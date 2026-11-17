@@ -680,10 +680,10 @@ async fn a_session_whose_record_cannot_be_written_says_why_and_closes() {
     }
     .build()
     .await;
-    let writes_stopped = session
-        .with_transcript(|store| store.writes_stopped().cloned())
-        .unwrap();
-    assert_eq!(writes_stopped, None);
+    assert!(
+        !session.is_closed(),
+        "a session that has written nothing in vain is open"
+    );
 
     let report = session.prompt("go").await.unwrap();
 

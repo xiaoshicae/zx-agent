@@ -13,7 +13,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{
     LoadedSession, LogRecord, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage,
-    Transcript, WritesStopped,
+    Transcript,
 };
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 use zx_testing::{config, header, summarize};
@@ -162,9 +162,13 @@ async fn an_agent_keeps_its_sessions_in_a_custom_storage_and_a_later_agent_conti
         summarize(&provider.requests()[1].messages),
         ["user:first", "assistant:one", "user:second"]
     );
-    let snapshot = Transcript::snapshot(storage.read(&id).await.unwrap()).unwrap();
+    let mut snapshot = Transcript::snapshot(storage.read(&id).await.unwrap()).unwrap();
     assert_eq!(snapshot.messages().len(), 4);
-    assert_eq!(snapshot.writes_stopped(), Some(&WritesStopped::ReadOnly));
+    let error = snapshot.append_message(Message::user("more")).await.unwrap_err();
+    assert!(
+        error.to_string().contains("read as a snapshot, which is read-only"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -182,7 +186,8 @@ async fn the_unique_key_stops_a_second_writer_of_the_same_session() {
     let error = second.append_message(Message::user("theirs")).await.unwrap_err();
 
     assert!(format!("{error:#}").contains("duplicate key"), "{error:#}");
-    assert!(matches!(second.writes_stopped(), Some(WritesStopped::Failed(_))));
+    let later = second.append_message(Message::user("again")).await.unwrap_err();
+    assert!(later.to_string().contains("an earlier write failed"), "{later}");
     assert!(second.messages().is_empty(), "a refused record is not in memory either");
     let stored = Transcript::snapshot(storage.read(&header.id).await.unwrap()).unwrap();
     assert_eq!(summarize(&stored.messages()), ["user:mine"]);

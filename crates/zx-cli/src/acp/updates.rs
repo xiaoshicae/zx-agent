@@ -18,7 +18,8 @@ use zx_agent::ai::{
     UserMessageKind,
 };
 use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
-use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Event, EventKind};
+use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 
 use super::tool_kind;
@@ -307,7 +308,7 @@ impl Updates {
             // A call the policy lets through, or one the client approved, is running now.
             EventKind::ToolDecision {
                 tool_call_id,
-                verdict: ToolVerdict::Allow,
+                decision: PolicyDecision::Allow,
                 ..
             }
             | EventKind::ApprovalResolved {

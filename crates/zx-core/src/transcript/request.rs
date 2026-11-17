@@ -36,13 +36,16 @@ pub struct RequestConfigEntry {
     pub config: RequestConfig,
 }
 
-/// How to reconstruct the messages at dispatch, without copying the whole transcript.
+/// Which request a checkpoint records, as the `kind` of `request_start` events names it, and
+/// how to rebuild its messages without copying the whole transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RequestSource {
-    /// The session projection at this request entry's parent, not at the current leaf.
-    Projection,
-    /// Original records referenced by a compaction, with request timestamps.
+    /// A task request: the session projection at this request entry's parent, not at the
+    /// current leaf.
+    Task,
+    /// A summary request: the original records a compaction read, with the request's
+    /// timestamps.
     Summary {
         compaction_id: String,
         system_timestamp: u64,
@@ -69,7 +72,7 @@ impl Transcript {
     /// Persist configuration changes and a dispatch checkpoint before a model call; any
     /// failure prevents dispatch. The checkpoint records how to rebuild the messages, not the
     /// messages: the caller sends the ones `source` names, as of the current leaf.
-    pub async fn record_request(
+    pub(crate) async fn record_request(
         &mut self,
         request: &Request,
         provider: &str,
@@ -189,7 +192,7 @@ impl Transcript {
 
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
         match source {
-            RequestSource::Projection => Ok(self
+            RequestSource::Task => Ok(self
                 .projection_at(parent)
                 .into_iter()
                 .map(|item| item.message)
@@ -209,5 +212,108 @@ impl Transcript {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::transcript::test_support::{header, loaded, records_of};
+
+    /// A request for `model` and nothing else.
+    fn request_for(model: &str) -> Request {
+        Request {
+            model: model.into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            reasoning: None,
+            cache_key: None,
+        }
+    }
+
+    /// The IDs of the request configurations `store` recorded, oldest first.
+    fn config_ids(store: &Transcript) -> Vec<String> {
+        store
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::RequestConfig(entry) => Some(entry.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Why the records of `store` do not load once a request checkpoint after `parent` names
+    /// the configuration `config`.
+    fn refusal_of_a_request(store: &Transcript, parent: &str, config: &str) -> String {
+        let mut records = records_of(store);
+        records.push(
+            json!({"type":"request_started", "id":"invalid", "parentId":parent,
+            "timestamp":0, "configId":config, "source":{"kind":"task"}})
+            .to_string(),
+        );
+        let error = Transcript::snapshot(loaded(store.header().clone(), records))
+            .err()
+            .expect("the request must be refused");
+        format!("{error:#}")
+    }
+
+    #[tokio::test]
+    async fn a_task_request_is_recorded_as_its_kind() {
+        let mut store = Transcript::in_memory(header());
+
+        let id = store
+            .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+
+        let line = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        assert_eq!(line["source"], json!({"kind": "task"}));
+    }
+
+    #[tokio::test]
+    async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
+        let mut store = Transcript::in_memory(header());
+        let first = store
+            .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        store
+            .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        let foreign = config_ids(&store).pop().unwrap();
+        store.branch(&first).unwrap();
+        let last = store
+            .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        assert_eq!(config_ids(&store).len(), 2, "the branch reuses its configuration");
+
+        let error = refusal_of_a_request(&store, &last, &foreign);
+
+        assert!(error.contains("is not the one in force on this branch"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_request_names_the_configuration_in_force_not_an_earlier_one_of_its_branch() {
+        let mut store = Transcript::in_memory(header());
+        store
+            .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        let last = store
+            .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        let configs = config_ids(&store);
+        assert_eq!(configs.len(), 2);
+
+        let error = refusal_of_a_request(&store, &last, &configs[0]);
+
+        assert!(error.contains("is not the one in force on this branch"), "{error}");
     }
 }

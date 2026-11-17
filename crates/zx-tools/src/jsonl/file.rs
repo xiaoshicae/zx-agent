@@ -11,12 +11,32 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use zx_core::transcript::{LoadedSession, LogRecord, SessionHeader, SessionLog};
 
 /// The longest header line read from a file that may not be a session at all.
 const MAX_HEADER_BYTES: u64 = 1024 * 1024;
+
+/// The header as the first line of a session file: tagged `session`, as an entry is tagged
+/// with its type.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HeaderLine {
+    Session(SessionHeader),
+}
+
+/// `header` as the first line of a session file, without its newline.
+fn header_line(header: &SessionHeader) -> Result<String> {
+    Ok(serde_json::to_string(&HeaderLine::Session(header.clone()))?)
+}
+
+/// The header that `line`, the first line of a session file, holds.
+fn parse_header(line: &[u8]) -> Result<SessionHeader> {
+    let HeaderLine::Session(header) = serde_json::from_slice(line)?;
+    Ok(header)
+}
 
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
 /// is dropped, so a second writer, in this process or another, cannot open the same file.
@@ -175,7 +195,7 @@ impl JsonlFile {
             .open(path)
             .with_context(|| format!("cannot create session file {}", path.display()))?;
         lock(&file, path)?;
-        let line = header.to_line()?;
+        let line = header_line(header)?;
         writeln!(file, "{line}")
             .and_then(|()| file.flush())
             .with_context(|| format!("cannot write the header of {}", path.display()))?;
@@ -248,7 +268,7 @@ pub(super) fn read_header(path: &Path) -> Result<SessionHeader> {
         "session file {} is empty",
         path.display()
     );
-    SessionHeader::from_line(&line).with_context(|| format!("{}: invalid session header", path.display()))
+    parse_header(&line).with_context(|| format!("{}: invalid session header", path.display()))
 }
 
 /// The header and complete records of `content`, and where an incomplete last line starts.
@@ -266,8 +286,7 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
     let (_, first) = lines
         .first()
         .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-    let header =
-        SessionHeader::from_line(first).with_context(|| format!("{}: invalid session header", path.display()))?;
+    let header = parse_header(first).with_context(|| format!("{}: invalid session header", path.display()))?;
 
     let mut records = Vec::new();
     let mut incomplete = None;

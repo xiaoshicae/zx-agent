@@ -2,14 +2,14 @@
 
 use anyhow::{Context, Result};
 
-use super::run_host::RunHost;
+use super::run_scope::RunScope;
 use super::{PERSIST_FAILED, Runner};
 use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::events::{EventKind, Interruption};
 use crate::tools::{Effects, Toolbox};
 use crate::transcript::{StartRecord, Transcript};
 
-impl RunHost<'_> {
+impl RunScope<'_> {
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.

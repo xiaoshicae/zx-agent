@@ -43,8 +43,10 @@ struct FrontMatter {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawCompaction {
     trigger_bytes: Option<usize>,
-    /// 0 disables the token trigger; unset leaves it to the model's context window.
+    /// 0 disables the token trigger; unset leaves it to the context window of the model in
+    /// use ([`settle_token_trigger`]).
     trigger_tokens: Option<u64>,
+    /// What a token trigger that follows the context window keeps free below it.
     reserve_tokens: Option<u64>,
     keep_recent_bytes: Option<usize>,
     max_summary_tokens: Option<u32>,
@@ -192,8 +194,11 @@ impl RawCompaction {
                 tokens => TokenTrigger::Above(tokens),
             };
         }
-        if let Some(tokens) = self.reserve_tokens {
-            config.reserve_tokens = tokens;
+        // Only a token trigger that no file set follows the window, below its reserve.
+        if let Some(tokens) = self.reserve_tokens
+            && let TokenTrigger::BelowWindow { reserve_tokens } = &mut config.trigger_tokens
+        {
+            *reserve_tokens = tokens;
         }
         if let Some(bytes) = self.keep_recent_bytes {
             config.keep_recent_bytes = bytes;
@@ -204,6 +209,16 @@ impl RawCompaction {
         if let Some(secs) = self.timeout_secs {
             config.timeout = Duration::from_secs(secs);
         }
+    }
+}
+
+/// Settle the token trigger of `config` once every file of an agent is applied. One that no
+/// file set follows the context window of the model in use
+/// ([`TokenTrigger::BelowWindow`]) while the byte trigger is on, and is off otherwise: then
+/// nothing turns automatic compaction on.
+pub(super) fn settle_token_trigger(config: &mut compaction::Config) {
+    if config.trigger_bytes.is_none() && matches!(config.trigger_tokens, TokenTrigger::BelowWindow { .. }) {
+        config.trigger_tokens = TokenTrigger::Off;
     }
 }
 

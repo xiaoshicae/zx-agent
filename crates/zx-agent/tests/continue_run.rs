@@ -58,7 +58,7 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
     let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("echo hi")).await.unwrap();
     store.append_message(call_answer()).await.unwrap();
-    store.append_tool_call_started("c1", "echo").await.unwrap();
+    store.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let tool = Arc::new(EchoTool::new("echo"));
     let (runner, events) = RunnerSetup {
@@ -83,7 +83,7 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
     let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("echo hi")).await.unwrap();
     store.append_message(call_answer()).await.unwrap();
-    store.append_tool_call_started("c1", "echo").await.unwrap();
+    store.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, _) = runner(&provider, store.into()).await;
     let heard = CustomMessage {

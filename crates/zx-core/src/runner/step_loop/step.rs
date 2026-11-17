@@ -21,7 +21,7 @@ impl StepLoop<'_> {
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.accounting.remaining_model_requests();
-        let messages = self.host.transcript.messages();
+        let messages = self.run.transcript.messages();
         let summary = FinishedStep {
             response: &response,
             messages: &messages,
@@ -36,7 +36,7 @@ impl StepLoop<'_> {
         }
         // Inspect again: input may have arrived while the hook ran. Steering is taken at the
         // top of every step; follow-ups only when the model has nothing left to do.
-        let queues = &self.host.config.queues;
+        let queues = &self.run.config.queues;
         if queues.has(Queue::Steering) {
             return Ok(NextInput::None);
         }
@@ -57,10 +57,10 @@ impl StepLoop<'_> {
     /// Ask the finish hooks what follows the step `summary` describes.
     async fn finish_step(&self, summary: &FinishedStep<'_>) -> Result<StepDecision, Halt> {
         match self
-            .host
+            .run
             .config
             .hooks
-            .finish_step(summary, &self.host.target.trace.context())
+            .finish_step(summary, &self.run.target.trace.context())
             .await
         {
             Ok(decision) => Ok(decision),
@@ -73,7 +73,7 @@ impl StepLoop<'_> {
         let needs_more = after_tools == AfterTools::Ran;
         // Inspect queues without consuming them: stopping or failing in a hook must
         // leave accepted user input available to the next run.
-        let queues = &self.host.config.queues;
+        let queues = &self.run.config.queues;
         let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
         if needs_more || queued {
             StepDisposition::Continue

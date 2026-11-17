@@ -10,7 +10,7 @@ use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
 use zx_agent::ai::{Message, StopReason, Usage};
-use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, RunOutcome, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 
 /// Observes the runs of the agent it is registered with, and passes the events that spans
@@ -92,7 +92,8 @@ pub(super) enum What {
     },
     Decision {
         call: String,
-        verdict: ToolVerdict,
+        /// The policies' verdict, without its reason, which may quote the call.
+        verdict: &'static str,
     },
     ApprovalRequested {
         call: String,
@@ -178,10 +179,10 @@ impl Signal {
                 tool: tool_name.clone(),
             },
             EventKind::ToolDecision {
-                tool_call_id, verdict, ..
+                tool_call_id, decision, ..
             } => What::Decision {
                 call: tool_call_id.clone(),
-                verdict: *verdict,
+                verdict: decision.name(),
             },
             EventKind::ApprovalRequested { tool_call_id, .. } => What::ApprovalRequested {
                 call: tool_call_id.clone(),

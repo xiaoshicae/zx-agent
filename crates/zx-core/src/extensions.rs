@@ -91,8 +91,9 @@ pub trait Extension: Send + Sync {
         Vec::new()
     }
 
-    /// Hooks, each declaring [`HookStage::Extension`]: redaction runs after them, so an
-    /// extension cannot bring back a redacted secret.
+    /// Hooks, each in the stage of every hook that declares no other,
+    /// [`HookStage::Default`]: redaction runs after them, so an extension cannot bring back a
+    /// redacted secret.
     fn hooks(&self) -> Vec<Arc<dyn Hook>> {
         Vec::new()
     }
@@ -128,7 +129,7 @@ impl Expanded {
     /// session: the tools are checked with the other tools of a session, and the sections
     /// against the prompt they are added to ([`Self::sections_after`]).
     ///
-    /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`],
+    /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Default`],
     /// a section name that is malformed, repeated, the preamble's or one of `reserved`, and a
     /// command name that is malformed or repeated.
     pub(crate) fn of(extensions: &[Arc<dyn Extension>], reserved: &[String]) -> Result<Self, String> {
@@ -165,10 +166,10 @@ impl Expanded {
         if let Some(stage) = hooks
             .iter()
             .map(|hook| hook.stage())
-            .find(|stage| *stage != HookStage::Extension)
+            .find(|stage| *stage != HookStage::Default)
         {
             return Err(format!(
-                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Extension stage"
+                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Default stage"
             ));
         }
         let sections = extension.prompt_sections();

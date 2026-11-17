@@ -6,7 +6,6 @@
 //! depends on it is decided here too, such as which MCP tools ask. What belongs to one
 //! session is in `setup`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +16,7 @@ use crate::config::skills::{ReadSkillTool, TOOL_NAME};
 use crate::config::{AgentDefinition, Config};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
-use zx_agent::ai::{ModelMeta, Provider, SystemPrompt};
+use zx_agent::ai::{Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::redact::RedactSecrets;
@@ -62,7 +61,7 @@ impl ConfiguredAgent {
         let settings = &shared.settings;
         let config = &settings.config;
         let mut agent = load_agent(shared)?;
-        let models = model_meta(&mut agent, &config.models, model);
+        let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
             agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
@@ -222,23 +221,6 @@ fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) {
     if let Some(amount) = budget.cost_budget {
         agent.limits.cost_budget = (amount > 0.0).then_some(amount);
     }
-}
-
-/// What is known about the models: the entries of config.toml. With automatic compaction on, a
-/// known window of `model` adds a token trigger below it, unless the agent set one or switched
-/// it off.
-fn model_meta(
-    agent: &mut AgentDefinition,
-    known: &HashMap<String, ModelMeta>,
-    model: &str,
-) -> HashMap<String, ModelMeta> {
-    let models = known.clone();
-    if agent.compaction.trigger_bytes.is_some()
-        && let Some(window) = models.get(model).and_then(|meta| meta.context_window)
-    {
-        agent.compaction.derive_trigger_tokens(window);
-    }
-    models
 }
 
 /// The provider of config.toml, and the API key it authenticates with.

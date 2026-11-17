@@ -10,8 +10,8 @@
 //!   attempt counts into it
 //! - `trace`: one run's identity and event numbering, and where its events go: the run's
 //!   reader, then the hooks that observe them
-//! - `run_host`: what a run lends the loop and the compactor, how a run opens, and when its
-//!   context is summarized
+//! - `run_scope`: what one run works with across its attempts, which the loop and the
+//!   compactor work through, how a run opens, and when its context is summarized
 //! - `failure`: what follows a provider failure: a retry, or one recovery from a context
 //!   the model rejected as too long
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
@@ -21,7 +21,7 @@ mod accounting;
 mod failure;
 mod final_answer;
 mod interrupted;
-mod run_host;
+mod run_scope;
 mod step_loop;
 mod trace;
 
@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use final_answer::{cut_off, final_answer};
-use run_host::{CompactionPause, RunHost, RunStop};
+use run_scope::{CompactionPause, RunScope, RunStop};
 
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
@@ -105,12 +105,11 @@ impl Runner {
         }
     }
 
-    /// Opt into automatic context preparation or tune manual summary budgets.
-    /// Rejects invalid budgets without making requests or changing the session.
-    pub(crate) fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
-        config.validate()?;
+    /// Opt into automatic context preparation or tune manual summary budgets, which the
+    /// agent checked when it was made ([`compaction::Config::validate`]).
+    pub(crate) fn with_compaction(mut self, config: compaction::Config) -> Self {
         self.compaction = config;
-        Ok(self)
+        self
     }
 
     /// Summarize the old prefix without executing a task or tools, as the run `link` names.
@@ -125,7 +124,7 @@ impl Runner {
             hooks: &self.config.hooks,
         };
         let run_start = self.transcript.entries().len();
-        let mut host = RunHost {
+        let mut run = RunScope {
             transcript: &mut self.transcript,
             run_start,
             target,
@@ -134,7 +133,7 @@ impl Runner {
             pause: &mut self.pause,
             cost_budget: self.limits.cost_budget,
         };
-        host.compact(Trigger::Manual, 1).await.into()
+        run.compact(Trigger::Manual, 1).await.into()
     }
 
     /// The loop configuration.
@@ -200,7 +199,7 @@ impl Runner {
         // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = transcript.entries().len();
         let running = Running {
-            host: RunHost {
+            run: RunScope {
                 transcript,
                 run_start,
                 target,
@@ -220,10 +219,10 @@ impl Runner {
     }
 }
 
-/// One run in progress: the host it records through, what it borrows from the
+/// One run in progress: the scope it records through, what else it borrows from the
 /// Runner, and what its attempts have spent so far.
 struct Running<'a> {
-    host: RunHost<'a>,
+    run: RunScope<'a>,
     retry: &'a RetryPolicy,
     limits: &'a RunLimits,
     approvals: &'a ApprovalGate,
@@ -236,7 +235,7 @@ struct Running<'a> {
 impl Running<'_> {
     /// Open the run from `begin`, run its attempts, and report how it ended.
     async fn run(mut self, begin: Start) -> RunReport {
-        let stop = match self.host.open_run(begin).await {
+        let stop = match self.run.open(begin).await {
             Ok(first) => self.attempts(first).await,
             Err(error) => RunStop::Failed(error),
         };
@@ -271,9 +270,9 @@ impl Running<'_> {
     /// accounting and checks the run's budgets. Returns why the loop stopped.
     async fn attempt(&mut self, first: FirstInput) -> Halt {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
-        // The host borrowed again for this attempt alone, so that the loop's borrow of the
-        // host and the host's borrow of the Runner end together.
-        StepLoop::new(self.host.reborrow(), self.approvals, &mut self.accounting)
+        // The scope borrowed again for this attempt alone, so that the loop's borrow of the
+        // scope and the scope's borrow of the Runner end together.
+        StepLoop::new(self.run.reborrow(), self.approvals, &mut self.accounting)
             .run(first)
             .await
     }
@@ -283,13 +282,13 @@ impl Running<'_> {
     async fn close(self, stop: RunStop) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
-        let (config, target) = (self.host.config, self.host.target);
-        let stop = match record_pending_entries(&config.queues, self.host.transcript, target).await {
+        let (config, target) = (self.run.config, self.run.target);
+        let stop = match record_pending_entries(&config.queues, self.run.transcript, target).await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
-        let transcript = &self.host.transcript;
-        let added = transcript.messages_since(self.host.run_start);
+        let transcript = &self.run.transcript;
+        let added = transcript.messages_since(self.run.run_start);
         let (outcome, error) = self.conclude(stop, cut_off(&added));
         let accounting = &self.accounting;
         let report = RunReport {
@@ -544,13 +543,11 @@ mod tests {
                 FauxStep::text(summary),
                 FauxStep::text("must not execute"),
             ]));
-            let mut runner = runner(config(&provider, vec![]), store)
-                .with_compaction(compaction::Config {
-                    trigger_bytes: Some(1024),
-                    keep_recent_bytes: 1,
-                    ..compaction::Config::default()
-                })
-                .unwrap();
+            let mut runner = runner(config(&provider, vec![]), store).with_compaction(compaction::Config {
+                trigger_bytes: Some(1024),
+                keep_recent_bytes: 1,
+                ..compaction::Config::default()
+            });
             let report = run(&mut runner, "continue", &CancellationToken::new()).await;
             assert_eq!(report.outcome, RunOutcome::Failed, "{rejected}: {report:?}");
             assert!(report.error.unwrap().contains(&format!("disk full on {rejected}")));
@@ -577,13 +574,11 @@ mod tests {
             cancel_on_request.cancel();
             FauxStep::Hang
         })]));
-        let mut runner = runner(config(&provider, vec![]), store)
-            .with_compaction(compaction::Config {
-                trigger_bytes: Some(1024),
-                keep_recent_bytes: 1,
-                ..compaction::Config::default()
-            })
-            .unwrap();
+        let mut runner = runner(config(&provider, vec![]), store).with_compaction(compaction::Config {
+            trigger_bytes: Some(1024),
+            keep_recent_bytes: 1,
+            ..compaction::Config::default()
+        });
 
         let report = run(&mut runner, "continue", &cancel).await;
 

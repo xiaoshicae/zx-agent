@@ -1517,7 +1517,7 @@ async fn resuming_an_interrupted_session_reports_the_recovered_call_without_runn
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();
-    store.append_tool_call_started("c1", "bash").await.unwrap();
+    store.record_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
@@ -1677,6 +1677,34 @@ async fn a_token_trigger_of_zero_is_not_replaced_by_one_from_the_context_window(
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!stdout(&output).contains("compaction_start"), "{}", stdout(&output));
     assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn after_a_model_switch_the_token_trigger_follows_the_window_of_the_new_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = seed_context(dir.path(), 120 * 1024).await;
+    let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
+    // Some 30000 estimated tokens of context: far below what the window of mock-model leaves
+    // under the reserve, above the 23616 tokens that the window of small-model leaves.
+    config(
+        dir.path(),
+        "[[models]]\nid = \"mock-model\"\ncontextWindow = 1000000\n\
+         [[models]]\nid = \"small-model\"\ncontextWindow = 40000\n",
+    );
+    agent(dir.path(), "");
+    let args = ["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"];
+
+    let output = run(&server, dir.path(), &args, "/model small-model\ncontinue\n/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let events: Vec<Value> = json_lines(&stdout(&output));
+    assert!(
+        events.iter().any(|event| event["type"] == "compaction_start"),
+        "{events:?}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "the summary request, then the task request");
+    assert_eq!(requests[0].body["model"], "small-model");
 }
 
 /// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the

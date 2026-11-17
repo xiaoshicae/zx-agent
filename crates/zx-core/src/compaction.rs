@@ -8,13 +8,14 @@
 mod answer;
 mod compactor;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::ai::{Message, Usage};
+use crate::ai::{Message, ModelMeta, Usage};
 use crate::guard::CancelSignal;
 use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without_details};
 
@@ -27,15 +28,12 @@ const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// automatic trigger; manual compaction still uses the remaining bounded settings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Serialized transcript threshold; None disables the byte trigger of automatic
+    /// Serialized transcript threshold; `None` disables the byte trigger of automatic
     /// compaction.
     pub trigger_bytes: Option<usize>,
     /// When the estimated tokens of the context ([`context_tokens`]) run an automatic
     /// compaction. Either trigger runs one.
     pub trigger_tokens: TokenTrigger,
-    /// Tokens kept free below a model's context window when the token trigger is derived
-    /// from the window ([`Config::derive_trigger_tokens`]); pi's `reserveTokens`.
-    pub reserve_tokens: u64,
     /// Recent message budget. The complete latest input and all system messages survive.
     pub keep_recent_bytes: usize,
     /// Output token budget for the summary request, independently of task requests.
@@ -44,27 +42,31 @@ pub struct Config {
     pub timeout: Duration,
 }
 
-/// The token trigger of automatic compaction.
+/// The token trigger of automatic compaction. It is checked before each task request, for
+/// the model the session asks at that time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenTrigger {
-    /// No token trigger is set. A host that knows the model's context window may set one
-    /// ([`Config::derive_trigger_tokens`]); until then there is none.
-    Unset,
-    /// No token trigger, whatever the context window.
+    /// No token trigger.
     Off,
-    /// Above this many estimated tokens.
+    /// Above this many estimated tokens, whatever the model.
     Above(u64),
+    /// Above the context window of the model, less `reserve_tokens` (pi: `shouldCompact`,
+    /// `contextWindow - reserveTokens`), with the window that
+    /// [`AgentConfig::models`](crate::AgentConfig::models) gives that model, so that a
+    /// session that switches model follows the new window. No token trigger for a model whose
+    /// window is unknown or no larger than the reserve, or whose trigger would not lie above
+    /// the recent messages a summary keeps.
+    BelowWindow { reserve_tokens: u64 },
 }
 
-/// The default of [`Config::reserve_tokens`] (pi: the default `reserveTokens`).
+/// A reserve for [`TokenTrigger::BelowWindow`] (pi: the default `reserveTokens`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Unset,
-            reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            trigger_tokens: TokenTrigger::Off,
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
             timeout: Duration::from_secs(120),
@@ -73,57 +75,62 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Whether automatic compaction is on: a byte or a token trigger is set.
-    pub fn automatic(&self) -> bool {
-        self.trigger_bytes.is_some() || matches!(self.trigger_tokens, TokenTrigger::Above(_))
+    /// Whether automatic compaction is on for requests to `model`: the byte trigger is set,
+    /// or a token trigger applies to that model ([`Config::trigger_tokens_for`]).
+    pub(crate) fn automatic(&self, models: &HashMap<String, ModelMeta>, model: &str) -> bool {
+        self.trigger_bytes.is_some() || self.trigger_tokens_for(models, model).is_some()
     }
 
-    /// Set the token trigger from a model's context window, `reserve_tokens` below it (pi:
-    /// `contextWindow - reserveTokens`), unless one is set already or it is switched off. The
-    /// trigger stays unset when the window is no larger than the reserve, or when the trigger
-    /// would not lie above the recent messages a summary keeps.
-    pub fn derive_trigger_tokens(&mut self, context_window: u64) {
-        let trigger = context_window.saturating_sub(self.reserve_tokens);
-        if self.trigger_tokens == TokenTrigger::Unset
-            && trigger > 0
-            && Self::leaves_room(trigger, self.keep_recent_bytes)
-        {
-            self.trigger_tokens = TokenTrigger::Above(trigger);
+    /// The estimated tokens above which the context of a request to `model` runs an
+    /// automatic compaction; `None` when no token trigger applies to that model. `models`
+    /// gives the window that a [`TokenTrigger::BelowWindow`] trigger lies below.
+    pub(crate) fn trigger_tokens_for(&self, models: &HashMap<String, ModelMeta>, model: &str) -> Option<u64> {
+        match self.trigger_tokens {
+            TokenTrigger::Off => None,
+            TokenTrigger::Above(tokens) => Some(tokens),
+            TokenTrigger::BelowWindow { reserve_tokens } => models
+                .get(model)?
+                .context_window?
+                .checked_sub(reserve_tokens)
+                .filter(|&trigger| Self::leaves_room(trigger, self.keep_recent_bytes)),
         }
     }
 
     /// Whether a token trigger lies above the recent messages a summary keeps, as
-    /// `triggerBytes` must: a summary could otherwise never bring the context under it.
+    /// `trigger_bytes` must: a summary could otherwise never bring the context under it.
     fn leaves_room(trigger_tokens: u64, keep_recent_bytes: usize) -> bool {
         trigger_tokens.saturating_mul(BYTES_PER_TOKEN as u64) > keep_recent_bytes as u64
     }
 
     /// Reject budgets that cannot make progress or cannot bound external waiting.
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.keep_recent_bytes > 0, "keepRecentBytes must be greater than zero");
+        ensure!(
+            self.keep_recent_bytes > 0,
+            "keep_recent_bytes must be greater than zero"
+        );
         if let TokenTrigger::Above(tokens) = self.trigger_tokens {
             ensure!(
                 tokens > 0,
-                "triggerTokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)"
+                "trigger_tokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)"
             );
             ensure!(
                 Self::leaves_room(tokens, self.keep_recent_bytes),
-                "triggerTokens must exceed a quarter of keepRecentBytes, the tokens the kept recent messages take"
+                "trigger_tokens must exceed a quarter of keep_recent_bytes, the tokens the kept recent messages take"
             );
         }
         ensure!(
             self.trigger_bytes.is_none_or(|bytes| bytes > self.keep_recent_bytes),
-            "triggerBytes must exceed keepRecentBytes (or be zero to disable auto compaction)"
+            "trigger_bytes must exceed keep_recent_bytes (`None` disables the byte trigger)"
         );
         // The first summary reads about what precedes the kept recent messages.
         ensure!(
             self.trigger_bytes
                 .is_none_or(|bytes| bytes - self.keep_recent_bytes <= MAX_SOURCE_BYTES),
-            "triggerBytes may exceed keepRecentBytes by at most {MAX_SOURCE_BYTES} bytes, the most a summary reads"
+            "trigger_bytes may exceed keep_recent_bytes by at most {MAX_SOURCE_BYTES} bytes, the most a summary reads"
         );
         ensure!(
             self.max_summary_tokens > 0 && self.max_summary_tokens <= 16_384,
-            "maxSummaryTokens must be 1..=16384"
+            "max_summary_tokens must be 1..=16384"
         );
         ensure!(!self.timeout.is_zero(), "summary timeout must be greater than zero");
         Ok(())
@@ -369,4 +376,105 @@ fn estimated_tokens(bytes: usize) -> u64 {
 /// Bytes of one message as a model may see it.
 fn message_bytes(message: &Message) -> Result<usize> {
     serialized_bytes(&without_details(std::slice::from_ref(message))[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What is known about the model `id`: its context window of `tokens`, and no prices.
+    fn window(id: &str, tokens: u64) -> HashMap<String, ModelMeta> {
+        let meta = ModelMeta {
+            context_window: Some(tokens),
+            cost: None,
+        };
+        HashMap::from([(id.to_string(), meta)])
+    }
+
+    /// Settings whose token trigger lies `reserve_tokens` below the window of the model.
+    fn below_window(reserve_tokens: u64) -> Config {
+        Config {
+            trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_token_trigger_below_the_window_follows_the_window_of_the_model_asked() {
+        let config = below_window(DEFAULT_RESERVE_TOKENS);
+        let mut models = window("m", 100_000);
+        models.extend(window("small", 50_000));
+
+        assert_eq!(
+            config.trigger_tokens_for(&models, "m"),
+            Some(100_000 - DEFAULT_RESERVE_TOKENS)
+        );
+        assert_eq!(
+            config.trigger_tokens_for(&models, "small"),
+            Some(50_000 - DEFAULT_RESERVE_TOKENS)
+        );
+        assert_eq!(
+            config.trigger_tokens_for(&models, "unknown"),
+            None,
+            "no window, no trigger"
+        );
+    }
+
+    #[test]
+    fn a_token_trigger_of_a_number_of_tokens_is_kept_whatever_the_window() {
+        let config = Config {
+            trigger_tokens: TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.trigger_tokens_for(&window("m", 50_000), "m"),
+            Some(100_000 - DEFAULT_RESERVE_TOKENS),
+            "an explicit value stays"
+        );
+    }
+
+    #[test]
+    fn a_window_within_the_reserve_or_the_kept_messages_gives_no_token_trigger() {
+        let small = below_window(1000);
+        assert_eq!(
+            small.trigger_tokens_for(&window("m", 1000), "m"),
+            None,
+            "a window within the reserve sets nothing"
+        );
+        assert!(
+            !small.automatic(&window("m", 1000), "m"),
+            "nothing turns summaries on when the window is within the reserve"
+        );
+        // 20000 - 16384 tokens would lie within the 64 KiB of recent messages a summary keeps.
+        assert_eq!(
+            below_window(DEFAULT_RESERVE_TOKENS).trigger_tokens_for(&window("m", 20_000), "m"),
+            None,
+            "no trigger a summary could never bring the context under"
+        );
+    }
+
+    #[test]
+    fn a_token_trigger_must_lie_above_zero_and_the_kept_messages() {
+        assert!(
+            Config {
+                trigger_tokens: TokenTrigger::Above(100),
+                ..Config::default()
+            }
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("keep_recent_bytes")
+        );
+        assert!(
+            Config {
+                trigger_tokens: TokenTrigger::Above(0),
+                ..Config::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(Config::default().validate().is_ok());
+        assert!(!Config::default().automatic(&HashMap::new(), "m"));
+    }
 }

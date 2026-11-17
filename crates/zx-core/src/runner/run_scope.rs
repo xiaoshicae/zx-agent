@@ -1,12 +1,14 @@
-//! What a run lends the loop and the compactor: the session it records in, where its events
-//! go, and the model it summarizes with. The Runner builds one per run, and each attempt's
-//! loop records through it: recording goes to the session as it would without a run, and
-//! preparing the context may summarize it (pi: AgentSession writes on `message_end`).
+//! The scope of a run: what it borrows from the Runner (the session it records in, the
+//! configuration with the model it summarizes with, the compaction settings and pause) with
+//! what is its own (where its events go, and where it started), and what it does across its
+//! attempts with them. The Runner builds one per run, and each attempt's loop records through
+//! it: recording goes to the session as it would without a run, and preparing the context may
+//! summarize it (pi: AgentSession writes on `message_end`).
 
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
-use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, TokenTrigger, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, Trigger};
 use crate::events::EventKind;
 use crate::input::Queue;
 use crate::transcript::Transcript;
@@ -53,9 +55,10 @@ impl CompactionPause {
     }
 }
 
-/// A run's borrow of the Runner: the session, the configuration with its hooks and model,
-/// and where the run's events go.
-pub(super) struct RunHost<'a> {
+/// Everything one run works with: its borrow of the Runner (the session, the configuration
+/// with its hooks and model, the compaction settings and pause) and its own event target,
+/// start and cost budget. The loop of each attempt and the compactor work through it.
+pub(super) struct RunScope<'a> {
     pub(super) transcript: &'a mut Transcript,
     /// How many entries the session had when the run started: what follows is the run's.
     pub(super) run_start: usize,
@@ -67,10 +70,10 @@ pub(super) struct RunHost<'a> {
     pub(super) cost_budget: Option<f64>,
 }
 
-impl RunHost<'_> {
-    /// The same host, borrowed for a shorter time.
-    pub(super) fn reborrow(&mut self) -> RunHost<'_> {
-        RunHost {
+impl RunScope<'_> {
+    /// The same scope, borrowed for a shorter time.
+    pub(super) fn reborrow(&mut self) -> RunScope<'_> {
+        RunScope {
             transcript: &mut *self.transcript,
             run_start: self.run_start,
             target: self.target,
@@ -84,7 +87,7 @@ impl RunHost<'_> {
     /// Open the run: announce it, record a result for each call an interrupted run left
     /// without one, and find the input the run starts with. An error says why the run cannot
     /// start.
-    pub(super) async fn open_run(&mut self, begin: Start) -> Result<FirstInput, String> {
+    pub(super) async fn open(&mut self, begin: Start) -> Result<FirstInput, String> {
         let config = self.config;
         self.target
             .emit(EventKind::RunStart {
@@ -195,17 +198,27 @@ impl RunHost<'_> {
         }
     }
 
+    /// Whether automatic compaction is on for the model the run asks now: the session's
+    /// model, which a switch between runs changes.
+    pub(super) fn compacts_automatically(&self) -> bool {
+        self.compaction.automatic(&self.config.models, &self.config.model)
+    }
+
     /// Whether the context passes a trigger of automatic compaction: its bytes, or the tokens
-    /// it is estimated to hold. Each is measured only when its trigger is set.
+    /// it is estimated to hold, against the token trigger of the model the run asks now. Each
+    /// is measured only when its trigger applies.
     fn over_trigger(&self) -> anyhow::Result<bool> {
         if let Some(limit) = self.compaction.trigger_bytes
             && compaction::context_bytes(&self.transcript.messages())? > limit
         {
             return Ok(true);
         }
-        match self.compaction.trigger_tokens {
-            TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.transcript)? > limit),
-            TokenTrigger::Unset | TokenTrigger::Off => Ok(false),
+        match self
+            .compaction
+            .trigger_tokens_for(&self.config.models, &self.config.model)
+        {
+            Some(limit) => Ok(compaction::context_tokens(self.transcript)? > limit),
+            None => Ok(false),
         }
     }
 
@@ -218,7 +231,7 @@ impl RunHost<'_> {
     /// An error stops the loop: preparation failed and left the context unchanged
     /// ([`Halt::Failed`]), or the session could not record it ([`Halt::Unrecorded`]).
     pub(super) async fn prepare_context(&mut self, accounting: &mut RunAccounting) -> Result<u32, Halt> {
-        if !self.compaction.automatic() {
+        if !self.compacts_automatically() {
             return Ok(0);
         }
         let over_trigger = self

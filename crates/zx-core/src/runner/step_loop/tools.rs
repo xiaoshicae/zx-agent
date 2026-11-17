@@ -14,14 +14,14 @@ use serde_json::Value;
 
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
-use crate::events::{ApprovalResult, EventKind, ToolVerdict};
+use crate::events::{ApprovalResult, EventKind};
 use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision};
 use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
     /// The tool the model calls `name`, and what it declared it changes.
     fn find_tool(&self, name: &str) -> Option<(Arc<dyn Tool>, Effects)> {
-        let tools = &self.host.config.tools;
+        let tools = &self.run.config.tools;
         Some((tools.find(name)?.clone(), tools.effects(name)?))
     }
 
@@ -32,7 +32,7 @@ impl StepLoop<'_> {
         let Some((tool, effects)) = self.find_tool(&call.name) else {
             return Checked::blocked(format!("Tool {} not found", call.name));
         };
-        if !self.host.config.active_tools.is_active(&call.name) {
+        if !self.run.config.active_tools.is_active(&call.name) {
             return Checked::blocked(format!("Tool {} is not active", call.name));
         }
         if let Some(error) = &call.arguments_error {
@@ -52,7 +52,7 @@ impl StepLoop<'_> {
         if let Err(text) = self.authorize(&ran).await {
             return Checked::blocked(text);
         }
-        if self.host.target.trace.cancel().is_cancelled() {
+        if self.run.target.trace.cancel().is_cancelled() {
             return Checked::blocked(NOT_STARTED);
         }
         Checked::Ready(Runnable {
@@ -81,7 +81,7 @@ impl StepLoop<'_> {
         if !call.arguments.is_object() {
             return Err(invalid_arguments(call, "expected a JSON object"));
         }
-        if let Some(mismatch) = self.host.config.tools.schema_mismatch(&call.name, &call.arguments) {
+        if let Some(mismatch) = self.run.config.tools.schema_mismatch(&call.name, &call.arguments) {
             return Err(invalid_arguments(call, mismatch));
         }
         match std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments))) {
@@ -95,20 +95,19 @@ impl StepLoop<'_> {
     /// is the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
         let verdict = self
-            .host
+            .run
             .config
             .policies
-            .check(call, &self.host.target.trace.policy_context())
+            .check(call, &self.run.target.trace.policy_context())
             .await;
+        self.decision(call, verdict.clone()).await;
         match verdict {
-            PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
+            PolicyDecision::Allow => {}
             PolicyDecision::Deny(reason) => {
-                self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
                 self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
             PolicyDecision::Ask(reason) => {
-                self.decision(call, ToolVerdict::Ask, Some(reason.clone())).await;
                 if self.approvals.allows(call) {
                     let remembered = Resolved {
                         approval_id: None,
@@ -140,9 +139,9 @@ impl StepLoop<'_> {
         })
         .await;
         let asked = Instant::now();
-        let answer = match self.host.config.approvals {
+        let answer = match self.run.config.approvals {
             ApprovalMode::Deny => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
-            ApprovalMode::Wait(timeout) => request.answer(timeout, self.host.target.trace.cancel()).await,
+            ApprovalMode::Wait(timeout) => request.answer(timeout, self.run.target.trace.cancel()).await,
         };
         // Withdrawn before it is reported: an answer that comes now finds no request.
         drop(request);
@@ -175,12 +174,12 @@ impl StepLoop<'_> {
         denial.map_or(Ok(()), Err)
     }
 
-    async fn decision(&self, call: &ToolCall, verdict: ToolVerdict, reason: Option<String>) {
+    /// Report the policies' verdict on `call`.
+    async fn decision(&self, call: &ToolCall, decision: PolicyDecision) {
         self.emit(EventKind::ToolDecision {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
-            verdict,
-            reason,
+            decision,
         })
         .await;
     }
@@ -205,7 +204,7 @@ impl StepLoop<'_> {
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let sequential = calls
             .iter()
-            .any(|call| self.host.config.tools.execution_mode(&call.name) == Some(ExecutionMode::Sequential));
+            .any(|call| self.run.config.tools.execution_mode(&call.name) == Some(ExecutionMode::Sequential));
         if sequential {
             self.sequential(calls).await
         } else {
@@ -224,7 +223,7 @@ impl StepLoop<'_> {
             }
             let outcome = self.execute_checked(call, checked).await;
             batch.add(self.record_result(call, outcome).await?);
-            if self.host.target.trace.cancel().is_cancelled() {
+            if self.run.target.trace.cancel().is_cancelled() {
                 break;
             }
         }
@@ -240,7 +239,7 @@ impl StepLoop<'_> {
             self.tool_start(call).await;
             let checked = self.check_next(call, &mut seen).await;
             slots.push((call, checked));
-            if self.host.target.trace.cancel().is_cancelled() {
+            if self.run.target.trace.cancel().is_cancelled() {
                 break;
             }
         }
@@ -274,7 +273,7 @@ impl StepLoop<'_> {
         let call = &runnable.call;
         match runnable.effects {
             Effects::SideEffects => self
-                .host
+                .run
                 .transcript
                 .append_tool_call_started(&call.id, &call.name)
                 .await
@@ -309,13 +308,13 @@ impl StepLoop<'_> {
     /// cancelled, reporting its progress on the way. A failure or a panic of the tool becomes
     /// an error result.
     async fn execute(&self, tool: &dyn Tool, effects: Effects, call: &ToolCall) -> CallOutput {
-        let cancel = self.host.target.trace.cancel();
+        let cancel = self.run.target.trace.cancel();
         if cancel.is_cancelled() {
             return CallOutput::blocked(NOT_STARTED);
         }
         let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
         let ctx = ToolContext {
-            cwd: self.host.config.cwd.clone(),
+            cwd: self.run.config.cwd.clone(),
             // A token of the call's own: cancelled with the run, while a tool that cancels it
             // to stop work of its own does not stop the run.
             cancel: cancel.child_token(),
@@ -360,10 +359,10 @@ impl StepLoop<'_> {
     /// Pass one progress update of `call` through the redaction hooks, then report it.
     async fn emit_progress(&self, call: &ToolCall, text: String) {
         match self
-            .host
+            .run
             .config
             .hooks
-            .filter_tool_progress(call, ToolOutput::ok(text), &self.host.target.trace.context())
+            .filter_tool_progress(call, ToolOutput::ok(text), &self.run.target.trace.context())
             .await
         {
             Ok(output) => {
@@ -395,10 +394,10 @@ impl StepLoop<'_> {
 
     async fn apply_output_hooks(&self, call: &ToolCall, outcome: CallOutput) -> CallOutput {
         let mut output = match self
-            .host
+            .run
             .config
             .hooks
-            .after_tool(call, outcome.output, &self.host.target.trace.context())
+            .after_tool(call, outcome.output, &self.run.target.trace.context())
             .await
         {
             Ok(output) => output,

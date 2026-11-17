@@ -4,9 +4,13 @@
 //! - `records`: appending those records, and the checks each passes when it is appended
 //!   and when a session is loaded
 //! - `source`: what a summary reads, and the request messages it was sent
+//! - `tests`, compiled for tests only: the records of compactions, and what they do to the
+//!   projection
 
 mod records;
 mod source;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashSet;
 
@@ -201,11 +205,11 @@ pub struct CompactionFailedEntry {
 }
 
 /// What the start of a compaction records, before its summary is asked for.
-pub struct CompactionPlan {
-    pub first_kept_entry_id: String,
+pub(crate) struct CompactionPlan {
+    pub(crate) first_kept_entry_id: String,
     /// See [`CompactionStartedEntry::kept_input_entry_id`].
-    pub kept_input_entry_id: Option<String>,
-    pub source_entry_ids: Vec<String>,
-    pub by: SummarizedBy,
-    pub input_bytes: usize,
+    pub(crate) kept_input_entry_id: Option<String>,
+    pub(crate) source_entry_ids: Vec<String>,
+    pub(crate) by: SummarizedBy,
+    pub(crate) input_bytes: usize,
 }

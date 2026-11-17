@@ -810,8 +810,8 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
     assert_eq!(output.status.code(), Some(0));
     let lines: Vec<Value> = json_lines(&stdout(&output));
     for (index, line) in lines.iter().enumerate() {
-        // 3 since `retry_scheduled` names the number of its retry `retry`.
-        assert_eq!(line["schemaVersion"], 5, "{line}");
+        // 6 since `tool_decision` carries the `decision` and the `reason` as policies give them.
+        assert_eq!(line["schemaVersion"], 6, "{line}");
         assert_eq!(line["seq"], index + 1, "{line}");
         assert_eq!(line["runId"], lines[0]["runId"], "{line}");
         assert!(line["sessionId"].is_string() && line["atMs"].is_u64(), "{line}");

@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use super::agent_file::AgentFile;
+use super::agent_file::{AgentFile, settle_token_trigger};
 use super::skills::{self, Skill};
 use super::{Config, Execution, Permissions, context, read_text};
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::output_store;
 use zx_agent::builtin::tools::BUILTIN_TOOL_NAMES;
-use zx_agent::compaction;
+use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
 const AGENTS_DIR: &str = "agents";
@@ -85,7 +85,8 @@ pub struct AgentDefinition {
     pub context: ProjectContext,
     /// Catalog metadata; loading does not decode the skill bodies.
     pub skills: Vec<Skill>,
-    /// Automatic trigger and bounded manual summarization settings.
+    /// Automatic trigger and bounded manual summarization settings. A token trigger that no
+    /// file sets follows the context window of the model in use while the byte trigger is on.
     pub compaction: compaction::Config,
 }
 
@@ -94,10 +95,11 @@ impl AgentDefinition {
     /// zx-agent `home` when that file exists, else the built-in agent. No other file is read:
     /// a file in `agents/` with another name is ignored.
     pub fn load(kind: Builtin, home: Option<&Path>, config: &Config) -> Result<Self> {
-        let agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", kind.name()))) {
+        let mut agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", kind.name()))) {
             Some(path) if exists(&path)? => Self::from_file(&path)?,
             _ => Self::builtin(kind)?,
         };
+        settle_token_trigger(&mut agent.compaction);
         agent.validate(config)?;
         Ok(agent)
     }
@@ -158,7 +160,14 @@ impl AgentDefinition {
                 files: Vec::new(),
             },
             skills: Vec::new(),
-            compaction: compaction::Config::default(),
+            // Until a file sets `triggerTokens`, the token trigger follows the context window;
+            // `load` settles it once every file is applied.
+            compaction: compaction::Config {
+                trigger_tokens: TokenTrigger::BelowWindow {
+                    reserve_tokens: DEFAULT_RESERVE_TOKENS,
+                },
+                ..compaction::Config::default()
+            },
         }
     }
 
@@ -170,7 +179,7 @@ impl AgentDefinition {
             ensure!(known_tool(name), "unknown tool {name:?}");
         }
         self.permissions.validate(known_tool, &config.mcp_tool_names()?)?;
-        self.compaction.validate()?;
+        self.compaction.validate().context("invalid [compaction] settings")?;
         if self.permissions.approve_all {
             ensure!(
                 config.execution == Execution::Container,

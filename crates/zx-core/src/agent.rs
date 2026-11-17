@@ -52,9 +52,10 @@ pub struct AgentConfig {
     /// What they add is taken from them once, when the agent is made; every session has
     /// it, after the session's own parts.
     pub extensions: Vec<Arc<dyn Extension>>,
-    /// What is known about models, by ID: the prices give each response a cost, the context
-    /// window can set the token trigger of automatic compaction. Empty by default: costs and
-    /// windows stay unknown.
+    /// What is known about models, by ID: the prices give each response a cost, and the
+    /// context window of the model a session asks is what a
+    /// [`TokenTrigger::BelowWindow`](compaction::TokenTrigger::BelowWindow) trigger of
+    /// automatic compaction lies below. Empty by default: costs and windows stay unknown.
     pub models: HashMap<String, ModelMeta>,
     /// Whether every task request carries its session's ID as the cache key
     /// ([`crate::ai::Request::cache_key`]), so that a provider keeps one cache for each
@@ -264,7 +265,7 @@ impl Agent {
             .create(&header)
             .await
             .context("cannot create the session")?;
-        self.register(self.start(assembled, Transcript::with_log(header, log))?)
+        self.register(self.start(assembled, Transcript::with_log(header, log)))
     }
 
     /// The session `id`: the open one when it is open, else the one in the storage, opened
@@ -333,7 +334,7 @@ impl Agent {
             .with_context(|| format!("cannot load session {id}"))?;
         let parts = self.set_up(transcript.header()).await?;
         let assembled = self.assemble(transcript.header(), parts)?;
-        self.start(assembled, transcript)
+        Ok(self.start(assembled, transcript))
     }
 
     /// What the host's setup makes for the session with `header`.
@@ -385,7 +386,7 @@ impl Agent {
     }
 
     /// The session that records in `transcript` and runs with `assembled`.
-    fn start(&self, assembled: LoopConfig, transcript: Transcript) -> Result<Session> {
+    fn start(&self, assembled: LoopConfig, transcript: Transcript) -> Session {
         let config = &self.shared.config;
         Session::new(
             assembled,

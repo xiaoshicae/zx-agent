@@ -1,20 +1,21 @@
 //! Persistent tool output, redaction order, paging and filesystem boundaries.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use serde_json::json;
+use async_trait::async_trait;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, ToolCall};
+use zx_agent::ai::{Message, ToolCall, ToolDef};
 use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
 use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::ReadFileTool;
 use zx_agent::events::RunOutcome;
-use zx_agent::hooks::{Hook, HookChain, HookContext};
+use zx_agent::hooks::Hook;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::{Session, SessionOptions};
 
 use zx_testing::{RunnerSetup, Start, config, header_in};
 
@@ -485,25 +486,67 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     assert!(!dir.path().join(".zx-agent").exists());
 }
 
+/// A bash command whose long output comes as its run is cancelled: it cancels the session it
+/// runs in, once the test gives it one, and then answers.
+struct AnswersAsItsRunIsCancelled(OnceLock<Session>);
+
+#[async_trait]
+impl Tool for AnswersAsItsRunIsCancelled {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "bash".into(),
+            description: "Answers at length".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        if let Some(session) = self.0.get() {
+            session.cancel();
+        }
+        Ok(ToolOutput::ok("x".repeat(500)))
+    }
+}
+
 #[tokio::test]
 async fn cancellation_skips_writes_and_reads() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, reader) = parts(dir.path());
-    let mut chain = HookChain::new();
-    chain.push("hook", Arc::new(hook));
-    let cancel = CancellationToken::new();
-    cancel.cancel();
+    let tool = Arc::new(AnswersAsItsRunIsCancelled(OnceLock::new()));
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "bash", json!({})),
+        FauxStep::text("never sent"),
+    ]));
+    let mut config = config(provider.clone(), vec![tool.clone()]);
+    config.hooks.push("hook", Arc::new(hook));
+    let (runner, _) = RunnerSetup {
+        session: Start::New(SessionOptions::new(dir.path())),
+        ..RunnerSetup::new(config)
+    }
+    .build()
+    .await;
+    assert!(tool.0.set(Session::clone(&runner)).is_ok());
+
+    let report = runner.run("go").await;
+
+    // The hooks of a cancelled run are not called: the output is withheld, and not stored.
+    assert_eq!(report.outcome, RunOutcome::Cancelled, "{report:?}");
+    let messages = runner.session().messages();
+    let Some(Message::ToolResult(result)) = messages.last() else {
+        panic!("tool result: {messages:?}");
+    };
     assert!(
-        chain
-            .after_tool(
-                &call("bash"),
-                ToolOutput::ok("x".repeat(500)),
-                &HookContext::new("session".into(), dir.path().into(), cancel.clone())
-            )
-            .await
-            .is_err()
+        result.is_error && result.content.starts_with("Tool output withheld"),
+        "{result:?}"
     );
     assert!(!dir.path().join(".zx-agent").exists());
+    assert_eq!(provider.requests().len(), 1);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
     let ctx = ToolContext::new(dir.path().into(), cancel);
     assert_eq!(
         reader

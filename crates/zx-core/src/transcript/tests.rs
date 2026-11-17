@@ -179,7 +179,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         reasoning: None,
     };
     store
-        .record_request(&request, "p", serde_json::json!({}), RequestSource::Projection)
+        .record_request(&request, "p", serde_json::json!({}), RequestSource::Task)
         .await
         .unwrap();
     let mut call = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
@@ -243,34 +243,37 @@ async fn an_append_that_times_out_stops_later_writes() {
 }
 
 #[tokio::test]
-async fn why_writes_stopped_can_be_told_apart() {
-    assert_eq!(Transcript::in_memory(header()).writes_stopped(), None);
+async fn a_later_append_says_why_writes_stopped() {
+    /// Why `store` refuses the next append.
+    async fn refusal(store: &mut Transcript) -> String {
+        store
+            .append_message(Message::user("later"))
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+    let mut writing = Transcript::in_memory(header());
+    assert!(writing.append_message(Message::user("q")).await.is_ok());
 
     let mut failed = Transcript::with_writer(header(), Box::new(FailingWriter));
     failed.append_message(Message::user("q")).await.unwrap_err();
-    assert_eq!(
-        failed.writes_stopped(),
-        Some(&WritesStopped::Failed("disk full".into()))
-    );
+    let error = refusal(&mut failed).await;
+    assert!(error.contains("an earlier write failed: disk full"), "{error}");
 
     let mut silent = Transcript::with_log(header(), Box::new(Unresponsive));
     silent.append_timeout = Duration::from_millis(10);
     silent.append_message(Message::user("q")).await.unwrap_err();
-    assert_eq!(
-        silent.writes_stopped(),
-        Some(&WritesStopped::TimedOut(Duration::from_millis(10)))
-    );
+    let error = refusal(&mut silent).await;
+    assert!(error.contains("did not finish within 10ms"), "{error}");
 
     let mut dropped = Transcript::with_log(header(), Box::new(Unresponsive));
     assert!(dropped.append_message(Message::user("q")).now_or_never().is_none());
-    assert_eq!(dropped.writes_stopped(), Some(&WritesStopped::Interrupted));
+    let error = refusal(&mut dropped).await;
+    assert!(error.contains("interrupted before its log answered"), "{error}");
 
-    assert_eq!(
-        Transcript::snapshot(loaded(header(), Vec::new()))
-            .unwrap()
-            .writes_stopped(),
-        Some(&WritesStopped::ReadOnly)
-    );
+    let mut snapshot = Transcript::snapshot(loaded(header(), Vec::new())).unwrap();
+    let error = refusal(&mut snapshot).await;
+    assert!(error.contains("read as a snapshot, which is read-only"), "{error}");
 }
 
 #[tokio::test]

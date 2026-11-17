@@ -1,7 +1,8 @@
 //! Where a test's session comes from and where it is kept. An agent creates or opens every
 //! test session, as it does a host's ([`Start`]); a session with history is a [`Seed`],
 //! which the test writes first through the storage that keeps it, in memory or in a session
-//! file. A [`LogStorage`] gives a session the log a test chooses, such as a [`RefusingLog`].
+//! file, records that only the kernel writes during a run included. A [`LogStorage`] gives a
+//! session the log a test chooses, such as a [`RefusingLog`].
 
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -9,11 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use zx_agent::SessionOptions;
-use zx_agent::ai::Message;
+use zx_agent::ai::{Message, now_ms};
 use zx_agent::builtin::jsonl::JsonlStorage;
 use zx_agent::transcript::{
-    LoadedSession, LogRecord, MemoryStorage, SessionHeader, SessionList, SessionLog, SessionQuery, SessionStorage,
-    Transcript,
+    Entry, LoadedSession, LogRecord, MemoryStorage, SessionHeader, SessionList, SessionLog, SessionQuery,
+    SessionStorage, ToolCallStartedEntry, Transcript,
 };
 
 /// The header of a new session that works in the current directory.
@@ -97,6 +98,49 @@ impl Seed {
             storage,
             transcript: Transcript::with_log(header, log),
         })
+    }
+
+    /// Append `entry` as one record line, through the storage that keeps the session, as a
+    /// run that stopped right after writing it leaves it: for the records that only the kernel
+    /// writes, such as the start of a tool call or of a compaction. The session is then read
+    /// back from the storage, which checks the record as it checks every record of a session
+    /// it opens; an error says why the storage or that check refused it.
+    pub async fn append_record(&mut self, entry: Entry) -> anyhow::Result<()> {
+        let header = self.transcript.header().clone();
+        // The session's one writer lets go, so that the storage hands out its log again.
+        drop(std::mem::replace(
+            &mut self.transcript,
+            Transcript::in_memory(header.clone()),
+        ));
+        let (mut loaded, mut log) = self.storage.open(&header.id).await?;
+        let json = serde_json::to_string(&entry)?;
+        let record = LogRecord {
+            seq: u64::try_from(loaded.records.len())? + 1,
+            id: entry.id(),
+            parent_id: entry.parent_id(),
+            kind: entry.kind(),
+            timestamp: entry.timestamp(),
+            json: &json,
+        };
+        log.append(&record).await?;
+        loaded.records.push(json);
+        self.transcript = Transcript::load(loaded, log)?;
+        Ok(())
+    }
+
+    /// Record, after the session's last record, that the call `tool_call_id` to `tool_name`
+    /// started, as [`append_record`](Self::append_record) does: what the kernel writes
+    /// before it runs a call with side effects, and what a run that crashed while the call ran
+    /// leaves behind.
+    pub async fn record_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> anyhow::Result<()> {
+        let entry = Entry::ToolCallStarted(ToolCallStartedEntry {
+            id: format!("started-{tool_call_id}"),
+            parent_id: self.transcript.leaf_id().map(String::from),
+            timestamp: now_ms(),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+        });
+        self.append_record(entry).await
     }
 }
 

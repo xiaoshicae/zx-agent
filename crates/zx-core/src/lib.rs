@@ -8,7 +8,6 @@
 //!
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
 //!   rules, the projection the model sees, and where sessions are kept (pi: SessionManager)
-//! - [`events`]: what a run emits, and the envelope of each event
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
 //!   every call into host code
 //! - [`tools`]: the tool interface, the tools of a session, and which of them a run offers
@@ -16,6 +15,7 @@
 //!   it runs
 //! - [`policy`] (guard): the interface that decides whether a tool call may run, and the
 //!   approval of a call a policy asks about
+//! - [`events`] (policy): what a run emits, and the envelope of each event
 //! - [`compaction`] (transcript, events, guard): running one bounded, auditable summary of
 //!   the conversation, which the kernel asks the model for or the host's summarizer makes
 //! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
@@ -46,7 +46,7 @@
 //!     still measures it)
 //!   - acts: `compaction.rs` (budgets, the token estimate and report),
 //!     `compaction/compactor.rs` (one compaction), `compaction/answer.rs` (the model's
-//!     answer), `runner/run_host.rs` (when to compact)
+//!     answer), `runner/run_scope.rs` (when to compact)
 //! - **Interrupted tool calls**
 //!   - records: `transcript/recovery.rs` (start records, the calls left without results)
 //!   - acts: `runner/step_loop/tools.rs` (records the start of a call with side effects),
@@ -59,7 +59,7 @@
 //!   - records: `transcript.rs` (the rules of an edit), `transcript/projection.rs` (applying
 //!     edits)
 //!   - acts: `hooks.rs` (checking a hook's plan of edits before any is recorded),
-//!     `runner/step_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting
+//!     `runner/step_loop/context.rs` (input and hook edits), `runner/run_scope.rs` (omitting
 //!     a failed answer)
 //! - **Session names**
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),

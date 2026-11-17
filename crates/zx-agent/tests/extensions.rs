@@ -10,7 +10,7 @@ use serde_json::json;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{SystemPrompt, ToolCall};
-use zx_agent::events::{EventKind, HookPoint};
+use zx_agent::events::{EventKind, HookPhase};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::tools::{Tool, ToolOutput};
@@ -294,7 +294,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     assert!(
         events.events().iter().any(|event| matches!(
             event,
-            EventKind::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
+            EventKind::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPhase::AfterTool
         )),
         "{:?}",
         events.kinds()

@@ -11,7 +11,7 @@ use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, LoadedSession, RequestSource, Transcript};
+use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
 use zx_testing::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
@@ -221,93 +221,4 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
     let sent = provider.requests();
     assert_eq!(sent.len(), 3);
     assert_eq!(replayed(&path), sent);
-}
-
-/// A request for `model` and nothing else.
-fn request_for(model: &str) -> Request {
-    Request {
-        model: model.into(),
-        messages: vec![],
-        tools: vec![],
-        max_tokens: None,
-        reasoning: None,
-        cache_key: None,
-    }
-}
-
-/// The IDs of the request configurations `store` recorded, oldest first.
-fn config_ids(store: &Transcript) -> Vec<String> {
-    store
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestConfig(entry) => Some(entry.id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Why the records of `store` do not load once a request checkpoint after `parent` names the
-/// configuration `config`.
-fn refusal_of_a_request(store: &Transcript, parent: &str, config: &str) -> String {
-    let mut records: Vec<String> = store
-        .entries()
-        .iter()
-        .map(|entry| serde_json::to_string(entry).unwrap())
-        .collect();
-    records.push(
-        json!({"type":"request_started", "id":"invalid", "parentId":parent,
-        "timestamp":0, "configId":config, "source":{"kind":"projection"}})
-        .to_string(),
-    );
-    let loaded = LoadedSession {
-        header: store.header().clone(),
-        records,
-        incomplete_tail_bytes: 0,
-    };
-    let error = Transcript::snapshot(loaded).err().expect("the request must be refused");
-    format!("{error:#}")
-}
-
-#[tokio::test]
-async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
-    let mut store = Transcript::in_memory(header());
-    let first = store
-        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    store
-        .record_request(&request_for("other"), "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    let foreign = config_ids(&store).pop().unwrap();
-    store.branch(&first).unwrap();
-    let last = store
-        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    assert_eq!(config_ids(&store).len(), 2, "the branch reuses its configuration");
-
-    let error = refusal_of_a_request(&store, &last, &foreign);
-
-    assert!(error.contains("is not the one in force on this branch"), "{error}");
-}
-
-#[tokio::test]
-async fn a_request_names_the_configuration_in_force_not_an_earlier_one_of_its_branch() {
-    let mut store = Transcript::in_memory(header());
-    store
-        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    let last = store
-        .record_request(&request_for("other"), "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    let configs = config_ids(&store);
-    assert_eq!(configs.len(), 2);
-
-    let error = refusal_of_a_request(&store, &last, &configs[0]);
-
-    assert!(error.contains("is not the one in force on this branch"), "{error}");
 }

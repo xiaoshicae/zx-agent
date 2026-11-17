@@ -141,7 +141,7 @@ impl InputQueues {
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
     /// next step, or when the run ends. Without a run the entry waits for the next one; a
     /// host that is idle records directly through its session instead.
-    pub fn append_entry(&self, custom_type: impl Into<String>, data: Value) {
+    pub fn append_custom_entry(&self, custom_type: impl Into<String>, data: Value) {
         lock(&self.entries).push(PendingEntry {
             custom_type: custom_type.into(),
             data,
@@ -173,18 +173,6 @@ impl InputQueues {
         })
     }
 
-    /// Take every queued steering message, oldest first, whatever the mode, ending their
-    /// holds.
-    pub fn drain_steering(&self) -> Vec<Input> {
-        Self::inputs(Self::take(&self.steering))
-    }
-
-    /// Take every queued follow-up message, oldest first, whatever the mode, ending their
-    /// holds.
-    pub fn drain_follow_up(&self) -> Vec<Input> {
-        Self::inputs(Self::take(&self.follow_up))
-    }
-
     /// Take every queued message with its hold: steering first, then follow-ups, each oldest
     /// first. A host that moves the messages into queues of its own keeps the holds with them.
     pub fn take_all(&self) -> Vec<PendingInput> {
@@ -196,11 +184,6 @@ impl InputQueues {
     /// Everything in `lane`, taken under its lock and handed out after it.
     fn take(lane: &Mutex<VecDeque<PendingInput>>) -> Vec<PendingInput> {
         lock(lane).drain(..).collect()
-    }
-
-    /// The inputs of `messages`, whose holds end here, outside any queue's lock.
-    fn inputs(messages: Vec<PendingInput>) -> Vec<Input> {
-        messages.into_iter().map(PendingInput::into_input).collect()
     }
 
     /// Take the entries waiting to be recorded, oldest first.
@@ -256,6 +239,16 @@ mod tests {
 
     use super::*;
 
+    /// The inputs of `messages`, whose holds end here, outside any queue's lock.
+    fn inputs(messages: Vec<PendingInput>) -> Vec<Input> {
+        messages.into_iter().map(PendingInput::into_input).collect()
+    }
+
+    /// Take every message `queue` holds, oldest first, whatever the mode, ending their holds.
+    fn drain(queues: &InputQueues, queue: Queue) -> Vec<Input> {
+        inputs(InputQueues::take(queues.lane(queue)))
+    }
+
     fn texts(messages: Vec<Input>) -> Vec<String> {
         messages
             .into_iter()
@@ -273,9 +266,9 @@ mod tests {
         queues.steer("b");
         queues.follow_up("c");
 
-        assert_eq!(texts(queues.drain_steering()), ["a", "b"]);
-        assert!(queues.drain_steering().is_empty());
-        assert_eq!(texts(queues.drain_follow_up()), ["c"]);
+        assert_eq!(texts(drain(&queues, Queue::Steering)), ["a", "b"]);
+        assert!(drain(&queues, Queue::Steering).is_empty());
+        assert_eq!(texts(drain(&queues, Queue::FollowUp)), ["c"]);
     }
 
     #[test]
@@ -300,7 +293,7 @@ mod tests {
         queues.follow_up("a");
 
         assert!(queues.withdraw(&"a".into()));
-        assert_eq!(texts(queues.drain_steering()), ["b", "a"]);
+        assert_eq!(texts(drain(&queues, Queue::Steering)), ["b", "a"]);
         assert!(queues.withdraw(&"a".into()));
         assert!(!queues.has(Queue::FollowUp));
     }
@@ -318,7 +311,7 @@ mod tests {
             details: None,
         };
         assert!(!queues.withdraw(&Input::Custom(custom)));
-        assert_eq!(texts(queues.drain_follow_up()), ["a"]);
+        assert_eq!(texts(drain(&queues, Queue::FollowUp)), ["a"]);
     }
 
     #[test]
@@ -326,12 +319,12 @@ mod tests {
         let queues = InputQueues::default();
         queues.follow_up("a");
         // A frontend drains the queue and queues other input while the loop records "a".
-        queues.drain_follow_up();
+        drain(&queues, Queue::FollowUp);
         queues.follow_up("b");
 
         queues.remove_front(Queue::FollowUp, &"a".into());
 
-        assert_eq!(texts(queues.drain_follow_up()), ["b"]);
+        assert_eq!(texts(drain(&queues, Queue::FollowUp)), ["b"]);
     }
 
     #[test]
@@ -345,12 +338,9 @@ mod tests {
         };
         queues.steer("a");
         queues.steer(Input::Custom(custom.clone()));
-        queues.append_entry("state", serde_json::json!({"n": 1}));
+        queues.append_custom_entry("state", serde_json::json!({"n": 1}));
 
-        assert_eq!(
-            InputQueues::inputs(queues.take_all()),
-            [Input::from("a"), Input::Custom(custom)]
-        );
+        assert_eq!(inputs(queues.take_all()), [Input::from("a"), Input::Custom(custom)]);
         assert_eq!(
             queues.take_entries(),
             [PendingEntry {
@@ -395,7 +385,7 @@ mod tests {
         assert_eq!(alive.load(Ordering::SeqCst), 0, "so does withdrawn input");
 
         queues.steer(PendingInput::held("c", Hold::new(&alive)));
-        assert_eq!(texts(queues.drain_steering()), ["c"]);
+        assert_eq!(texts(drain(&queues, Queue::Steering)), ["c"]);
         assert_eq!(alive.load(Ordering::SeqCst), 0, "and input taken without it");
         queues.follow_up(PendingInput::held("d", Hold::new(&alive)));
         drop(queues);

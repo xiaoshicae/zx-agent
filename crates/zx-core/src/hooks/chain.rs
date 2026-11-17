@@ -10,18 +10,18 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ContextEdit, DEFAULT_HOOK_TIMEOUT, FinishedStep, Hook, HookContext, HookError, HookFailure, HookPoint, HookResult,
+    ContextEdit, DEFAULT_HOOK_TIMEOUT, FinishedStep, Hook, HookContext, HookError, HookFailure, HookPhase, HookResult,
     HookStage, RequestPlan, RequestSettings, StepDecision,
 };
 use crate::ai::{Message, ToolCall};
 use crate::events::Event;
-use crate::guard::{Priority, bounded};
+use crate::guard::{Priority, Stopped, bounded};
 use crate::tools::ToolOutput;
 
 /// One guarded call of a registered hook. A failure names the call by `name` and `phase`.
 pub(crate) struct HookCall<'a> {
     pub(crate) name: &'a str,
-    pub(crate) phase: HookPoint,
+    pub(crate) phase: HookPhase,
     pub(crate) timeout: Duration,
 }
 
@@ -43,7 +43,7 @@ impl HookCall<'_> {
     ) -> Result<T, HookError> {
         // Ready observers still see the final event after cancellation. Pending
         // observers stop immediately; operational hooks give cancellation priority.
-        let priority = if self.phase == HookPoint::OnEvent {
+        let priority = if self.phase == HookPhase::OnEvent {
             Priority::Completion
         } else {
             Priority::Cancellation
@@ -51,7 +51,7 @@ impl HookCall<'_> {
         match bounded(future, self.timeout, cancel, priority).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(reason)) => Err(self.error(HookFailure::Rejected(reason))),
-            Err(stopped) => Err(self.error(stopped.into())),
+            Err(stopped) => Err(self.error(HookFailure::Stopped(stopped))),
         }
     }
 }
@@ -67,7 +67,7 @@ struct RegisteredHook {
 }
 
 impl RegisteredHook {
-    fn call(&self, phase: HookPoint) -> HookCall<'_> {
+    fn call(&self, phase: HookPhase) -> HookCall<'_> {
         HookCall {
             name: &self.name,
             phase,
@@ -79,7 +79,7 @@ impl RegisteredHook {
     /// run's cancellation.
     async fn run<T>(
         &self,
-        phase: HookPoint,
+        phase: HookPhase,
         future: impl Future<Output = HookResult<T>>,
         ctx: &HookContext,
     ) -> Result<T, HookError> {
@@ -87,7 +87,7 @@ impl RegisteredHook {
     }
 
     /// The error of this hook failing in `phase`.
-    fn error(&self, phase: HookPoint, failure: HookFailure) -> HookError {
+    fn error(&self, phase: HookPhase, failure: HookFailure) -> HookError {
         self.call(phase).error(failure)
     }
 }
@@ -141,10 +141,10 @@ impl HookChain {
     }
 
     /// Run `on_input` of every hook, each seeing the text the previous ones returned.
-    pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
+    pub(crate) async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
         for entry in &self.hooks {
             text = entry
-                .run(HookPoint::OnInput, entry.hook.on_input(text, ctx), ctx)
+                .run(HookPhase::OnInput, entry.hook.on_input(text, ctx), ctx)
                 .await?;
         }
         Ok(text)
@@ -152,7 +152,7 @@ impl HookChain {
 
     /// The context edits of every hook, each hook seeing the projection after the edits of
     /// the ones before it. An edit that does not apply fails the hook that planned it.
-    pub async fn transform_context(
+    pub(crate) async fn transform_context(
         &self,
         messages: &[Message],
         ctx: &HookContext,
@@ -161,7 +161,7 @@ impl HookChain {
         let mut projected = Cow::Borrowed(messages);
         let mut edits = Vec::new();
         for entry in &self.hooks {
-            let phase = HookPoint::TransformContext;
+            let phase = HookPhase::TransformContext;
             let changes = entry
                 .run(phase, entry.hook.transform_context(&projected, ctx), ctx)
                 .await?;
@@ -176,7 +176,7 @@ impl HookChain {
     }
 
     /// Run `prepare_request` of every hook, each seeing the settings the previous ones chose.
-    pub async fn prepare_request(
+    pub(crate) async fn prepare_request(
         &self,
         messages: &[Message],
         step: u32,
@@ -185,7 +185,7 @@ impl HookChain {
     ) -> Result<RequestSettings, HookError> {
         let mut settings = settings;
         for entry in &self.hooks {
-            let phase = HookPoint::PrepareRequest;
+            let phase = HookPhase::PrepareRequest;
             let plan = RequestPlan {
                 messages,
                 step,
@@ -202,7 +202,7 @@ impl HookChain {
     }
 
     /// Run `after_tool` of every hook, each seeing the output the previous ones returned.
-    pub async fn after_tool(
+    pub(crate) async fn after_tool(
         &self,
         call: &ToolCall,
         output: ToolOutput,
@@ -234,7 +234,7 @@ impl HookChain {
     ) -> Result<ToolOutput, HookError> {
         for entry in self.hooks.iter().filter(|entry| selected(entry.stage)) {
             output = entry
-                .run(HookPoint::AfterTool, entry.hook.after_tool(call, output, ctx), ctx)
+                .run(HookPhase::AfterTool, entry.hook.after_tool(call, output, ctx), ctx)
                 .await?;
         }
         Ok(output)
@@ -242,11 +242,15 @@ impl HookChain {
 
     /// What follows a step: the first hook that stops ends the chain; otherwise the first
     /// that asks to continue the answer or to follow up decides.
-    pub async fn finish_step(&self, step: &FinishedStep<'_>, ctx: &HookContext) -> Result<StepDecision, HookError> {
+    pub(crate) async fn finish_step(
+        &self,
+        step: &FinishedStep<'_>,
+        ctx: &HookContext,
+    ) -> Result<StepDecision, HookError> {
         let mut decision = StepDecision::Default;
         for entry in &self.hooks {
             let next = entry
-                .run(HookPoint::FinishStep, entry.hook.finish_step(step, ctx), ctx)
+                .run(HookPhase::FinishStep, entry.hook.finish_step(step, ctx), ctx)
                 .await?;
             match next {
                 StepDecision::Stop => return Ok(StepDecision::Stop),
@@ -262,7 +266,7 @@ impl HookChain {
     }
 
     /// Call `on_event` of every hook that observes `event`, in stage and registration order.
-    pub async fn on_event(&self, event: &Event, ctx: &HookContext) -> Vec<HookError> {
+    pub(crate) async fn on_event(&self, event: &Event, ctx: &HookContext) -> Vec<HookError> {
         let mut errors = Vec::new();
         for entry in &self.hooks {
             // Synchronous extension code: a panic is a failure of this hook, not of the run.
@@ -270,16 +274,16 @@ impl HookChain {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(_) => {
-                    errors.push(entry.error(HookPoint::OnEvent, HookFailure::Panicked));
+                    errors.push(entry.error(HookPhase::OnEvent, HookFailure::Stopped(Stopped::Panicked)));
                     continue;
                 }
             }
             if let Err(error) = entry
-                .run(HookPoint::OnEvent, entry.hook.on_event(event, ctx), ctx)
+                .run(HookPhase::OnEvent, entry.hook.on_event(event, ctx), ctx)
                 .await
             {
                 // Cancellation is a normal shutdown, not an observer failure.
-                if error.failure != HookFailure::Cancelled {
+                if error.failure != HookFailure::Stopped(Stopped::Cancelled) {
                     errors.push(error);
                 }
             }
