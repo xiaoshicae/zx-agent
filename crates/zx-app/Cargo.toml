@@ -27,5 +27,9 @@ tokio-util.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# The tests script the model with `ai::faux::FauxProvider`.
+zx-agent = { workspace = true, features = ["testing"] }
+zx-testing.workspace = true
+
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

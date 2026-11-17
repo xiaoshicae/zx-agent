@@ -144,3 +144,26 @@ pub fn session_files(dir: &Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
+
+/// What a finished program wrote to stdout, decoded lossily.
+pub fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// What a finished program wrote to stderr, decoded lossily.
+pub fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Send `name` (as `kill` spells it, such as `TERM`) to `child`.
+#[cfg(unix)]
+pub async fn signal(child: &tokio::process::Child, name: &str) {
+    assert!(
+        tokio::process::Command::new("kill")
+            .args([name, &child.id().unwrap().to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+}

@@ -47,7 +47,6 @@ zx-agent = { workspace = true, features = ["testing"] }
 zx-testing.workspace = true
 
 async-trait.workspace = true
-opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "time"] }
 
