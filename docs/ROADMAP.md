@@ -38,7 +38,7 @@
 | D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用；attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试 |
 | D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction（记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`、`RequestSource::Summary`） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript。事件格式版本为 5 |
-| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配与追踪导出在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。集成测试分三处：根目录 `tests/`、`crates/zx-app/tests/` 与 `crates/zx-cli/tests/` |
+| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配与追踪导出在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。各 crate 共用、没有业务含义的小工具在 `zx-util`，它不依赖工作区里任何 crate，不属于 API。集成测试分三处：根目录 `tests/`、`crates/zx-app/tests/` 与 `crates/zx-cli/tests/` |
 | D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），`zx-app` 的装配让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放 |
 | D26 | 预算按整次运行累计，用完报告 `BudgetExhausted { budget, truncated }`，续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
 | D27 | IM 路由器只分派消息，运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话作为下一次运行的提问重新排队，`/cancel` 丢弃它们；第一次为线程建会话前先读线程历史 |
@@ -106,4 +106,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.27 · 2026年11月
+ROADMAP.md · v0.28 · 2026年11月

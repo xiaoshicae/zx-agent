@@ -6,8 +6,8 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use zx_ai::sync::lock;
 use zx_core::input::{Input, PendingInput};
+use zx_util::sync::lock;
 
 /// The limit on one conversation's pending messages and their UTF-8 text bytes. The router and
 /// the worker reserve from it concurrently.

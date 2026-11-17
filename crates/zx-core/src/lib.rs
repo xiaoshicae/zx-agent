@@ -93,7 +93,8 @@
 //! `zx-ai-openai`.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
-use zx_ai::{self as ai, sync};
+use zx_ai as ai;
+use zx_util::{sync, text};
 
 pub mod agent;
 pub mod compaction;

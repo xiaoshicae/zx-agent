@@ -17,6 +17,7 @@ json-schema = ["dep:jsonschema"]
 
 [dependencies]
 zx-ai.workspace = true
+zx-util.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use zx_ai::text::prefix_noted;
 use zx_ai::{AssistantMessage, ContentBlock, Delta, FINISH_REASON_CODE, ProviderError, StopReason, ToolCall, Usage};
+use zx_util::text::prefix_noted;
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.

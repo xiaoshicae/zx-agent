@@ -3304,6 +3304,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "zx-util",
 ]
 
 [[package]]
@@ -3319,6 +3320,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zx-ai",
+ "zx-util",
 ]
 
 [[package]]
@@ -3366,6 +3368,7 @@ dependencies = [
  "zx-im",
  "zx-im-feishu",
  "zx-im-slack",
+ "zx-util",
 ]
 
 [[package]]
@@ -3384,6 +3387,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "zx-ai",
+ "zx-util",
 ]
 
 [[package]]
@@ -3399,6 +3403,7 @@ dependencies = [
  "tokio-util",
  "zx-ai",
  "zx-core",
+ "zx-util",
 ]
 
 [[package]]
@@ -3413,8 +3418,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "uuid",
  "zx-im",
+ "zx-util",
 ]
 
 [[package]]
@@ -3449,4 +3454,12 @@ dependencies = [
  "uuid",
  "zx-ai",
  "zx-core",
+ "zx-util",
+]
+
+[[package]]
+name = "zx-util"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]

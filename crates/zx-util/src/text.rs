@@ -1,5 +1,4 @@
-//! Bounding text for errors, messages and terminal output. Shared by every layer, and depends
-//! on nothing else in the crate.
+//! Bounding text for errors, messages and terminal output.
 
 /// The first `max_chars` characters of `text`, followed by "..." when more were left out.
 pub fn clip(text: &str, max_chars: usize) -> String {

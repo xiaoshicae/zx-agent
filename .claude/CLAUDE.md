@@ -8,10 +8,11 @@
 
 ## 架构
 
-10 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
+11 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
 
 | crate | 位置 | 负责 |
 |---|---|---|
+| `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、`is_zero`；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | `crates/zx-ai` | 消息类型、流式事件、`Provider` 契约 |
 | `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
@@ -29,12 +30,12 @@
 - **会话是审计日志，也是模型上下文的唯一来源**（不变量 5、6）：修正上下文与提示词的变化都靠追加，原始记录始终保留；可替换的只是存储（`SessionStorage` 与 `SessionLog`，接口里没有文件路径）。
 - **审批由内核等待，不是接口**：策略询问时调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）立即拒绝，`Wait` 等宿主经 `Session::resolve_approval` 按内核生成的审批编号回答；超时与取消按拒绝处理，审批不写入会话。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
-- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；`zx-app` 引用不到命令行、ACP 与 IM；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
+- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；`zx-app` 引用不到命令行、ACP 与 IM；`zx-util` 不依赖工作区里任何 crate；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13），`chat` 不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
 
 ## 命令
 
-都在仓库根目录运行，覆盖全部 10 个 crate（经 `Cargo.toml` 的 `default-members`）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
+都在仓库根目录运行，覆盖全部 11 个 crate（经 `Cargo.toml` 的 `default-members`）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
 
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
 - lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`），改动 `zx-tools` 时另跑 `cargo clippy -p zx-tools --no-default-features --all-targets -- -D warnings`（MCP 客户端是它默认开启的 feature `mcp`）。有意保留的写法用 `#[expect(lint, reason = "...")]`

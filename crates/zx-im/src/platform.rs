@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use zx_ai::sync::lock;
+use zx_util::sync::lock;
 
 /// Characters per posted message, beyond which a channel splits text with [`split_text`].
 /// Slack recommends keeping message text within 4,000 characters (chat.postMessage,

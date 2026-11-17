@@ -2,11 +2,11 @@
 //! and cards the channel posts.
 
 use serde_json::{Value, json};
-use zx_im::sync::lock;
 use zx_im::{
     Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
     MessageId, Seen, ThreadId, UserId,
 };
+use zx_util::sync::lock;
 
 use super::FeishuChannel;
 use super::connection::PREFIX;

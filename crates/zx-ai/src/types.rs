@@ -32,20 +32,16 @@ pub struct Usage {
     /// Prompt tokens served from the provider cache.
     pub cache_read: u64,
     /// Prompt tokens written to the provider cache (pi: `cacheWrite`).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "zx_util::num::is_zero")]
     pub cache_write: u64,
     /// Reasoning tokens, counted within `output` (pi: `reasoning`).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "zx_util::num::is_zero")]
     pub reasoning: u64,
     pub total_tokens: u64,
     /// What the response cost by the configured prices ([`ModelCost`]), in their unit;
     /// absent without prices. A sum adds the known costs (pi: `cost.total`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost: Option<f64>,
-}
-
-fn is_zero(value: &u64) -> bool {
-    *value == 0
 }
 
 impl Usage {

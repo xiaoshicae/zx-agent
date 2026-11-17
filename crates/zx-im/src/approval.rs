@@ -10,8 +10,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use zx_core::events::{ApprovalResult, Event, EventKind};
-
-use crate::ai::text::clip;
+use zx_util::text::clip;
 
 use super::{ApprovalCard, ApprovalId, ServerEvent, ServerSink, SessionKey};
 

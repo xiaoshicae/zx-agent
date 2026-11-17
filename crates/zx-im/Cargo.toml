@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 zx-ai.workspace = true
 zx-core.workspace = true
+zx-util.workspace = true
 
 async-trait.workspace = true
 serde.workspace = true

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms};
-use crate::sync::lock;
+use zx_util::sync::lock;
 
 /// One scripted response.
 pub enum FauxStep {
