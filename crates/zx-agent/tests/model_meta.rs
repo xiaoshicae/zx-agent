@@ -1,6 +1,5 @@
 //! Model metadata and metering: prices give responses a cost, a context window
 //! adds a token trigger to automatic summaries, and the cache key is audited.
-mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +9,6 @@ use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, answer_reporting, config, header, read_lines, seeded_session, summary_json};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
@@ -20,6 +18,9 @@ use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::transcript::{Entry, SessionHeader, Transcript};
+use zx_testing::{
+    EchoTool, RunnerSetup, Seed, answer_reporting, config, header, read_lines, seeded_session, summary_json,
+};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {
@@ -45,10 +46,11 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&file, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&file, header()).await.unwrap().into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -78,7 +80,7 @@ async fn a_model_without_prices_has_no_cost() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.models.insert("another-model".into(), priced());
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     let report = runner.run("go").await;
     assert_eq!(report.usage.total_cost, None);
     assert!(
@@ -135,14 +137,15 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     let mut config = config(provider, vec![]);
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             keep_recent_bytes: 1,
             ..Config::default()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     let compacted = runner.compact().await.unwrap();
     let report = runner.run("go").await;
@@ -166,7 +169,7 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(trigger_tokens),
@@ -176,7 +179,8 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     (report.outcome, events.kinds(), provider.requests().len())
 }
@@ -197,7 +201,7 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
 
 #[tokio::test]
 async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_trigger() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -207,7 +211,7 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(100),
@@ -217,7 +221,8 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     // Some 1.4 KiB, which estimate to about 350 tokens: a summary keeps the latest input
     // whole, so none can bring the context under the trigger.
@@ -240,7 +245,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(100),
@@ -250,7 +255,8 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("continue").await;
 
@@ -274,7 +280,7 @@ fn token_trigger() -> Config {
 async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() {
     // An old message worth summarizing, then an answer that reported a context above the
     // trigger and is recent enough for the summary to keep.
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -285,11 +291,12 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: token_trigger(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("continue").await;
 
@@ -326,7 +333,7 @@ impl Hook for TrimLongInput {
 async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() {
     // The last answer reported a context above the trigger. A hook then trims the message
     // that made it large, and what is left is too recent to compact.
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -336,11 +343,12 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("trim_long_input", Arc::new(TrimLongInput));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: token_trigger(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("continue").await;
 
@@ -460,10 +468,11 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
         ..header()
     };
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&file, header).await.unwrap(),
+        session: zx_testing::create_session_file(&file, header).await.unwrap().into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     runner.run("go").await;
     assert_eq!(provider.requests()[0].cache_key.as_deref(), Some("session-7"));
     let replayed = runner
@@ -492,11 +501,12 @@ async fn a_cost_budget_refuses_an_unpriced_model_after_switching() {
     let (runner, _) = RunnerSetup {
         limits: zx_agent::agent::RunLimits {
             cost_budget: Some(1.0),
-            ..common::test_limits()
+            ..zx_testing::test_limits()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     runner.set_model(provider.clone(), "unpriced").unwrap();
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
@@ -532,11 +542,12 @@ async fn a_cost_budget_checks_the_model_selected_by_a_request_hook() {
     let (runner, _) = RunnerSetup {
         limits: zx_agent::agent::RunLimits {
             cost_budget: Some(1.0),
-            ..common::test_limits()
+            ..zx_testing::test_limits()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("unpriced"));
@@ -548,10 +559,10 @@ async fn a_cost_budget_refuses_an_unpriced_automatic_summary() {
     let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not request")]));
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         limits: zx_agent::agent::RunLimits {
             cost_budget: Some(1.0),
-            ..common::test_limits()
+            ..zx_testing::test_limits()
         },
         compaction: Config {
             trigger_bytes: Some(1024),
@@ -560,7 +571,8 @@ async fn a_cost_budget_refuses_an_unpriced_automatic_summary() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("prices"));
@@ -578,10 +590,10 @@ async fn overflow_recovery_checks_the_summary_models_prices() {
     config.models.insert("priced".into(), priced());
     config.hooks.push("priced_task", Arc::new(SelectModel("priced")));
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         limits: zx_agent::agent::RunLimits {
             cost_budget: Some(1.0),
-            ..common::test_limits()
+            ..zx_testing::test_limits()
         },
         compaction: Config {
             trigger_bytes: Some(1_000_000),
@@ -590,7 +602,8 @@ async fn overflow_recovery_checks_the_summary_models_prices() {
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(
         provider.requests().len(),
@@ -608,10 +621,10 @@ async fn a_cost_budget_refuses_an_unpriced_manual_summary_after_switching() {
     let mut config = config(provider.clone(), vec![]);
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         limits: zx_agent::agent::RunLimits {
             cost_budget: Some(1.0),
-            ..common::test_limits()
+            ..zx_testing::test_limits()
         },
         compaction: Config {
             keep_recent_bytes: 1,
@@ -619,7 +632,8 @@ async fn a_cost_budget_refuses_an_unpriced_manual_summary_after_switching() {
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     runner.set_model(provider.clone(), "unpriced").unwrap();
     let report = runner.compact().await.unwrap();
     assert!(

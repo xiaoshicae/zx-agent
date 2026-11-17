@@ -5,16 +5,20 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-pub(crate) struct Request {
+/// One request as a fake server read it.
+pub struct Request {
+    /// The HTTP method, such as `POST`.
     pub method: String,
     /// Path and query, as in the request line.
     pub path: String,
     headers: Vec<(String, String)>,
+    /// The body, as many bytes as `Content-Length` says.
     pub body: Vec<u8>,
 }
 
 impl Request {
-    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+    /// The value of the header `name`, matched without regard to case.
+    pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
@@ -22,7 +26,7 @@ impl Request {
     }
 
     /// The request line and the headers, one per line, as they were sent.
-    pub(crate) fn head_text(&self) -> String {
+    pub fn head_text(&self) -> String {
         let mut text = format!("{} {}\n", self.method, self.path);
         for (name, value) in &self.headers {
             text.push_str(&format!("{name}: {value}\n"));
@@ -31,7 +35,7 @@ impl Request {
     }
 
     /// The body as JSON; `Null` when empty.
-    pub(crate) fn json(&self) -> serde_json::Value {
+    pub fn json(&self) -> serde_json::Value {
         if self.body.is_empty() {
             serde_json::Value::Null
         } else {
@@ -41,7 +45,7 @@ impl Request {
 }
 
 /// Read one request; `None` if the client closed the connection first.
-pub(crate) async fn read_request(stream: &mut TcpStream) -> Option<Request> {
+pub async fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut data = Vec::new();
     let mut buf = [0u8; 4096];
     let header_end = loop {
@@ -86,7 +90,7 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> Option<Request> {
 
 /// A complete response that closes the connection. `status` is the code and reason, such as
 /// `"200 OK"`; `headers` are written as given.
-pub(crate) fn response(status: &str, headers: &[(&str, String)], body: &str) -> String {
+pub fn response(status: &str, headers: &[(&str, String)], body: &str) -> String {
     let extra: String = headers
         .iter()
         .map(|(key, value)| format!("{key}: {value}\r\n"))
@@ -99,7 +103,7 @@ pub(crate) fn response(status: &str, headers: &[(&str, String)], body: &str) -> 
 
 /// A listener that accepts connections and never answers them, for a request or a handshake
 /// that does not end: its address, and a receiver told of each connection it accepts.
-pub(crate) async fn silent_listener() -> (String, mpsc::UnboundedReceiver<()>) {
+pub async fn silent_listener() -> (String, mpsc::UnboundedReceiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let (accepted, connections) = mpsc::unbounded_channel();

@@ -19,10 +19,10 @@ use zx_agent::ai::{
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
-use super::{RunnerSetup, config, header};
+use crate::{RunnerSetup, config, header};
 
 /// Rounds in the scripted session; a summary follows each.
-pub(crate) const ROUNDS: usize = 8;
+pub const ROUNDS: usize = 8;
 
 /// Lines of routine access log in each round, most of a round's bytes.
 const LOG_LINES: usize = 100;
@@ -31,7 +31,8 @@ const LOG_LINES: usize = 100;
 const TASK: &str = "Checkout in namespace shop has been failing and slow since about 08:10 UTC. Find the cause, fix it with the smallest safe changes, and tell me the follow-ups.";
 
 /// A fact planted in the records of one round.
-pub(crate) struct Planted {
+pub struct Planted {
+    /// What [`planted`] finds it by, such as `F1`.
     pub id: &'static str,
     /// The round whose records first state it.
     pub round: usize,
@@ -46,18 +47,18 @@ pub(crate) struct Planted {
 
 impl Planted {
     /// Whether `text` states this fact.
-    pub(crate) fn stated_in(&self, text: &str) -> bool {
+    pub fn stated_in(&self, text: &str) -> bool {
         let text = text.to_lowercase();
         self.keys.iter().all(|group| group.iter().any(|key| text.contains(key)))
     }
 
     /// The planted fact that replaces this one.
-    pub(crate) fn replacement(&self) -> Option<&'static Planted> {
+    pub fn replacement(&self) -> Option<&'static Planted> {
         self.replaced_by.map(planted)
     }
 
     /// Whether the fact holds after `round`: stated by then, and not yet replaced.
-    pub(crate) fn holds_after(&self, round: usize) -> bool {
+    pub fn holds_after(&self, round: usize) -> bool {
         self.round <= round && self.replacement().is_none_or(|by| by.round > round)
     }
 
@@ -80,7 +81,7 @@ impl Planted {
 }
 
 /// The planted fact with this ID.
-pub(crate) fn planted(id: &str) -> &'static Planted {
+pub fn planted(id: &str) -> &'static Planted {
     PLANTED
         .iter()
         .find(|fact| fact.id == id)
@@ -88,7 +89,7 @@ pub(crate) fn planted(id: &str) -> &'static Planted {
 }
 
 /// Three facts per round; six of them are replaced later.
-pub(crate) static PLANTED: &[Planted] = &[
+pub static PLANTED: &[Planted] = &[
     Planted {
         id: "F1",
         round: 1,
@@ -288,7 +289,7 @@ enum Step {
 
 /// The messages of round `n`, from 1 to [`ROUNDS`].
 #[expect(clippy::too_many_lines, reason = "a scripted conversation, one round per arm")]
-pub(crate) fn round(n: usize) -> Vec<Message> {
+pub fn round(n: usize) -> Vec<Message> {
     let steps = match n {
         1 => vec![
             Step::Run("kubectl get pods -n shop -o wide", PODS.into()),
@@ -480,7 +481,7 @@ fn assistant(block: ContentBlock, stop_reason: StopReason) -> Message {
 }
 
 /// The text a message carries: what was said, the commands run, and their output.
-pub(crate) fn text_of(message: &Message) -> String {
+pub fn text_of(message: &Message) -> String {
     match message {
         // The scripted session has no system messages.
         Message::System(_) => String::new(),
@@ -767,11 +768,14 @@ const TOP: &str = concat!(
 );
 
 /// How one round's summary went, and what the summary in context states afterwards.
-pub(crate) struct RoundScore {
+pub struct RoundScore {
+    /// How the round's compaction ended.
     pub outcome: Outcome,
+    /// Why the compaction failed, when it did.
     pub error: Option<String>,
     /// Bytes of the summary request's input, rebuilt from the session; 0 when none was sent.
     pub request_bytes: usize,
+    /// What the compaction's requests used.
     pub usage: Usage,
     /// Facts in the summary the model sees.
     pub facts: usize,
@@ -788,7 +792,8 @@ pub(crate) struct RoundScore {
 }
 
 /// The scripted session, summarized after each round.
-pub(crate) struct Evaluation {
+pub struct Evaluation {
+    /// Each round's score, in order.
     pub rounds: Vec<RoundScore>,
     /// The facts of the summary in context at the end.
     pub facts: Vec<String>,
@@ -796,7 +801,7 @@ pub(crate) struct Evaluation {
 
 impl Evaluation {
     /// Print each round and the final facts, visible with `--nocapture`.
-    pub(crate) fn print(&self, model: &str) {
+    pub fn print(&self, model: &str) {
         let mut total = Usage::default();
         for (index, round) in self.rounds.iter().enumerate() {
             total.add(&round.usage);
@@ -833,15 +838,15 @@ impl Evaluation {
 /// and `model` under the budgets of `budget`; score every summary. Only the user's
 /// next request stays out of a summary, whatever `budget` keeps. Panics if the session
 /// cannot be written or does not load again at the end.
-pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
+pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let path = dir.join("summaries.jsonl");
-    let mut store = super::create_session_file(&path, header()).await.unwrap();
+    let mut store = crate::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user(TASK)).await.unwrap();
     drop(store);
     let mut rounds = Vec::new();
     let mut facts = Vec::new();
     for n in 1..=ROUNDS {
-        let mut store = super::open_session_file(&path).await.unwrap();
+        let mut store = crate::open_session_file(&path).await.unwrap();
         for message in round(n) {
             store.append_message(message).await.unwrap();
         }
@@ -849,7 +854,7 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         let mut loop_config = config(Arc::clone(&provider), vec![]);
         loop_config.model = model.into();
         let (runner, _) = RunnerSetup {
-            session: store,
+            session: store.into(),
             compaction: Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
@@ -857,7 +862,8 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
             },
             ..RunnerSetup::new(loop_config)
         }
-        .build();
+        .build()
+        .await;
 
         let report = runner.compact().await.unwrap();
 
@@ -889,7 +895,7 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         });
     }
     // The session, the model's answers included, passes every check when loaded again.
-    super::read_session_file(&path).unwrap();
+    crate::read_session_file(&path).unwrap();
     Evaluation { rounds, facts }
 }
 

@@ -9,8 +9,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::fake_feishu::{Answer, FakeFeishu, TestFrame};
-use common::http::silent_listener;
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
@@ -18,6 +16,8 @@ use zx_im::{
     MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
 };
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
+use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
+use zx_testing::http::silent_listener;
 
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);

@@ -1,6 +1,5 @@
 //! Switching branches within a session: `Session::branch` moves the
 //! conversation to another point of its tree, `inspect` reads the tree while idle.
-mod common;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,20 +7,21 @@ use std::sync::atomic::Ordering;
 
 use serde_json::json;
 
-use common::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Entry;
+use zx_testing::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 
 async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> Driven {
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(file, header()).await.unwrap(),
+        session: zx_testing::create_session_file(file, header()).await.unwrap().into(),
         ..RunnerSetup::new(config(provider, tools))
     }
-    .build();
+    .build()
+    .await;
     runner
 }
 
@@ -82,7 +82,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
     assert_eq!(parent.as_deref(), Some(one.as_str()));
     drop(session);
     // Reopened, the file continues where it ends: on the new branch; the old one is kept.
-    let reopened = common::open_session_file(&file).await.unwrap();
+    let reopened = zx_testing::open_session_file(&file).await.unwrap();
     assert_eq!(
         summarize(&reopened.messages()),
         ["user:first", "assistant:one", "user:third", "assistant:three"]
@@ -142,7 +142,7 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:new"]);
     drop(session);
-    let reopened = common::open_session_file(&file).await.unwrap();
+    let reopened = zx_testing::open_session_file(&file).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:new", "assistant:fresh"]);
     let roots = reopened
         .entries()
@@ -154,8 +154,8 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 
 #[tokio::test]
 async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
-    let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
-    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("later")]));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! {
         () = provider.started.notified() => {}

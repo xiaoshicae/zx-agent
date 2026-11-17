@@ -1,13 +1,12 @@
 //! Persistent tool output, redaction order, paging and filesystem boundaries.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
 use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
@@ -16,9 +15,8 @@ use zx_agent::builtin::tools::ReadFileTool;
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookChain, HookContext};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::Transcript;
 
-use common::{RunnerSetup, config, header_in};
+use zx_testing::{RunnerSetup, Start, config, header_in};
 
 fn settings() -> Config {
     Config {
@@ -62,7 +60,7 @@ fn stored_file(dir: &Path, id: &str) -> PathBuf {
 /// its place, and the ID of the stored result.
 async fn spill(hook: &SpillOutputs, text: &str) -> (String, String) {
     let result = hook
-        .after_tool(&call("bash"), ToolOutput::ok(text), &common::hook_context())
+        .after_tool(&call("bash"), ToolOutput::ok(text), &zx_testing::hook_context())
         .await
         .unwrap();
     let id = output_id(&result.content);
@@ -102,7 +100,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
     let (hook, _) = parts(dir.path());
     let exact = ToolOutput::error("x".repeat(256));
     assert_eq!(
-        hook.after_tool(&call("bash"), exact.clone(), &common::hook_context())
+        hook.after_tool(&call("bash"), exact.clone(), &zx_testing::hook_context())
             .await
             .unwrap(),
         exact
@@ -115,7 +113,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
         usage: None,
     };
     let spilled = hook
-        .after_tool(&call("bash"), output.clone(), &common::hook_context())
+        .after_tool(&call("bash"), output.clone(), &zx_testing::hook_context())
         .await
         .unwrap();
     assert!(spilled.is_error && spilled.terminate);
@@ -247,9 +245,13 @@ async fn a_link_named_like_an_output_is_not_followed() {
 /// could. Returns the other directory and the ID of the one output it holds.
 #[cfg(unix)]
 async fn swap_outputs_for_a_link(hook: &SpillOutputs, dir: &Path) -> (tempfile::TempDir, String) {
-    hook.after_tool(&call("bash"), ToolOutput::ok("x".repeat(500)), &common::hook_context())
-        .await
-        .unwrap();
+    hook.after_tool(
+        &call("bash"),
+        ToolOutput::ok("x".repeat(500)),
+        &zx_testing::hook_context(),
+    )
+    .await
+    .unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     std::fs::write(elsewhere.path().join(format!("{id}.txt")), "from another directory").unwrap();
@@ -280,7 +282,11 @@ async fn nothing_is_stored_through_an_output_directory_swapped_for_a_link() {
     let (elsewhere, _) = swap_outputs_for_a_link(&hook, dir.path()).await;
 
     let kept = hook
-        .after_tool(&call("bash"), ToolOutput::ok("y".repeat(500)), &common::hook_context())
+        .after_tool(
+            &call("bash"),
+            ToolOutput::ok("y".repeat(500)),
+            &zx_testing::hook_context(),
+        )
         .await
         .unwrap();
 
@@ -303,7 +309,11 @@ async fn nothing_is_stored_through_a_link_planted_before_the_first_result() {
         std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
 
         let kept = hook
-            .after_tool(&call("bash"), ToolOutput::ok("y".repeat(500)), &common::hook_context())
+            .after_tool(
+                &call("bash"),
+                ToolOutput::ok("y".repeat(500)),
+                &zx_testing::hook_context(),
+            )
             .await
             .unwrap();
 
@@ -364,7 +374,11 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     let (hook, reader) = SpillOutputs::with_reader(store, vec![]);
     // Over the cap nothing is written; the bounded result stays inline with the reason.
     let kept = hook
-        .after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)), &common::hook_context())
+        .after_tool(
+            &call("bash"),
+            ToolOutput::ok("x".repeat(513)),
+            &zx_testing::hook_context(),
+        )
         .await
         .unwrap();
     assert!(kept.content.starts_with(&"x".repeat(513)));
@@ -416,7 +430,11 @@ fn a_result_not_stored_in_time_stays_inline() {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            hook.after_tool(&call("bash"), ToolOutput::ok("x".repeat(500)), &common::hook_context()),
+            hook.after_tool(
+                &call("bash"),
+                ToolOutput::ok("x".repeat(500)),
+                &zx_testing::hook_context(),
+            ),
         )
         .await
         .expect("the hook gives up storing at its limit")
@@ -440,7 +458,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let large = ToolOutput::ok("x".repeat(500));
     for name in PAGING_TOOLS {
         assert_eq!(
-            hook.after_tool(&call(name), large.clone(), &common::hook_context())
+            hook.after_tool(&call(name), large.clone(), &zx_testing::hook_context())
                 .await
                 .unwrap(),
             large
@@ -459,7 +477,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     );
     assert_eq!(
         disabled
-            .after_tool(&call("bash"), large.clone(), &common::hook_context())
+            .after_tool(&call("bash"), large.clone(), &zx_testing::hook_context())
             .await
             .unwrap(),
         large
@@ -540,12 +558,14 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     config.hooks.push("spill_outputs", Arc::new(spill));
     let audit = dir.path().join("session.jsonl");
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&audit, header_in(dir.path()))
+        session: zx_testing::create_session_file(&audit, header_in(dir.path()))
             .await
-            .unwrap(),
+            .unwrap()
+            .into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     assert_eq!(runner.run("read it").await.outcome, RunOutcome::Completed);
     let requests = provider.requests();
     let Message::ToolResult(result) = &requests[1].messages[2] else {
@@ -592,10 +612,11 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
     );
     config.hooks.push("spill_outputs", Arc::new(spill));
     let (runner, _) = RunnerSetup {
-        session: Transcript::in_memory(header_in(dir.path())),
+        session: Start::New(SessionOptions::new(dir.path())),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     // Storing is an optimisation: the hook runs after redaction, so a storage failure
     // keeps the already redacted, bounded result inline instead of hiding it.

@@ -1,6 +1,5 @@
 //! Shared conversation ownership, cancellation, the run a prompt returns, and model
 //! switching.
-mod common;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -12,7 +11,6 @@ use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use common::{Collect, Driven, NotifyingProvider, RunnerSetup, config, header, summarize, take_queued_inputs};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::events::{EventKind, RunOutcome};
@@ -20,23 +18,26 @@ use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::{Entry, SessionName, Transcript};
+use zx_agent::transcript::{Entry, SessionName};
 use zx_agent::{Run, Session};
+use zx_testing::{
+    Collect, Driven, NotifyingProvider, RunnerSetup, Start, config, header, summarize, take_queued_inputs,
+};
 
-fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (Driven, Arc<NotifyingProvider>, Arc<Collect>) {
-    let provider = NotifyingProvider::new(steps);
-    let (runner, events) = RunnerSetup::new(config(provider.clone(), vec![])).build();
+async fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (Driven, Arc<NotifyingProvider>, Arc<Collect>) {
+    let provider = NotifyingProvider::new(FauxProvider::new(steps));
+    let (runner, events) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     (runner, provider, events)
 }
 
 #[tokio::test]
 async fn sequential_prompts_keep_history_and_each_reports_its_own_answer() {
-    let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]);
+    let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]).await;
     let first = session.prompt("first").await.unwrap();
     let second = session.prompt("second").await.unwrap();
     assert_eq!((first.final_text.as_str(), second.final_text.as_str()), ("one", "two"));
     assert_eq!(
-        summarize(&provider.faux.requests()[1].messages),
+        summarize(&provider.requests()[1].messages),
         ["user:first", "assistant:one", "user:second"]
     );
     assert_eq!(second.usage.total_tokens, 15);
@@ -44,11 +45,11 @@ async fn sequential_prompts_keep_history_and_each_reports_its_own_answer() {
 
 #[tokio::test]
 async fn sdk_prompts_preserve_empty_and_unicode_input() {
-    let (session, provider, _) = setup([FauxStep::text("空"), FauxStep::text("你好")]);
+    let (session, provider, _) = setup([FauxStep::text("空"), FauxStep::text("你好")]).await;
     session.prompt("").await.unwrap();
     let report = session.prompt("多字节输入 🦀").await.unwrap();
     assert_eq!(report.final_text, "你好");
-    let requests = provider.faux.requests();
+    let requests = provider.requests();
     assert_eq!(summarize(&requests[0].messages), ["user:"]);
     assert_eq!(
         summarize(&requests[1].messages),
@@ -58,7 +59,7 @@ async fn sdk_prompts_preserve_empty_and_unicode_input() {
 
 #[tokio::test]
 async fn take_queued_returns_input_no_run_consumed_steering_first() {
-    let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]);
+    let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]).await;
     session.prompt("first").await.unwrap();
     session.queues().follow_up("later");
     session.queues().steer("now");
@@ -70,14 +71,14 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
     assert!(take_queued_inputs(&session).unwrap().is_empty());
     session.prompt("second").await.unwrap();
     assert_eq!(
-        summarize(&provider.faux.requests()[1].messages),
+        summarize(&provider.requests()[1].messages),
         ["user:first", "assistant:one", "user:second"]
     );
 }
 
 #[tokio::test]
 async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
-    let (session, provider, _) = setup([FauxStep::Hang]);
+    let (session, provider, _) = setup([FauxStep::Hang]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.queues().steer("queued");
@@ -89,19 +90,19 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
 
 #[tokio::test]
 async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("resumed")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("resumed")]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let rejected = tokio::time::timeout(Duration::from_secs(1), session.prompt("must not enter history"))
         .await
         .unwrap();
     assert!(matches!(rejected, Err(SessionError::Busy)));
-    assert_eq!(provider.faux.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     assert_eq!(session.prompt("next").await.unwrap().outcome, RunOutcome::Completed);
     assert!(
-        !summarize(&provider.faux.requests()[1].messages)
+        !summarize(&provider.requests()[1].messages)
             .iter()
             .any(|text| text.contains("must not enter history"))
     );
@@ -109,7 +110,7 @@ async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
 
 #[tokio::test]
 async fn cancelling_a_run_ends_only_that_run() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("next answer")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("next answer")]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     assert!(session.cancel());
@@ -124,14 +125,14 @@ async fn cancelling_a_run_ends_only_that_run() {
 
 #[tokio::test]
 async fn aborting_an_idle_session_has_no_effect_on_the_next_prompt() {
-    let (session, _, _) = setup([FauxStep::text("done")]);
+    let (session, _, _) = setup([FauxStep::text("done")]).await;
     assert!(!session.cancel());
     assert_eq!(session.prompt("go").await.unwrap().outcome, RunOutcome::Completed);
 }
 
 #[tokio::test]
 async fn dropping_a_prompt_cancels_the_provider_and_returns_ownership() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     drop(running);
@@ -151,17 +152,17 @@ async fn panic_during_prompt_conversion_returns_ownership() {
             panic!("host prompt bug")
         }
     }
-    let (session, provider, _) = setup([FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::text("done")]).await;
     let panicked = AssertUnwindSafe(session.prompt(PanicPrompt)).catch_unwind().await;
     assert!(panicked.is_err());
     assert!(!session.cancel());
-    assert!(provider.faux.requests().is_empty());
+    assert!(provider.requests().is_empty());
     assert_eq!(session.prompt("next").await.unwrap().outcome, RunOutcome::Completed);
 }
 
 #[tokio::test]
 async fn provider_failures_remain_reports_and_do_not_make_the_session_busy() {
-    let (session, _, _) = setup([FauxStep::Fail("bad request".into()), FauxStep::text("done")]);
+    let (session, _, _) = setup([FauxStep::Fail("bad request".into()), FauxStep::text("done")]).await;
     let failed = session.prompt("first").await.unwrap();
     assert_eq!(failed.outcome, RunOutcome::Failed);
     assert_eq!(session.prompt("next").await.unwrap().outcome, RunOutcome::Completed);
@@ -169,7 +170,7 @@ async fn provider_failures_remain_reports_and_do_not_make_the_session_busy() {
 
 #[tokio::test]
 async fn a_run_gives_its_events_in_order_and_then_its_report() {
-    let (session, _, _) = setup([FauxStep::text("done")]);
+    let (session, _, _) = setup([FauxStep::text("done")]).await;
 
     let mut run = session.send("go").unwrap();
     let id = run.id().to_string();
@@ -197,16 +198,16 @@ async fn a_run_gives_its_events_in_order_and_then_its_report() {
 
 #[tokio::test]
 async fn a_run_makes_no_request_until_it_is_read_and_holds_the_session_meanwhile() {
-    let (session, provider, _) = setup([FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::text("done")]).await;
 
     let run = session.send("go").unwrap();
     tokio::task::yield_now().await;
-    assert!(provider.faux.requests().is_empty());
+    assert!(provider.requests().is_empty());
     assert!(matches!(session.send("second"), Err(SessionError::Busy)));
     let report = run.wait().await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(provider.faux.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
     assert!(!session.cancel(), "the session is free once its run has ended");
 }
 
@@ -217,7 +218,7 @@ async fn read_all(run: &mut Run) {
 
 #[tokio::test]
 async fn dropping_a_run_cancels_it_and_frees_the_session() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]).await;
     let mut run = session.send("first").unwrap();
     tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
 
@@ -233,7 +234,7 @@ async fn dropping_a_run_cancels_it_and_frees_the_session() {
 
 #[tokio::test]
 async fn one_handle_cancels_the_run_that_another_reads() {
-    let (session, provider, _) = setup([FauxStep::Hang]);
+    let (session, provider, _) = setup([FauxStep::Hang]).await;
     let other = Session::clone(&session);
     let mut run = session.send("first").unwrap();
     tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
@@ -242,29 +243,29 @@ async fn one_handle_cancels_the_run_that_another_reads() {
     assert!(other.cancel());
 
     assert_eq!(run.wait().await.outcome, RunOutcome::Cancelled);
-    assert_eq!(provider.faux.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn a_run_goes_on_without_the_handle_that_started_it() {
-    let (session, provider, _) = setup([FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::text("done")]).await;
     let run = session.send("go").unwrap();
 
     drop(session);
 
     assert_eq!(run.wait().await.outcome, RunOutcome::Completed);
-    assert_eq!(provider.faux.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn switching_models_preserves_history_and_uses_the_new_provider() {
-    let (session, first, _) = setup([FauxStep::text("one")]);
+    let (session, first, _) = setup([FauxStep::text("one")]).await;
     session.prompt("first").await.unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
     session.set_model(next.clone(), "next-model").unwrap();
     let report = session.prompt("second").await.unwrap();
     assert_eq!(report.final_text, "two");
-    assert_eq!(first.faux.requests().len(), 1);
+    assert_eq!(first.requests().len(), 1);
     let requests = next.requests();
     assert_eq!(requests[0].model, "next-model");
     assert_eq!(
@@ -285,10 +286,11 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     let mut loop_config = config(provider.clone(), vec![]);
     loop_config.reasoning = Some(Reasoning::Low);
     let (session, _) = RunnerSetup {
-        session: common::create_session_file(&file, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&file, header()).await.unwrap().into(),
         ..RunnerSetup::new(loop_config)
     }
-    .build();
+    .build()
+    .await;
 
     session.prompt("first").await.unwrap();
     session.set_reasoning(Some(Reasoning::High)).unwrap();
@@ -299,7 +301,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     let sent: Vec<Option<Reasoning>> = provider.requests().iter().map(|request| request.reasoning).collect();
     assert_eq!(sent, [Some(Reasoning::Low), Some(Reasoning::High), None]);
     // Each change is a new request configuration, and every request rebuilds as sent.
-    let store = common::read_session_file(&file).unwrap();
+    let store = zx_testing::read_session_file(&file).unwrap();
     let ids: Vec<String> = store
         .entries()
         .iter()
@@ -320,19 +322,19 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
 
 #[tokio::test]
 async fn a_running_session_rejects_a_reasoning_change() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
     session.prompt("second").await.unwrap();
-    assert_eq!(provider.faux.requests()[1].reasoning, None);
+    assert_eq!(provider.requests()[1].reasoning, None);
 }
 
 #[tokio::test]
 async fn a_session_is_named_while_idle_and_never_during_a_run() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]).await;
     let name = |text| SessionName::new(text).unwrap();
     session.set_name(name("triage")).await.unwrap();
     let mut running = Box::pin(session.prompt("first"));
@@ -347,7 +349,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
     // The name is the session's, not the conversation's: the model never sees it.
     session.prompt("second").await.unwrap();
     assert!(
-        !summarize(&provider.faux.requests()[1].messages)
+        !summarize(&provider.requests()[1].messages)
             .iter()
             .any(|text| text.contains("triage"))
     );
@@ -355,7 +357,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
 
 #[tokio::test]
 async fn a_running_session_rejects_model_changes_without_changing_the_provider() {
-    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("old provider")]);
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("old provider")]).await;
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let next = Arc::new(FauxProvider::new([FauxStep::text("must not run")]));
@@ -368,7 +370,7 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
 
 #[tokio::test]
 async fn an_invalid_model_does_not_replace_the_current_configuration() {
-    let (session, provider, _) = setup([FauxStep::text("done")]);
+    let (session, provider, _) = setup([FauxStep::text("done")]).await;
     let next = Arc::new(FauxProvider::new([]));
     for invalid in ["", " \t　"] {
         assert_eq!(
@@ -377,7 +379,7 @@ async fn an_invalid_model_does_not_replace_the_current_configuration() {
         );
     }
     session.prompt("go").await.unwrap();
-    assert_eq!(provider.faux.requests()[0].model, "test-model");
+    assert_eq!(provider.requests()[0].model, "test-model");
     assert!(next.requests().is_empty());
 }
 
@@ -417,7 +419,9 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
         started: Notify::new(),
         release: Notify::new(),
     });
-    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![gate.clone()])).build();
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![gate.clone()]))
+        .build()
+        .await;
     let mut running = Box::pin(session.prompt("go"));
     tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
     session.queues().steer("steering");
@@ -439,7 +443,7 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_callers_share_one_running_prompt() {
     const CALLERS: usize = 6;
-    let (session, provider, _) = setup([FauxStep::Hang]);
+    let (session, provider, _) = setup([FauxStep::Hang]).await;
     let session = Arc::new(session);
     let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
     let rejected = Arc::new(AtomicUsize::new(0));
@@ -481,7 +485,7 @@ async fn concurrent_callers_share_one_running_prompt() {
         }
     }
     assert_eq!(completed, 1);
-    assert_eq!(provider.faux.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 struct Ask;
@@ -493,8 +497,8 @@ impl ToolPolicy for Ask {
 }
 struct Approver(AtomicUsize);
 #[async_trait]
-impl common::Approver for Approver {
-    async fn confirm(&self, _request: &common::Asked) -> Option<ApprovalDecision> {
+impl zx_testing::Approver for Approver {
+    async fn confirm(&self, _request: &zx_testing::Asked) -> Option<ApprovalDecision> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Some(ApprovalDecision::AllowSession)
     }
@@ -511,13 +515,14 @@ async fn model_switching_retains_approval_grants() {
     let first = Arc::new(FauxProvider::new(steps()));
     let next = Arc::new(FauxProvider::new(steps()));
     let host = Arc::new(Approver(AtomicUsize::new(0)));
-    let mut config = config(first, vec![Arc::new(common::EchoTool::new("echo"))]);
+    let mut config = config(first, vec![Arc::new(zx_testing::EchoTool::new("echo"))]);
     config.policies.push("ask", Arc::new(Ask));
     let (session, _) = RunnerSetup {
         approver: Some(host.clone()),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     session.prompt("one").await.unwrap();
     session.set_model(next, "next").unwrap();
     session.prompt("two").await.unwrap();
@@ -526,12 +531,12 @@ async fn model_switching_retains_approval_grants() {
 
 /// A session whose every call of `echo` asks for approval and waits `timeout` for the
 /// answer, and that tool.
-fn asking_session(provider: Arc<FauxProvider>, timeout: Duration) -> (Driven, Arc<common::EchoTool>) {
-    let tool = Arc::new(common::EchoTool::new("echo"));
+async fn asking_session(provider: Arc<FauxProvider>, timeout: Duration) -> (Driven, Arc<zx_testing::EchoTool>) {
+    let tool = Arc::new(zx_testing::EchoTool::new("echo"));
     let mut config = config(provider, vec![tool.clone()]);
     config.policies.push("ask", Arc::new(Ask));
     config.approvals = ApprovalMode::Wait(timeout);
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     (runner, tool)
 }
 
@@ -541,7 +546,7 @@ async fn an_approval_is_answered_through_the_session_with_the_id_its_event_gives
         FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
         FauxStep::text("done"),
     ]));
-    let (session, tool) = asking_session(provider, Duration::from_secs(60));
+    let (session, tool) = asking_session(provider, Duration::from_secs(60)).await;
 
     let mut run = session.send("go").unwrap();
     let mut asked = Vec::new();
@@ -589,7 +594,7 @@ async fn an_answer_that_comes_after_the_request_timed_out_reaches_no_call() {
         FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
         FauxStep::text("went on"),
     ]));
-    let (session, tool) = asking_session(provider, Duration::ZERO);
+    let (session, tool) = asking_session(provider, Duration::ZERO).await;
 
     let mut run = session.send("go").unwrap();
     let mut requests = Vec::new();
@@ -614,12 +619,13 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one")]));
-    let store = common::create_session_file(&file, header()).await.unwrap();
+    let store = zx_testing::create_session_file(&file, header()).await.unwrap();
     let (session, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     session.prompt("first").await.unwrap();
     let before = std::fs::read(&file).unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
@@ -631,7 +637,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     );
     session.prompt("second").await.unwrap();
     assert!(std::fs::read(&file).unwrap().starts_with(&before));
-    let reopened = common::read_session_file(&file).unwrap();
+    let reopened = zx_testing::read_session_file(&file).unwrap();
     assert_eq!(reopened.header().model, "test-model");
     assert!(
         matches!(reopened.messages().last(), Some(zx_agent::ai::Message::Assistant(message)) if message.model == "new-model")
@@ -642,36 +648,38 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
 async fn the_reader_gets_a_message_only_once_it_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
-    let store = common::create_session_file(&file, header()).await.unwrap();
+    let store = zx_testing::create_session_file(&file, header()).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let (session, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let mut run = session.send("go").unwrap();
     let mut observed = 0;
     while let Some(event) = run.next().await {
         if let EventKind::MessageEnd { message, .. } = &event.event {
-            let stored = common::read_session_file(&file).unwrap();
+            let stored = zx_testing::read_session_file(&file).unwrap();
             assert!(stored.messages().contains(message), "{message:?}");
             observed += 1;
         }
     }
 
     assert_eq!(observed, 2);
-    assert_eq!(common::read_session_file(&file).unwrap().messages().len(), 2);
+    assert_eq!(zx_testing::read_session_file(&file).unwrap().messages().len(), 2);
 }
 
 #[tokio::test]
 async fn a_session_whose_record_cannot_be_written_says_why_and_closes() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let (session, _) = RunnerSetup {
-        session: Transcript::with_log(header(), Box::new(common::RefusingLog)),
+        session: Start::with_log(zx_testing::RefusingLog),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let writes_stopped = session
         .with_transcript(|store| store.writes_stopped().cloned())
         .unwrap();

@@ -31,6 +31,9 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The unit tests script the model with `ai::faux::FauxProvider`.
+zx-ai = { workspace = true, features = ["testing"] }
+
 tempfile.workspace = true
 # The doctests start their runtime with `#[tokio::main]`.
 tokio = { workspace = true, features = ["rt-multi-thread"] }

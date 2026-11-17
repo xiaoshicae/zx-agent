@@ -1,6 +1,5 @@
 //! The OpenTelemetry export of real runs: one trace per run, with a span for each attempt,
 //! step, model request and tool call, and a run that continues the caller's trace.
-mod common;
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -9,10 +8,10 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::json;
 
-use common::{EchoTool, RunnerSetup, config};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_app::otel::{Telemetry, TraceParent};
+use zx_testing::{EchoTool, RunnerSetup, config};
 
 /// Keeps every exported span, also after shutdown, which the SDK's in-memory exporter clears.
 #[derive(Clone, Debug, Default)]
@@ -47,7 +46,7 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push("telemetry", Arc::new(telemetry.hook()));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
 
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -86,7 +85,7 @@ async fn a_run_continues_the_callers_trace_through_hook_under() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, Vec::new());
     config.hooks.push("telemetry", Arc::new(telemetry.hook_under(&parent)));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
 
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);

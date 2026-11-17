@@ -12,15 +12,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
-use super::http::{read_request, response};
+use crate::http::{read_request, response};
 
 /// Only reached when an expected request never comes.
 const WAIT: Duration = Duration::from_secs(10);
 /// The session the 2025-11-25 server assigns.
-pub(crate) const SESSION: &str = "session-1";
+pub const SESSION: &str = "session-1";
 
+/// Which version of the protocol the server speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Era {
+pub enum Era {
     /// 2026-07-28: `server/discover`, and every request stands alone.
     Modern,
     /// 2025-11-25: the `initialize` handshake and a session.
@@ -29,7 +30,7 @@ pub(crate) enum Era {
 
 /// How the next call of a tool is answered. Without one, a call returns its arguments as text.
 #[derive(Clone, Debug)]
-pub(crate) enum Reply {
+pub enum Reply {
     /// The fields of the `tools/call` result, such as `{"content": [...], "isError": true}`.
     Result(Value),
     /// A JSON-RPC error, as its code and message.
@@ -40,20 +41,25 @@ pub(crate) enum Reply {
     /// server does on the request's SSE response. Each step is the notification's `progress`,
     /// `total` and `message` fields; the token is the one the request carried.
     Progress {
+        /// The notifications' fields, in order.
         steps: Vec<Value>,
+        /// The wait before each notification and before the result.
         every: Duration,
+        /// The fields of the `tools/call` result, as [`Reply::Result`] gives them.
         result: Value,
     },
 }
 
 /// One request the server received.
 #[derive(Clone, Debug)]
-pub(crate) struct Received {
+pub struct Received {
     /// `POST`, `GET` or `DELETE`.
     pub http_method: String,
     /// The JSON-RPC method; empty for `GET` and `DELETE`.
     pub method: String,
+    /// The JSON-RPC params; `Null` without them.
     pub params: Value,
+    /// The `Authorization` header.
     pub authorization: Option<String>,
     /// The `MCP-Protocol-Version` header.
     pub protocol_version: Option<String>,
@@ -62,7 +68,7 @@ pub(crate) struct Received {
 }
 
 /// A tool as `tools/list` describes it, with one string argument `q`.
-pub(crate) fn tool(name: &str, description: &str) -> Value {
+pub fn tool(name: &str, description: &str) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -80,14 +86,16 @@ struct State {
     changed: Notify,
 }
 
-pub(crate) struct FakeMcp {
+/// A running fake MCP server, on a local port.
+pub struct FakeMcp {
     /// The MCP endpoint.
     pub url: String,
     state: Arc<State>,
 }
 
 impl FakeMcp {
-    pub(crate) async fn start(era: Era, tools: Vec<Value>) -> Self {
+    /// Start a server that speaks the protocol of `era` and lists `tools`, one per page.
+    pub async fn start(era: Era, tools: Vec<Value>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let state = Arc::new(State {
@@ -108,7 +116,7 @@ impl FakeMcp {
     }
 
     /// Answer the next calls of `tool` this way, in order, before answering normally.
-    pub(crate) fn reply(&self, tool: &str, replies: Vec<Reply>) {
+    pub fn reply(&self, tool: &str, replies: Vec<Reply>) {
         self.state
             .replies
             .lock()
@@ -118,17 +126,18 @@ impl FakeMcp {
             .extend(replies);
     }
 
-    pub(crate) fn received(&self) -> Vec<Received> {
+    /// Every request received so far, in order.
+    pub fn received(&self) -> Vec<Received> {
         self.state.received.lock().unwrap().clone()
     }
 
     /// The requests with JSON-RPC method `method`.
-    pub(crate) fn requests(&self, method: &str) -> Vec<Received> {
+    pub fn requests(&self, method: &str) -> Vec<Received> {
         self.received().into_iter().filter(|r| r.method == method).collect()
     }
 
     /// Wait until `method` was requested at least `count` times.
-    pub(crate) async fn wait_for(&self, method: &str, count: usize) -> Vec<Received> {
+    pub async fn wait_for(&self, method: &str, count: usize) -> Vec<Received> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let changed = self.state.changed.notified();
@@ -144,7 +153,7 @@ impl FakeMcp {
     }
 
     /// Wait until the client closed `count` unanswered calls.
-    pub(crate) async fn wait_abandoned(&self, count: usize) {
+    pub async fn wait_abandoned(&self, count: usize) {
         tokio::time::timeout(WAIT, async {
             loop {
                 let changed = self.state.changed.notified();

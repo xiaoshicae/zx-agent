@@ -1,7 +1,6 @@
-//! The MCP client against a fake MCP server (`crates/zx-agent/tests/common/fake_mcp.rs`): both
+//! The MCP client against a fake MCP server (`zx_testing::fake_mcp`): both
 //! protocol eras, tool selection and naming, calls and their results, errors, timeouts and
 //! cancellation.
-mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,14 +9,14 @@ use std::time::Duration;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
-use common::{RunnerSetup, config, run_prompt, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
 use zx_agent::events::RunOutcome;
 use zx_agent::extensions::Extension;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_testing::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
+use zx_testing::{RunnerSetup, config, run_prompt, summarize};
 
 const TOKEN: &str = "mcp-token-1234";
 
@@ -258,7 +257,7 @@ async fn cancelling_a_run_gives_up_the_call_it_was_waiting_for() {
         )]));
         let mut config = config(provider, Vec::new());
         config.extensions = vec![server];
-        let (runner, _) = RunnerSetup::new(config).build();
+        let (runner, _) = RunnerSetup::new(config).build().await;
 
         let report = {
             let run = runner.run("is it up?");

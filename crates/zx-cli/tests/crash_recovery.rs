@@ -22,14 +22,12 @@ use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::builtin::tools::builtin_tools;
 use zx_agent::events::{EventKind, Interruption, RunOutcome};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::Transcript;
 use zx_app::config::skills::ReadSkillTool;
 
-use common::mock_server::{MockServer, Reply};
-use common::{
-    Home, RunnerSetup, config, fake_model_config, header, read_lines, stderr, tool_call_answer, write_config,
-    zx_agent_in,
-};
+use common::zx_agent_in;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, fake_model_config, write_config};
+use zx_testing::{RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -248,10 +246,11 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -287,10 +286,11 @@ async fn a_parallel_batch_records_every_start_before_any_call_runs() {
         probe("read", Effects::ReadOnly, &path),
     ];
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -307,7 +307,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
-    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     store
         .append_message(answer(&[
@@ -328,10 +328,11 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, events) = RunnerSetup {
-        session: common::open_session_file(&path).await.unwrap(),
+        session: zx_testing::open_session_file(&path).await.unwrap().into(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("continue").await;
 
@@ -376,7 +377,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     }
     // Recorded in the file, so the next run has nothing to recover.
     assert!(
-        common::read_session_file(&path)
+        zx_testing::read_session_file(&path)
             .unwrap()
             .interrupted_tool_calls()
             .is_empty()
@@ -386,7 +387,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
 #[tokio::test]
 async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
     for stop_reason in [StopReason::Error, StopReason::Aborted] {
-        let mut store = Transcript::in_memory(header());
+        let mut store = Seed::in_memory(header()).await;
         store.append_message(Message::user("fix it")).await.unwrap();
         let Message::Assistant(mut failed) = answer(&[("c1", "write"), ("c2", "read")]) else {
             panic!("answer builds an assistant message");
@@ -398,10 +399,11 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
         let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
         let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
         let (runner, events) = RunnerSetup {
-            session: store,
+            session: store.into(),
             ..RunnerSetup::new(config(provider.clone(), tools))
         }
-        .build();
+        .build()
+        .await;
 
         let report = runner.run("continue").await;
 
@@ -427,16 +429,17 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
 
 #[tokio::test]
 async fn the_recovery_event_follows_the_recorded_result() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("fix it")).await.unwrap();
     store.append_message(answer(&[("c1", "write")])).await.unwrap();
     let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config(provider, tools))
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("continue").await;
 
@@ -468,7 +471,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         FauxStep::tool_call("c1", "hang", json!({})),
         FauxStep::text("checked"),
     ]));
-    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
+    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build().await;
     {
         let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
@@ -497,7 +500,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         FauxStep::tool_call("c1", "hang", json!({})),
         FauxStep::text("checked"),
     ]));
-    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
+    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build().await;
     {
         let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
@@ -554,7 +557,7 @@ fn sent_tool_result(server: &MockServer, index: usize) -> Value {
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = common::create_session_file(&dir.path().join("session.jsonl"), header())
+    let mut store = zx_testing::create_session_file(&dir.path().join("session.jsonl"), header())
         .await
         .unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();

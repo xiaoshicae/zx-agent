@@ -1,4 +1,5 @@
 //! Scripted provider for tests (pi: packages/ai/src/providers/faux.ts). No network, no keys.
+//! Compiled only for this crate's tests and with the feature `testing`.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

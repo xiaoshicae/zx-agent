@@ -1,19 +1,17 @@
 //! `Hook::prepare_request` (pi: `prepareRequest`): hooks change the model or reasoning level
 //! of one task request, never its context, and the audit records what each request used.
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use common::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
 use zx_agent::tools::Tool;
+use zx_testing::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 
 /// Uses `model` with high reasoning on the first step only, and records what it saw.
 struct FirstTurnUpgrade {
@@ -67,10 +65,11 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         }),
     );
     let (runner, events) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..RunnerSetup::new(loop_config)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -103,7 +102,7 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         .collect();
     assert_eq!(started, ["big-model", "test-model"]);
     // Every request rebuilds from the session file with the settings it used.
-    let replayed = replayed_requests(&common::read_session_file(&path).unwrap());
+    let replayed = replayed_requests(&zx_testing::read_session_file(&path).unwrap());
     assert_eq!(replayed, provider.requests());
 }
 
@@ -119,7 +118,7 @@ async fn hooks_chain_their_changes_in_order() {
         }),
     );
     loop_config.hooks.push("lower", Arc::new(Lower));
-    let (runner, _) = RunnerSetup::new(loop_config).build();
+    let (runner, _) = RunnerSetup::new(loop_config).build().await;
 
     runner.run("go").await;
 
@@ -166,7 +165,8 @@ async fn a_failing_hook_or_an_empty_model_ends_the_run_before_the_request_withou
             retry: fast_retry(3),
             ..RunnerSetup::new(loop_config)
         }
-        .build();
+        .build()
+        .await;
 
         let report = runner.run("go").await;
 
@@ -196,7 +196,7 @@ async fn a_panicking_hook_stops_the_attempt_without_crashing_the_run() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
     let mut loop_config = config(provider.clone(), vec![]);
     loop_config.hooks.push("panics", Arc::new(Panics));
-    let (runner, _) = RunnerSetup::new(loop_config).build();
+    let (runner, _) = RunnerSetup::new(loop_config).build().await;
 
     let report = runner.run("go").await;
 

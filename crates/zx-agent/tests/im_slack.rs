@@ -8,8 +8,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::fake_slack::{Answer, FakeSlack};
-use common::http::silent_listener;
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
@@ -17,6 +15,8 @@ use zx_im::{
     MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
 use zx_im_slack::{SlackChannel, SlackConfig};
+use zx_testing::fake_slack::{Answer, FakeSlack};
+use zx_testing::http::silent_listener;
 
 const APP_TOKEN: &str = "xapp-test";
 const BOT_TOKEN: &str = "xoxb-test";

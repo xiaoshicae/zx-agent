@@ -1,6 +1,5 @@
 //! Who a run answers: the session's labels and the actor of each input reach the policies
 //! and the hooks, and the actor is recorded with the input.
-mod common;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +16,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, SessionHeader, Transcript};
 
-use common::{Driven, EchoTool, RunnerSetup, config, header};
+use zx_testing::{Driven, EchoTool, RunnerSetup, Seed, Start, config, header};
 
 /// What a policy or a hook was told about the run: the labels and the actor.
 type Told = (BTreeMap<String, String>, Option<String>);
@@ -69,9 +68,9 @@ fn one_call() -> [FauxStep; 2] {
     ]
 }
 
-/// A session over `transcript` whose model calls `echo` once in each of `runs` runs, with a
-/// policy and a hook that remember what they were told.
-fn observed(transcript: Transcript, runs: usize) -> (Driven, Arc<RecordingPolicy>, RecordingHook) {
+/// The session `session` whose model calls `echo` once in each of `runs` runs, with a policy
+/// and a hook that remember what they were told.
+async fn observed(session: Start, runs: usize) -> (Driven, Arc<RecordingPolicy>, RecordingHook) {
     let provider = Arc::new(FauxProvider::new((0..runs).flat_map(|_| one_call())));
     let policy = Arc::new(RecordingPolicy::default());
     let hook = RecordingHook::default();
@@ -79,10 +78,11 @@ fn observed(transcript: Transcript, runs: usize) -> (Driven, Arc<RecordingPolicy
     config.policies.push("recording", policy.clone());
     config.hooks.push("hook", Arc::new(hook.clone()));
     let (runner, _) = RunnerSetup {
-        session: transcript,
+        session,
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     (runner, policy, hook)
 }
 
@@ -101,11 +101,12 @@ fn recorded_actors(transcript: &Transcript) -> Vec<Option<String>> {
 #[tokio::test]
 async fn a_policy_is_told_the_labels_of_the_session_and_who_sent_the_input() {
     let labels = BTreeMap::from([("tenant".to_string(), "acme".to_string())]);
-    let transcript = Transcript::in_memory(SessionHeader {
+    let seed = Seed::in_memory(SessionHeader {
         labels: labels.clone(),
         ..header()
-    });
-    let (session, policy, _) = observed(transcript, 1);
+    })
+    .await;
+    let (session, policy, _) = observed(seed.into(), 1).await;
 
     let report = session.prompt(sent_by("alice", "go")).await.unwrap();
 
@@ -117,7 +118,7 @@ async fn a_policy_is_told_the_labels_of_the_session_and_who_sent_the_input() {
 
 #[tokio::test]
 async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sent() {
-    let (session, policy, hook) = observed(Transcript::in_memory(header()), 1);
+    let (session, policy, hook) = observed(Start::default(), 1).await;
     // Taken before the first request: Bob's words, then a note from an extension.
     session.queues().steer(sent_by("bob", "and this"));
     session.queues().steer(Input::Custom(CustomMessage {
@@ -148,7 +149,7 @@ async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sen
 
 #[tokio::test]
 async fn an_input_that_names_nobody_is_answered_for_nobody() {
-    let (session, policy, _) = observed(Transcript::in_memory(header()), 2);
+    let (session, policy, _) = observed(Start::default(), 2).await;
     session.prompt(sent_by("alice", "go")).await.unwrap();
 
     session.prompt("and again").await.unwrap();
@@ -167,12 +168,11 @@ async fn an_input_that_names_nobody_is_answered_for_nobody() {
 
 #[tokio::test]
 async fn a_run_without_new_input_answers_whoever_sent_the_last_one() {
-    let mut transcript = Transcript::in_memory(header());
-    transcript
-        .append_message_from(Message::user("go"), Some("alice".into()))
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message_from(Message::user("go"), Some("alice".into()))
         .await
         .unwrap();
-    let (session, policy, hook) = observed(transcript, 1);
+    let (session, policy, hook) = observed(seed.into(), 1).await;
 
     let report = session.continue_run().await.unwrap();
 

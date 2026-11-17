@@ -1,7 +1,6 @@
 //! The IM server with an in-memory channel and a scripted model: threads, access, approvals,
 //! the run limit, steering, cancellation, idle release, the stop, and the statuses kept for a
 //! restart.
-mod common;
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -15,7 +14,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, config, fast_retry, summarize, test_limits};
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::Message;
@@ -33,6 +31,7 @@ use zx_im::{
     MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
     StatusStore, ThreadId, UserId,
 };
+use zx_testing::{EchoTool, config, fast_retry, summarize, test_limits};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";

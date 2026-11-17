@@ -21,6 +21,7 @@ zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }
 zx-im-slack = { path = "crates/zx-im-slack" }
+zx-testing = { path = "crates/zx-testing" }
 zx-tools = { path = "crates/zx-tools" }
 zx-util = { path = "crates/zx-util" }
 

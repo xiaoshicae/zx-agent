@@ -1,7 +1,5 @@
 //! Append-only compaction format and branch projection.
 
-mod common;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,7 +14,7 @@ use zx_agent::transcript::{
     SummaryRequest, Transcript,
 };
 
-use common::{RunnerSetup, answer_reporting, config, header, summarize};
+use zx_testing::{RunnerSetup, Seed, answer_reporting, config, header, summarize};
 
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
@@ -344,7 +342,7 @@ async fn an_invalid_plan_writes_nothing() {
 async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
     let (id, _) = seeded(&mut store).await;
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
@@ -355,7 +353,7 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
     ] {
         let content = format!("{prefix}{bad}\n");
         std::fs::write(&path, &content).unwrap();
-        assert!(common::open_session_file(&path).await.is_err());
+        assert!(zx_testing::open_session_file(&path).await.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     }
 }
@@ -384,9 +382,10 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
 async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
     let (old, kept) = seeded(&mut store).await;
-    let asked = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let by_model = plan(&store, &kept);
+    let asked = store.begin_compaction(by_model).await.unwrap();
     store
         .fail_compaction(&asked, "invalid".into(), Usage::default(), None)
         .await
@@ -402,7 +401,7 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
         .unwrap();
     drop(store);
 
-    let lines = common::read_lines(&path);
+    let lines = zx_testing::read_lines(&path);
     let starts: Vec<_> = lines
         .iter()
         .filter(|line| line["type"] == "compaction_started")
@@ -412,7 +411,7 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
     assert_eq!(starts[1]["summarizer"], "notes");
     assert!(starts[1].get("request").is_none());
     // Both load again, each as it was written.
-    let reopened = common::open_session_file(&path).await.unwrap();
+    let reopened = zx_testing::open_session_file(&path).await.unwrap();
     let recorded: Vec<&SummarizedBy> = reopened
         .entries()
         .iter()
@@ -491,8 +490,8 @@ fn exchange(id: &str) -> [Message; 2] {
 
 /// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
 /// question: the IDs of the earlier question, of the task, and of the two calls.
-async fn a_turn_with_two_calls() -> (Transcript, [String; 4]) {
-    let mut store = Transcript::in_memory(header());
+async fn a_turn_with_two_calls() -> (Seed, [String; 4]) {
+    let mut store = Seed::in_memory(header()).await;
     let earlier = store
         .append_message(Message::user("an earlier question"))
         .await
@@ -594,10 +593,11 @@ async fn a_context_plan_that_ends_a_summary_still_edits_the_messages_it_named() 
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("revise", Arc::new(ReviseTheTaskAndTrimC2));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.continue_run().await.unwrap();
 

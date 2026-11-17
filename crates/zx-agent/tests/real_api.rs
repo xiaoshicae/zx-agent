@@ -31,14 +31,11 @@
 //!     cargo test --test real_api summaries_over_eight_rounds -- --ignored --nocapture
 //! ```
 
-mod common;
-
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::summary_eval::evaluate;
-use common::{RunnerSetup, config, fast_retry};
+use zx_agent::SessionOptions;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider, SystemPrompt};
@@ -48,7 +45,8 @@ use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::policy::PolicyDecision;
-use zx_agent::transcript::Transcript;
+use zx_testing::summary_eval::evaluate;
+use zx_testing::{RunnerSetup, Start, config, fast_retry};
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";
 
@@ -117,7 +115,7 @@ impl Endpoint {
                 timeout: Some(Duration::from_secs(120)),
                 ..RunLimits::default()
             },
-            session: Transcript::in_memory(common::header_in(cwd)),
+            session: Start::New(SessionOptions::new(cwd)),
             ..RunnerSetup::new(config)
         }
     }
@@ -158,7 +156,7 @@ fn print_usage(test: &str, report: &RunReport) {
 async fn answers_with_streamed_text_and_reports_usage() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup(endpoint.api_key(), dir.path()).build();
+    let (runner, _) = endpoint.setup(endpoint.api_key(), dir.path()).build().await;
 
     let report = runner.run("Reply with exactly the word PONG.").await;
     print_usage("text", &report);
@@ -177,7 +175,7 @@ async fn answers_with_streamed_text_and_reports_usage() {
 async fn runs_a_tool_and_answers_from_its_output() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq", "wc"]).build();
+    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq", "wc"]).build().await;
 
     let prompt = "Use the bash tool to run `seq 1 7 | wc -l`, then reply with the number only.";
     let report = runner.run(prompt).await;
@@ -196,7 +194,7 @@ async fn runs_a_tool_and_answers_from_its_output() {
 async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq"]).build();
+    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq"]).build().await;
 
     let prompt = "Call the bash tool once with the command `ls`, then say in one sentence whether it was blocked.";
     let report = runner.run(prompt).await;
@@ -216,7 +214,7 @@ async fn an_answer_over_the_output_limit_is_reported_as_truncated() {
     let dir = tempfile::tempdir().unwrap();
     let mut setup = endpoint.setup(endpoint.api_key(), dir.path());
     setup.config.max_tokens = Some(16);
-    let (runner, _) = setup.build();
+    let (runner, _) = setup.build().await;
 
     let report = runner.run("Count from 1 to 200, separated by spaces.").await;
     print_usage("truncation", &report);
@@ -235,10 +233,14 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let first_dir = dir.path().join("first-dir");
     std::fs::create_dir(&first_dir).unwrap();
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, common::header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, zx_testing::header())
+            .await
+            .unwrap()
+            .into(),
         ..endpoint.setup(endpoint.api_key(), &first_dir)
     }
-    .build();
+    .build()
+    .await;
     let first = runner.run("Reply with exactly: OK").await;
     print_usage("resume, first run", &first);
     drop(runner);
@@ -246,10 +248,11 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let second_dir = dir.path().join("second-dir");
     std::fs::create_dir(&second_dir).unwrap();
     let (runner, _) = RunnerSetup {
-        session: common::open_session_file(&path).await.unwrap(),
+        session: zx_testing::open_session_file(&path).await.unwrap().into(),
         ..endpoint.setup(endpoint.api_key(), &second_dir)
     }
-    .build();
+    .build()
+    .await;
     let prompt = "According to the system prompt, what is the working directory now? Reply with the path only.";
     let second = runner.run(prompt).await;
     print_usage("resume, second run", &second);
@@ -267,7 +270,8 @@ async fn an_invalid_key_fails_without_retrying() {
         retry: fast_retry(2),
         ..endpoint.setup("zx-e2e-invalid-key".into(), dir.path())
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("Reply with exactly: OK").await;
     print_usage("invalid key", &report);
@@ -277,7 +281,7 @@ async fn an_invalid_key_fails_without_retrying() {
     assert!(error.starts_with("HTTP 4"), "{error}");
 }
 
-/// The scripted session of `common::summary_eval` summarized after each of its rounds.
+/// The scripted session of `zx_testing::summary_eval` summarized after each of its rounds.
 /// Prints each round's score and the final facts. Fails when a summary is not made, since the scores then
 /// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
 /// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`

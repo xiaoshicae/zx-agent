@@ -1,10 +1,12 @@
 # 测试文件一览
 
-每个测试文件覆盖什么，具体行为见测试名。测试设施的索引在 `crates/zx-agent/tests/common/mod.rs` 的模块文档，原则与约定见 `.claude/rules/06-testing.md`。
+每个测试文件覆盖什么，具体行为见测试名。测试设施的索引在 `crates/zx-testing/src/lib.rs` 的模块文档，原则与约定见 `.claude/rules/06-testing.md`。
 
 单元测试写在被测模块里或其 `tests.rs` 中，覆盖各模块的逻辑与边界，包括会话文件与事件的 JSON 格式；`config.toml` 与 agent 文件（含 `deploy/kubernetes/agents/*.md`）的配置规则也在这一层测。
 
-集成测试分三处，按用到的 crate 与是否需要编译出的程序划分。各处的测试都可以在仓库根目录按文件名运行，如 `cargo test --test step_loop`、`cargo test --test run_cli`。
+集成测试放在被测的 crate 里：只用库的在那个库的 crate，运行程序的在那个程序的 crate（规则 06），下面每个 crate 一节。各处的测试都可以在仓库根目录按文件名运行，如 `cargo test --test step_loop`、`cargo test --test run_cli`。
+
+测试设施是库 `zx-testing`（`crates/zx-testing`），各包只把它列在 `[dev-dependencies]` 里；crate 自己的单元测试不用它，否则会看到被测 crate 的第二份。留在各包测试里的只有 `crates/zx-cli/tests/common/`（编译出的 `zx-agent` 与伪终端）与 `crates/zx-agent/tests/common/`（IM 测试运行 channel 的辅助），为什么留下写在两处 `common/mod.rs` 的模块文档里。脚本化的模型 `FauxProvider` 只在 `zx-ai` 的 feature `testing` 打开时编译：`zx-core` 与 `zx-agent` 的测试依赖经 `zx-ai` 打开它，`zx-app` 与 `zx-cli` 的经 `zx-agent`；`zx-testing` 不打开它，所以在仓库根目录构建发布版时它不在其中。
 
 ## 只用库：`crates/zx-agent/tests/`
 
@@ -46,15 +48,16 @@
 
 ## 应用层：`crates/zx-app/tests/`
 
-属于应用层 `zx-app`，只经它的公开接口测，不用测试设施。
+属于应用层 `zx-app`，只经它的公开接口测。
 
 | 文件 | 内容 |
 |---|---|
 | `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配、会话创建与续接、模型/预算校验、密钥文件与启动提示 |
+| `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
 
-属于命令行 `zx-cli`：运行编译出的 `zx-agent`，或既用 `zx-app` 又用测试设施（`crates/zx-agent/tests/common` 依赖 IM 的 crate，`zx-app` 不依赖它们）。
+属于命令行 `zx-cli`：运行编译出的 `zx-agent`。`container.rs` 与 `crash_recovery.rs` 里还有只用库的测试，待拆分（`docs/ROADMAP.md` 第 5 节）。
 
 | 文件 | 内容 |
 |---|---|
@@ -69,8 +72,7 @@
 | `crates/zx-cli/tests/im_cli.rs` | `im` 子命令的配置与完整流程 |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
 | `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放 |
-| `crates/zx-cli/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ---
 
-TESTS.md · v0.7 · 2026年11月
+TESTS.md · v0.9 · 2026年11月

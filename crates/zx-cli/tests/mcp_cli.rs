@@ -12,9 +12,11 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use common::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
-use common::mock_server::{MockServer, Reply};
-use common::{Home, stderr, stdout, write_agent, write_config, zx_agent_in};
+use common::zx_agent_in;
+use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, write_agent, write_config};
+use zx_testing::{stderr, stdout};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";

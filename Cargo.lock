@@ -3283,7 +3283,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tokio-util",
  "uuid",
  "zx-ai",
@@ -3292,6 +3291,7 @@ dependencies = [
  "zx-im",
  "zx-im-feishu",
  "zx-im-slack",
+ "zx-testing",
  "zx-tools",
 ]
 
@@ -3341,6 +3341,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "zx-agent",
+ "zx-testing",
 ]
 
 [[package]]
@@ -3352,14 +3353,11 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "futures",
  "libc",
- "opentelemetry_sdk",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tokio-util",
  "toml",
  "uuid",
@@ -3368,6 +3366,7 @@ dependencies = [
  "zx-im",
  "zx-im-feishu",
  "zx-im-slack",
+ "zx-testing",
  "zx-util",
 ]
 
@@ -3434,6 +3433,21 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "zx-im",
+]
+
+[[package]]
+name = "zx-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "zx-agent",
 ]
 
 [[package]]

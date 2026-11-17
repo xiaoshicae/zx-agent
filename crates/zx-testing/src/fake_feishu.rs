@@ -14,35 +14,42 @@ use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::http::{read_request, response};
+use crate::http::{read_request, response};
 
 /// Only reached when an expected frame or call never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
 /// One API call.
 #[derive(Clone, Debug)]
-pub(crate) struct Call {
+pub struct Call {
     /// Which API: token, endpoint, create, reply, edit or patch.
     pub route: &'static str,
     /// Path and query.
     pub path: String,
+    /// The `Authorization` header; empty without one.
     pub authorization: String,
+    /// The `Locale` header.
     pub locale: Option<String>,
+    /// The JSON body; `Null` when the body was empty.
     pub body: Value,
 }
 
 /// A scripted answer to one call of a route.
 #[derive(Clone, Debug)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// Status 200 with this non-zero code.
     Code(i64),
     /// This HTTP status, with this code in the body.
     Status(u16, i64),
     /// Status 429 with the gateway's code and this reset time.
-    RateLimited { reset_secs: u64 },
+    RateLimited {
+        /// The `x-ogw-ratelimit-reset` header: seconds until the limit resets.
+        reset_secs: u64,
+    },
 }
 
-pub(crate) struct FakeFeishu {
+/// A running fake Feishu: its API and its long connections, on local ports.
+pub struct FakeFeishu {
     /// Pass as the channel's API base.
     pub api_base: String,
     /// Pass as the channel's token URL.
@@ -55,7 +62,7 @@ pub(crate) struct FakeFeishu {
 
 impl FakeFeishu {
     /// Start with this ping interval in the connection settings it hands out.
-    pub(crate) async fn start(ping_secs: u64) -> Self {
+    pub async fn start(ping_secs: u64) -> Self {
         let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!(
@@ -106,19 +113,20 @@ impl FakeFeishu {
     }
 
     /// Answer the next calls of `route` this way, in order, before answering normally.
-    pub(crate) fn script(&self, route: &'static str, answers: Vec<Answer>) {
+    pub fn script(&self, route: &'static str, answers: Vec<Answer>) {
         self.scripted.lock().unwrap().entry(route).or_default().extend(answers);
     }
 
     /// The next long connection.
-    pub(crate) async fn socket(&mut self) -> Socket {
+    pub async fn socket(&mut self) -> Socket {
         tokio::time::timeout(WAIT, self.sockets.recv())
             .await
             .expect("the channel did not connect in time")
             .expect("the listener is alive")
     }
 
-    pub(crate) fn calls(&self, route: &str) -> Vec<Call> {
+    /// The calls of `route` so far, in order.
+    pub fn calls(&self, route: &str) -> Vec<Call> {
         self.calls
             .lock()
             .unwrap()
@@ -129,7 +137,7 @@ impl FakeFeishu {
     }
 
     /// Wait until `route` was called at least `count` times, and return its calls.
-    pub(crate) async fn wait_for(&self, route: &str, count: usize) -> Vec<Call> {
+    pub async fn wait_for(&self, route: &str, count: usize) -> Vec<Call> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let notified = self.called.notified();
@@ -151,22 +159,23 @@ struct Settings {
 }
 
 /// One long connection, from the server's side.
-pub(crate) struct Socket {
+pub struct Socket {
     stream: WebSocketStream<TcpStream>,
 }
 
 impl Socket {
-    pub(crate) async fn send(&mut self, frame: &TestFrame) {
+    /// Send `frame` to the client, encoded.
+    pub async fn send(&mut self, frame: &TestFrame) {
         self.send_bytes(frame.encode()).await;
     }
 
     /// Send `bytes` as one binary message, as they are: for what is not a frame.
-    pub(crate) async fn send_bytes(&mut self, bytes: Vec<u8>) {
+    pub async fn send_bytes(&mut self, bytes: Vec<u8>) {
         self.stream.send(Message::binary(bytes)).await.unwrap();
     }
 
     /// The next frame from the client.
-    pub(crate) async fn receive(&mut self) -> TestFrame {
+    pub async fn receive(&mut self) -> TestFrame {
         loop {
             let message = tokio::time::timeout(WAIT, self.stream.next())
                 .await
@@ -182,7 +191,7 @@ impl Socket {
     }
 
     /// The next data frame from the client, skipping its pings.
-    pub(crate) async fn receive_data(&mut self) -> TestFrame {
+    pub async fn receive_data(&mut self) -> TestFrame {
         loop {
             let frame = self.receive().await;
             if frame.method == 1 {
@@ -191,12 +200,13 @@ impl Socket {
         }
     }
 
-    pub(crate) async fn close(mut self) {
+    /// Close the connection from the server's side.
+    pub async fn close(mut self) {
         self.stream.close(None).await.ok();
     }
 
     /// Whether the client closed the connection, waiting for it.
-    pub(crate) async fn closed_by_client(&mut self) -> bool {
+    pub async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
                 Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
@@ -207,23 +217,33 @@ impl Socket {
     }
 }
 
-/// A frame as the test sees it.
+/// A frame as the test sees it: the fields of the protobuf message `pbbp2.Frame` of Feishu's
+/// Go SDK, in its order.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TestFrame {
+pub struct TestFrame {
+    /// `SeqID`.
     pub seq_id: u64,
+    /// `LogID`.
     pub log_id: u64,
+    /// The service the frame belongs to.
     pub service: i32,
+    /// 0 for a control frame (a ping or a pong), 1 for a data frame.
     pub method: i32,
+    /// The headers, such as `type` and `message_id`, as key and value.
     pub headers: Vec<(String, String)>,
+    /// How the payload is encoded.
     pub payload_encoding: String,
+    /// The payload's type.
     pub payload_type: String,
+    /// The payload, such as an event's JSON.
     pub payload: Vec<u8>,
+    /// `LogIDNew`.
     pub log_id_new: String,
 }
 
 impl TestFrame {
     /// A data frame of type `event` carrying `payload`, as fragment `seq` of `sum`.
-    pub(crate) fn event(message_id: &str, sum: usize, seq: usize, payload: &[u8]) -> Self {
+    pub fn event(message_id: &str, sum: usize, seq: usize, payload: &[u8]) -> Self {
         TestFrame {
             seq_id: 7,
             log_id: 8,
@@ -242,7 +262,8 @@ impl TestFrame {
         }
     }
 
-    pub(crate) fn header(&self, key: &str) -> Option<&str> {
+    /// The value of the first header named `key`.
+    pub fn header(&self, key: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(name, _)| name == key)

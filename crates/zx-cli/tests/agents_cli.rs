@@ -11,11 +11,11 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use common::mock_server::{MockServer, Reply};
-use common::{
-    Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent_in,
-};
+use common::zx_agent_in;
 use zx_agent::ai::Message;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, agent_text, fake_model_config, write_agent_file, write_config};
+use zx_testing::{json_lines, stderr, stdout};
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
 
@@ -267,7 +267,7 @@ async fn a_configured_output_directory_is_relative_to_config_toml() {
 async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = common::create_session_file(&dir.path().join("audit.jsonl"), common::header())
+        let mut store = zx_testing::create_session_file(&dir.path().join("audit.jsonl"), zx_testing::header())
             .await
             .unwrap();
         let id = store
@@ -292,7 +292,7 @@ async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
         let output = run(&server, dir.path(), &args).await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), if enable { 2 } else { 1 });
-        let store = common::open_session_file(&dir.path().join("audit.jsonl"))
+        let store = zx_testing::open_session_file(&dir.path().join("audit.jsonl"))
             .await
             .unwrap();
         assert_eq!(store.latest_compaction().is_some(), enable);

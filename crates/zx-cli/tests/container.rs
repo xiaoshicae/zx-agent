@@ -25,9 +25,11 @@ use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::{ExecutionMode, Tool};
 
-use common::fake_mcp::{Era, FakeMcp, tool};
-use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, Home, RunnerSetup, config, stderr, zx_agent_in};
+use common::zx_agent_in;
+use zx_testing::fake_mcp::{Era, FakeMcp, tool};
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{AgentHome, Home};
+use zx_testing::{RunnerSetup, config, stderr};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -474,7 +476,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
         ]),
         FauxStep::text("done"),
     ]));
-    let (runner, _events) = RunnerSetup::new(config(provider, vec![Arc::new(bash)])).build();
+    let (runner, _events) = RunnerSetup::new(config(provider, vec![Arc::new(bash)])).build().await;
 
     let cancelling = async {
         assert!(eventually(Duration::from_secs(5), || fake.execs("zx-agent-run").len() == 1).await);

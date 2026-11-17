@@ -16,6 +16,11 @@ workspace = true
 name = "zx_agent"
 path = "src/lib.rs"
 
+[features]
+# The scripted provider `ai::faux::FauxProvider`, for an embedder's tests: the feature
+# `testing` of zx-ai.
+testing = ["zx-ai/testing"]
+
 [dependencies]
 zx-ai.workspace = true
 zx-ai-openai.workspace = true
@@ -24,10 +29,14 @@ zx-tools.workspace = true
 
 # For tests/, the integration tests of the workspace's libraries, and for examples/.
 [dev-dependencies]
+# The tests script the model with `ai::faux::FauxProvider`.
+zx-ai = { workspace = true, features = ["testing"] }
 # The chat platforms are not part of the library; their tests are with the others.
 zx-im.workspace = true
 zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
+# The helpers the integration tests of the workspace share.
+zx-testing.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -35,8 +44,6 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-# The fake chat platforms of the integration tests (tests/common/) speak WebSocket.
-tokio-tungstenite.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
 uuid.workspace = true

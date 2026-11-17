@@ -10,9 +10,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use common::fake_slack::FakeSlack;
-use common::mock_server::{MockServer, Reply};
-use common::{Home, fake_model_config, json_lines, stderr, stdout, zx_agent_in};
+use common::zx_agent_in;
+use zx_testing::fake_slack::FakeSlack;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, fake_model_config};
+use zx_testing::{json_lines, stderr, stdout};
 
 const APP_TOKEN: &str = "xapp-1-im-test-token";
 const BOT_TOKEN: &str = "xoxb-im-test-token";
@@ -23,7 +25,7 @@ const WAIT: Duration = Duration::from_secs(20);
 /// zx-agent home in `dir` has a config.toml without retries.
 fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
-    common::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
+    zx_testing::program::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
     let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["im", "--config", config.to_str().unwrap(), "--model", "mock"])
@@ -41,7 +43,7 @@ fn only_session(sessions: &Path) -> String {
     let files: Vec<_> = std::fs::read_dir(sessions)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .flat_map(|directory| common::session_files(&directory))
+        .flat_map(|directory| zx_testing::program::session_files(&directory))
         .collect();
     assert_eq!(files.len(), 1, "{files:?}");
     std::fs::read_to_string(&files[0]).unwrap()

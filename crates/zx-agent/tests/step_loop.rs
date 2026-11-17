@@ -1,7 +1,5 @@
 //! Loop semantics, mirroring pi's agent-loop behavior.
 
-mod common;
-
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -11,9 +9,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{
-    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
-};
 use zx_agent::AgentConfig;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -25,6 +20,9 @@ use zx_agent::events::{Budget, EventKind, RunOutcome};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
+use zx_testing::{
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
+};
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
@@ -41,7 +39,7 @@ fn with_policy(mut config: AgentConfig, policy: Arc<dyn ToolPolicy>) -> AgentCon
 
 /// A session of `provider`, limited to `max_model_requests` requests, whose `echo` tool
 /// feeds the session's own queues when a call asks it to.
-fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, Arc<Collect>) {
+async fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, Arc<Collect>) {
     let echo = echo();
     let limits = RunLimits {
         max_model_requests: Some(max_model_requests),
@@ -51,7 +49,8 @@ fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, Arc<Col
         limits,
         ..RunnerSetup::new(config(provider, vec![echo.clone()]))
     }
-    .build();
+    .build()
+    .await;
     echo.feeds(runner.queues());
     (runner, events)
 }
@@ -96,7 +95,7 @@ impl Tool for Described {
 async fn a_run_goes_by_what_its_tools_declared_when_the_session_was_made() {
     let provider = provider([FauxStep::tool_call("c1", "inspect", json!({})), FauxStep::text("done")]);
     let tool = Arc::new(Described(std::sync::atomic::AtomicUsize::new(0)));
-    let (runner, _) = RunnerSetup::new(config(provider, vec![tool.clone()])).build();
+    let (runner, _) = RunnerSetup::new(config(provider, vec![tool.clone()])).build().await;
     let declared = tool.0.load(Ordering::SeqCst);
 
     let report = runner.run("go").await;
@@ -350,7 +349,7 @@ async fn cancellation_interrupts_a_waiting_policy() {
         config(provider, vec![tool.clone()]),
         Arc::new(WaitingPolicy(entered.clone())),
     );
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     let mut running = Box::pin(runner.run("go"));
     tokio::select! {
         () = entered.notified() => {}
@@ -485,7 +484,7 @@ async fn steering_enters_after_the_step_and_follow_ups_after_the_answer() {
         FauxStep::text("disk fine"),
         FauxStep::text("summary"),
     ]);
-    let (runner, _) = fed(provider, 10);
+    let (runner, _) = fed(provider, 10).await;
 
     let result = runner.run("go").await;
 
@@ -511,7 +510,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
         FauxStep::text("done"),
         FauxStep::text("stopped"),
     ]);
-    let (runner, _) = fed(provider, 10);
+    let (runner, _) = fed(provider, 10).await;
     runner.queues().follow_up("then summarize");
     runner.queues().follow_up("and then stop");
 
@@ -539,7 +538,7 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         "echo",
         json!({"text": "ok", "steer": "also check disk"}),
     )]);
-    let (runner, events) = fed(provider, 1);
+    let (runner, events) = fed(provider, 1).await;
 
     let result = runner.run("go").await;
 
@@ -588,8 +587,8 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
 
 #[tokio::test]
 async fn cancellation_ends_the_loop() {
-    let provider = NotifyingProvider::new([FauxStep::Hang]);
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
+    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     // Cancelled once the request has started.
     let (result, ()) = tokio::join!(runner.run("go"), async {
         provider.started.notified().await;
