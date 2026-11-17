@@ -1,14 +1,14 @@
 //! Helpers shared by the tests of the program: the compiled `zx-agent`, the home directory a
 //! test gives it, and what it leaves behind. The helpers of the library's tests
-//! (`tests/common` at the repository root) are part of this module: the fake model service
-//! and the other fake servers, scripted runs, and session files.
+//! (`crates/zx-agent/tests/common`) are part of this module: the fake model service and the
+//! other fake servers, scripted runs, and session files.
 
 #![allow(
     dead_code,
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../../../zx-agent/tests/common/mod.rs"]
 mod library;
 
 use std::path::{Path, PathBuf};

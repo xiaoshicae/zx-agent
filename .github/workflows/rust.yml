@@ -46,6 +46,8 @@ jobs:
         run: cargo +stable clippy --locked --all-targets -- -D warnings
       - name: Clippy for the kernel without its default features
         run: cargo +stable clippy --locked -p zx-core --no-default-features --all-targets -- -D warnings
+      - name: Clippy for zx-tools without its default features
+        run: cargo +stable clippy --locked -p zx-tools --no-default-features --all-targets -- -D warnings
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings

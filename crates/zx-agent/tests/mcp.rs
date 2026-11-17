@@ -1,5 +1,6 @@
-//! The MCP client against a fake MCP server (`tests/common/fake_mcp.rs`): both protocol eras,
-//! tool selection and naming, calls and their results, errors, timeouts and cancellation.
+//! The MCP client against a fake MCP server (`crates/zx-agent/tests/common/fake_mcp.rs`): both
+//! protocol eras, tool selection and naming, calls and their results, errors, timeouts and
+//! cancellation.
 mod common;
 
 use std::path::PathBuf;
