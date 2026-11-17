@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 提交前自查：列出需要说明理由的写法。每一处命中都要能说出理由；"(无)" 表示没有命中。
-# 在任何目录下运行都可以，脚本会切到项目根目录。生产代码在 src/（zx-agent）与 crates/*/src/；
-# 集成测试在 tests/、crates/zx-app/tests/ 与 crates/zx-cli/tests/。
+# 在任何目录下运行都可以，脚本会切到项目根目录。生产代码在 crates/*/src/；
+# 集成测试在 crates/zx-agent/tests/、crates/zx-app/tests/ 与 crates/zx-cli/tests/。
 
 cd "$(dirname "$0")/../.." || exit 1
 
@@ -17,7 +17,7 @@ check() {
 # 这样的声明本身不跳过任何内容：它可以写在文件开头，后面还是生产代码（如 crates/zx-core/src/transcript.rs）。
 # 单独带 #[cfg(test)] 的函数（如 crates/zx-core/src/transcript.rs 的 with_writer）不跳过。
 production_unwraps() {
-    find src crates/*/src -name '*.rs' -print0 | xargs -0 awk '
+    find crates/*/src -name '*.rs' -print0 | xargs -0 awk '
         FNR == 1 { in_tests = (FILENAME ~ /(^|\/)(tests|test_support)\.rs$/); after_cfg_test = 0 }
         /^[[:space:]]*#\[cfg\((all\()?test/ { after_cfg_test = 1; next }
         after_cfg_test && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [A-Za-z0-9_]+[[:space:]]*\{/ { in_tests = 1 }
@@ -26,10 +26,10 @@ production_unwraps() {
     '
 }
 
-check 'Rc / RefCell / Box::leak / static mut / unsafe' 'Rc<\|RefCell\|Box::leak\|static mut\|unsafe ' src/ crates/*/src/
-check '#[allow] / #![allow]' -e '#\[allow' -e '#!\[allow' src/ crates/ tests/
+check 'Rc / RefCell / Box::leak / static mut / unsafe' 'Rc<\|RefCell\|Box::leak\|static mut\|unsafe ' crates/*/src/
+check '#[allow] / #![allow]' -e '#\[allow' -e '#!\[allow' crates/
 echo "== 生产代码里的 unwrap()（已跳过测试模块）"
 unwraps=$(production_unwraps)
 echo "${unwraps:-(无)}"
-check 'let _ =' 'let _ =' src/ crates/*/src/
-check '调试代码' 'dbg!\|todo!\|unimplemented!' src/ crates/ tests/
+check 'let _ =' 'let _ =' crates/*/src/
+check '调试代码' 'dbg!\|todo!\|unimplemented!' crates/

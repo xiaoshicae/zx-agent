@@ -1,0 +1,42 @@
+# The library: the kernel and what ships with it, under one name. The program `zx-agent` is
+# the package crates/zx-cli.
+[package]
+name = "zx-agent"
+description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "zx_agent"
+path = "src/lib.rs"
+
+[dependencies]
+zx-ai.workspace = true
+zx-ai-openai.workspace = true
+zx-core.workspace = true
+zx-tools.workspace = true
+
+# For tests/, the integration tests of the workspace's libraries, and for examples/.
+[dev-dependencies]
+# The chat platforms are not part of the library; their tests are with the others.
+zx-im.workspace = true
+zx-im-feishu.workspace = true
+zx-im-slack.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+# The fake chat platforms of the integration tests (tests/common/) speak WebSocket.
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true

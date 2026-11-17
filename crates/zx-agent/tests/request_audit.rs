@@ -47,8 +47,8 @@ fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
     assert_fixture_rebuilds("replay-full");
 }
 
-/// `tests/fixtures/<name>.jsonl` rebuilds to `tests/fixtures/<name>.expected.json`, byte for
-/// byte as pretty-printed JSON, so that the order of fields counts too.
+/// `crates/zx-agent/tests/fixtures/<name>.jsonl` rebuilds to `<name>.expected.json` beside it,
+/// byte for byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let store = common::read_session_file(&fixtures.join(format!("{name}.jsonl"))).unwrap();

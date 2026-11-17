@@ -1,30 +1,9 @@
+# The root is a workspace and no package: every crate is under crates/, so commands run at the
+# root (build, test, clippy, doc) cover them all.
 [workspace]
-members = [
-  "crates/zx-util",
-  "crates/zx-ai",
-  "crates/zx-ai-openai",
-  "crates/zx-core",
-  "crates/zx-tools",
-  "crates/zx-im",
-  "crates/zx-im-slack",
-  "crates/zx-im-feishu",
-  "crates/zx-app",
-  "crates/zx-cli",
-]
-# Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
-default-members = [
-  ".",
-  "crates/zx-util",
-  "crates/zx-ai",
-  "crates/zx-ai-openai",
-  "crates/zx-core",
-  "crates/zx-tools",
-  "crates/zx-im",
-  "crates/zx-im-slack",
-  "crates/zx-im-feishu",
-  "crates/zx-app",
-  "crates/zx-cli",
-]
+members = ["crates/*"]
+# What edition 2024 implies for a package; a virtual manifest has no edition and must say it.
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
@@ -34,8 +13,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-# The library of this package, as the crates built on it name it.
-zx-agent = { path = "." }
+zx-agent = { path = "crates/zx-agent" }
 zx-ai = { path = "crates/zx-ai" }
 zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-app = { path = "crates/zx-app" }
@@ -60,10 +38,13 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# JSON objects keep their keys in the order written, in the whole build and in a crate built
+# alone; tests that compare JSON text rely on it.
+serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs", "net"] }
+# tokio has no default features; each crate turns on those its code and its tests use.
+tokio = "1"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
@@ -102,48 +83,5 @@ manual_let_else = "warn"
 needless_continue = "warn"
 ignored_unit_patterns = "warn"
 # Layout: one module file style, the one the Rust Reference encourages. The exception is
-# `tests/common/mod.rs`, here and in crates/zx-cli, which Cargo needs under that name.
+# `tests/common/mod.rs` of crates/zx-agent and crates/zx-cli, which Cargo needs under that name.
 mod_module_files = "warn"
-
-# The library: the kernel and what ships with it, under one name. The program `zx-agent` is
-# the package crates/zx-cli.
-[package]
-name = "zx-agent"
-description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
-
-[lints]
-workspace = true
-
-[lib]
-name = "zx_agent"
-path = "src/lib.rs"
-
-[dependencies]
-zx-ai.workspace = true
-zx-ai-openai.workspace = true
-zx-core.workspace = true
-zx-tools.workspace = true
-
-# For tests/, the integration tests of the workspace's libraries, and for examples/.
-[dev-dependencies]
-# The chat platforms are not part of the library; their tests are with the others.
-zx-im.workspace = true
-zx-im-feishu.workspace = true
-zx-im-slack.workspace = true
-
-anyhow.workspace = true
-async-trait.workspace = true
-futures.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tempfile.workspace = true
-tokio.workspace = true
-# The fake chat platforms of the integration tests (tests/common/) speak WebSocket.
-tokio-tungstenite.workspace = true
-tokio-util.workspace = true
-uuid.workspace = true

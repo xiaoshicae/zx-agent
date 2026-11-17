@@ -20,7 +20,7 @@ case "$file" in
 esac
 
 # 记下 workspace 的根目录，而不是离文件最近的 Cargo.toml：在成员 crate（crates/*）里跑 cargo test
-# 只测那一个包，测不到根目录 tests/ 下的集成测试。cargo 读不了清单（比如正改到一半）时退回最近的 Cargo.toml。
+# 只测那一个包，测不到用它的其他 crate（如 crates/zx-agent/tests/ 下的集成测试）。cargo 读不了清单（比如正改到一半）时退回最近的 Cargo.toml。
 dir=$(dirname "$file")
 manifest=$(cd "$dir" && cargo locate-project --workspace --message-format plain 2>/dev/null)
 if [ -n "$manifest" ]; then

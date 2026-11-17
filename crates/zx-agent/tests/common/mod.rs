@@ -1,7 +1,7 @@
-//! Helpers shared by the integration tests. The library's tests (`tests/`) use them as
-//! `common::…`; the program's tests (`crates/zx-cli/tests/`) reach them the same way, through
-//! their own `common` module, which includes this one whole. This is the index; how to use
-//! each helper is in its own documentation.
+//! Helpers shared by the integration tests. The library's tests (`crates/zx-agent/tests/`) use
+//! them as `common::…`; the program's tests (`crates/zx-cli/tests/`) reach them the same way,
+//! through their own `common` module, which includes this one whole. This is the index; how to
+//! use each helper is in its own documentation.
 //!
 //! In this file:
 //! - driving a session: [`RunnerSetup`], a builder with test defaults (`config`, `retry`,
