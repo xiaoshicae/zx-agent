@@ -60,8 +60,11 @@ pub fn home() -> Result<Option<PathBuf>> {
     }
 }
 
-/// Read a regular UTF-8 configuration file within [`MAX_FILE_BYTES`]. This is bounded,
+/// Read a regular UTF-8 configuration file within `MAX_FILE_BYTES`. This is bounded,
 /// synchronous startup I/O; invalid files and read failures preserve their path in errors.
-fn read_text(path: &Path) -> Result<String> {
+/// Public only for the command line's im.toml, which is read the same way; not part of the
+/// API.
+#[doc(hidden)]
+pub fn read_text(path: &Path) -> Result<String> {
     read_text_file(path, MAX_FILE_BYTES)
 }

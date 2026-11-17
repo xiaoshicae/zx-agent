@@ -242,7 +242,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-agent im --config <im.toml>` 读取的 IM 服务配置，未知的键视为错误。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-agent im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]
