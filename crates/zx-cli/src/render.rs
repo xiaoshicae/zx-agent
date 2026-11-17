@@ -3,9 +3,9 @@
 //! nothing printed here can drive the terminal.
 
 use serde_json::Value;
-use zx_agent::ai::text::clip;
 use zx_agent::ai::{AssistantMessage, StopReason};
 use zx_agent::events::{EventKind, Interruption};
+use zx_util::text::clip;
 
 /// Characters of an argument string shown inline in an approval; longer or multi-line ones
 /// become indented blocks.

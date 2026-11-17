@@ -6,11 +6,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
-use zx_agent::ai::sync::lock;
-use zx_agent::ai::text::clip;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
+use zx_util::sync::lock;
+use zx_util::text::clip;
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use zx_ai::sync::lock;
+use zx_util::sync::lock;
 
 use crate::Agent;
 use crate::transcript::SessionQuery;

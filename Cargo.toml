@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/zx-util",
   "crates/zx-ai",
   "crates/zx-ai-openai",
   "crates/zx-core",
@@ -13,6 +14,7 @@ members = [
 # Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
 default-members = [
   ".",
+  "crates/zx-util",
   "crates/zx-ai",
   "crates/zx-ai-openai",
   "crates/zx-core",
@@ -42,6 +44,7 @@ zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }
 zx-im-slack = { path = "crates/zx-im-slack" }
 zx-tools = { path = "crates/zx-tools" }
+zx-util = { path = "crates/zx-util" }
 
 agent-client-protocol = { version = "5.0", default-features = false, features = ["stdio"] }
 anyhow = "1"

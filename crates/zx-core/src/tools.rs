@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::text::prefix_within;
 use crate::ai::{ToolDef, Usage};
 use crate::sync::lock;
+use crate::text::prefix_within;
 
 /// The tools of a session, found by the name the model calls them by. Each tool declares
 /// itself once, when the toolbox is made: what requests declare, what arguments are checked

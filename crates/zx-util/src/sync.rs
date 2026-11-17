@@ -1,5 +1,5 @@
-//! Synchronization helpers shared by the crates of the zx-agent workspace. Public only so that
-//! those crates can reach them; not part of the API.
+//! Synchronization: a lock that recovers from poisoning, and a task aborted when its owner
+//! is dropped.
 
 use std::sync::{Mutex, MutexGuard};
 

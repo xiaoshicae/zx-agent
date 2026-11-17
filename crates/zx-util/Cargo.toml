@@ -1,0 +1,15 @@
+[package]
+name = "zx-util"
+description = "Small helpers the crates of the zx-agent workspace share: locks, bounded text, randomness; not part of the API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# AbortOnDrop holds a tokio JoinHandle.
+tokio.workspace = true

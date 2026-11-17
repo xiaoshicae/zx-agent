@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use serde_json::Value;
 use zx_ai::ProviderError;
-use zx_ai::text::clip;
+use zx_util::text::clip;
 
 use crate::config::OpenAiConfig;
 

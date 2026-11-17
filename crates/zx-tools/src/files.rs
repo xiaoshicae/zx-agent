@@ -1,7 +1,7 @@
 //! Bounded reads of regular files, opened without blocking so that a FIFO is refused rather
 //! than waited on: synchronous for configuration at startup and secret files before a
-//! redaction, asynchronous for the files that tools read. The text reader is shared with the
-//! CLI; not part of the API.
+//! redaction, asynchronous for the files that tools read. The text reader is shared with
+//! zx-app, which reads configuration with it; not part of the API.
 
 use std::fs::OpenOptions;
 use std::io::Read;

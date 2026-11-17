@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{ImError, Inbound, Keepalive, MessageId, Seen};
+use zx_util::random::random_u64;
 
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
@@ -343,15 +344,13 @@ fn service_id(address: &str) -> i32 {
         .unwrap_or(0)
 }
 
-/// A random wait below `nonce`, from the random bits of a version 4 UUID.
+/// A random wait below `nonce`.
 pub(crate) fn jitter(nonce: Duration) -> Duration {
     let millis = u64::try_from(nonce.as_millis()).unwrap_or(u64::MAX);
     if millis == 0 {
         return Duration::ZERO;
     }
-    // The low 64 bits of the UUID are random but for two variant bits.
-    let (_, random) = uuid::Uuid::new_v4().as_u64_pair();
-    Duration::from_millis(random % millis)
+    Duration::from_millis(random_u64() % millis)
 }
 
 /// Fragments of messages split over several frames, by `message_id`.

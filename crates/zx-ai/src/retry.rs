@@ -2,9 +2,9 @@
 //! jitter follows provider-retry.ts; the defaults are those of
 //! coding-agent/src/core/settings-defaults.ts).
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
+
+use zx_util::random::random_fraction;
 
 use super::types::{AssistantMessage, FINISH_REASON_CODE, ProviderError, StopReason};
 
@@ -60,15 +60,6 @@ impl RetryPolicy {
         let share = self.jitter.clamp(0.0, 1.0) * random_fraction();
         delay.mul_f64(1.0 - share)
     }
-}
-
-/// A number in `[0, 1)` from the standard library's randomly keyed hasher: enough to spread
-/// retries out, without a random number generator among the dependencies.
-fn random_fraction() -> f64 {
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(0x5eed);
-    // The top 53 bits of the hash make an exact double in [0, 1).
-    (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Failures that retrying cannot fix: credentials and quota. A request too long for the

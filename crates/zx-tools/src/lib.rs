@@ -16,9 +16,10 @@
 //!   default
 
 // The modules name the model layer, the shared helpers and the kernel by these crate-root paths.
-use zx_ai::{self as ai, sync, text};
+use zx_ai as ai;
 #[cfg(feature = "mcp")]
 use zx_core::extensions;
+use zx_util::{sync, text};
 
 mod calendar;
 pub mod continuation;

@@ -27,6 +27,7 @@ zx-app.workspace = true
 zx-im.workspace = true
 zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
+zx-util.workspace = true
 
 agent-client-protocol.workspace = true
 anyhow.workspace = true

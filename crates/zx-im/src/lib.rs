@@ -49,10 +49,6 @@ pub use status::{StatusFiles, StatusStore};
 // What a closed card shows ([`Replacement::ApprovalResolved`]): a platform names it without
 // depending on the kernel.
 pub use zx_core::events::ApprovalResult;
-// The lock helper every crate takes its locks with, for the platforms, which need nothing
-// else of the model layer. Not part of the API.
-#[doc(hidden)]
-pub use zx_ai::sync;
 
 /// One chat platform, such as Slack.
 ///
