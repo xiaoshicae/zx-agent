@@ -1,6 +1,6 @@
 # 测试文件一览
 
-每个测试文件覆盖什么，具体行为见测试名。设施与约定见 `.claude/rules/06-testing.md`。
+每个测试文件覆盖什么，具体行为见测试名。测试设施的索引在 `tests/common/mod.rs` 的模块文档，原则与约定见 `.claude/rules/06-testing.md`。
 
 单元测试写在被测模块里或其 `tests.rs` 中，覆盖各模块的逻辑与边界，包括会话文件与事件的 JSON 格式；`config.toml` 与 agent 文件（含 `deploy/kubernetes/agents/*.md`）的配置规则也在这一层测。
 
