@@ -15,7 +15,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
-use zx_testing::stderr;
+use zx_testing::{stderr, summary_json};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -208,7 +208,7 @@ impl Acp {
     }
 
     /// The message right after a response that opened `session_id`: the commands the agent
-    /// offers for it, which is `/name` alone.
+    /// offers for it, `/name` with its input and `/compact` without one.
     async fn expect_commands(&mut self, session_id: &str) {
         let message = self.read().await;
         assert_eq!(message["method"], "session/update", "{message}");
@@ -216,10 +216,13 @@ impl Acp {
         let update = &message["params"]["update"];
         assert_eq!(update["sessionUpdate"], "available_commands_update", "{message}");
         let commands = update["availableCommands"].as_array().unwrap();
-        assert_eq!(commands.len(), 1, "{message}");
+        assert_eq!(commands.len(), 2, "{message}");
         assert_eq!(commands[0]["name"], "name", "{message}");
         assert!(commands[0]["description"].is_string(), "{message}");
         assert!(commands[0]["input"]["hint"].is_string(), "{message}");
+        assert_eq!(commands[1]["name"], "compact", "{message}");
+        assert!(commands[1]["description"].is_string(), "{message}");
+        assert!(commands[1]["input"].is_null(), "{message}");
     }
 
     /// List the sessions with `params`; the response.
@@ -981,6 +984,91 @@ async fn the_name_command_needs_a_name_and_other_slashes_reach_the_model() {
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(texts(&requests[0].body).last(), Some(&"/named things"));
+    acp.finish().await;
+}
+
+/// The ID of the record that holds the prompt `text`, in the one session file of `dir`.
+fn prompt_record(dir: &Path, text: &str) -> String {
+    let file = &zx_testing::program::session_files(dir)[0];
+    std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["message"]["role"] == "user" && record["message"]["content"] == text)
+        .map(|record| record["id"].as_str().unwrap().to_string())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_compact_command_summarizes_and_a_load_still_replays_every_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    // Everything before the latest prompt is old enough to summarize.
+    write_agent(
+        &home.path().join(".zx-agent"),
+        "assistant",
+        "[compaction]\nkeepRecentBytes = 1",
+    );
+    let server = MockServer::start(vec![Reply::text("first answer"), Reply::text("second answer")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &["--tools", ""], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    for prompt in ["one", "two"] {
+        let response = first.prompt(&id, prompt).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    }
+    first.finish().await;
+    // The summary cites a record of the session, as the model's does.
+    let cited = prompt_record(&session_dir(home.path(), &cwd), "one");
+    let server = MockServer::start(vec![Reply::text(&summary_json(&cited))]).await;
+    let mut second = Acp::start_in(&server, &cwd, &["--tools", ""], Some(home.path())).await;
+    second.initialize().await;
+    let resumed = second.resume(&id, &cwd).await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+
+    let response = second.prompt(&id, "/compact").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(server.requests().len(), 1, "the summary is the only request");
+    let shown: Vec<(String, String)> = second
+        .replayed()
+        .iter()
+        .map(|update| {
+            (
+                update["sessionUpdate"].as_str().unwrap().to_string(),
+                update["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let compaction = |status: &str| ("compaction_update".to_string(), status.to_string());
+    assert_eq!(shown, [compaction("in_progress"), compaction("completed")]);
+    // The summary stands in for the first turn in what the model reads, not in what the
+    // person is shown: a load replays every turn.
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay: Vec<String> = second
+        .replayed()
+        .iter()
+        .map(|update| text_of(update).to_string())
+        .collect();
+    assert_eq!(replay, ["one", "first answer", "two", "second answer"]);
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn the_compact_command_says_when_nothing_is_old_enough_to_summarize() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
+    let session = acp.session(dir.path()).await;
+
+    let response = acp.prompt(&session, "/compact").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let update = acp.next_update().await;
+    assert_eq!(update["sessionUpdate"], "notice", "{update}");
+    assert!(acp.inbox.is_empty(), "{:?}", acp.inbox);
+    assert!(server.requests().is_empty());
     acp.finish().await;
 }
 

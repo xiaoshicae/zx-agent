@@ -113,7 +113,7 @@ fn end_by(interrupt: Interrupt) {
 /// The next event of `run`, a run of `session`. Once `stop` is cancelled, as a signal
 /// cancels it, so is the run, which is still read to its end for its report; cancelling a
 /// cancelled run again changes nothing.
-pub async fn next_event(run: &mut Run, session: &Session, stop: &CancellationToken) -> Option<Event> {
+pub async fn next_event<T>(run: &mut Run<T>, session: &Session, stop: &CancellationToken) -> Option<Event> {
     tokio::select! {
         biased;
         () = stop.cancelled() => {

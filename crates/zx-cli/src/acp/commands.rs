@@ -1,6 +1,7 @@
 //! The agent's slash commands: offered with `available_commands_update` once the client
-//! knows the session, and run instead of a turn when a prompt starts with one. There is one,
-//! `/name`, which names the session.
+//! knows the session, and run instead of a prompt when a prompt starts with one: `/name`,
+//! which names the session, and `/compact`, which summarizes the old part of the
+//! conversation as a turn of its own.
 
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
@@ -8,7 +9,6 @@ use agent_client_protocol::v1::schema::{
     AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, PromptResponse, SessionId, SessionInfoUpdate,
     SessionUpdate, StopReason, UnstructuredCommandInput,
 };
-use agent_client_protocol::{Error, ErrorCode};
 use anyhow::Result;
 
 use zx_agent::Session;
@@ -19,12 +19,16 @@ use crate::listing::preview_text;
 
 /// The command that names the session, without its slash.
 const NAME: &str = "name";
+/// The command that summarizes the old part of the conversation, without its slash.
+const COMPACT: &str = "compact";
 
 /// A prompt that is one of the agent's commands.
 pub(super) enum Command {
     /// `/name <name>`: name the session.
     Name(SessionName),
-    /// A command without what it needs, and how to use it.
+    /// `/compact`: summarize the old part of the conversation.
+    Compact,
+    /// A command without what it needs, or with what it does not take, and how to use it.
     Usage(&'static str),
 }
 
@@ -34,13 +38,15 @@ pub(super) enum Command {
 pub(super) fn parse(text: &str) -> Option<Command> {
     let text = text.trim();
     let (word, input) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    if word.strip_prefix('/') != Some(NAME) {
-        return None;
+    match word.strip_prefix('/')? {
+        NAME => Some(match SessionName::new(input) {
+            Some(name) => Command::Name(name),
+            None => Command::Usage("give the session a name: /name <name>"),
+        }),
+        COMPACT if input.trim().is_empty() => Some(Command::Compact),
+        COMPACT => Some(Command::Usage("/compact takes no input")),
+        _ => None,
     }
-    Some(match SessionName::new(input) {
-        Some(name) => Command::Name(name),
-        None => Command::Usage("give the session a name: /name <name>"),
-    })
 }
 
 /// Tell the client which commands the session offers.
@@ -52,34 +58,33 @@ pub(super) fn offer(cx: &ConnectionTo<Client>, session_id: &SessionId) {
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "a name for this session",
     )));
+    let compact = AvailableCommand::new(
+        COMPACT,
+        "Summarize the earlier part of the conversation, which makes room in the model's context",
+    );
     updates::send(
         cx,
         session_id,
-        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![name])),
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![name, compact])),
     );
 }
 
-/// Run `command` on `session`. The turn it answers ends at once, without a model request.
-pub(super) async fn run(
+/// Name `session`. The turn it answers ends at once, without a model request.
+pub(super) async fn name(
     session: &Session,
-    command: Command,
+    name: SessionName,
     cx: &ConnectionTo<Client>,
     session_id: &SessionId,
 ) -> Result<PromptResponse> {
-    match command {
-        Command::Name(name) => {
-            // The title `session/list` gives the session from now on.
-            let title = preview_text(name.as_str());
-            session.set_name(name).await?;
-            updates::send(
-                cx,
-                session_id,
-                SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
-            );
-            Ok(PromptResponse::new(StopReason::EndTurn))
-        }
-        Command::Usage(usage) => Err(Error::new(ErrorCode::INVALID_PARAMS, usage).into()),
-    }
+    // The title `session/list` gives the session from now on.
+    let title = preview_text(name.as_str());
+    session.set_name(name).await?;
+    updates::send(
+        cx,
+        session_id,
+        SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
+    );
+    Ok(PromptResponse::new(StopReason::EndTurn))
 }
 
 #[cfg(test)]
@@ -89,6 +94,7 @@ mod tests {
     fn named(text: &str) -> Option<String> {
         match parse(text)? {
             Command::Name(name) => Some(name.as_str().to_string()),
+            Command::Compact => Some("compact".to_string()),
             Command::Usage(usage) => Some(format!("usage: {usage}")),
         }
     }
@@ -107,6 +113,15 @@ mod tests {
     }
 
     #[test]
+    fn the_compact_command_takes_no_input() {
+        assert!(matches!(parse(" /compact \n"), Some(Command::Compact)));
+        assert_eq!(
+            named("/compact the first half").as_deref(),
+            Some("usage: /compact takes no input")
+        );
+    }
+
+    #[test]
     fn other_text_is_a_prompt_even_with_a_slash() {
         for prompt in [
             "/named things",
@@ -114,6 +129,7 @@ mod tests {
             "name x",
             "//name x",
             "rename with /name x",
+            "/compacted",
             "",
         ] {
             assert!(parse(prompt).is_none(), "{prompt:?}");

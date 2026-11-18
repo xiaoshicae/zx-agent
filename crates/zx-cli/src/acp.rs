@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
+use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
@@ -51,6 +52,7 @@ use crate::cli::{self, AcpArgs};
 use crate::listing;
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
 
+use commands::Command;
 use updates::Updates;
 
 struct Host {
@@ -231,7 +233,8 @@ impl Host {
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
     /// permission answers keep arriving; the response is sent when the turn ends. A prompt
-    /// that is one of the agent's commands runs the command instead.
+    /// that is one of the agent's commands runs the command instead; `/compact` is a turn of
+    /// its own, taken and cancelled as a prompt's is.
     ///
     /// The session is taken for the turn here, in the dispatch loop: a `session/cancel` that
     /// follows the prompt at once then finds the turn, though it has not run yet. A session
@@ -254,14 +257,21 @@ impl Host {
         };
         let text = prompt_text(&request.prompt);
         let (connection, session_id) = (cx.clone(), request.session_id.clone());
-        if let Some(command) = commands::parse(&text) {
-            return cx.spawn(async move {
-                let answer = commands::run(&session, command, &connection, &session_id).await;
-                responder.respond_with_result(answer.map_err(protocol_error))
-            });
-        }
-        let run = match session.send(text) {
-            Ok(run) => run,
+        let started = match commands::parse(&text) {
+            Some(Command::Name(name)) => {
+                return cx.spawn(async move {
+                    let answer = commands::name(&session, name, &connection, &session_id).await;
+                    responder.respond_with_result(answer.map_err(protocol_error))
+                });
+            }
+            Some(Command::Usage(usage)) => {
+                return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, usage));
+            }
+            Some(Command::Compact) => session.compact().map(Running::Compaction),
+            None => session.send(text).map(Running::Task),
+        };
+        let running = match started {
+            Ok(running) => running,
             Err(error) => return responder.respond_with_error(protocol_error(error.into())),
         };
         let turn = Turn {
@@ -274,7 +284,7 @@ impl Host {
         // None once the stop has waited for the turns: this one then ends with the process.
         let in_progress = self.turns.upgrade();
         cx.spawn(async move {
-            let answer = turn.answer(run).await;
+            let answer = turn.answer(running).await;
             let answered = responder.respond_with_result(answer.map_err(protocol_error));
             drop(in_progress);
             answered
@@ -299,6 +309,12 @@ impl Host {
         self.agent.agent().close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
+}
+
+/// What a turn runs: the task a prompt starts, or the compaction `/compact` starts.
+enum Running {
+    Task(Run),
+    Compaction(Run<compaction::Report>),
 }
 
 /// One turn of a session: the conversation, and the client it reports to and asks.
@@ -446,12 +462,32 @@ fn opened<T: JsonRpcResponse>(
 }
 
 impl Turn {
-    /// The response to `session/prompt` once `run`, the turn, has ended: its stop reason, or
-    /// the run's error. While the turn runs, its events go to the client as session updates,
-    /// and a call that waits for approval becomes a permission request. A process that is
-    /// told to stop cancels the turn, which is still read to its end.
-    async fn answer(mut self, mut run: Run) -> Result<PromptResponse> {
-        while let Some(event) = next_event(&mut run, &self.session, &self.stop).await {
+    /// The response to `session/prompt` once `running`, the turn, has ended: its stop reason,
+    /// or its error. A compaction that found nothing old enough to summarize says so, since
+    /// nothing else would show that it ran.
+    async fn answer(mut self, running: Running) -> Result<PromptResponse> {
+        let reason = match running {
+            Running::Task(mut run) => {
+                self.read(&mut run).await?;
+                stop_reason(&run.wait().await)?
+            }
+            Running::Compaction(mut run) => {
+                self.read(&mut run).await?;
+                let report = run.wait().await;
+                if report.outcome == Outcome::Noop {
+                    self.updates.nothing_to_compact();
+                }
+                compaction_stop(&report)?
+            }
+        };
+        Ok(PromptResponse::new(reason))
+    }
+
+    /// Read `run` to its end: its events go to the client as session updates, and a call
+    /// that waits for approval becomes a permission request. A process that is told to stop
+    /// cancels the run, which is still read to its end.
+    async fn read<T>(&mut self, run: &mut Run<T>) -> Result<()> {
+        while let Some(event) = next_event(run, &self.session, &self.stop).await {
             self.updates.emit(&event);
             if let EventKind::ApprovalRequested {
                 approval_id,
@@ -470,7 +506,7 @@ impl Turn {
                 permissions::ask(&self.cx, &self.id, &self.session, request)?;
             }
         }
-        stop_reason(&run.wait().await).map(PromptResponse::new)
+        Ok(())
     }
 }
 
@@ -558,6 +594,21 @@ fn stop_reason(report: &RunReport) -> Result<StopReason> {
     }
 }
 
+/// How a finished compaction answers the `/compact` that asked for it; a failed one is a
+/// request error, with its message.
+fn compaction_stop(report: &compaction::Report) -> Result<StopReason> {
+    match report.outcome {
+        Outcome::Completed | Outcome::Noop => Ok(StopReason::EndTurn),
+        Outcome::Cancelled => Ok(StopReason::Cancelled),
+        Outcome::Failed => Err(anyhow::Error::msg(
+            report
+                .error
+                .clone()
+                .unwrap_or_else(|| "the compaction failed".to_string()),
+        )),
+    }
+}
+
 /// The protocol's kinds for the built-in tools; everything else, MCP tools included, is
 /// `Other`, which clients show without an icon.
 fn tool_kind(name: &str) -> ToolKind {
@@ -618,6 +669,29 @@ mod tests {
         assert_eq!(
             answer(&report(RunOutcome::TimedOut, None)),
             Err("the run ended with TimedOut".to_string())
+        );
+    }
+
+    #[test]
+    fn a_compaction_ends_its_turn_and_a_failed_one_is_a_request_error() {
+        let ended = |outcome, error: Option<&str>| {
+            let report = compaction::Report {
+                outcome,
+                requests: 0,
+                usage: Usage::default(),
+                input_bytes: 0,
+                output_bytes: 0,
+                entry_id: None,
+                error: error.map(str::to_string),
+            };
+            compaction_stop(&report).map_err(|error| error.to_string())
+        };
+        assert_eq!(ended(Outcome::Completed, None), Ok(StopReason::EndTurn));
+        assert_eq!(ended(Outcome::Noop, None), Ok(StopReason::EndTurn));
+        assert_eq!(ended(Outcome::Cancelled, Some("cancelled")), Ok(StopReason::Cancelled));
+        assert_eq!(
+            ended(Outcome::Failed, Some("invalid summary JSON")),
+            Err("invalid summary JSON".to_string())
         );
     }
 

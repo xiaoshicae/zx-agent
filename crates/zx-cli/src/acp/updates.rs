@@ -269,6 +269,15 @@ impl Updates {
         ));
     }
 
+    /// Tell the client that a compaction it asked for found nothing to summarize.
+    pub(super) fn nothing_to_compact(&self) {
+        self.notice(
+            NoticeSeverity::Info,
+            "Nothing to summarize",
+            "no part of the conversation is old enough yet",
+        );
+    }
+
     /// The state of the compaction that runs as `run_id`.
     fn compaction_update(&self, run_id: &str, status: CompactionStatus) {
         self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
