@@ -23,9 +23,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider};
+use opentelemetry::{Key, Value};
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::resource::{EnvResourceDetector, ResourceDetector};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -55,8 +57,10 @@ const TRACE_CONTEXT_VARIABLES: [&str; 2] = ["TRACEPARENT", "TRACESTATE"];
 const QUEUE_CAPACITY: usize = 4096;
 /// How long shutdown waits for the collector: the SDK's own default.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// The standard variable that names the service over the one a host gives.
+/// The standard variable that names the service.
 const SERVICE_NAME_VARIABLE: &str = "OTEL_SERVICE_NAME";
+/// The resource attribute that names the service, which `OTEL_RESOURCE_ATTRIBUTES` may hold.
+const SERVICE_NAME_ATTRIBUTE: &str = "service.name";
 /// The tracer's name, the instrumentation scope of every span: the agent's runs, whichever
 /// host exports them.
 const TRACER_NAME: &str = "zx-agent";
@@ -124,8 +128,9 @@ pub struct Telemetry {
 
 impl Telemetry {
     /// Export to the endpoint that the standard variables name, as the service `service_name`:
-    /// the host's name, which tells the traces of different programs apart, unless
-    /// `OTEL_SERVICE_NAME` names the service.
+    /// the host's name, which tells the traces of different programs apart, unless the
+    /// environment names the service: `OTEL_SERVICE_NAME`, which the specification puts first,
+    /// or else `service.name` in `OTEL_RESOURCE_ATTRIBUTES`.
     ///
     /// Traces go out when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
     /// is set and not empty; `None` when neither is: nothing is then sent anywhere. The SDK reads the other
@@ -135,17 +140,12 @@ impl Telemetry {
         if ENDPOINT_VARIABLES.iter().all(|name| env_value(name).is_none()) {
             return Ok(None);
         }
-        let mut resource = Resource::builder();
-        // The SDK takes the variable when it is set and not empty.
-        if env_value(SERVICE_NAME_VARIABLE).is_none() {
-            resource = resource.with_service_name(service_name.to_string());
-        }
         let exporter = SpanExporter::builder()
             .with_http()
             .build()
             .context("cannot set up the OTLP span exporter")?;
         let tracer_provider = SdkTracerProvider::builder()
-            .with_resource(resource.build())
+            .with_resource(resource(service_name))
             .with_batch_exporter(exporter)
             .build();
         Ok(Some(Self::with_provider(tracer_provider)))
@@ -214,6 +214,22 @@ impl Telemetry {
         .await
         .context("the export failed")?
     }
+}
+
+/// The resource that the traces come from: the SDK's, with its own attributes and those in
+/// `OTEL_RESOURCE_ATTRIBUTES`, under the service name that [`Telemetry::from_env`] describes,
+/// `default_name` when the environment gives none. Left to itself, the SDK puts `service.name`
+/// in that variable over `OTEL_SERVICE_NAME`, and names an unnamed service
+/// `unknown_service:<executable>`.
+fn resource(default_name: &str) -> Resource {
+    let named = env_value(SERVICE_NAME_VARIABLE).map(Value::from).or_else(|| {
+        EnvResourceDetector::new()
+            .detect()
+            .get(&Key::from_static_str(SERVICE_NAME_ATTRIBUTE))
+    });
+    Resource::builder()
+        .with_service_name(named.unwrap_or_else(|| Value::from(default_name.to_string())))
+        .build()
 }
 
 #[cfg(test)]

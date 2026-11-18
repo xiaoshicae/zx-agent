@@ -195,7 +195,7 @@ HTTP 错误按状态归类，错误码表明上下文过长或凭据、配额问
 
 ### OpenTelemetry 追踪
 
-run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认为程序名：`zx-agent` 或 `zx-im`。只导出 span，不导出指标，需要时由收集端从 span 推导。
+run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取。服务名（`service.name`）依次取 `OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 中的 `service.name`，都没有时为程序名：`zx-agent` 或 `zx-im`。只导出 span，不导出指标，需要时由收集端从 span 推导。
 
 一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒；一次运行的结束被丢弃时，它的 span 在同一会话开始下一次运行时结束（没有结果属性），最迟在退出时结束。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`，工具输出中出现它们的值时脱敏。
 
@@ -223,4 +223,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.6 · 2026年11月
+REFERENCE.md · v0.7 · 2026年11月
