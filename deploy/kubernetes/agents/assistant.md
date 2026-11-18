@@ -5,7 +5,8 @@
 # instructions are the assistant's.
 extends = "assistant"
 # Without edit_file and write_file, since the Pod is for looking at clusters, not for changing
-# files, and without the search tools grep, find and ls.
+# files, and without grep, find and ls, which would search without asking: searches go through
+# bash and its checks (docs/SECURITY.md, "工具").
 tools = ["bash", "read_file", "read_skill", "read_output"]
 
 [permissions]
