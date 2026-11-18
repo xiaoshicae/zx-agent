@@ -22,7 +22,7 @@
 - 不含 URL（`://`），也不含 `permissions.allowExcept` 的字词（不分大小写；内置 assistant 为 `secret`）；
 - 程序在 `permissions.allowOptions` 中列出了选项时，只带这些选项。
 
-检查不含任何具体程序的知识。把 kubectl 之类的程序加进 `allow` 时，要同时列出它可带的选项，否则任何选项都不会触发询问；`deploy/kubernetes/agents/assistant.md` 只放行 kubectl 的只读选项，`--server`、`--kubeconfig`、`--token`、`--raw` 等都要询问。自动放行的命令能读到什么取决于账号与凭据，读到的内容会进入模型上下文。
+检查不含任何具体程序的知识。把 kubectl 之类的程序加进 `allow` 时，要同时列出它可带的选项，否则任何选项都不会触发询问；`deploy/kubernetes/agents/assistant.md` 只放行 kubectl 的只读选项，`--server`、`--kubeconfig`、`--token`、`--raw` 等都要询问。选项按命令的第一个词查找：程序只经 `sudo kubectl` 或带路径的前缀放行时，为它列出的选项不起作用，这样的配置在启动时报错。自动放行的命令能读到什么取决于账号与凭据，读到的内容会进入模型上下文。
 
 ## 工具
 
@@ -55,4 +55,4 @@
 
 ---
 
-SECURITY.md · v0.6 · 2026年11月
+SECURITY.md · v0.7 · 2026年11月

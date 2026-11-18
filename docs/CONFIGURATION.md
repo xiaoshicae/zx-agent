@@ -42,7 +42,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
-| `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1` |
+| `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段（请求的路径接在它后面）；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
 | `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认 `OPENAI_API_KEY`；变量没有值时请求不带认证头 |
 | `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的 system 消息；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
 | `provider.reasoningFormat` | `reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
@@ -174,7 +174,7 @@ shortFlags = ["A"]
 | `ask` | 要审批的工具名，不能写 `bash(...)`。run 没有人审批而拒绝，chat 在终端询问，zx-im 发审批卡片，acp 交给客户端 |
 | `allow` | `bash(<前缀>)`：以该前缀开头（按词比较，区分大小写，只合并空白）的命令不经审批直接执行，只在 bash 需要审批时起作用；带 shell 语法、URL 或串联多个命令的仍要审批，见 [SECURITY.md](SECURITY.md#自动放行)。MCP 工具名：该工具直接执行（MCP 工具默认都要审批）。写内置工具名，或同一工具同时在 `ask` 与 `allow` 中，报错 |
 | `allowExcept` | 命令中出现其中的字词（不分大小写，子串比较）时，`allow` 放行的命令仍要审批 |
-| `allowOptions.<程序>` | 该程序（一个小写的词）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名）、`shortWithValue`（带值的单字母选项，如 `-oyaml`）、`shortFlags`（不带值、须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项 |
+| `allowOptions.<程序>` | 该程序（一个小写的词）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名）、`shortWithValue`（带值的单字母选项，如 `-oyaml`）、`shortFlags`（不带值、须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。选项按命令的第一个词查找，所以程序须是 `allow` 中某条 `bash(...)` 的第一个词：只经 `sudo` 或带路径放行的程序得不到约束，这样的配置以退出码 2 报错 |
 | `deny` | 工具名：拒绝该工具，批准也不能覆盖。`bash(<文本>)`：拒绝任何位置含该文本的命令，不分大小写。内置的拒绝规则始终保留 |
 | `approveAll` | `true` 时不询问任何审批，拒绝规则仍然生效。只能与 `execution = "container"` 一起使用，且 `ask` 须为空（扩展 `assistant` 时写 `ask = []`） |
 
@@ -281,4 +281,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.24 · 2026年11月
+CONFIGURATION.md · v0.25 · 2026年11月
