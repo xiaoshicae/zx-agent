@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CARGO_INCREMENTAL": "0"
+  },
   "permissions": {
     "ask": [
       "Bash(git commit *)",
