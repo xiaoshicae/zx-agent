@@ -3,9 +3,11 @@
     "CARGO_INCREMENTAL": "0"
   },
   "permissions": {
-    "ask": [
+    "allow": [
       "Bash(git commit *)",
-      "Bash(git push *)",
+      "Bash(git push *)"
+    ],
+    "ask": [
       "Bash(cargo add *)",
       "Bash(cargo remove *)",
       "Bash(cargo update *)",
