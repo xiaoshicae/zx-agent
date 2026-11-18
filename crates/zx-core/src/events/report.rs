@@ -94,7 +94,7 @@ pub struct RunReport {
     /// Tool calls that a policy or an approval denied, so that they did not run. The model
     /// sees each as an error result and may still complete the task, so a host that must
     /// know whether every intended action ran checks this.
-    #[serde(skip_serializing_if = "zx_util::num::is_zero")]
+    #[serde(skip_serializing_if = "zx_util::default::is_default")]
     pub denied_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

@@ -1,7 +1,7 @@
 //! Minimal Server-Sent Events parser: yields the `data` payload of each event.
 
 /// Default maximum bytes in one SSE event, including its framing.
-pub const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
+pub(crate) const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 /// Incremental parser with a byte limit per event. Discard it after a parsing error.
 pub(crate) struct SseParser {

@@ -1,11 +1,15 @@
 //! How a request fails: the failures of HTTP responses, bodies and chunks, with the server's
 //! Retry-After hint read as milliseconds, seconds or an HTTP date (pi: provider-retry.ts).
+//!
+//! - `kind`: what kind of failure a server's status, error code or wording reports
+
+pub(crate) mod kind;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use serde_json::Value;
-use zx_ai::ProviderError;
+use zx_ai::{ProviderError, ProviderErrorKind};
 use zx_util::text::clip;
 
 use crate::config::OpenAiConfig;
@@ -27,17 +31,20 @@ pub(crate) enum Failure {
 }
 
 impl Failure {
-    pub(crate) fn error(details: ProviderError, message: impl Into<String>) -> Self {
+    /// A failed request: `details`, a whole [`ProviderError`] or only its kind, and the text
+    /// for the message.
+    pub(crate) fn error(details: impl Into<ProviderError>, message: impl Into<String>) -> Self {
         Self::Error {
-            details,
+            details: details.into(),
             message: message.into(),
         }
     }
 }
 
-/// The failure of a response with an error status: the body's error code and the server's
-/// Retry-After hint go with it. A hint the client cannot read is left to the local backoff,
-/// and a body that cannot be read only loses its excerpt; the status is authoritative.
+/// The failure of a response with an error status, of the kind that the status, the body's
+/// error code and its wording report ([`kind::of_status`]), with the server's Retry-After
+/// hint. A hint the client cannot read is left to the local backoff, and a body that cannot
+/// be read only loses its excerpt; the status still decides.
 pub(crate) async fn http_failure(response: reqwest::Response, config: &OpenAiConfig) -> Failure {
     let status = response.status().as_u16();
     let retry_after_ms = retry_after_ms(response.headers(), SystemTime::now());
@@ -45,14 +52,14 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &OpenAiCon
     let code = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|body| body.get("error").and_then(error_code));
-    Failure::error(
-        ProviderError::Http {
-            status,
-            code,
-            retry_after_ms,
-        },
-        format!("HTTP {status}: {}", excerpt(&String::from_utf8_lossy(&bytes))),
-    )
+    let text = excerpt(&String::from_utf8_lossy(&bytes));
+    let details = ProviderError {
+        kind: kind::of_status(status, code.as_deref(), &text),
+        status: Some(status),
+        code,
+        retry_after_ms,
+    };
+    Failure::error(details, format!("HTTP {status}: {text}"))
 }
 
 /// Whether the server answered with a JSON document rather than an event stream: a gateway
@@ -76,7 +83,7 @@ pub(crate) async fn json_body_failure(response: reqwest::Response, config: &Open
         return provider_failure(error);
     }
     Failure::error(
-        ProviderError::Protocol,
+        ProviderErrorKind::Protocol,
         format!(
             "the server answered with JSON instead of an event stream; it may not support streaming: {}",
             excerpt(&String::from_utf8_lossy(&bytes))
@@ -102,28 +109,32 @@ fn error_code(error: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The failure that an error object, in a body or in a stream chunk, reports.
+/// The failure that an error object, in a body or in a stream chunk, reports, of the kind
+/// that its code or its wording says ([`kind::of_error`]).
 pub(crate) fn provider_failure(error: &Value) -> Failure {
     let text = error
         .get("message")
         .and_then(Value::as_str)
         .map_or_else(|| error.to_string(), str::to_string);
-    Failure::error(
-        ProviderError::Provider {
-            code: error_code(error),
-        },
-        format!("provider error: {}", excerpt(&text)),
-    )
+    let text = excerpt(&text);
+    let code = error_code(error);
+    let details = ProviderError {
+        kind: kind::of_error(code.as_deref(), &text),
+        status: None,
+        code,
+        retry_after_ms: None,
+    };
+    Failure::error(details, format!("provider error: {text}"))
 }
 
 /// The failure of `operation`, a request or a stream read, that `error` ended.
 pub(crate) fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
-    let details = if error.is_timeout() {
-        ProviderError::Timeout
+    let kind = if error.is_timeout() {
+        ProviderErrorKind::Timeout
     } else {
-        ProviderError::Transport
+        ProviderErrorKind::Transport
     };
-    Failure::error(details, format!("{operation}: {}", with_causes(error)))
+    Failure::error(kind, format!("{operation}: {}", with_causes(error)))
 }
 
 /// The start of a body read only to explain a failure, within the idle timeout. A body that

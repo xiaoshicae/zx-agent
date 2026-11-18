@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::ai::{AssistantMessage, Message, StopReason, Usage};
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
 
 use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
 
@@ -69,6 +69,19 @@ pub(crate) fn without_details<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]
     Cow::Owned(copy)
 }
 
+/// Replace the text of `message` with `text`, as a context edit's replacement does: the
+/// content of a user message or a tool result, or the blocks of an assistant message, which
+/// become one text block. A system message keeps its sections: prompt changes are appended,
+/// never edited. Callers change a copy for the model, never the record.
+pub(crate) fn replace_text(message: &mut Message, text: &str) {
+    match message {
+        Message::System(_) => {}
+        Message::User { content, .. } => *content = text.to_string(),
+        Message::Assistant(answer) => answer.content = vec![ContentBlock::Text { text: text.to_string() }],
+        Message::ToolResult(result) => result.content = text.to_string(),
+    }
+}
+
 /// Later edits of a target win, including edits of messages kept beside a summary.
 fn edits_on<'a>(path: &[&'a Entry]) -> HashMap<&'a str, &'a Option<String>> {
     path.iter()
@@ -81,11 +94,15 @@ fn edits_on<'a>(path: &[&'a Entry]) -> HashMap<&'a str, &'a Option<String>> {
 
 fn project(entry: &Entry, edits: &HashMap<&str, &Option<String>>) -> Option<ProjectedMessage> {
     let id = entry.id();
-    let message = match edits.get(id) {
+    let replacement = match edits.get(id) {
         Some(None) => return None,
-        Some(Some(text)) => entry.projected()?.with_replaced_text(text),
-        None => entry.projected()?.into_owned(),
+        Some(Some(text)) => Some(text),
+        None => None,
     };
+    let mut message = entry.projected()?.into_owned();
+    if let Some(text) = replacement {
+        replace_text(&mut message, text);
+    }
     Some(ProjectedMessage {
         entry_id: id.to_string(),
         message,
@@ -280,7 +297,7 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::ai::ContentBlock;
+    use crate::ai::UserMessageKind;
     use crate::transcript::test_support::{header, plan, result_with_details, seeded, summary};
 
     /// An answer that reported `input` prompt tokens and 10 output tokens.
@@ -295,6 +312,16 @@ mod tests {
             ..Usage::default()
         };
         Message::Assistant(answer)
+    }
+
+    #[test]
+    fn a_text_replacement_keeps_a_continuation_a_continuation() {
+        let mut message = Message::continuation("继续");
+        replace_text(&mut message, "接着说");
+        assert!(matches!(
+            message,
+            Message::User { kind: UserMessageKind::ContinueAnswer, content, .. } if content == "接着说"
+        ));
     }
 
     #[tokio::test]

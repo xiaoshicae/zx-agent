@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
+use zx_agent::ai::{
+    EventReceiver, Message, Provider, ProviderErrorKind, Request, SectionChange, StopReason, SystemMessage, ToolCall,
+};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::redact::{RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::builtin::tools::BashTool;
@@ -530,7 +532,7 @@ impl Hook for Observer {
 #[tokio::test]
 async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail("HTTP 503: retry".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: retry"),
         FauxStep::text("done"),
     ]));
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -584,7 +586,7 @@ async fn custom_continuation_wording_still_joins_answer_parts() {
 async fn continuation_budget_is_not_reset_after_a_provider_retry() {
     let provider = Arc::new(FauxProvider::new([
         FauxStep::truncated("甲"),
-        FauxStep::Fail("HTTP 503".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503"),
         FauxStep::truncated("乙"),
         FauxStep::text("never"),
     ]));

@@ -22,13 +22,13 @@ pub struct SystemPrompt {
 }
 
 impl SystemPrompt {
-    /// Set section `name`, replacing one with the same name in place. Blank content is
-    /// left out, so optional sections can be passed unconditionally.
     /// A prompt of `instructions`, its preamble, before any section.
     pub fn new(instructions: &str) -> Self {
         Self::default().with_section(PREAMBLE, instructions)
     }
 
+    /// Set section `name`, replacing one with the same name in place. Blank content is
+    /// left out, so optional sections can be passed unconditionally.
     pub fn with_section(mut self, name: &str, content: &str) -> Self {
         let content = content.trim();
         if !content.is_empty() {

@@ -8,9 +8,10 @@
 //! - [`sync`]: a lock that recovers from poisoning, and a task aborted when it is dropped
 //! - [`text`]: text bounded by characters or bytes, cut on character boundaries
 //! - [`random`]: randomness for spreading retries and reconnections
-//! - [`num`]: [`num::is_zero`], for leaving zero counts out of serialized records
+//! - [`default`]: [`default::is_default`], for leaving a type's default, such as a zero count,
+//!   out of serialized records
 
-pub mod num;
+pub mod default;
 pub mod random;
 pub mod sync;
 pub mod text;

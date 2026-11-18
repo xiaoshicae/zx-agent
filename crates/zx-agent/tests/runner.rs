@@ -62,7 +62,9 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
+use zx_agent::ai::{
+    Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, StopReason, SystemPrompt, ToolCall, Usage,
+};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -450,7 +452,7 @@ async fn an_unlimited_budget_can_explicitly_enable_continuation() {
 #[tokio::test]
 async fn retries_transient_errors_without_repeating_the_prompt() {
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::text("ok"),
     ]);
     let (runner, sink) = RunnerSetup {
@@ -487,7 +489,7 @@ impl SessionLog for RefusingContextEdits {
 #[tokio::test]
 async fn a_retry_whose_edit_cannot_be_recorded_is_neither_counted_nor_announced() {
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::text("must not be requested"),
     ]);
     let (runner, sink) = RunnerSetup {
@@ -589,7 +591,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.jsonl");
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::text("ok"),
     ]);
     let (runner, _) = RunnerSetup {
@@ -629,7 +631,10 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
 
 #[tokio::test]
 async fn permanent_errors_are_not_retried() {
-    let provider = provider([FauxStep::Fail("HTTP 401: invalid api key".into())]);
+    let provider = provider([FauxStep::fail(
+        ProviderErrorKind::AccessDenied,
+        "HTTP 401: invalid api key",
+    )]);
     let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&provider)
@@ -645,7 +650,7 @@ async fn permanent_errors_are_not_retried() {
 
 #[tokio::test]
 async fn retrying_stops_after_max_retries() {
-    let provider = provider((0..5).map(|_| FauxStep::Fail("HTTP 502: bad gateway".into())));
+    let provider = provider((0..5).map(|_| FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 502: bad gateway")));
     let (runner, _) = RunnerSetup {
         retry: fast_retry(2),
         ..setup(&provider)
@@ -662,7 +667,7 @@ async fn retrying_stops_after_max_retries() {
 #[tokio::test]
 async fn a_retry_needs_request_budget_and_keeps_the_provider_error() {
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::text("never sent"),
     ]);
     let (runner, sink) = RunnerSetup {
@@ -686,7 +691,7 @@ async fn the_budget_and_the_step_numbers_span_the_attempts_of_a_run() {
     // The first request fails and is retried; the retry's answer is cut off, and continuing
     // it would take a third request, which the run's limit of two does not leave.
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::truncated("part one"),
         FauxStep::text("never sent"),
     ]);
@@ -744,7 +749,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
 #[tokio::test]
 async fn a_retried_failure_is_reported_as_a_context_edit() {
     let provider = provider([
-        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: service unavailable"),
         FauxStep::text("ok"),
     ]);
     let (runner, sink) = RunnerSetup {
@@ -1132,7 +1137,7 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
 /// A run that fails once with a retryable error, then answers.
 async fn retried_run() -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail("HTTP 503: retry".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: retry"),
         FauxStep::text("done"),
     ]));
     RunnerSetup {

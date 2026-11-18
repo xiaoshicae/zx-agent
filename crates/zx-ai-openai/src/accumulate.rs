@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Delta, FINISH_REASON_CODE, ProviderError, StopReason, ToolCall, Usage};
+use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, ToolCall, Usage};
 use zx_util::text::prefix_noted;
+
+use crate::failure::kind;
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
@@ -253,8 +255,9 @@ impl Accumulator {
     }
 
     /// The complete message, from the finish reason: only the known endings succeed, and any
-    /// other value means the server interrupted or rejected the answer. Fails on a stream
-    /// that ended without a finish reason.
+    /// other value means the server interrupted or rejected the answer, a failure of the kind
+    /// [`kind::of_finish_reason`] gives, with the reason as its code. Fails on a stream that
+    /// ended without a finish reason.
     pub(crate) fn finish(&self) -> Result<AssistantMessage, String> {
         let Some(reason) = self.finish_reason.as_deref() else {
             return Err("stream ended without a finish_reason".to_string());
@@ -275,8 +278,11 @@ impl Accumulator {
                 Some(format!("the provider ended the response with finish_reason {other:?}")),
             ),
         };
-        let details = error.is_some().then(|| ProviderError::Provider {
-            code: Some(format!("{FINISH_REASON_CODE}{reason}")),
+        let details = error.is_some().then(|| ProviderError {
+            kind: kind::of_finish_reason(reason),
+            status: None,
+            code: Some(reason.to_string()),
+            retry_after_ms: None,
         });
         Ok(self.message(stop_reason, error, details))
     }
@@ -454,8 +460,9 @@ mod tests {
             assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
             assert_eq!(
                 message.provider_error,
-                Some(ProviderError::Provider {
-                    code: Some(format!("finish_reason:{reason}"))
+                Some(ProviderError {
+                    code: Some(reason.to_string()),
+                    ..ProviderError::from(zx_ai::ProviderErrorKind::Refused)
                 })
             );
             assert!(message.error_message.is_some(), "{reason}");

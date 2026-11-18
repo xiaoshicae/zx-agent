@@ -9,7 +9,7 @@ use serde_json::json;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{Message, StopReason};
+use zx_agent::ai::{Message, ProviderErrorKind, StopReason};
 use zx_agent::compaction::Config;
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::tools::Tool;
@@ -20,6 +20,11 @@ use zx_testing::{
 };
 
 const OVERFLOW: &str = "HTTP 400: This model's maximum context length is 65536 tokens";
+
+/// A response that fails because the request does not fit the model's context.
+fn overflow() -> FauxStep {
+    FauxStep::fail(ProviderErrorKind::ContextOverflow, OVERFLOW)
+}
 
 /// Automatic compaction is enabled, but the context stays below its byte threshold, so only
 /// an overflow makes the runner summarize.
@@ -72,7 +77,7 @@ fn failed_answers(messages: &[Message]) -> usize {
 async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_continues() {
     let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
@@ -146,9 +151,9 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
 async fn a_recovery_starts_an_attempt_but_is_not_a_retry() {
     let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text(summary_json(&old)),
-        FauxStep::Fail("HTTP 503: busy".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: busy"),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = retrying_runner(&provider, session, test_limits(), fast_retry(1)).await;
@@ -176,7 +181,7 @@ async fn a_recovery_starts_an_attempt_but_is_not_a_retry() {
 #[tokio::test]
 async fn without_automatic_compaction_an_overflow_ends_the_run_as_before() {
     let (session, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Fail(OVERFLOW.into())]));
+    let provider = Arc::new(FauxProvider::new([overflow()]));
     let (runner, events) = RunnerSetup {
         session: session.into(),
         retry: fast_retry(3),
@@ -197,9 +202,9 @@ async fn without_automatic_compaction_an_overflow_ends_the_run_as_before() {
 async fn an_overflow_right_after_a_recovery_ends_the_run() {
     let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text(summary_json(&old)),
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text("must not be requested"),
     ]));
     let (runner, events) = runner(&provider, session, test_limits()).await;
@@ -219,10 +224,10 @@ async fn an_overflow_right_after_a_recovery_ends_the_run() {
 async fn an_answer_after_a_recovery_allows_another_recovery() {
     let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text(summary_json(&old)),
         FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
     ]));
     let (runner, events) = runner(&provider, session, test_limits()).await;
 
@@ -241,9 +246,9 @@ async fn an_answer_after_a_recovery_allows_another_recovery() {
 async fn a_failed_recovery_summary_pauses_automatic_compaction() {
     let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text("not JSON"),
-        FauxStep::Fail(OVERFLOW.into()),
+        overflow(),
         FauxStep::text("must not be requested"),
     ]));
     let (runner, _) = runner(&provider, session, test_limits()).await;
@@ -268,10 +273,7 @@ async fn a_failed_recovery_summary_pauses_automatic_compaction() {
 #[tokio::test]
 async fn an_overflow_without_request_budget_left_ends_the_run() {
     let (session, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail(OVERFLOW.into()),
-        FauxStep::text("must not be requested"),
-    ]));
+    let provider = Arc::new(FauxProvider::new([overflow(), FauxStep::text("must not be requested")]));
     let limits = RunLimits {
         max_model_requests: Some(1),
         ..test_limits()
@@ -289,7 +291,7 @@ async fn an_overflow_without_request_budget_left_ends_the_run() {
 #[tokio::test]
 async fn the_run_timeout_also_bounds_the_recovery_summary() {
     let (session, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Fail(OVERFLOW.into()), FauxStep::Hang]));
+    let provider = Arc::new(FauxProvider::new([overflow(), FauxStep::Hang]));
     let limits = RunLimits {
         timeout: Some(Duration::from_millis(200)),
         ..test_limits()

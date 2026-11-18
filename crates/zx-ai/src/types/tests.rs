@@ -14,13 +14,22 @@ fn provider_error_metadata_is_optional_and_round_trips() {
             .provider_error,
         None
     );
-    message.provider_error = Some(ProviderError::Http {
-        status: 429,
+    message.provider_error = Some(ProviderError {
+        kind: ProviderErrorKind::RateLimited,
+        status: Some(429),
         code: Some("rate_limit_exceeded".into()),
         retry_after_ms: Some(2000),
     });
     let encoded = serde_json::to_value(&message).unwrap();
-    assert_eq!(encoded["providerError"]["retryAfterMs"], 2000);
+    assert_eq!(
+        encoded["providerError"],
+        json!({"kind": "rate_limited", "status": 429, "code": "rate_limit_exceeded", "retryAfterMs": 2000})
+    );
+    assert_eq!(serde_json::from_value::<AssistantMessage>(encoded).unwrap(), message);
+    // What the server did not say is left out.
+    message.provider_error = Some(ProviderErrorKind::ContextOverflow.into());
+    let encoded = serde_json::to_value(&message).unwrap();
+    assert_eq!(encoded["providerError"], json!({"kind": "context_overflow"}));
     assert_eq!(serde_json::from_value::<AssistantMessage>(encoded).unwrap(), message);
 }
 
@@ -57,6 +66,24 @@ fn assistant() -> AssistantMessage {
         duration_ms: None,
         response_id: None,
         response_model: None,
+    }
+}
+
+/// A response that failed: the server limited the rate and asked for a wait.
+fn failed_answer() -> AssistantMessage {
+    AssistantMessage {
+        content: Vec::new(),
+        usage: Usage::default(),
+        stop_reason: StopReason::Error,
+        error_message: Some("HTTP 429: slow down".into()),
+        provider_error: Some(ProviderError {
+            kind: ProviderErrorKind::RateLimited,
+            status: Some(429),
+            code: Some("rate_limit_exceeded".into()),
+            retry_after_ms: Some(2000),
+        }),
+        duration_ms: Some(12),
+        ..assistant()
     }
 }
 
@@ -117,6 +144,21 @@ fn messages_keep_the_session_file_format() {
                 "usage": {"input": 3, "output": 2, "cacheRead": 1, "totalTokens": 5},
                 "stopReason": "toolUse",
                 "timestamp": 7
+            }),
+        ),
+        (
+            Message::Assistant(failed_answer()),
+            json!({
+                "role": "assistant",
+                "content": [],
+                "provider": "p",
+                "model": "m",
+                "usage": {"input": 0, "output": 0, "cacheRead": 0, "totalTokens": 0},
+                "stopReason": "error",
+                "errorMessage": "HTTP 429: slow down",
+                "providerError": {"kind": "rate_limited", "status": 429, "code": "rate_limit_exceeded", "retryAfterMs": 2000},
+                "timestamp": 7,
+                "durationMs": 12
             }),
         ),
         (
@@ -197,14 +239,11 @@ fn tool_result_usage_is_recorded_only_when_present() {
 }
 
 #[test]
-fn continuation_kind_round_trips_and_survives_text_edits() {
+fn continuation_kind_round_trips() {
     let message = Message::continuation("继续");
     let json = serde_json::to_value(&message).unwrap();
     assert_eq!(json["kind"], "continueAnswer");
     assert_eq!(serde_json::from_value::<Message>(json).unwrap(), message);
-    assert!(
-        matches!(message.with_replaced_text("接着说"), Message::User { kind: UserMessageKind::ContinueAnswer, content, .. } if content == "接着说")
-    );
     // A prompt is written without a kind, so a record without one is a prompt.
     let prompt: Message = serde_json::from_value(json!({"role": "user", "content": "go", "timestamp": 1})).unwrap();
     assert!(matches!(
