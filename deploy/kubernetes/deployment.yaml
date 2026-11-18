@@ -76,5 +76,8 @@ spec:
         - name: agents
           configMap:
             name: zx-agent-agents
+        # Beyond this the kubelet evicts the Pod, instead of commands filling the node's disk;
+        # the Deployment then starts a new one.
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 1Gi

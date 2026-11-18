@@ -9,8 +9,13 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - cronjob.yaml
-  # Writes in chat, each approved by a person; scheduled inspections stay read-only.
-  # - operator.yaml
+# Writes in chat are a separate step, granted per namespace: operator.yaml.
+# On every object and Pod, to select them in a NetworkPolicy or a log query. Not on selectors,
+# which cannot change once the Deployment exists.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: zx-agent
+    includeTemplates: true
 # Optional components: uncomment `components:` and the ones wanted.
 # - multicluster: other clusters (README.md, "多集群"), after creating the ConfigMap
 #   zx-agent-kubeconfig and the Secret zx-agent-clusters.

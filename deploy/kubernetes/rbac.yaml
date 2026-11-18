@@ -1,4 +1,6 @@
 # Read access to most objects in every namespace, without Secrets: the built-in view role.
+# It covers no cluster-scoped objects besides namespaces, so zx-agent-cluster-view below adds
+# the ones troubleshooting reads: nodes, persistent volumes and storage classes.
 # The subjects name no namespace on purpose: kustomize fills in the namespace of
 # kustomization.yaml, so apply this with kubectl apply -k, not -f.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -22,5 +24,33 @@ roleRef:
   kind: ClusterRole
   name: view
 subjects:
+  - kind: ServiceAccount
+    name: zx-agent-inspect
+---
+# kubectl get, describe and top for nodes; the volumes and classes behind a pending claim.
+# Node metrics come with view where metrics-server is installed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zx-agent-cluster-view
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zx-agent-cluster-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zx-agent-cluster-view
+subjects:
+  - kind: ServiceAccount
+    name: zx-agent
   - kind: ServiceAccount
     name: zx-agent-inspect
