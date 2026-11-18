@@ -41,7 +41,7 @@ pub(crate) use args::Args;
 const EXIT_COMPLETED: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 pub(crate) const EXIT_USAGE: u8 = 2;
-/// The traces' `service.name`, unless `OTEL_SERVICE_NAME` sets one: the program's name.
+/// The traces' `service.name` when the environment names no service: the program's name.
 const SERVICE_NAME: &str = "zx-im";
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
 /// keeps it apart from the platform directories, whose encoded names never contain one.

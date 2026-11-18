@@ -28,7 +28,7 @@ const EXIT_COST_BUDGET: u8 = 8;
 /// `run --fail-on-denied`: completed, but a policy or an approval denied a tool call.
 pub(crate) const EXIT_DENIED: u8 = 9;
 
-/// The traces' `service.name`, unless `OTEL_SERVICE_NAME` sets one: the program's name.
+/// The traces' `service.name` when the environment names no service: the program's name.
 const SERVICE_NAME: &str = "zx-agent";
 
 /// What the process shares, read and connected once for sessions of `builtin`, with its

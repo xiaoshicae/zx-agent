@@ -1092,6 +1092,90 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
 }
 
+/// The body of the one trace export of a run in `dir`, with the variables that describe the
+/// resource set to `resource` and the other variables of a trace unset.
+async fn exported_trace(dir: &Path, resource: &[(&str, &str)]) -> Vec<u8> {
+    let (endpoint, received) = collector().await;
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let mut command = run(&server, dir);
+    command
+        .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", format!("{endpoint}/v1/traces"))
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env_remove("TRACEPARENT")
+        .env_remove("OTEL_SERVICE_NAME")
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES");
+    for (name, value) in resource {
+        command.env(name, value);
+    }
+    let output = command.output().await.unwrap();
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let mut requests = received.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one export, at the end");
+    requests.remove(0).body
+}
+
+/// The string value of the attribute `key` in an OTLP/protobuf export, the first one when
+/// several have that key. An attribute is a `KeyValue`: the key as field 1, then the value as
+/// field 2, an `AnyValue` whose field 1 is a string. Each field is its tag, its length (one
+/// byte for keys and values as short as these tests') and its bytes.
+fn attribute(body: &[u8], key: &str) -> Option<String> {
+    let mut key_field = vec![0x0a, u8::try_from(key.len()).unwrap()];
+    key_field.extend_from_slice(key.as_bytes());
+    key_field.push(0x12);
+    let at = body.windows(key_field.len()).position(|window| window == key_field)? + key_field.len();
+    let [_, 0x0a, length, rest @ ..] = body.get(at..)? else {
+        return None;
+    };
+    let value = rest.get(..usize::from(*length))?;
+    Some(String::from_utf8(value.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn otel_service_name_names_the_service_over_the_resource_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    for resource in [
+        vec![("OTEL_SERVICE_NAME", "from-the-variable")],
+        vec![
+            ("OTEL_SERVICE_NAME", "from-the-variable"),
+            ("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-the-attributes"),
+        ],
+    ] {
+        let body = exported_trace(dir.path(), &resource).await;
+        assert_eq!(
+            attribute(&body, "service.name").as_deref(),
+            Some("from-the-variable"),
+            "{resource:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_service_name_in_the_resource_attributes_comes_before_the_programs_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let resource = "service.name=from-the-attributes,deployment.environment.name=staging";
+
+    let body = exported_trace(dir.path(), &[("OTEL_RESOURCE_ATTRIBUTES", resource)]).await;
+
+    assert_eq!(attribute(&body, "service.name").as_deref(), Some("from-the-attributes"));
+    // The other attributes stay: the user's, and the SDK's own.
+    assert_eq!(
+        attribute(&body, "deployment.environment.name").as_deref(),
+        Some("staging")
+    );
+    assert_eq!(attribute(&body, "telemetry.sdk.language").as_deref(), Some("rust"));
+}
+
+#[tokio::test]
+async fn the_service_takes_the_programs_name_when_the_environment_names_none() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let body = exported_trace(dir.path(), &[]).await;
+
+    assert_eq!(attribute(&body, "service.name").as_deref(), Some("zx-agent"));
+}
+
 #[tokio::test]
 async fn a_run_continues_the_trace_that_traceparent_names() {
     const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
