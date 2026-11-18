@@ -4,11 +4,11 @@
 
 - **是什么**：Rust 编写的通用 agent 内核，同一个内核支撑和人对话、无人值守运行（cron、Kubernetes Job）与被其他程序嵌入。场景差异放在内核之外，由 agent 文件、提示词和插件表达。
 - **参照**：分层、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`），不同之处见 `docs/REFERENCE.md` 的"与 pi 的差异"。
-- **现状**：v0.1.0。子命令 `run`、`chat`（应急与脚本化入口）、`acp`、`im`（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）、`sessions`。环境在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml`，角色在 agent 文件。改动前先看 `docs/ROADMAP.md` 的当前阶段。
+- **现状**：v0.1.0。程序 `zx-agent` 的子命令 `run`、`chat`（应急与脚本化入口）、`acp`、`sessions`；IM 服务是另一个程序 `zx-im`（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）。环境在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml`，角色在 agent 文件。改动前先看 `docs/ROADMAP.md` 的当前阶段。
 
 ## 架构
 
-12 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
+10 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
 
 | crate | 位置 | 负责 |
 |---|---|---|
@@ -17,11 +17,11 @@
 | `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-builtin` | `crates/zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
-| `zx-im`、`zx-im-slack`、⚑ D:5/CHINA FLAG: `zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-builtin` 互不依赖 |
 | `zx-agent` | `crates/zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-builtin` 再导出成一个库，没有自己的代码 |
-| `zx-app` | `crates/zx-app` | 应用层：`config`（`config.toml` 与 agent 文件）、由它们装配 agent 的 `Application`、`otel`（追踪导出）、`shutdown`（信号、取消后读完运行、追踪导出的开始与结束）；不知道命令行、终端与协议，不打印（要说的返回给宿主），命令行与其他宿主（如 Web 服务）共用 |
-| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）：参数、输出与退出码，`run`、`chat`、`acp`、`im`、`sessions` 互不引用，agent 都经 `zx_app::Application` 得到 |
-| `zx-testing` | `crates/zx-testing` | 各包集成测试共用的测试设施：由 agent 建会话、读完运行的测试设置（`RunnerSetup`），假的模型服务、MCP 服务器与聊天平台，被测程序的启动与主目录（`program`）。只作 `[dev-dependencies]`，crate 自己的单元测试不用它；不依赖 IM 的 crate |
+| `zx-app` | `crates/zx-app` | 应用层：`config`（`config.toml` 与 agent 文件）、由它们装配 agent 的 `Application`、`otel`（追踪导出）、`shutdown`（信号、取消后读完运行、追踪导出的开始与结束）；不知道命令行、终端与协议，不打印（要说的返回给宿主），命令行、IM 服务与其他宿主（如 Web 服务）共用 |
+| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）：参数、输出与退出码，`run`、`chat`、`acp`、`sessions` 互不引用，agent 都经 `zx_app::Application` 得到 |
+| `zx-im` | `crates/zx-im` | IM 服务（都在库里，`main.rs` 只调用它；可执行文件 `zx-im`）：平台接口 `ImChannel` 与它的词汇（`channel`），按会话分派的 `Server`（`server`），平台与它们共用的部分（`platform`：Slack，⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后），程序（`program`：`im.toml`、参数、操作日志与退出码）。agent 经 `zx_app::Application` 得到 |
+| `zx-testing` | `crates/zx-testing` | 各包集成测试共用的测试设施：由 agent 建会话、读完运行的测试设置（`RunnerSetup`），假的模型服务、MCP 服务器与聊天平台，被测程序的启动与主目录（`program`）。只作 `[dev-dependencies]`，crate 自己的单元测试不用它；不依赖 `zx-im` |
 
 设计取舍（改动前先理解原因；括号里是 `docs/ROADMAP.md` 的决策编号，契约细节在各类型的 rustdoc）：
 
@@ -31,15 +31,15 @@
 - **会话是审计日志，也是模型上下文的唯一来源**（不变量 5、6）：修正上下文与提示词的变化都靠追加，原始记录始终保留；可替换的只是存储（`SessionStorage` 与 `SessionLog`，接口里没有文件路径）。
 - **审批由内核等待，不是接口**：策略询问时调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）立即拒绝，`Wait` 等宿主经 `Session::resolve_approval` 按内核生成的审批编号回答；超时与取消按拒绝处理，审批不写入会话。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
-- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；`zx-app` 引用不到命令行、ACP 与 IM；`zx-util` 不依赖工作区里任何 crate；`zx-testing` 只是测试依赖；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
+- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；`zx-app` 引用不到命令行、ACP 与 IM；`zx-util` 不依赖工作区里任何 crate；`zx-testing` 只是测试依赖；同层模块互不引用（规则 09），`zx-im` 的两个平台也是：它们是 `platform` 下的同层模块，内部的项只对自己的模块可见，共用的在 `platform.rs`。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13），`chat` 不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
 
 ## 命令
 
-都在仓库根目录运行，覆盖全部 12 个 crate（根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
+都在仓库根目录运行，覆盖全部 10 个 crate（根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
 
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
-- lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`），改动 `zx-builtin` 时另跑 `cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings`（MCP 客户端是它默认开启的 feature `mcp`）。有意保留的写法用 `#[expect(lint, reason = "...")]`
+- lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`），改动 `zx-builtin` 时另跑 `cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings`（MCP 客户端是它默认开启的 feature `mcp`），改动 `zx-im` 时另跑 `cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings`（⚑ D:5/CHINA FLAG: 飞书平台是它默认开启的 feature `feishu`）。有意保留的写法用 `#[expect(lint, reason = "...")]`
 - 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`，零警告，断掉的文档链接也算（引号必须有）
 - MSRV：`cargo +1.88.0 check --all-targets`，用到新语法或新标准库 API 时运行
@@ -97,4 +97,4 @@
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `crates/zx-agent/tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
-| IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交私聊、@ 机器人的群消息与群里线程中的回复、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`crates/zx-agent/tests/im_server.rs` 的 `FakeChannel` |
+| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交私聊、@ 机器人的群消息与群里线程中的回复、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels`，连接用 `next_message` 读（ping、静默与取消）。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的函数都在这个模块里；不引用别的平台，可选的平台放在 cargo feature 后 | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |

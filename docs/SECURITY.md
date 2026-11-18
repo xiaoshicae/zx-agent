@@ -42,7 +42,7 @@
 
 在 `config.toml` 中写 `execution = "container"` 并配置 `container.image`，bash、read_file、edit_file、write_file 与搜索工具改在 Docker 容器中执行；read_skill 与 read_output 仍读取本机文件。其他键见[配置说明](CONFIGURATION.md)。容器是沙箱：限制放在容器的外墙上，容器内默认给命令该用户能有的全部权限。
 
-- 每个会话一个容器，打开会话时创建（chat 的 `/new` 换一个新容器；acp 与 im 同时打开几个会话就有几个容器），随会话关闭或进程结束而删除，被 SIGKILL 时也一样。容器带 `zx-agent.session=<会话 ID>` 标签。启动时检查命令不以 root 运行、镜像有 bash 等程序、容器用户能读（可写时能写）工作目录；不满足、镜像不在本地或 Docker 不可用时以退出码 2 结束。
+- 每个会话一个容器，打开会话时创建（chat 的 `/new` 换一个新容器；acp 与 zx-im 同时打开几个会话就有几个容器），随会话关闭或进程结束而删除，被 SIGKILL 时也一样。容器带 `zx-agent.session=<会话 ID>` 标签。启动时检查命令不以 root 运行、镜像有 bash 等程序、容器用户能读（可写时能写）工作目录；不满足、镜像不在本地或 Docker 不可用时以退出码 2 结束。
 - 容器内默认：工作目录以读写方式挂载在同一路径，改动直接作用于宿主机；容器自身的文件可写；加入 `bridge` 网络，可以联网；命令以运行 zx-agent 的用户的 `uid:gid` 运行。严格模式为 `network = "none"`、`workspace = "readOnly"`、`root = "readOnly"`。
 - 外墙：不加 `--privileged`，不挂 Docker socket，不用宿主机的网络与 PID 命名空间，去掉全部 capability 并设 `no-new-privileges`，限制进程数与内存，命令不以 root 运行。命令不继承 agent 的环境变量，API key 不进入容器。
 - 同一容器内的调用逐个执行；每条命令前后终止命令用户的全部进程，脱离进程组的后台进程也不例外。
@@ -52,4 +52,4 @@
 
 ---
 
-SECURITY.md · v0.4 · 2026年11月
+SECURITY.md · v0.5 · 2026年11月

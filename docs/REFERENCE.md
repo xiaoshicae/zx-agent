@@ -4,7 +4,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 ## 命令行参数
 
-`--model`、`--cwd`、`--tools` 与四个预算参数每个子命令都有（`sessions` 只有 `--cwd`，`im` 另有必填的 `--config`）；其余参数标出了适用的子命令。默认值写作 agent 的取自所用的 agent（内置 agent 的取值见 [CONFIGURATION.md](CONFIGURATION.md#内置-agent)），显式传入时覆盖。上限与预算作用于每一次运行，chat 与 acp 中即每次提问。
+`--model`、`--cwd`、`--tools` 与四个预算参数每个子命令与程序 `zx-im` 都有（`sessions` 只有 `--cwd`，`zx-im` 另有必填的 `--config`）；其余参数标出了适用的子命令。默认值写作 agent 的取自所用的 agent（内置 agent 的取值见 [CONFIGURATION.md](CONFIGURATION.md#内置-agent)），显式传入时覆盖。上限与预算作用于每一次运行，chat 与 acp 中即每次提问。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -89,7 +89,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 ## IM 服务
 
-命令见 README 的“IM 服务”，`im.toml` 见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)。
+IM 服务是程序 `zx-im`，命令见 README 的“IM 服务”，`im.toml` 见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)。
 
 | 项 | 说明 |
 |---|---|
@@ -102,8 +102,8 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | 两个平台的 token 与 secret 只从环境变量读取；命令的环境中删除这些变量，输出中出现其值时脱敏 |
 | 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。服务启动时读取会话头部，记下每个对话最近创建的会话，续接时打开它；存储里已没有这个会话时（如文件被删除），记一条 `failed` 日志并像首次一样新建会话；`/new` 用同样的标签立即再建一个，此后续接新的，之前的保留 |
-| 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。对话内容在会话文件中 |
-| 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示；正在建立的平台连接随即放弃。收尾期间再收到一次信号时，进程立即被该信号结束。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
+| 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。平台继续运行时遇到的问题也是带 `platform` 的 `failed`：连接失败后的重试、连接静默（两倍 ping 间隔加余量收不到任何帧）后重新打开、读不了的帧。对话内容在会话文件中 |
+| 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示；正在建立的平台连接随即放弃。收尾期间再收到一次信号时，进程立即被该信号结束。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1；错误写到 stderr，以 `zx-im:` 开头 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
 
 ## 语义
@@ -195,7 +195,7 @@ HTTP 错误按状态归类，错误码表明上下文过长或凭据、配额问
 
 ### OpenTelemetry 追踪
 
-run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认 `zx-agent`。只导出 span，不导出指标，需要时由收集端从 span 推导。
+run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认为程序名：`zx-agent` 或 `zx-im`。只导出 span，不导出指标，需要时由收集端从 span 推导。
 
 一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒；一次运行的结束被丢弃时，它的 span 在同一会话开始下一次运行时结束（没有结果属性），最迟在退出时结束。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`，工具输出中出现它们的值时脱敏。
 
@@ -223,4 +223,4 @@ run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完�
 
 ---
 
-REFERENCE.md · v0.5 · 2026年11月
+REFERENCE.md · v0.6 · 2026年11月

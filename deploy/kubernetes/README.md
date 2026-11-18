@@ -4,8 +4,8 @@
 
 ## 目录内容
 
-- `Dockerfile`：zx-agent 与 bash、kubectl、curl、jq、tini，以 10001 号非 root 用户运行。
-- `agents/`：生成 ConfigMap `zx-agent-agents`，挂载到主目录的 `agents/`，替换同名内置 agent。`assistant.md`（chat 与 im）加入只读 kubectl 命令及其选项；`unattended.md`（巡检与单次任务）要求排障报告的固定小节。
+- `Dockerfile`：zx-agent、IM 服务 zx-im 与 bash、kubectl、curl、jq、tini，以 10001 号非 root 用户运行。
+- `agents/`：生成 ConfigMap `zx-agent-agents`，挂载到主目录的 `agents/`，替换同名内置 agent。`assistant.md`（chat 与 zx-im）加入只读 kubectl 命令及其选项；`unattended.md`（巡检与单次任务）要求排障报告的固定小节。
 - `serviceaccounts.yaml`、`rbac.yaml`：常驻 Pod 的 `zx-agent` 与巡检的 `zx-agent-inspect`，都绑定预置的只读角色 `view`（不含 Secret）；`operator.yaml` 是可选的写权限。
 - `pvc.yaml` 是 `/data` 的卷；`im/` 与 `multicluster/` 是可选组件。
 
@@ -84,7 +84,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 ## IM 服务
 
-启用 `im` 组件后，主进程是 `zx-agent im`，在 IM 中 @ 机器人排障、审批写操作（用法见仓库 README 的“IM 服务”）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
+启用 `im` 组件后，主进程是 IM 服务 `zx-im`，在 IM 中 @ 机器人排障、审批写操作（用法见仓库 README 的“IM 服务”）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
 
 1. 创建 Secret `zx-agent-im`，只写用到的平台（⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键，Subject to Legal/Export Compliance approval）：`kubectl -n zx-agent create secret generic zx-agent-im --from-literal=slack-app-token=xapp-... --from-literal=slack-bot-token=xoxb-...`。
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
@@ -104,7 +104,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 ## 安全说明
 
-- 主进程 tini 的环境里有 API key（启用 `im` 时在 zx-agent 进程的环境里，连同 IM 凭据；巡检的主进程就是 zx-agent），同一用户的命令可以从 `/proc` 读到。读到的值被脱敏，不进入模型上下文；被诱导的命令仍可能把它发往外部（在 chat 中要确认）。
+- 主进程 tini 的环境里有 API key（启用 `im` 时在 zx-im 进程的环境里，连同 IM 凭据；巡检的主进程就是 zx-agent），同一用户的命令可以从 `/proc` 读到。读到的值被脱敏，不进入模型上下文；被诱导的命令仍可能把它发往外部（在 chat 中要确认）。
 - 命令与 agent 以同一用户运行，能修改 `/data` 中的会话文件。
 - 用 NetworkPolicy 默认拒绝出网时，要单独放行集群 DNS。
 
@@ -125,4 +125,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.5 · 2026年11月
+`deploy/kubernetes/README.md` · v0.6 · 2026年11月
