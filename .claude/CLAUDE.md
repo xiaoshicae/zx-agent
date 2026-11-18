@@ -52,6 +52,7 @@
 - 用户提问时先回答问题，再动手修改。
 - 只改任务需要的部分。顺手发现的问题单独提出，不要把无关的重构、改名、格式调整混进改动。
 - 测试的原则与约定见 `.claude/rules/06-testing.md`，每个测试文件覆盖什么见 `docs/TESTS.md`。
+- 构建产物：每个 worktree 有自己的 `target/`，cargo 不清理旧产物，36 个 worktree 曾积累到 424 GB。Claude Code 会话因此关闭了增量编译（`.claude/settings.json` 的 `CARGO_INCREMENTAL=0`），不要再打开；不另指定 `--target-dir`，任务不需要时不做 `--release` 构建。worktree 的分支合并后，收尾时提醒用户可以移除它，不自行删除。
 
 ## 红线
 
