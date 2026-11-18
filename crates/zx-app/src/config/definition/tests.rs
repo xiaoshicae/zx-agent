@@ -197,6 +197,11 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
             "[permissions.allowOptions.tool]\nlong = ['x']\nshort = ['y']",
             "unknown field",
         ),
+        // Allowed only behind another word, the program's commands would pass any option.
+        (
+            "[permissions]\nallow = ['bash(sudo tool get)', 'bash(/bin/tool get)']\n[permissions.allowOptions.tool]\nlong = ['x']",
+            "begins with",
+        ),
         ("[permissions]\nallowExcept = [' ']", "an entry is empty"),
     ] {
         let error = format!("{:#}", load_file(table).unwrap_err());

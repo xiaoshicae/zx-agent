@@ -166,11 +166,28 @@ impl Permissions {
         for tool in self.denied_tools() {
             ensure!(registered(&tool), "permissions.deny: unknown tool {tool:?}");
         }
+        let commands = self.allowed_commands();
         for (program, options) in &self.allow_options {
             check_program_options(program, options)?;
+            // The options are looked up by a command's first word: for a program that is
+            // allowed only behind another word, such as `sudo` or its directory, they would
+            // limit nothing while seeming to.
+            ensure!(
+                commands.iter().any(|command| begins_with_program(command, program)),
+                "permissions.allowOptions.{program}: no bash(...) entry of permissions.allow begins with {program}, so these options would limit nothing; allow the program's commands by its name"
+            );
         }
         Ok(())
     }
+}
+
+/// Whether the first word of `command` is `program`, without regard to case, as the options
+/// of a program are looked up.
+fn begins_with_program(command: &str, program: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| word.to_lowercase() == program)
 }
 
 fn bash_texts(entries: &[Entry]) -> Vec<String> {
