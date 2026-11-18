@@ -78,8 +78,8 @@
 | `crates/zx-im/tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止；启动时的会话索引、先读线程再建会话、慢的会话准备不挡其他对话、运行名额（残留插话重新排队、闲聊等名额再打开会话）、`/cancel` 丢弃未读插话与待处理消息容量（因容量被拒的闲聊不回复） |
 | `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack |
 | `crates/zx-im/tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
-| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程 |
+| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程 |
 
 ---
 
-TESTS.md · v0.12 · 2026年11月
+TESTS.md · v0.13 · 2026年11月

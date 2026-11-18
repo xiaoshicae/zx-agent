@@ -13,8 +13,8 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--cwd` | 当前目录 | 新会话的工作目录，也是 `sessions` 与 `--resume` 列出会话时所看的目录。续接的会话在它开始时的目录工作：续接时显式给出另一个目录，或原目录已不存在，都以退出码 2 结束。`acp` 中会话的目录由客户端给出，`--cwd` 只是 `session/list` 没有带 `cwd` 时所列的目录 |
 | `--max-model-requests` | agent | 模型请求次数上限，失败的尝试也计入 |
 | `--timeout-secs` | agent | 时间上限，0 不限 |
-| `--token-budget` | 不设 | 输入加输出 token 上限，`run` 用完时以 7 结束 |
-| `--cost-budget` | 不设 | 花费上限，需要模型的单价，`run` 用完时以 8 结束 |
+| `--token-budget` | agent | 输入加输出 token 上限，`run` 用完时以 7 结束 |
+| `--cost-budget` | agent | 花费上限，需要模型的单价，`run` 用完时以 8 结束 |
 | `--fail-on-denied` | 关闭 | 仅 `run`：有工具调用被拒时以 9 代替 0 |
 | `--session` | `run`：无；`chat`：会话目录中的新文件 | 仅 `run` 与 `chat`：会话文件，不存在则创建，存在则继续 |
 | `--no-session` | 关闭 | 仅 `chat` 与 `acp`：不写会话文件 |
@@ -74,7 +74,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 [approval] Choose 1, 2, 3 or 4:
 ```
 
-1 只允许这一次；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 不执行，把输入的话交给当前任务。空输入不授权，超时（默认 600 秒，`approvalTimeoutSecs`）不执行。
+1 只允许这一次；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 不执行，把输入的话交给当前任务。空输入不授权，超时（`approvalTimeoutSecs`）不执行。
 
 退出码：`/quit` 与 EOF 为 0，参数或配置错误、读取终端失败为 2，SIGTERM 为 5。单轮的模型或预算错误报告后继续对话。会话记录写不进去时会话自行关闭，chat 从存储重新打开它；会话只在内存中（`--no-session`）或重新打开失败时以 1 结束。
 
@@ -223,4 +223,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.7 · 2026年11月
+REFERENCE.md · v0.8 · 2026年11月

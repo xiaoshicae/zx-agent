@@ -45,14 +45,14 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ## 与命令行共用配置
 
-`zx_app::Application` 让其他 Rust 宿主（如 Web 服务）与命令行共用配置装配（`config.toml`、agent 文件、执行环境与 MCP），不依赖命令行解析、ACP 与 IM；命令行的每个子命令与 `zx-im` 也经它得到 agent。`zx-app` 不打印：启动与收尾要说的都交给宿主，由宿主输出或记日志。
+`zx_app::Application` 让其他 Rust 宿主（如 Web 服务）与命令行共用配置装配（`config.toml`、agent 文件、执行环境与 MCP），不依赖命令行解析、ACP 与 IM；命令行的 `run`、`chat`、`acp` 与 `zx-im` 也经它得到 agent。`zx-app` 不打印：启动与收尾要说的都交给宿主，由宿主输出或记日志。
 
 - `Application::from_config` 用显式传入的配置，先经 `Config::validate` 检查，不读 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES`；配置里命名的 API 与 MCP 凭据仍从环境变量读取。`Application::from_environment` 读主目录的 `config.toml`：模型取 `Overrides::model` > `ZX_MODEL` > `model`，`ZX_BASE_URL` 覆盖服务地址，`ZX_SECRET_FILES` 中的文件另外脱敏。两者都按 agent 文件的规则检查 `Overrides`（花费预算为负数或不是有限值时报错）；没有模型时的错误可向下转型为 `NoModel`，宿主据此说明自己给模型的方式。
 - `build` 为给定的模型（通常是 `model()`）得到 `ConfiguredAgent`，还不创建会话；会话存在内存、文件还是目录由宿主经 `SessionPlace` 选择（内存中关闭的会话会被遗忘）。启动提示（`notices`）的输出归宿主。
-- `zx_app::shutdown` 是每个程序都要的收尾：`with_telemetry(服务名, body)` 在环境变量给出 OTLP 地址时启动追踪导出（`service.name` 依次取 `OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 中的 `service.name`，都没有时取宿主给的名字），把导出交给 `body`（经 `Application::with_traces` 注册它的钩子），`body` 返回后导出剩下的部分，并把丢弃的事件数与导出失败作为 `ExportEnd` 与 `body` 的结果一起返回；`spawn_signal_handler` 让 SIGINT 与 SIGTERM 取消一个 `CancellationToken`（Unix 上第二个信号立即结束进程），注册不了时返回错误，由宿主决定是否继续；`next_event` 读运行的下一个事件，取消后让运行停下并读到结束。自己逐个处理信号的宿主用 `Signals` 与 `Interrupt`。
+- `zx_app::shutdown` 是每个程序都要的收尾：`with_telemetry(服务名, body)` 在环境变量给出 OTLP 地址时启动追踪导出（宿主给的服务名只在环境变量没有指定时使用，见 [REFERENCE.md](REFERENCE.md#opentelemetry-追踪)），把导出交给 `body`（经 `Application::with_traces` 注册它的钩子），`body` 返回后导出剩下的部分，并把丢弃的事件数与导出失败作为 `ExportEnd` 与 `body` 的结果一起返回；`spawn_signal_handler` 让 SIGINT 与 SIGTERM 取消一个 `CancellationToken`（Unix 上第二个信号立即结束进程），注册不了时返回错误，由宿主决定是否继续；`next_event` 读运行的下一个事件，取消后让运行停下并读到结束。自己逐个处理信号的宿主用 `Signals` 与 `Interrupt`。
 
 用法与验收见 `crates/zx-app/tests/application.rs`。
 
 ---
 
-LIBRARY.md · v0.13 · 2026年11月
+LIBRARY.md · v0.14 · 2026年11月

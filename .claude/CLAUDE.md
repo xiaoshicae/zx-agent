@@ -14,7 +14,7 @@
 |---|---|---|
 | `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、判断是否为默认值（`default` 的 `is_default`，供 serde 省略默认值）、读环境变量（`env` 的 `env_value`：设了且不为空才算）；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | `crates/zx-ai` | 消息类型、流式事件、`Provider` 契约 |
-| `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
+| `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` 与 `zx-util` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-builtin` | `crates/zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
 | `zx-agent` | `crates/zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-builtin` 再导出成一个库，没有自己的代码 |

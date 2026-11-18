@@ -1,10 +1,11 @@
 //! Model layer: message types, the streaming event protocol and the provider contract (pi:
 //! packages/ai).
 //!
-//! The lowest crate of the zx-agent workspace; the `zx-agent` crate re-exports it as
-//! `zx_agent::ai`. Providers live in crates of their own, such as `zx-ai-openai`, so that an
-//! embedder of the kernel does not compile an HTTP client it does not use. The helpers every
-//! layer shares, such as the lock and text bounds, are in `zx-util`, below this crate.
+//! Every crate of the zx-agent workspace builds on this one except `zx-util`, which is below
+//! it and holds the helpers every layer shares, such as the lock and text bounds. The
+//! `zx-agent` crate re-exports it as `zx_agent::ai`. Providers live in crates of their own,
+//! such as `zx-ai-openai`, so that an embedder of the kernel does not compile an HTTP client
+//! it does not use.
 //!
 //! The types are at the crate root:
 //! - `types`: messages, usage and prices, the events of a streamed response, and how a

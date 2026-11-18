@@ -26,24 +26,24 @@
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |
 | D10 | 通用，不为场景定制：某个环境、平台或厂商的知识放在 agent、部署清单或配置里；外部系统经适配器调用 `run`、SDK 或 IM，zx-agent 不解析其私有格式；provider 的协议方言显式开启。例外：回答中的推理内容按它到达的字段（`reasoning_content` 或 `reasoning`）原样回传给同一 provider 名与模型，不设开关，因为它只回放该服务自己发来的内容；两个地址配置了同一 provider 名与模型时会互相回传 |
 | D11 | 容器是沙箱：内部可写、默认联网、审批由 agent 决定，命令以映射的宿主机用户运行，不允许 root；外墙：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。只读、无网络是可选的严格模式 |
-| D12 | chat 不给 `--session` 时把会话存到主目录的 `sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（新建的目录 0700、文件 0600），`--no-session` 只存在内存；`run` 只在给出 `--session` 时写文件 |
+| D12 | chat 不给 `--session` 时把会话存到主目录的会话目录（路径与权限见 [REFERENCE.md](REFERENCE.md#chat)），`--no-session` 只存在内存；`run` 只在给出 `--session` 时写文件 |
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `zx-im` 与 SDK |
-| D15 | 只读写当前会话格式（`SESSION_VERSION` 为 13），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
+| D15 | 只读写当前会话格式（`SESSION_VERSION`），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
 | D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；权限用 ask / allow / deny。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
-| D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（默认 600 秒，chat、acp 与 zx-im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
+| D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（chat、acp 与 zx-im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
 | D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名，以最后一条为准，不进入模型上下文，不能清除。只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置；chat 按 D13 不加命令；`session/set_title` 在协议中仍不稳定，不实现。细节见 [REFERENCE.md](REFERENCE.md) |
 | D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用；attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试 |
 | D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction（记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`、`RequestSource::Summary`）；任务请求在事件与记录里都叫 task（`kind: task`、`RequestSource::Task`） |
-| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript。事件格式版本为 7 |
-| D24 | 库与接入方式分开：`zx-agent`（`crates/zx-agent`）是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-builtin`（附带的实现，库中名为 `builtin`）再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是另一个程序 `zx-im`（可执行文件同名；服务、平台与程序是这一个 crate 的模块），新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配、追踪导出与进程的收尾在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。各 crate 共用、没有业务含义的小工具在 `zx-util`，它不依赖工作区里任何 crate，不属于 API。集成测试分四处：`crates/zx-agent/tests/`、`crates/zx-app/tests/`、`crates/zx-cli/tests/` 与 `crates/zx-im/tests/`，共用的测试设施在只作测试依赖的 `zx-testing`；测试替身与只给测试用的入口不进生产 API，测试经 feature 打开它们（见 [TESTS.md](TESTS.md)）。根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下，在根目录运行的命令覆盖全部 crate |
+| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript |
+| D24 | 库与接入方式分开：`zx-agent`（`crates/zx-agent`）是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-builtin`（附带的实现，库中名为 `builtin`）再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是另一个程序 `zx-im`（可执行文件同名；服务、平台与程序是这一个 crate 的模块），新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配、追踪导出与进程的收尾在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。各 crate 共用、没有业务含义的小工具在 `zx-util`，它不依赖工作区里任何 crate，不属于 API。集成测试放在被测的 crate 里（规则 06），共用的测试设施在只作测试依赖的 `zx-testing`；测试替身与只给测试用的入口不进生产 API，测试经 feature 打开它们（见 [TESTS.md](TESTS.md)）。根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下，在根目录运行的命令覆盖全部 crate |
 | D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具按路径排队修改，队列由宿主传入（`executor_tools` 的 `queue`），`zx-app` 的装配让一个进程的所有会话共用一个；读改写与后台写入在同一轮内完成，取消调用不提前让出 |
 | D26 | 预算按整次运行累计，用完报告 `BudgetExhausted { budget, truncated }`，续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
 | D27 | IM 路由器只分派消息，运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话作为下一次运行的提问重新排队，`/cancel` 丢弃它们；第一次为线程建会话前先读线程历史 |
 | D28 | 宿主建自己的会话索引用 `SessionStorage::headers`，只读头部，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护。IM 的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
-| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-builtin，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc；只有一个程序或一种存储用的代码也不在内核（会话文件的头部行在 JSONL 存储，按会话 ID 前缀找会话在 chat），内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键。只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法，测试要这些记录时经存储写入记录行。`zx_app::Application` 让命令行与其他宿主共用配置装配：显式配置经 `Config::validate` 检查，宿主给的 `Overrides` 按 agent 文件的规则检查，`from_environment` 自己读 `ZX_MODEL`、`ZX_BASE_URL` 与 `ZX_SECRET_FILES`；每个程序都要的收尾（信号、取消后读完运行、追踪导出的开始与结束）在 `zx_app::shutdown`，追踪的 `service.name` 由程序给出。`zx-app` 不打印，要说的作为返回值交给宿主；它的文档称用它的程序为宿主，措辞不提子命令与命令行参数；只有一个程序用的行为留在那个程序里（如 `--session` 文件续接哪个会话在 `zx-cli`） |
+| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-builtin，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc；只有一个程序或一种存储用的代码也不在内核（会话文件的头部行在 JSONL 存储，按会话 ID 前缀找会话在 chat），内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键。只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法，测试要这些记录时经存储写入记录行。`zx_app::Application` 让命令行与其他宿主共用配置装配：显式配置经 `Config::validate` 检查，宿主给的 `Overrides` 按 agent 文件的规则检查，`from_environment` 自己读 `ZX_MODEL`、`ZX_BASE_URL` 与 `ZX_SECRET_FILES`；每个程序都要的收尾（信号、取消后读完运行、追踪导出的开始与结束）在 `zx_app::shutdown`，追踪的 `service.name` 在环境变量没有指定时由程序给出。`zx-app` 不打印，要说的作为返回值交给宿主；它的文档称用它的程序为宿主，措辞不提子命令与命令行参数；只有一个程序用的行为留在那个程序里（如 `--session` 文件续接哪个会话在 `zx-cli`） |
 | D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停；随上下文窗口的 token 阈值（`TokenTrigger::BelowWindow`）每次检查时按会话当时的模型取窗口（同 pi 的 `shouldCompact`），换模型后随之改变。两个 IM 平台是 `zx-im` 的 `platform` 下的同层模块，互不引用，共用的在 `platform.rs`；每个平台的模块带着自己的 `im.toml` 段与由段建 channel 的函数，⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后（关掉时见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)） |
 | D31 | 模型请求的失败由 provider 归类：模型层 `zx-ai` 只定义中立的种类（`ProviderErrorKind`），重试与上下文溢出恢复只看种类，没有种类的失败不重试；HTTP 状态、错误码、`finish_reason` 与措辞各表示哪一类，是协议与厂商的知识，只写在 provider 的 crate 里（`zx-ai-openai`）。服务端给出的状态、错误码与等待提示作为数据留在失败回答的 `providerError` 中。种类与处理见 [REFERENCE.md](REFERENCE.md#模型请求失败) |
 | D32 | `zx-builtin` 是通用的附带实现，与内核同一规则（D29）：设置类型自己校验（各自的 `validate`），文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键；程序的默认值由 `zx-app` 给出（如落盘目录）。执行器自己决定 shell（内置的两个都用 bash），并为提示词描述自己（`Executor::environment_section`）。命令策略的程序清单与续写的提示语是默认值，宿主可以追加或替换，不新增配置键 |
@@ -87,7 +87,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 | 日期 | 运行 | 结果 |
 |---|---|---|
-| 2026-11-01 | `tests/real_api.rs`，⚑ D:5/CHINA FLAG: DeepSeek `https://api.deepseek.com/v1`，⚑ D:5/CHINA FLAG: `deepseek-flash` 与 `deepseek-chat` 各一次 | 均为 6 项通过；只覆盖 `collapse` 模式，不含压缩用例 |
+| 2026-11-01 | `crates/zx-agent/tests/real_api.rs`，⚑ D:5/CHINA FLAG: DeepSeek `https://api.deepseek.com/v1`，⚑ D:5/CHINA FLAG: `deepseek-flash` 与 `deepseek-chat` 各一次 | 均为 6 项通过；只覆盖 `collapse` 模式，不含压缩用例 |
 | 2026-11-02 | `run` 经 `https://api.deepseek.com` 调用 ⚑ D:5/CHINA FLAG: `deepseek-flash`，附加请求字段取默认、关闭思考、`reasoning_effort="low"` | 均以 0 退出；关闭思考时输入 token 不同，字段生效 |
 | 2026-11-02 | 摘要评测，两个模型各三次 | ⚑ D:5/CHINA FLAG: `deepseek-chat` 三次通过；⚑ D:5/CHINA FLAG: `deepseek-flash` 因推理用满默认 2048 token 的输出预算而失败，调高预算后尚未运行 |
 | — | `provider.systemUpdates = "inline"` | 只在一个服务上验证过 |
@@ -108,4 +108,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.36 · 2026年11月
+ROADMAP.md · v0.37 · 2026年11月

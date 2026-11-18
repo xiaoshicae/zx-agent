@@ -123,9 +123,9 @@ zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
        │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
-       └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
+       └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai 与 zx-util）
 
-zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数），在最底层，不属于 API
+zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数、判断默认值、读环境变量），在最底层，不属于 API
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
 ```
 
@@ -133,7 +133,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 
 ## 安全模型
 
-策略只是第一道防线，不是安全边界。生产环境以最小权限账号运行，放在容器或虚拟机中，必要时限制网络。命令策略与自动放行的条件、工具与密钥的边界、容器执行见 [docs/SECURITY.md](docs/SECURITY.md)。
+策略只是第一道防线，不是安全边界；生产环境的隔离、命令策略与自动放行的条件、工具与密钥的边界、容器执行见 [docs/SECURITY.md](docs/SECURITY.md)。
 
 ## 作为库使用
 
@@ -163,7 +163,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 10 个 crate；加 `-p <crate>` 只处理一个。集成测试分四处：只用库的在 `crates/zx-agent/tests/`，只用应用层的在 `crates/zx-app/tests/`，程序 `zx-agent` 的在 `crates/zx-cli/tests/`，IM 服务的在 `crates/zx-im/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 10 个 crate；加 `-p <crate>` 只处理一个。集成测试放在被测的 crate 里，每个文件在哪、覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `crates/zx-agent/tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 

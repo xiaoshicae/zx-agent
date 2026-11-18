@@ -10,7 +10,7 @@
 |---|---|
 | `config.toml` | 环境配置 |
 | `agents/assistant.md`、`agents/unattended.md` | 替换同名的内置 agent |
-| `sessions/--<工作目录>--/` | chat 与 acp 的默认会话目录（`/` 换成 `-`），`zx-agent sessions` 列出的也是它 |
+| `sessions/--<工作目录>--/` | chat 与 acp 的默认会话目录（目录名见 [REFERENCE.md](REFERENCE.md#chat)），`zx-agent sessions` 列出的也是它 |
 
 只读主目录里的 `config.toml`，没有项目级配置文件：项目内容不能改变环境或权限。要为某个项目换一套配置，用另一个 `ZX_AGENT_HOME`。
 
@@ -65,9 +65,10 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 ⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
 
-该服务的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用现有的 provider 即可：
+⚑ D:5/CHINA FLAG: DeepSeek 的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用现有的 provider 即可：
 
 ```toml
+# ⚑ D:5/CHINA FLAG: DeepSeek
 model = "deepseek-flash"
 
 [provider]
@@ -279,4 +280,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.21 · 2026年11月
+CONFIGURATION.md · v0.22 · 2026年11月

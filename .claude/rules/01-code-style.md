@@ -19,5 +19,5 @@ paths:
 ## MSRV 与依赖的 API
 
 - 1.88 起可以用 let chains（`if let Some(x) = a && x > 1`），clippy 的 `collapsible_if` 会建议这种写法。拿不准某个标准库 API 的稳定版本时，查本机源码的 `since` 标注：`grep -rnE 'since = "1\.(89|9[0-9])' ~/.rustup/toolchains/stable-*/lib/rustlib/src/rust/library/`。
-- 依赖的 API 以 `Cargo.lock` 锁定的版本（`cargo tree -i reqwest`）和本项目启用的 feature 为准：reqwest 只启用 `json`、`stream`、`rustls`，没有 `reqwest::blocking`；tokio 没有启用 `io-std`，没有 `tokio::io::stdin`。
+- 依赖的 API 以 `Cargo.lock` 锁定的版本（`cargo tree -i reqwest`）和本项目启用的 feature 为准：各 crate 给 reqwest 只启用 `json`、`stream`、`rustls`，代码不用 `reqwest::blocking`（它只在依赖 `zx-app` 的构建里出现，由追踪导出的 `opentelemetry-otlp` 的 `reqwest-blocking-client` 打开）；tokio 没有启用 `io-std`，没有 `tokio::io::stdin`。
 - 根目录 `Cargo.toml` 的 `[workspace.dependencies]` 给 serde_json 打开了 `preserve_order`，每个 crate 的 `serde_json::Map` 都按插入序，单独编译一个 crate 时也一样；比较 JSON 字符串的断言按写入顺序写。
