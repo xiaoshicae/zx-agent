@@ -774,6 +774,10 @@ mod tests {
                 "prices must be zero or more",
             ),
             (
+                "[[models]]\nid = 'm'\ncost = { input = 1.0, output = 2.0, cache_read = 0.5 }",
+                "unknown field `cache_read`",
+            ),
+            (
                 "[[models]]\nid = 'm'\ncontextWindow = 1000\n[[models]]\nid = 'm'\ncontextWindow = 2000",
                 "more than one [[models]] entry has the id \"m\"",
             ),

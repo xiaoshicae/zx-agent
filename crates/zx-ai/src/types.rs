@@ -90,7 +90,7 @@ pub struct ModelMeta {
 /// Prices per million tokens (pi: `ModelCost`), in one currency of the host's choosing:
 /// costs come out in that unit, and a cost budget is read in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ModelCost {
     /// Prompt tokens neither served from nor written to the cache.
     pub input: f64,
