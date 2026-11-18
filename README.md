@@ -15,22 +15,12 @@
 
 ## 快速开始
 
-需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。例外是 IM 平台（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）的 WebSocket 长连接：它只信任编译进程序的根证书，在使用私有 CA 的出口代理后面，REST 调用能通而长连接的握手可能失败。
+需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。
 
 ```bash
 cargo build --release
 export OPENAI_API_KEY=...
 ./target/release/zx-agent run --model <模型 ID> "检查本机磁盘与内存使用情况，找出资源占用最高的进程"
-```
-
-模型与服务地址可以写进 `~/.zx-agent/config.toml`，见[配置说明](docs/CONFIGURATION.md)：
-
-```toml
-model = "<模型 ID>"
-
-[provider]
-baseUrl = "https://api.openai.com/v1"
-apiKeyEnv = "OPENAI_API_KEY"
 ```
 
 本地或私有部署的 OpenAI 兼容服务（vLLM、Ollama、llama.cpp server 等）用 `ZX_BASE_URL` 指定地址；找不到 API key 时请求不带认证头：
@@ -39,7 +29,15 @@ apiKeyEnv = "OPENAI_API_KEY"
 ZX_BASE_URL=http://127.0.0.1:11434/v1 ./target/release/zx-agent run --model <模型名> "排查 nginx 返回 502 的原因"
 ```
 
-配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有：`config.toml` 决定环境，agent 决定角色。`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，主目录下的 `agents/unattended.md`、`agents/assistant.md` 替换它们；两者的区别与每个键见 [CONFIGURATION.md](docs/CONFIGURATION.md)。
+配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有：`config.toml` 决定环境，agent 决定角色。`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，主目录下 `agents/` 中的同名文件替换它们。每个键与两个内置 agent 的区别见[配置说明](docs/CONFIGURATION.md)。模型与服务地址可以写进 `config.toml`：
+
+```toml
+model = "<模型 ID>"
+
+[provider]
+baseUrl = "https://api.openai.com/v1"
+apiKeyEnv = "OPENAI_API_KEY"
+```
 
 ### 终端对话
 
@@ -59,7 +57,7 @@ zx-agent chat --session ./chat.jsonl   # 指定会话文件
 zx-agent acp
 ```
 
-`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。会话的工作目录由客户端给出；stdout 只走协议，诊断在 stderr。会话、命令、回合与退出见[参考手册](docs/REFERENCE.md#acp)。
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息：在 ACP 客户端（见[客户端目录](https://agentclientprotocol.com/overview/clients)）里把 agent 命令配置为上面这一行，会话的工作目录由客户端给出。行为见[参考手册](docs/REFERENCE.md#acp)。
 
 ### 无人值守
 
@@ -92,11 +90,11 @@ zx-agent run \
 echo "exit code: $?"
 ```
 
-`allow` 之外的 bash 命令，以及带了 `allowOptions` 之外选项的 kubectl 命令，都要审批；`run` 没有人审批，因此拒绝。`run` 用退出码表达结果：0 完成，1 失败，2 参数或配置错误，3 到 9 是各类上限、中止与被拒，见[参考手册](docs/REFERENCE.md#run-退出码)。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
+`allow` 之外的 bash 命令，以及带了 `allowOptions` 之外选项的 kubectl 命令，都要审批，`run` 没有人审批，因此拒绝（规则见[安全模型](docs/SECURITY.md#自动放行)）。退出码表达结果：0 完成，1 失败，2 参数或配置错误，其余见[参考手册](docs/REFERENCE.md#run-退出码)。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
 
 ### IM 服务
 
-`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
+`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；自动放行之外的调用在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
@@ -105,11 +103,11 @@ export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
-内置的 assistant 不限模型请求数与时间，所以示例在命令行给每次运行加了上限：不加时，一次不收敛的运行会一直占着运行名额（`maxRunning`）。等待审批的时间也算在时间上限里。`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置、会话的划分、审批、日志与退出见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
+内置的 assistant 不限模型请求数与时间，所以示例给每次运行加了上限，否则一次不收敛的运行会一直占着运行名额（`maxRunning`）；等待审批的时间也计入时间上限。`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置与服务的行为见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md#im-服务)。
 
 ### MCP 工具
 
-在 `config.toml` 中用 `[[mcp]]` 列出外部 MCP 服务器（只支持 Streamable HTTP）及交给模型的工具，模型以 `<服务器名>__<工具名>` 调用；agent 的 `permissions.allow` 列出的直接执行，其余每次都要审批。见[配置说明](docs/CONFIGURATION.md#mcp-服务器)。
+在 `config.toml` 的 `[[mcp]]` 中列出外部 MCP 服务器（只支持 Streamable HTTP）与交给模型的工具，调用默认都要审批，见[配置说明](docs/CONFIGURATION.md#mcp-服务器)。
 
 ## 架构
 
@@ -121,15 +119,15 @@ zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分
   ├─ zx-app    crates/zx-app    应用层，两个程序共用：config.toml 与 agent、装配 agent、OpenTelemetry 导出与收尾（依赖 zx-agent）
   └─ zx-agent  crates/zx-agent  SDK：把下面四个 crate 再导出成一个库，没有自己的代码
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
-       ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
-       │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
+       ├─ zx-core   crates/zx-core   内核：Agent、会话与运行，循环，会话记录，摘要，工具、策略、钩子与扩展的接口
+       │    └─ zx-ai  crates/zx-ai   消息类型、系统提示词、流式事件协议、provider 契约
        └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai 与 zx-util）
 
 zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数、判断默认值、读环境变量），在最底层，不属于 API
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
 ```
 
-命令行与 IM 服务是建在库之上的两个程序，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`，不编译命令行解析、ACP 与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
+命令行与 IM 服务是建在库之上的两个程序，不在库里（见[作为库使用](#作为库使用)）；只嵌入内核（`zx-core` 与 `zx-ai`）的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
 
 ## 安全模型
 
@@ -137,7 +135,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 
 ## 作为库使用
 
-`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、配置文件、追踪导出与 IM。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `crates/zx-agent/examples/library.rs`，接口与契约见 rustdoc（`cargo doc --open`）。
+`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、ACP、配置文件、追踪导出与 IM；要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `crates/zx-agent/examples/library.rs`，接口与契约见 rustdoc（`cargo doc --no-deps --open`）。
 
 ## 文档
 
