@@ -1,6 +1,6 @@
 [package]
 name = "zx-app"
-description = "The application layer of zx-agent: config.toml, agent files, agents assembled from them, and trace export, for the command line and other hosts"
+description = "The application layer of zx-agent: config.toml, agent files, agents assembled from them, trace export and shutdown, for the programs built on it"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 zx-agent.workspace = true
+zx-util.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -22,7 +23,7 @@ opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync"] }
 tokio-util.workspace = true
 toml.workspace = true
 
@@ -33,3 +34,7 @@ zx-testing.workspace = true
 
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+
+# A second signal ends the process by that signal (`shutdown`).
+[target."cfg(unix)".dependencies]
+libc.workspace = true

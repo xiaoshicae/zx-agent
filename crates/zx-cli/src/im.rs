@@ -15,16 +15,17 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
 use zx_app::config::{Builtin, read_text};
 use zx_app::otel::Telemetry;
-use zx_app::{Application, Approvals, ConfiguredAgent, SessionPlace, env_value};
+use zx_app::{Application, Approvals, ConfiguredAgent, SessionPlace};
 use zx_im::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionKey, StatusFiles, UserId,
 };
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
 use zx_im_slack::{SlackChannel, SlackConfig};
+use zx_util::env::env_value;
 
 use crate::cli::{self, ImArgs};
-use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
+use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, cancel_on_signals, with_telemetry, write_line};
 
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -143,15 +144,15 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             .with_traces(telemetry.map(Telemetry::hook));
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
-        agent(&app, &SessionPlace::memory())?
+        build_agent(&app, &SessionPlace::memory())?
             .create(None)
             .await
             .context("cannot prepare a session with these settings")?;
         // The sessions of every conversation are kept under `dir`; a conversation's sessions
         // are those that carry its labels.
-        let mode = agent(&app, &SessionPlace::directory(&dir))?;
+        let agent = build_agent(&app, &SessionPlace::directory(&dir))?;
         let config = ServerConfig {
-            cwd: mode.new_session_cwd(None)?,
+            cwd: agent.new_session_cwd(None)?,
             ..server_config(&file.limits, file.replies, running, conversations, approvers)
         };
         eprintln!(
@@ -164,10 +165,10 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             dir.display()
         );
         let cancel = CancellationToken::new();
-        spawn_signal_handler(cancel.clone());
+        cancel_on_signals(cancel.clone());
         // The session file is the record of each conversation; the operator log holds
         // approvals and failures (Log), and traces, when exported, the timeline.
-        let served = Server::new(config, mode.agent().clone(), Arc::new(Log))
+        let served = Server::new(config, agent.agent().clone(), Arc::new(Log))
             .run(channels, &cancel)
             .await;
         Ok(serve_exit_code(served))
@@ -178,7 +179,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
 /// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
 /// approvals in the conversation: the server answers each request with an approver's click
 /// on the card it posts.
-fn agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgent> {
+fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
     app.build(app.model(), place, approvals)
 }

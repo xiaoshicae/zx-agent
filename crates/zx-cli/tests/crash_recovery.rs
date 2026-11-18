@@ -22,7 +22,6 @@ use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, ReadOutput
 use zx_agent::builtin::tools::executor_tools;
 use zx_agent::events::{EventKind, Interruption, RunOutcome};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
-use zx_app::config::skills::ReadSkillTool;
 
 use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
@@ -216,7 +215,7 @@ fn only_bash_among_the_built_in_tools_has_side_effects() {
     .unwrap();
     let store = OutputStore::new(dir.path(), OutputStoreConfig::new("outputs")).unwrap();
     tools.push(Arc::new(ReadOutputTool::new(store)));
-    tools.push(Arc::new(ReadSkillTool::new(Vec::new()).unwrap()));
+    // read_skill, which zx-app registers, is checked with it (`assembly::skills`).
     let effects: Vec<(&str, Effects)> = tools.iter().map(|tool| (tool.name(), tool.effects())).collect();
     assert_eq!(
         effects,
@@ -224,7 +223,6 @@ fn only_bash_among_the_built_in_tools_has_side_effects() {
             ("bash", Effects::SideEffects),
             ("read_file", Effects::ReadOnly),
             ("read_output", Effects::ReadOnly),
-            ("read_skill", Effects::ReadOnly),
         ]
     );
 }

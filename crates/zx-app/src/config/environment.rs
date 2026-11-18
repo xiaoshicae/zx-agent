@@ -1,6 +1,6 @@
 //! `config.toml`: where and with what an agent runs. The file is optional, and every key in
-//! it is: what it leaves out keeps the built-in default. The command line and its variables
-//! go over it; that is up to the frontend.
+//! it is: what it leaves out keeps the built-in default. What a host and the environment
+//! variables say over it is laid on by the assembly (`crate::assembly`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -58,9 +58,9 @@ pub struct ContainerSettings {
     pub root: Option<Access>,
 }
 
-/// An external MCP server whose listed tools the model may call. The frontends connect it at
-/// startup. Its tools ask a person, and are refused where no one can answer, as in `run`,
-/// unless the agent's `permissions.allow` lists them.
+/// An external MCP server whose listed tools the model may call, connected when the host
+/// starts. Its tools ask a person, and are refused where no one can answer, unless the
+/// agent's `permissions.allow` lists them.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServer {
@@ -85,8 +85,8 @@ pub struct McpServer {
 /// reached.
 #[derive(Clone, Debug)]
 pub struct ProviderSettings {
-    /// Where requests go and how they are written; the key is left to the frontend, which
-    /// reads it from `api_key_env`.
+    /// Where requests go and how they are written; the API key is not here: the assembly
+    /// reads it from the variable `api_key_env` names.
     pub openai: OpenAiConfig,
     /// Name of the variable holding the API key.
     pub api_key_env: String,
@@ -109,7 +109,9 @@ impl Default for ProviderSettings {
 pub struct Config {
     /// Where the file is, or would be; `None` without a home directory.
     pub path: Option<PathBuf>,
-    /// The model ID, unless `--model` or `ZX_MODEL` names one.
+    /// The model ID, unless the host names one ([`Overrides::model`](crate::Overrides::model)),
+    /// or `ZX_MODEL` does where the environment is read
+    /// ([`Application::from_environment`](crate::Application::from_environment)).
     pub model: Option<String>,
     /// How hard a reasoning model thinks.
     pub reasoning: Option<Reasoning>,
@@ -117,8 +119,8 @@ pub struct Config {
     pub max_tokens: Option<u32>,
     /// Default bash command timeout, and that of MCP calls, in seconds.
     pub tool_timeout_secs: Option<u64>,
-    /// How long an approval request of chat, acp or im waits for an answer, in seconds; an
-    /// unanswered request is denied.
+    /// How long a tool call waits for a person's approval, in seconds; an unanswered request
+    /// is denied.
     pub approval_timeout_secs: Option<u64>,
     /// Files holding secrets to redact from tool output, or directories of such files;
     /// absolute after load.
@@ -233,7 +235,7 @@ impl Config {
     /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries:
     /// their `name`, `url` and `tools` as [`ServerConfig::validate`] does, whose errors name
     /// the server and those fields, and the keys that only config.toml has.
-    pub fn mcp_tool_names(&self) -> Result<Vec<String>> {
+    pub(crate) fn mcp_tool_names(&self) -> Result<Vec<String>> {
         let mut servers = HashSet::new();
         let mut names = Vec::new();
         for server in &self.mcp {

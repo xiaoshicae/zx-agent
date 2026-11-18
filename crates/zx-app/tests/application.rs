@@ -130,6 +130,25 @@ async fn invalid_model_and_budget_are_rejected_before_any_session_is_created() {
 }
 
 #[tokio::test]
+async fn a_host_that_gives_a_negative_or_unbounded_cost_budget_gets_an_error() {
+    for amount in [-1.0, f64::NAN, f64::INFINITY] {
+        let overrides = Overrides {
+            cost_budget: Some(amount),
+            ..Overrides::default()
+        };
+        let refused = Application::from_config(configured(), None, overrides, Builtin::Unattended).await;
+        let error = match refused {
+            Ok(_) => panic!("the cost budget {amount} was accepted"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("a cost budget must be zero (none) or a positive amount"),
+            "{amount}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_explicit_configuration_is_checked_as_a_file_would_be() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {

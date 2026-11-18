@@ -43,20 +43,22 @@ use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
+use zx_app::shutdown::next_event;
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace, resolve_cwd};
 
 use crate::cli::{self, AcpArgs};
 use crate::listing;
-use crate::process::{EXIT_COMPLETED, next_event, spawn_signal_handler, with_telemetry};
+use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
 
 use updates::Updates;
 
 struct Host {
     /// The agent of every session, which also holds the sessions the client has open: the
     /// client's approval is asked for its calls. With it, where the sessions are kept, which
-    /// is the session files chat keeps too, or memory with `--no-session`, and `--cwd`, for
-    /// a listing that names no directory.
-    mode: ConfiguredAgent,
+    /// is the session files chat keeps too, or memory with `--no-session`.
+    agent: ConfiguredAgent,
+    /// `--cwd`, the directory of a listing that names none; the current one without it.
+    cwd: Option<PathBuf>,
     /// Cancelled when the process is told to stop: every turn then cancels its run.
     stop: CancellationToken,
     /// Each turn holds a sender of this channel while it runs, and nothing is ever sent:
@@ -68,19 +70,19 @@ struct Host {
 impl Host {
     /// The session `id` when the client has it open.
     fn session(&self, id: &SessionId) -> Option<Session> {
-        self.mode.agent().session(&id.0)
+        self.agent.agent().session(&id.0)
     }
 
     /// Whether sessions are kept as files, where a later request or process finds them
     /// again: not with `--no-session`.
     fn keeps_files(&self) -> bool {
-        self.mode.place().is_persistent()
+        self.agent.place().is_persistent()
     }
 
     /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
     /// It is kept among the session files, where `session/load` finds it again.
     async fn create(&self, cwd: &Path) -> Result<SessionId> {
-        let session = self.mode.create(Some(cwd)).await?;
+        let session = self.agent.create(Some(cwd)).await?;
         Ok(SessionId::new(session.id()))
     }
 
@@ -92,7 +94,7 @@ impl Host {
     /// session in it.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
         let open = self.session(id);
-        let (id, place) = (&*id.0, &self.mode.place());
+        let (id, place) = (&*id.0, &self.agent.place());
         let cwd = resolve_cwd(Some(cwd))?;
         let directory = place.location(&cwd);
         let unknown = || match &directory {
@@ -117,12 +119,12 @@ impl Host {
         if !kept_there {
             return Err(unknown().into());
         }
-        let session = crate::process::resume(&self.mode, id).await?;
+        let session = crate::process::resume(&self.agent, id).await?;
         // Two directories can share a directory name of sessions (`/a-b` and `/a/b`).
         if session.cwd() != cwd {
             // Started in another directory: not a session of this one, and not left open,
             // where the next request would find it whatever directory it names.
-            self.mode.agent().close_session(id);
+            self.agent.agent().close_session(id);
             return Err(unknown().into());
         }
         Ok(session)
@@ -161,12 +163,11 @@ impl Host {
             )
             .into());
         }
-        let cwd = request.cwd.as_deref().or(self.mode.cwd());
-        let cwd = resolve_cwd(cwd)?;
+        let cwd = resolve_cwd(request.cwd.as_deref().or(self.cwd.as_deref()))?;
         if !self.keeps_files() {
             return Ok(Vec::new());
         }
-        let kept = self.mode.place().started_in(&cwd).await?;
+        let kept = self.agent.place().started_in(&cwd).await?;
         Ok(kept.sessions.iter().map(session_info).collect())
     }
 
@@ -294,7 +295,7 @@ impl Host {
         request: &CloseSessionRequest,
         responder: Responder<CloseSessionResponse, V1>,
     ) -> Result<(), Error> {
-        self.mode.agent().close_session(&request.session_id.0);
+        self.agent.agent().close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
 }
@@ -318,7 +319,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// A signal cancels the turns in progress, and the connection is served until they have
 /// ended, so that each session records how its turn ended; whether the client still reads
 /// the answers is not waited for. The sessions close as the connection and the agent are
-/// dropped on the way out, before the caller exports what remains of the traces.
+/// dropped on the way out, before what remains of the traces is exported.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
@@ -330,12 +331,13 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
-    let mode = app.build(app.model(), &place, approvals)?;
+    let agent = app.build(app.model(), &place, approvals)?;
     let stop = CancellationToken::new();
-    spawn_signal_handler(stop.clone());
+    cancel_on_signals(stop.clone());
     let (turns, mut turns_ended) = mpsc::channel::<()>(1);
     let connection = connect(Arc::new(Host {
-        mode,
+        agent,
+        cwd: app.cwd().map(Path::to_path_buf),
         stop: stop.clone(),
         turns: turns.downgrade(),
     }));

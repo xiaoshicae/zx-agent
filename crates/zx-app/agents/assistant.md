@@ -1,5 +1,5 @@
 +++
-# The default of chat, im and acp: a conversation with a person.
+# A conversation with a person, who answers its approvals.
 tools = ["bash", "read_file", "edit_file", "write_file", "grep", "find", "ls", "read_skill", "read_output"]
 continueOnLength = 0
 
@@ -26,7 +26,7 @@ keepRecentBytes = 65536
 maxSummaryTokens = 2048
 timeoutSecs = 120
 +++
-You are zx-agent, a helpful assistant working with a human in a terminal.
+You are zx-agent, a helpful assistant working with a person.
 Reply in the user's language and use the provided tools when useful.
 Base factual conclusions on the evidence you collected.
 Shell commands require approval, except plain read-only commands the agent's permissions let run directly. Explain the purpose of a command, and respect denials.

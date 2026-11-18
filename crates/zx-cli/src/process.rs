@@ -1,18 +1,18 @@
-//! What every subcommand shares of the process: exit codes, lines on stdout, the shutdown
-//! signals and the telemetry export.
+//! What every subcommand shares of the process: exit codes, the configured application and
+//! its sessions, lines on stdout, and what the subcommands say on stderr about the shutdown
+//! signals and the trace export, which `zx_app::shutdown` runs.
 
-use std::io::{self, Write};
+use std::io::Write;
 
 use anyhow::Result;
-#[cfg(unix)]
-use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::Session;
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::transcript::Transcript;
-use zx_agent::{Run, Session};
 use zx_app::config::Builtin;
-use zx_app::otel::{Telemetry, TraceHook, TraceParent};
+use zx_app::otel::Telemetry;
+use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, ConfiguredAgent, NoModel, Overrides};
 
 /// Exit codes, so schedulers can react without parsing output.
@@ -28,11 +28,14 @@ const EXIT_COST_BUDGET: u8 = 8;
 /// `run --fail-on-denied`: completed, but a policy or an approval denied a tool call.
 pub(crate) const EXIT_DENIED: u8 = 9;
 
-/// What the process shares, read and connected once for sessions of `agent`, with its
-/// startup notices written to stderr. Without a model, the error names the command line's
-/// ways to give one.
-pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Application> {
-    let app = Application::from_environment(overrides, agent)
+/// The traces' `service.name`, unless `OTEL_SERVICE_NAME` sets one: the program's name.
+const SERVICE_NAME: &str = "zx-agent";
+
+/// What the process shares, read and connected once for sessions of `builtin`, with its
+/// startup notices written to stderr. Without a model, the error names the program's ways to
+/// give one.
+pub(crate) async fn connect(overrides: Overrides, builtin: Builtin) -> Result<Application> {
+    let app = Application::from_environment(overrides, builtin)
         .await
         .map_err(with_model_hint)?;
     for notice in app.notices() {
@@ -41,12 +44,13 @@ pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Appl
     Ok(app)
 }
 
-/// `error`, or, when no model was given, the command line's ways to give one.
+/// `error`, or, when no model was given, the ways to give one: `--model`, over `ZX_MODEL`,
+/// which the application reads, over config.toml.
 fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<NoModel>() {
         Some(no_model) => anyhow::anyhow!(
             "no model: pass --model, set ZX_MODEL, or set model in {}",
-            no_model.place
+            no_model.config_file
         ),
         None => error,
     }
@@ -81,113 +85,11 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
     }
 }
 
-/// SIGINT and SIGTERM cancel `cancel`; what it cancels still reports how it ended. On Unix a
-/// second signal ends the process at once, for a stop that takes too long, such as an export
-/// to a collector that does not answer.
-///
-/// The listeners are registered before this returns, so a signal that arrives once the run
-/// has started always cancels it instead of killing the process. The waiting task is detached
-/// on purpose: it lives until a signal ends the process, or the process exits.
-pub(crate) fn spawn_signal_handler(cancel: CancellationToken) {
-    match Signals::new() {
-        Ok(mut signals) => {
-            tokio::spawn(async move {
-                signals.next().await;
-                cancel.cancel();
-                #[cfg(unix)]
-                end_by(signals.next().await);
-            });
-        }
-        // Without signal handling the run is still bounded by its own limits, so it continues.
-        Err(e) => eprintln!("zx-agent: cannot listen for shutdown signals: {e}"),
-    }
-}
-
-/// End the process at once by the signal of `interrupt`, as it ends without a listener:
-/// shells and supervisors see a death by that signal. Tokio goes on catching a signal it has
-/// listened for, also once no listener is left, so the default action is restored first.
-#[cfg(unix)]
-fn end_by(interrupt: Interrupt) {
-    let number = match interrupt {
-        Interrupt::Cancel => libc::SIGINT,
-        Interrupt::Terminate => libc::SIGTERM,
-    };
-    // SAFETY: `signal` and `raise` take plain integers and touch no memory of this program;
-    // with the default action back, the raised signal ends the process.
-    unsafe {
-        libc::signal(number, libc::SIG_DFL);
-        libc::raise(number);
-    }
-}
-
-/// The next event of `run`, a run of `session`. Once `stop` is cancelled, as a signal
-/// cancels it, so is the run, which is still read to its end for its report; cancelling a
-/// cancelled run again changes nothing.
-pub(crate) async fn next_event(run: &mut Run, session: &Session, stop: &CancellationToken) -> Option<Event> {
-    tokio::select! {
-        biased;
-        () = stop.cancelled() => {
-            session.cancel();
-            run.next().await
-        }
-        event = run.next() => event,
-    }
-}
-
-/// Which signal arrived.
-#[derive(Clone, Copy)]
-pub(crate) enum Interrupt {
-    /// SIGINT, or Ctrl+C.
-    Cancel,
-    /// SIGTERM.
-    Terminate,
-}
-
-/// SIGINT and SIGTERM listeners, registered for as long as this lives: a frontend that
-/// cancels one prompt on a signal keeps listening for the next.
-pub(crate) struct Signals {
-    #[cfg(unix)]
-    interrupt: Signal,
-    #[cfg(unix)]
-    terminate: Signal,
-    #[cfg(not(unix))]
-    interrupt: tokio::signal::windows::CtrlC,
-}
-
-impl Signals {
-    pub(crate) fn new() -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            Ok(Self {
-                interrupt: signal(SignalKind::interrupt())?,
-                terminate: signal(SignalKind::terminate())?,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self {
-                interrupt: tokio::signal::windows::ctrl_c()?,
-            })
-        }
-    }
-
-    /// The next signal. `recv` yields `None` only when the runtime shuts down, which ends the
-    /// process anyway.
-    pub(crate) async fn next(&mut self) -> Interrupt {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = self.interrupt.recv() => Interrupt::Cancel,
-                _ = self.terminate.recv() => Interrupt::Terminate,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            match self.interrupt.recv().await {
-                Some(()) => Interrupt::Cancel,
-                None => Interrupt::Terminate,
-            }
-        }
+/// SIGINT and SIGTERM cancel `cancel` ([`spawn_signal_handler`]). When they cannot be listened
+/// for, the subcommand goes on, still bounded by its own limits, and says so on stderr.
+pub(crate) fn cancel_on_signals(cancel: CancellationToken) {
+    if let Err(error) = spawn_signal_handler(cancel) {
+        eprintln!("zx-agent: cannot listen for shutdown signals: {error}");
     }
 }
 
@@ -223,61 +125,29 @@ impl JsonlEvents {
     }
 }
 
-/// Run `mode` with the trace export started, when an OTLP endpoint is configured,
-/// and finished once it returns.
+/// Run `body`, a subcommand, with the trace export of [`shutdown::with_telemetry`]: say on
+/// stderr that traces are exported when they are, and, once `body` returns, what could not
+/// be exported. Telemetry never changes the exit code.
 ///
-/// An endpoint the exporter refuses is a configuration error, reported before `mode` starts;
-/// what remains to export is sent before the exit code is returned.
-pub(crate) async fn with_telemetry<M>(mode: M) -> Result<u8>
+/// An endpoint the exporter refuses is a configuration error, reported before `body` starts.
+pub(crate) async fn with_telemetry<B>(body: B) -> Result<u8>
 where
-    M: AsyncFnOnce(Option<&Telemetry>) -> Result<u8>,
+    B: AsyncFnOnce(Option<&Telemetry>) -> Result<u8>,
 {
-    let telemetry = start_telemetry()?;
-    let result = mode(telemetry.as_ref()).await;
-    finish_telemetry(telemetry).await;
-    result
-}
-
-/// Export traces when an OTLP endpoint is configured (`zx_app::otel`), and say so on
-/// stderr.
-fn start_telemetry() -> Result<Option<Telemetry>> {
-    let telemetry = Telemetry::from_env()?;
-    if telemetry.is_some() {
-        eprintln!("[otel] exporting traces over OTLP/HTTP");
-    }
-    Ok(telemetry)
-}
-
-/// The trace hook of an unattended run: the run continues the caller's trace when
-/// `TRACEPARENT` names one, as a scheduler or `otel-cli` sets it. A value that is not a
-/// traceparent is reported, and the run starts a trace of its own.
-pub(crate) fn run_traces(telemetry: &Telemetry) -> TraceHook {
-    match TraceParent::from_env() {
-        Ok(Some(parent)) => {
-            eprintln!("[otel] continuing trace {}", parent.trace_id());
-            telemetry.hook_under(&parent)
+    let (code, end) = shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| {
+        if telemetry.is_some() {
+            eprintln!("[otel] exporting traces over OTLP/HTTP");
         }
-        Ok(None) => telemetry.hook(),
-        Err(error) => {
-            eprintln!("[otel] {error:#}; the run starts a trace of its own");
-            telemetry.hook()
-        }
+        body(telemetry).await
+    })
+    .await?;
+    if end.dropped > 0 {
+        eprintln!("[otel] {} event(s) were not exported: the queue was full", end.dropped);
     }
-}
-
-/// Export the spans that remain. Telemetry never changes the outcome: failures only go to
-/// stderr.
-async fn finish_telemetry(telemetry: Option<Telemetry>) {
-    let Some(telemetry) = telemetry else {
-        return;
-    };
-    let dropped = telemetry.dropped();
-    if dropped > 0 {
-        eprintln!("[otel] {dropped} event(s) were not exported: the queue was full");
-    }
-    if let Err(error) = telemetry.shutdown().await {
+    if let Some(error) = end.error {
         eprintln!("[otel] {error:#}");
     }
+    code
 }
 
 #[cfg(test)]
@@ -285,9 +155,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_model_names_the_command_lines_ways_to_give_one() {
+    fn a_missing_model_names_the_programs_ways_to_give_one() {
         let no_model = NoModel {
-            place: "/home/me/.zx-agent/config.toml".into(),
+            config_file: "/home/me/.zx-agent/config.toml".into(),
         };
         assert_eq!(
             format!("{:#}", with_model_hint(no_model.into())),

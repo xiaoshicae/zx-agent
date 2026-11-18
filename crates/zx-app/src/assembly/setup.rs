@@ -1,6 +1,6 @@
-//! What the command line sets up for each session: where its commands run, the tools that
-//! work there, the store of long tool results in its working directory, and the prompt
-//! sections that describe the machine, the project and the skills.
+//! What the assembly sets up for each session: where its commands run, the tools that work
+//! there, the store of long tool results in its working directory, and the prompt sections
+//! that describe the machine, the project and the skills.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,8 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::config::skills::READ_SKILL;
-use crate::config::{ContainerSettings, Execution, ProjectContext};
+use crate::config::{ContainerSettings, Execution, ProjectContext, READ_SKILL};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, SpillOutputs};
 use zx_agent::builtin::tools::{self, EXECUTOR_TOOL_NAMES, FileMutationQueue, READ_OUTPUT};
@@ -21,7 +20,7 @@ use zx_agent::transcript::SessionHeader;
 use super::SessionPlace;
 use super::execution::{check_session_outside, executor};
 
-/// What each session of a mode gets for itself, made when the session is created or opened
+/// What each session of an agent gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
 pub(super) struct PerSession {
     /// The tools the agent enables, by name: those of the executor are made for each
@@ -88,7 +87,7 @@ impl SessionSetup for PerSession {
             // again.
             let paging = [READ_OUTPUT, READ_SKILL, tools::READ_FILE];
             let (spill, reader) = SpillOutputs::with_reader(store, paging.map(String::from).to_vec());
-            // Named like the hooks every session shares (`cli::agent::hooks`).
+            // Named like the hooks every session shares (`agent::hooks`).
             hooks.push("spill_outputs", Arc::new(spill));
             host.push(Arc::new(reader));
         }

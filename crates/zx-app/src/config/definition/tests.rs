@@ -44,9 +44,12 @@ fn load_file(front: &str) -> Result<AgentDefinition> {
     load_with(front, &Config::default())
 }
 
-/// The built-in agent `kind`, without a zx-agent home.
-fn load(kind: Builtin) -> AgentDefinition {
-    AgentDefinition::load(kind, None, &Config::default()).unwrap()
+/// Every built-in agent.
+const BUILTINS: [Builtin; 2] = [Builtin::Unattended, Builtin::Assistant];
+
+/// The built-in agent `builtin`, without a zx-agent home.
+fn load(builtin: Builtin) -> AgentDefinition {
+    AgentDefinition::load(builtin, None, &Config::default()).unwrap()
 }
 
 /// The configuration of a `config.toml` holding `text`.
@@ -64,7 +67,7 @@ fn body_of(file: &str) -> &str {
 
 #[test]
 fn builtin_names_are_spelt_as_extends_takes_them() {
-    for builtin in Builtin::ALL {
+    for builtin in BUILTINS {
         let parsed: Builtin = serde_json::from_value(serde_json::Value::String(builtin.name().into())).unwrap();
         assert_eq!(parsed, builtin);
         assert_eq!(load(builtin).name, builtin.name());
@@ -100,10 +103,11 @@ fn built_in_agents_preserve_the_existing_scenario_defaults() {
         assistant.instructions,
         body_of(include_str!("../../../agents/assistant.md"))
     );
+    // A person may answer in a terminal, a chat platform or an editor: it names none of them.
     assert!(
         assistant
             .instructions
-            .starts_with("You are zx-agent, a helpful assistant")
+            .starts_with("You are zx-agent, a helpful assistant working with a person.\n")
     );
     assert_eq!(assistant.limits.max_model_requests, None);
     assert_eq!(assistant.limits.timeout, None);
@@ -134,16 +138,16 @@ fn built_in_agents_preserve_the_existing_scenario_defaults() {
 
 #[test]
 fn no_built_in_agent_names_a_program_of_a_particular_environment() {
-    for kind in Builtin::ALL {
-        let agent = load(kind);
-        assert!(agent.permissions.allow_options.is_empty(), "{kind:?}");
+    for builtin in BUILTINS {
+        let agent = load(builtin);
+        assert!(agent.permissions.allow_options.is_empty(), "{builtin:?}");
         assert!(
             !agent
                 .permissions
                 .allowed_commands()
                 .iter()
                 .any(|prefix| prefix.contains("kubectl")),
-            "{kind:?}"
+            "{builtin:?}"
         );
     }
 }
@@ -347,7 +351,7 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
     .unwrap();
     // Not the name of a built-in agent: never read, even though it is broken.
     std::fs::write(agents.join("ops.md"), "not an agent").unwrap();
-    let load_in = |kind| AgentDefinition::load(kind, Some(home.path()), &Config::default());
+    let load_in = |builtin| AgentDefinition::load(builtin, Some(home.path()), &Config::default());
     let assistant = load_in(Builtin::Assistant).unwrap();
     assert_eq!(assistant.name, "assistant");
     assert_eq!((assistant.instructions.as_str(), assistant.tools.len()), ("Mine.\n", 0));

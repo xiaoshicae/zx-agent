@@ -1,8 +1,8 @@
-//! The agent of a mode, shared by run, chat, im and acp: the agent file with the command
-//! line over it, in the environment of the settings, with the provider, the policies and
-//! the hooks every mode registers, and the sessions a mode opens with it.
+//! The agent a host builds: the agent file with the host's [`Overrides`] over it, in the
+//! environment of the settings, with the provider, the policies and the hooks every agent
+//! registers, and the sessions the host creates or opens with it.
 //!
-//! The agent file is loaded here, once for each agent a mode builds, and everything that
+//! The agent file is loaded here, once for each agent a host builds, and everything that
 //! depends on it is decided here too, such as which MCP tools ask. What belongs to one
 //! session is in `setup`.
 
@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::config::skills::{READ_SKILL, ReadSkillTool};
-use crate::config::{AgentDefinition, Config};
+use crate::config::{AgentDefinition, Config, READ_SKILL, cost_budget};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::{Provider, SystemPrompt};
@@ -25,42 +24,51 @@ use zx_agent::hooks::HookChain;
 use zx_agent::policy::{ApprovalMode, PolicyChain, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
+use zx_util::env::env_value;
 
 use super::setup::PerSession;
-use super::{Overrides, SessionPlace, Shared, env_value, resolve_cwd};
+use super::skills::ReadSkillTool;
+use super::{Application, Overrides, SessionPlace, resolve_cwd};
 
-/// Who answers when a tool call of a mode's sessions needs approval.
+/// Who answers when a tool call of the agent's sessions needs approval.
 #[derive(Clone, Copy)]
 pub enum Approvals<'a> {
-    /// Nobody, as in `run`: a call that a policy asks about is denied.
+    /// Nobody, for runs that nobody attends: a call that a policy asks about is denied.
     Nobody,
     /// A person, within the approval timeout of config.toml. Every bash command asks first,
     /// for this reason, except those the agent auto-approves, or none when the agent
-    /// approves every call; other tools follow the agent's permissions. Chat, im and acp
-    /// work this way.
+    /// approves every call; other tools follow the agent's permissions.
     Person(&'a str),
 }
 
-/// The agent of a mode, and what the mode shows about it.
+/// An agent configured from config.toml and its agent file, with what the host says over
+/// them, and the [`SessionPlace`] where its sessions are kept; with what a host shows about
+/// it, such as its name and the commands it runs without asking.
 pub struct ConfiguredAgent {
     agent: Agent,
     provider: Arc<dyn Provider>,
     name: String,
     auto_approve_commands: Vec<String>,
     place: SessionPlace,
+    /// Where new sessions work unless a request names a directory: [`Overrides::cwd`].
     cwd: Option<PathBuf>,
 }
 
 impl ConfiguredAgent {
-    /// The agent of a mode that asks `model` and keeps its sessions in `place`, from what
-    /// the process shares. Startup reads; no session exists yet.
+    /// The agent of `app` that asks `model` and keeps its sessions in `place`, sharing what
+    /// `app` read and connected. Startup reads; no session exists yet.
     ///
     /// Configuration errors are reported here: an agent file or a tool setting that cannot
     /// be used, a cost budget without prices, invalid provider settings.
-    pub(crate) fn build(shared: &Shared, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<Self> {
-        let settings = &shared.settings;
+    pub(super) fn build(
+        app: &Application,
+        model: &str,
+        place: &SessionPlace,
+        approvals: Approvals<'_>,
+    ) -> Result<Self> {
+        let settings = &app.settings;
         let config = &settings.config;
-        let mut agent = load_agent(shared)?;
+        let mut agent = load_agent(app)?;
         let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
@@ -70,17 +78,17 @@ impl ConfiguredAgent {
         let (provider, api_key) = provider(config)?;
         let provider: Arc<dyn Provider> = Arc::new(provider);
         let skills = skills_tool(&mut agent)?;
-        let (policies, approvals) = policies(shared, &mut agent, approvals);
+        let (policies, approvals) = policies(app, &mut agent, approvals);
         let name = std::mem::take(&mut agent.name);
         let auto_approve_commands = agent.permissions.allowed_commands();
         let role = AgentConfig {
             system_prompt: SystemPrompt::new(&agent.instructions),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
-            hooks: hooks(shared, &agent, api_key),
+            hooks: hooks(app, &agent, api_key),
             policies,
             approvals,
-            extensions: shared.mcp.servers.clone(),
+            extensions: app.mcp.servers.clone(),
             models,
             session_cache_key: config.provider.openai.body.prompt_cache_key,
             limits: agent.limits,
@@ -93,11 +101,11 @@ impl ConfiguredAgent {
                 skills,
                 execution: config.execution,
                 container: config.container.clone(),
-                hidden_env: hidden_env(shared),
+                hidden_env: hidden_env(app),
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
-                file_queue: Arc::clone(&shared.file_queue),
+                file_queue: Arc::clone(&app.file_queue),
             })),
             ..AgentConfig::new(provider.clone(), model)
         };
@@ -107,7 +115,7 @@ impl ConfiguredAgent {
             name,
             auto_approve_commands,
             place: place.clone(),
-            cwd: shared.overrides.cwd.clone(),
+            cwd: app.overrides.cwd.clone(),
         })
     }
 
@@ -136,12 +144,6 @@ impl ConfiguredAgent {
         &self.place
     }
 
-    /// Where new sessions work unless a client names a directory: [`Overrides::cwd`];
-    /// `None` for the current directory.
-    pub fn cwd(&self) -> Option<&Path> {
-        self.cwd.as_deref()
-    }
-
     /// Open a stored session without writing diagnostics to the process's outputs.
     pub async fn open(&self, id: &str) -> Result<Session> {
         match self.agent.open_session(id).await {
@@ -150,16 +152,16 @@ impl ConfiguredAgent {
         }
     }
 
-    /// Where a new session works: `cwd` when a client names a project directory, else the
-    /// configured one, else the current directory, by its real path.
+    /// Where a new session works: `cwd` when a request names a project directory, else
+    /// [`Overrides::cwd`], else the current directory, by its real path.
     ///
     /// Fails when that directory cannot be resolved or is not a directory.
     pub fn new_session_cwd(&self, cwd: Option<&Path>) -> Result<PathBuf> {
         resolve_cwd(cwd.or(self.cwd.as_deref()))
     }
 
-    /// Create a session in `cwd`, otherwise in the configured override directory or the
-    /// process's current directory.
+    /// Create a session in `cwd`, otherwise in [`Overrides::cwd`] or the process's current
+    /// directory.
     ///
     /// Startup reads and, in container mode, starting the container. A container that cannot
     /// start is reported before the session's file is created.
@@ -188,12 +190,12 @@ fn check_reasoning_fields(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The selected agent with the command line's tools and budgets over it, validated: explicit
+/// The agent `app` runs, with the host's tools and budgets over it, validated: explicit
 /// values replace the agent's.
-fn load_agent(shared: &Shared) -> Result<AgentDefinition> {
-    let config = &shared.settings.config;
-    let mut agent = AgentDefinition::load(shared.agent, shared.settings.home.as_deref(), config)?;
-    if let Some(tools) = &shared.overrides.tools {
+fn load_agent(app: &Application) -> Result<AgentDefinition> {
+    let config = &app.settings.config;
+    let mut agent = AgentDefinition::load(app.builtin, app.settings.home.as_deref(), config)?;
+    if let Some(tools) = &app.overrides.tools {
         agent.tools = tools
             .iter()
             .map(|name| name.trim())
@@ -201,14 +203,15 @@ fn load_agent(shared: &Shared) -> Result<AgentDefinition> {
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut agent, &shared.overrides);
+    apply_budgets(&mut agent, &app.overrides)?;
     agent.validate(config)?;
     Ok(agent)
 }
 
 /// The request limit, the time limit and the token and cost budgets of `budget` over the
-/// agent's; a zero timeout or budget removes the agent's.
-fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) {
+/// agent's; a zero timeout or budget removes the agent's. A cost budget that an agent file
+/// could not hold either is an error.
+fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) -> Result<()> {
     if let Some(turns) = budget.max_model_requests {
         agent.limits.max_model_requests = Some(turns);
     }
@@ -219,8 +222,9 @@ fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) {
         agent.limits.token_budget = (tokens > 0).then_some(tokens);
     }
     if let Some(amount) = budget.cost_budget {
-        agent.limits.cost_budget = (amount > 0.0).then_some(amount);
+        agent.limits.cost_budget = cost_budget(amount)?;
     }
+    Ok(())
 }
 
 /// The provider of config.toml, and the API key it authenticates with.
@@ -248,19 +252,19 @@ fn skills_tool(agent: &mut AgentDefinition) -> Result<Option<(Arc<dyn Tool>, Str
     Ok(Some((Arc::new(tool), catalog)))
 }
 
-/// The policies every session of the mode asks, in this order: the command policy, the
+/// The policies every session of the agent asks, in this order: the command policy, the
 /// policy of the agent's permissions with the MCP tools it does not allow, and, where a
 /// person answers, the one that asks before bash commands. With them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest verdict of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
-fn policies(shared: &Shared, agent: &mut AgentDefinition, approvals: Approvals<'_>) -> (PolicyChain, ApprovalMode) {
+fn policies(app: &Application, agent: &mut AgentDefinition, approvals: Approvals<'_>) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
     // The commands an agent allows run without asking, the others ask.
     let commands = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
     policies.push("command_policy", Arc::new(commands));
     let auto_approve = agent.permissions.auto_approval();
-    let mcp_ask = mcp_asking(agent, &shared.mcp.names);
+    let mcp_ask = mcp_asking(agent, &app.mcp.names);
     if let Some(rules) = rules_policy(agent, &mcp_ask, auto_approve.clone()) {
         policies.push("agent_permissions", Arc::new(rules));
     }
@@ -282,28 +286,28 @@ fn policies(shared: &Shared, agent: &mut AgentDefinition, approvals: Approvals<'
         .auto_approve(auto_approve);
         policies.push("bash_approval", Arc::new(bash));
     }
-    (policies, ApprovalMode::Wait(shared.settings.approval_timeout))
+    (policies, ApprovalMode::Wait(app.settings.approval_timeout))
 }
 
-/// The hooks every session of the mode shares: continuation, redaction of the API key `api_key`
-/// and the other credentials, and the trace export.
+/// The hooks every session of the agent shares: continuation, redaction of the API key
+/// `api_key` and the other credentials, and the trace export.
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
 /// `[hook]` lines show, contains `_`, which MCP server names cannot, so it never clashes with
 /// an extension's.
-fn hooks(shared: &Shared, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
+fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
     let mut hooks = HookChain::new();
     hooks.push(
         "continue_on_length",
         Arc::new(ContinueOnLength::new(agent.continue_on_length)),
     );
     // The hook reads the secret files again before every use.
-    let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(shared)))
-        .with_secret_files(shared.secret_files.clone());
+    let redaction =
+        RedactSecrets::new(api_key.into_iter().chain(hidden_values(app))).with_secret_files(app.secret_files.clone());
     hooks.push("redact_secrets", Arc::new(redaction));
     // Observes every run of every session, whoever reads its events.
-    if let Some(traces) = &shared.traces {
+    if let Some(traces) = &app.traces {
         hooks.push("trace_export", Arc::new(traces.clone()));
     }
     hooks
@@ -312,21 +316,20 @@ fn hooks(shared: &Shared, agent: &AgentDefinition, api_key: Option<String>) -> H
 /// Variables commands must not inherit: the API key, the other credentials and the headers
 /// that authenticate to a trace collector. `env` would put them into the session file and
 /// the context.
-fn hidden_env(shared: &Shared) -> Vec<String> {
-    std::iter::once(shared.settings.config.provider.api_key_env.clone())
-        .chain(shared.hidden_env.iter().cloned())
-        .chain(shared.mcp.token_env.iter().cloned())
+fn hidden_env(app: &Application) -> Vec<String> {
+    std::iter::once(app.settings.config.provider.api_key_env.clone())
+        .chain(app.hidden_env.iter().cloned())
+        .chain(app.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
         .collect()
 }
 
 /// The values to redact of the hidden variables besides the key, the trace collector's headers
 /// among them; an unset or empty variable holds nothing.
-fn hidden_values(shared: &Shared) -> impl Iterator<Item = String> + '_ {
-    shared
-        .hidden_env
+fn hidden_values(app: &Application) -> impl Iterator<Item = String> + '_ {
+    app.hidden_env
         .iter()
-        .chain(&shared.mcp.token_env)
+        .chain(&app.mcp.token_env)
         .map(String::as_str)
         .chain(otel::HEADER_VARIABLES)
         .filter_map(env_value)

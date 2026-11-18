@@ -173,9 +173,9 @@ impl RawLimits {
     }
 }
 
-/// A cost budget as configured, in the unit of the prices: 0 disables it. Negative and
-/// non-finite amounts are errors.
-fn cost_budget(amount: f64) -> Result<Option<f64>> {
+/// A cost budget, in the unit of the prices, as an agent file or a host gives it: 0 disables
+/// it. Negative and non-finite amounts are errors.
+pub(crate) fn cost_budget(amount: f64) -> Result<Option<f64>> {
     ensure!(
         amount.is_finite() && amount >= 0.0,
         "a cost budget must be zero (none) or a positive amount, not {amount}"

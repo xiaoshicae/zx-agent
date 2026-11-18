@@ -155,8 +155,8 @@ pub(crate) struct SessionsArgs {
 
 #[derive(Args)]
 pub(crate) struct BaseArgs {
-    /// Model id passed to the provider. Defaults to model in config.toml.
-    #[arg(long, env = "ZX_MODEL")]
+    /// Model id passed to the provider. Defaults to ZX_MODEL, else model in config.toml.
+    #[arg(long)]
     pub(crate) model: Option<String>,
 
     /// Working directory for tools. Defaults to the current directory.
@@ -189,11 +189,12 @@ pub(crate) struct BudgetArgs {
     /// currency, as long as every price uses it): the cost of its model requests by those
     /// prices. Checked before each request, so the last one may go over; a run then exits 8.
     /// The model must have prices. 0 disables it. Defaults to the agent's.
-    #[arg(long, value_parser = parse_cost_budget)]
+    #[arg(long)]
     pub(crate) cost_budget: Option<f64>,
 }
 
-/// What `base` and `budget` say over the agent and config.toml, as the assembly takes it.
+/// What `base` and `budget` say over the agent and config.toml, as the application takes it
+/// and checks it.
 pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs) -> Overrides {
     Overrides {
         model: base.model,
@@ -203,14 +204,6 @@ pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs) -> Overrides {
         timeout_secs: budget.timeout_secs,
         token_budget: budget.token_budget,
         cost_budget: budget.cost_budget,
-    }
-}
-
-/// A cost budget on the command line: zero or a positive, finite amount.
-fn parse_cost_budget(text: &str) -> Result<f64, String> {
-    match text.trim().parse::<f64>() {
-        Ok(amount) if amount.is_finite() && amount >= 0.0 => Ok(amount),
-        _ => Err(format!("expected zero (none) or a positive amount, not {text:?}")),
     }
 }
 
@@ -227,7 +220,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_request_limit_is_available_in_each_mode() {
+    fn model_request_limit_is_available_in_each_subcommand() {
         let flag = "--max-model-requests";
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", flag, "3", "go"]).unwrap();
         match cli.command {
@@ -287,17 +280,17 @@ mod tests {
 
     #[test]
     fn acp_describes_cwd_as_the_directory_of_a_listing_not_of_tools() {
-        let cwd_help = |mode: &str| {
+        let cwd_help = |name: &str| {
             let command = <Cli as clap::CommandFactory>::command();
-            let mode = command.find_subcommand(mode).unwrap();
-            let cwd = mode.get_arguments().find(|arg| arg.get_id() == "cwd").unwrap();
+            let subcommand = command.find_subcommand(name).unwrap();
+            let cwd = subcommand.get_arguments().find(|arg| arg.get_id() == "cwd").unwrap();
             cwd.get_help().unwrap().to_string()
         };
         // The client names the directory of each session it creates.
         assert!(cwd_help("acp").contains("session/list"), "{}", cwd_help("acp"));
-        for mode in ["run", "chat", "im"] {
+        for subcommand in ["run", "chat", "im"] {
             assert_eq!(
-                cwd_help(mode),
+                cwd_help(subcommand),
                 "Working directory for tools. Defaults to the current directory"
             );
         }

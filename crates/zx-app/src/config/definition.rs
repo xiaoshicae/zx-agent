@@ -1,6 +1,5 @@
-//! An agent: what it does and may do. Each mode runs a built-in agent (`run` the unattended
-//! one; `chat`, `im` and `acp` the assistant), which a file of the same name in the
-//! `agents/` directory of the zx-agent home replaces.
+//! An agent: what it does and may do. A host runs one of the built-in agents, which a file of
+//! the same name in the `agents/` directory of the zx-agent home replaces.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +7,9 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::agent_file::{AgentFile, settle_token_trigger};
-use super::skills::{self, Skill};
-use super::{Config, Execution, Permissions, context, read_text};
+use super::permissions::Permissions;
+use super::skills::{READ_SKILL, Skill, validate_skills};
+use super::{Config, Execution, context, read_text};
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
 use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
@@ -17,20 +17,18 @@ use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
 const AGENTS_DIR: &str = "agents";
 
-/// A built-in agent; an agent file may extend one of these, never another file.
+/// A built-in agent: the one a host runs, unless the user's file of its name replaces it. An
+/// agent file may extend one of these, never another file.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Builtin {
-    /// A neutral agent without a human operator, the default of `run`.
+    /// A neutral agent for runs that nobody attends: approvals have no one to answer them.
     Unattended,
-    /// A conversation with a person, the default of `chat`, `im` and `acp`.
+    /// An agent for a conversation with a person, who answers its approvals.
     Assistant,
 }
 
 impl Builtin {
-    /// Every built-in agent.
-    pub const ALL: [Builtin; 2] = [Self::Unattended, Self::Assistant];
-
     /// Its name, as `extends` and the user's file in `agents/` spell it.
     pub fn name(self) -> &'static str {
         match self {
@@ -48,55 +46,56 @@ impl Builtin {
     }
 }
 
-/// Which project instructions to read at startup. Explicit paths are absolute after load.
+/// Which project instructions a session reads when it is set up. Explicit paths are
+/// absolute after load.
 #[derive(Debug)]
-pub struct ProjectContext {
+pub(crate) struct ProjectContext {
     /// Discover root-to-cwd AGENTS.md files, bounded by the nearest Git root.
-    pub discover: bool,
+    pub(crate) discover: bool,
     /// Extra instruction files, resolved relative to the agent file at load time.
-    pub files: Vec<PathBuf>,
+    pub(crate) files: Vec<PathBuf>,
 }
 
 impl ProjectContext {
     /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
-    pub fn section(&self, cwd: &Path) -> Result<String> {
+    pub(crate) fn section(&self, cwd: &Path) -> Result<String> {
         context::load(cwd, self)
     }
 }
 
-/// A resolved agent: its file over the built-in agent it extends. Command-line overrides
-/// are applied by the frontend, which calls `validate` again before assembly.
+/// A resolved agent: its file over the built-in agent it extends. The assembly lays what a
+/// host says over the agent ([`Overrides`](crate::Overrides)) on it and checks it again.
 #[derive(Debug)]
-pub struct AgentDefinition {
+pub(crate) struct AgentDefinition {
     /// The file stem, or the built-in agent's name.
-    pub name: String,
+    pub(crate) name: String,
     /// Effective preamble, before generated machine and project sections.
-    pub instructions: String,
+    pub(crate) instructions: String,
     /// Requested built-in tools; read_skill is omitted when no catalog is registered.
-    pub tools: Vec<String>,
+    pub(crate) tools: Vec<String>,
     /// What the host lets the agent do, independently of prompt text.
-    pub permissions: Permissions,
+    pub(crate) permissions: Permissions,
     /// Per-prompt request and time budgets.
-    pub limits: RunLimits,
+    pub(crate) limits: RunLimits,
     /// Number of length-truncated responses to continue automatically.
-    pub continue_on_length: u32,
+    pub(crate) continue_on_length: u32,
     /// Project guidance discovery and explicit file paths.
-    pub context: ProjectContext,
+    pub(crate) context: ProjectContext,
     /// Catalog metadata; loading does not decode the skill bodies.
-    pub skills: Vec<Skill>,
+    pub(crate) skills: Vec<Skill>,
     /// Automatic trigger and bounded manual summarization settings. A token trigger that no
     /// file sets follows the context window of the model in use while the byte trigger is on.
-    pub compaction: compaction::Config,
+    pub(crate) compaction: compaction::Config,
 }
 
 impl AgentDefinition {
-    /// The agent `kind`, checked against `config`: the user's `agents/<name>.md` in the
+    /// The agent `builtin`, checked against `config`: the user's `agents/<name>.md` in the
     /// zx-agent `home` when that file exists, else the built-in agent. No other file is read:
     /// a file in `agents/` with another name is ignored.
-    pub fn load(kind: Builtin, home: Option<&Path>, config: &Config) -> Result<Self> {
-        let mut agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", kind.name()))) {
+    pub(crate) fn load(builtin: Builtin, home: Option<&Path>, config: &Config) -> Result<Self> {
+        let mut agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", builtin.name()))) {
             Some(path) if exists(&path)? => Self::from_file(&path)?,
-            _ => Self::builtin(kind)?,
+            _ => Self::builtin(builtin)?,
         };
         settle_token_trigger(&mut agent.compaction);
         agent.validate(config)?;
@@ -134,13 +133,13 @@ impl AgentDefinition {
         Ok(agent)
     }
 
-    /// The built-in agent `kind`, over the empty base.
-    fn builtin(kind: Builtin) -> Result<Self> {
-        let file = AgentFile::parse(kind.source()).context("invalid built-in agent")?;
+    /// The built-in agent `builtin`, over the empty base.
+    fn builtin(builtin: Builtin) -> Result<Self> {
+        let file = AgentFile::parse(builtin.source()).context("invalid built-in agent")?;
         ensure!(file.extends().is_none(), "a built-in agent extends another");
         let mut agent = Self::empty();
         file.apply(&mut agent, Path::new("."))?;
-        agent.name = kind.name().to_string();
+        agent.name = builtin.name().to_string();
         Ok(agent)
     }
 
@@ -173,7 +172,7 @@ impl AgentDefinition {
     /// Check tool names, permissions and skill registrations without reading skill bodies;
     /// permissions may name the MCP tools of `config`, and approving every call needs its
     /// container.
-    pub fn validate(&self, config: &Config) -> Result<()> {
+    pub(crate) fn validate(&self, config: &Config) -> Result<()> {
         for name in &self.tools {
             ensure!(known_tool(name), "unknown tool {name:?}");
         }
@@ -189,7 +188,7 @@ impl AgentDefinition {
                 "permissions.approveAll asks for no approval, so permissions.ask must be empty"
             );
         }
-        skills::validate(&self.skills)
+        validate_skills(&self.skills)
     }
 }
 
@@ -206,7 +205,7 @@ fn exists(path: &Path) -> Result<bool> {
 /// Whether `name` is a tool the host registers itself: one that runs on the executor,
 /// read_output, or read_skill.
 fn known_tool(name: &str) -> bool {
-    EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == skills::READ_SKILL
+    EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == READ_SKILL
 }
 
 #[cfg(test)]

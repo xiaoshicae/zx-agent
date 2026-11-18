@@ -90,7 +90,7 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(system.contains("working with a human"));
+    assert!(system.contains("working with a person"));
     assert!(!system.contains("No one will answer"));
 }
 

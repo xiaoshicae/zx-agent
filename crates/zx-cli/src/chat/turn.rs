@@ -16,6 +16,7 @@ use zx_agent::input::{Input, PendingInput};
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
 use zx_agent::{Run, Session};
+use zx_app::shutdown::{Interrupt, Signals};
 
 use super::commands::{self, Command};
 use super::info::help;
@@ -24,7 +25,6 @@ use super::output::Output;
 use super::term::Tone;
 use super::{Flow, InputMode, rejected, run_extension_command};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
-use crate::process::{Interrupt, Signals};
 use crate::render::{describe_arguments, describe_call, visible};
 
 const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";

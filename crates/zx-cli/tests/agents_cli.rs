@@ -19,14 +19,14 @@ use zx_testing::{json_lines, stderr, stdout};
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
 
-fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Command {
+fn command(server: &MockServer, dir: &Path, subcommand: &str, args: &[&str]) -> Command {
     if !agent_home(dir).join("config.toml").exists() {
         config(dir, "");
     }
     // chat keeps sessions under the home directory by default; never the real one.
     let mut command = zx_agent_in(dir, Home::User(&dir.join(".home")));
     command
-        .arg(mode)
+        .arg(subcommand)
         .args(["--model", "mock"])
         .args(args)
         .env("ZX_BASE_URL", &server.base_url)
@@ -396,7 +396,7 @@ async fn unattended_run_never_opens_a_terminal_approval_for_an_agent_extending_t
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!dir.path().join("marker").exists());
     assert!(tool_result(&server, 1).contains("no human"));
-    assert!(system(&server, 0).contains("working with a human"));
+    assert!(system(&server, 0).contains("working with a person"));
 }
 
 #[tokio::test]
@@ -426,17 +426,17 @@ async fn a_configuration_error_exits_2_without_a_model_request_or_session_file()
     }
 }
 
-/// The description printed under `flag` by `<mode> --help`.
-fn flag_help(mode: &str, flag: &str) -> String {
+/// The description printed under `flag` by `<subcommand> --help`.
+fn flag_help(subcommand: &str, flag: &str) -> String {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"))
-        .args([mode, "--help"])
+        .args([subcommand, "--help"])
         .output()
         .unwrap();
     let help = String::from_utf8(output.stdout).unwrap();
     let mut lines = help
         .lines()
         .skip_while(|line| !line.trim_start().starts_with(&format!("{flag} <")));
-    assert!(lines.next().is_some(), "{mode} --help lists {flag}");
+    assert!(lines.next().is_some(), "{subcommand} --help lists {flag}");
     lines
         .take_while(|line| !line.trim_start().starts_with('-') && !line.trim().is_empty())
         .collect::<Vec<_>>()
@@ -445,7 +445,7 @@ fn flag_help(mode: &str, flag: &str) -> String {
 
 #[test]
 fn omitted_budget_flags_are_documented_as_agent_values() {
-    for (mode, flag) in [
+    for (subcommand, flag) in [
         ("run", "--max-model-requests"),
         ("run", "--timeout-secs"),
         ("run", "--token-budget"),
@@ -454,9 +454,9 @@ fn omitted_budget_flags_are_documented_as_agent_values() {
         ("chat", "--token-budget"),
     ] {
         // A parser default here would claim a value that the agent replaces.
-        let help = flag_help(mode, flag);
-        assert!(!help.contains("[default:"), "{mode} {flag}: {help}");
-        assert!(help.contains("agent"), "{mode} {flag}: {help}");
+        let help = flag_help(subcommand, flag);
+        assert!(!help.contains("[default:"), "{subcommand} {flag}: {help}");
+        assert!(help.contains("agent"), "{subcommand} {flag}: {help}");
     }
 }
 

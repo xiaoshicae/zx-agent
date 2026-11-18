@@ -45,7 +45,7 @@ pub(super) fn spawn(mode: InputMode) -> Result<Input> {
                 };
                 let failed = line.is_err();
                 if sender.blocking_send(line).is_err() {
-                    // The frontend exited, so nobody needs further input.
+                    // The chat exited, so nobody needs further input.
                     break;
                 }
                 if failed {

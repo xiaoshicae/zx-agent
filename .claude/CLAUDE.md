@@ -12,14 +12,14 @@
 
 | crate | 位置 | 负责 |
 |---|---|---|
-| `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、判断是否为默认值（`default` 的 `is_default`，供 serde 省略默认值）；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
+| `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、判断是否为默认值（`default` 的 `is_default`，供 serde 省略默认值）、读环境变量（`env` 的 `env_value`：设了且不为空才算）；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | `crates/zx-ai` | 消息类型、流式事件、`Provider` 契约 |
 | `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-builtin` | `crates/zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
 | `zx-im`、`zx-im-slack`、⚑ D:5/CHINA FLAG: `zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-builtin` 互不依赖 |
 | `zx-agent` | `crates/zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-builtin` 再导出成一个库，没有自己的代码 |
-| `zx-app` | `crates/zx-app` | 应用层：`config`（`config.toml` 与 agent 文件）、由它们装配 agent 的 `Application`、`otel`（追踪导出）；不知道命令行、终端与协议，命令行与其他宿主（如 Web 服务）共用 |
+| `zx-app` | `crates/zx-app` | 应用层：`config`（`config.toml` 与 agent 文件）、由它们装配 agent 的 `Application`、`otel`（追踪导出）、`shutdown`（信号、取消后读完运行、追踪导出的开始与结束）；不知道命令行、终端与协议，不打印（要说的返回给宿主），命令行与其他宿主（如 Web 服务）共用 |
 | `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）：参数、输出与退出码，`run`、`chat`、`acp`、`im`、`sessions` 互不引用，agent 都经 `zx_app::Application` 得到 |
 | `zx-testing` | `crates/zx-testing` | 各包集成测试共用的测试设施：由 agent 建会话、读完运行的测试设置（`RunnerSetup`），假的模型服务、MCP 服务器与聊天平台，被测程序的启动与主目录（`program`）。只作 `[dev-dependencies]`，crate 自己的单元测试不用它；不依赖 IM 的 crate |
 
@@ -96,5 +96,5 @@
 | 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `crates/zx-agent/tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `crates/zx-agent/tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
-| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
+| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
 | IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交私聊、@ 机器人的群消息与群里线程中的回复、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`crates/zx-agent/tests/im_server.rs` 的 `FakeChannel` |
