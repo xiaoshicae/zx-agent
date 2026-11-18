@@ -1,12 +1,15 @@
-//! Retry classification and backoff (pi: packages/ai/src/utils/retry.ts and overflow.ts; the
-//! jitter follows provider-retry.ts; the defaults are those of
-//! coding-agent/src/core/settings-defaults.ts).
+//! Retry decisions and backoff (pi: packages/ai/src/utils/retry.ts; the jitter follows
+//! provider-retry.ts; the defaults are those of coding-agent/src/core/settings-defaults.ts).
+//!
+//! What went wrong is the provider's to say, as the [`ProviderErrorKind`] of a failed
+//! message; whether to ask again, or to compact a context that overflowed instead, is decided
+//! here from that kind alone.
 
 use std::time::Duration;
 
 use zx_util::random::random_fraction;
 
-use super::types::{AssistantMessage, FINISH_REASON_CODE, ProviderError, StopReason};
+use super::types::{AssistantMessage, ProviderErrorKind, StopReason};
 
 /// How often and how patiently to retry failed responses.
 #[derive(Clone, Debug)]
@@ -45,13 +48,11 @@ impl RetryPolicy {
     /// The wait before the `retry`th retry: the nominal delay with jitter taken off, or the
     /// server's `Retry-After` when that is longer; never above `max_delay`.
     pub fn delay_for(&self, retry: u32, message: &AssistantMessage) -> Duration {
-        let hint = match &message.provider_error {
-            Some(ProviderError::Http {
-                retry_after_ms: Some(ms),
-                ..
-            }) => Duration::from_millis(*ms),
-            _ => Duration::ZERO,
-        };
+        let hint = message
+            .provider_error
+            .as_ref()
+            .and_then(|error| error.retry_after_ms)
+            .map_or(Duration::ZERO, Duration::from_millis);
         self.jittered(self.delay(retry)).max(hint).min(self.max_delay)
     }
 
@@ -62,210 +63,66 @@ impl RetryPolicy {
     }
 }
 
-/// Failures that retrying cannot fix: credentials and quota. A request too long for the
-/// model is permanent too; its wording is [`OVERFLOW_TEXT`].
-const PERMANENT_TEXT: &[&str] = &[
-    "401",
-    "403",
-    "unauthorized",
-    "invalid api key",
-    "invalid_api_key",
-    "insufficient_quota",
-    "billing",
-];
+/// The kind of failure that ended `message`: `None` when it did not fail, was cancelled, or
+/// failed in a way its provider did not classify.
+fn failure_kind(message: &AssistantMessage) -> Option<ProviderErrorKind> {
+    if message.stop_reason != StopReason::Error {
+        return None;
+    }
+    message.provider_error.as_ref().map(|error| error.kind)
+}
 
-/// Transient provider and transport failures other than rate limiting, whose wording is
-/// [`RATE_LIMIT_TEXT`].
-const TRANSIENT_TEXT: &[&str] = &[
-    "overloaded",
-    "server_busy",
-    "500",
-    "502",
-    "503",
-    "504",
-    "internal server error",
-    "bad gateway",
-    "service unavailable",
-    "gateway timeout",
-    "timed out",
-    "stream stalled",
-    "stream read failed",
-    "request failed",
-    "connection",
-    "temporarily",
-];
-
-/// Whether a failed response is transient. Structured metadata takes precedence; messages
-/// without it, from providers that report none, and stream errors with a code the tables do
-/// not know use the text fallback.
+/// Whether asking again may get past a failed response: one that was rate limited, found the
+/// service unavailable, lost its connection or timed out. Nothing else is retried, a failure
+/// its provider did not classify included.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
-    if message.stop_reason != StopReason::Error {
-        return false;
-    }
-    match &message.provider_error {
-        Some(ProviderError::Http { status, code, .. }) => {
-            let permanent = code.as_deref().is_some_and(permanent_code);
-            return !permanent && matches!(status, 408 | 429 | 500..=599);
-        }
-        Some(ProviderError::Provider { code: Some(code) }) => {
-            if transient_code(code) {
-                return true;
-            }
-            if permanent_code(code) {
-                return false;
-            }
-            // A code this table does not know says nothing either way: the text decides.
-        }
-        Some(ProviderError::Transport | ProviderError::Timeout) => return true,
-        // A key source that fails needs the host's attention, not another try.
-        Some(ProviderError::Protocol | ProviderError::ResourceLimit | ProviderError::ApiKey) => return false,
-        Some(ProviderError::Provider { code: None }) | None => {}
-    }
-    let Some(error) = message.error_message.as_deref() else {
-        return false;
-    };
-    let error = error.to_lowercase();
-    if mentions_any(&error, PERMANENT_TEXT) || overflow_text(&error) {
-        return false;
-    }
-    mentions_any(&error, TRANSIENT_TEXT) || mentions_any(&error, RATE_LIMIT_TEXT)
-}
-
-/// Error codes that say the request was too long for the model. Codes, not vendor names: any
-/// service may use them.
-const OVERFLOW_CODES: &[&str] = &[
-    "context_length_exceeded",
-    "model_context_window_exceeded",
-    "request_too_large",
-];
-
-/// Phrases that say the request was too long for the model, for failures without such a code.
-/// Generic wording only, not one message per service.
-const OVERFLOW_TEXT: &[&str] = &[
-    "context length",
-    "context_length",
-    "maximum context",
-    "context window",
-    "context_window",
-    "context size",
-    "prompt is too long",
-    "prompt too long",
-    "request_too_large",
-    "too many tokens",
-];
-
-/// Rate limiting, which a retry may outlast and which can also mention tokens ("too many
-/// tokens, please wait"), so that it is never taken for an overflow.
-const RATE_LIMIT_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "too many requests"];
-
-/// Whether a failed response says the request was too long for the model's context.
-///
-/// A smaller context may fix it, repeating the request never does. An HTTP 413 or one of the
-/// overflow codes decides; throttling, server, credential and transport failures never count;
-/// otherwise the error text decides. Silent overflow, where a service truncates the input
-/// instead of failing, is not detected.
-pub fn is_context_overflow(message: &AssistantMessage) -> bool {
-    if message.stop_reason != StopReason::Error {
-        return false;
-    }
-    match &message.provider_error {
-        Some(ProviderError::Http { status: 413, .. }) => return true,
-        Some(ProviderError::Http { status, code, .. }) => {
-            if code.as_deref().is_some_and(overflow_code) {
-                return true;
-            }
-            if matches!(status, 401 | 403 | 408 | 429 | 500..=599) {
-                return false;
-            }
-        }
-        Some(ProviderError::Provider { code: Some(code) }) if overflow_code(code) => return true,
+    match failure_kind(message) {
         Some(
-            ProviderError::Transport
-            | ProviderError::Timeout
-            | ProviderError::Protocol
-            | ProviderError::ResourceLimit
-            | ProviderError::ApiKey,
-        ) => {
-            return false;
-        }
-        Some(ProviderError::Provider { .. }) | None => {}
-    }
-    let Some(error) = message.error_message.as_deref() else {
-        return false;
-    };
-    let error = error.to_lowercase();
-    // Throttling, including a `ThrottlingException`, which the text fallback of
-    // `is_retryable` does not know: whether to retry on it is a separate decision.
-    if mentions_any(&error, RATE_LIMIT_TEXT) || error.contains("throttl") {
-        return false;
-    }
-    error.starts_with("http 413") || overflow_text(&error)
-}
-
-fn overflow_code(code: &str) -> bool {
-    OVERFLOW_CODES.contains(&code.to_ascii_lowercase().as_str())
-}
-
-/// Whether the lowercased `error` has one of the overflow phrases.
-fn overflow_text(error: &str) -> bool {
-    OVERFLOW_TEXT.iter().any(|pattern| error.contains(pattern))
-}
-
-/// Error codes of a failure in the stream that a retry may get past: throttling, and the
-/// server's own failures.
-fn transient_code(code: &str) -> bool {
-    matches!(
-        code.to_ascii_lowercase().as_str(),
-        "rate_limit_exceeded"
-            | "rate_limit_error"
-            | "server_error"
-            | "internal_error"
-            | "overloaded_error"
-            | "server_busy"
-            | "timeout"
-    )
-}
-
-/// Error codes that a retry cannot get past: credentials, quota, the overflow codes, and a
-/// response the provider ended with an unusual reason.
-fn permanent_code(code: &str) -> bool {
-    code.starts_with(FINISH_REASON_CODE)
-        || overflow_code(code)
-        || matches!(
-            code.to_ascii_lowercase().as_str(),
-            "insufficient_quota"
-                | "billing_hard_limit_reached"
-                | "invalid_api_key"
-                | "authentication_error"
-                | "permission_error"
+            ProviderErrorKind::RateLimited
+            | ProviderErrorKind::Unavailable
+            | ProviderErrorKind::Transport
+            | ProviderErrorKind::Timeout,
+        ) => true,
+        Some(
+            ProviderErrorKind::ContextOverflow
+            | ProviderErrorKind::AccessDenied
+            | ProviderErrorKind::ApiKey
+            | ProviderErrorKind::Refused
+            | ProviderErrorKind::Protocol
+            | ProviderErrorKind::ResourceLimit
+            | ProviderErrorKind::Other,
         )
-}
-
-/// Whether the lowercased `error` mentions one of `patterns`, as [`mentions`] decides.
-fn mentions_any(error: &str, patterns: &[&str]) -> bool {
-    patterns.iter().any(|pattern| mentions(error, pattern))
-}
-
-/// Whether `error` contains `pattern`. A number must stand alone, with no letter or digit
-/// right before or after it, so status codes do not match inside request ids such as
-/// `9d500a1b`.
-fn mentions(error: &str, pattern: &str) -> bool {
-    if !pattern.bytes().all(|byte| byte.is_ascii_digit()) {
-        return error.contains(pattern);
+        | None => false,
     }
-    error.match_indices(pattern).any(|(start, _)| {
-        let before = error[..start].chars().next_back();
-        let after = error[start + pattern.len()..].chars().next();
-        ![before, after].into_iter().flatten().any(|c| c.is_ascii_alphanumeric())
-    })
+}
+
+/// Whether a failed response says the request was too long for the model's context
+/// ([`ProviderErrorKind::ContextOverflow`]): a smaller context may fix it, repeating the
+/// request never does. Silent overflow, where a service truncates the input instead of
+/// failing, is not detected.
+pub fn is_context_overflow(message: &AssistantMessage) -> bool {
+    failure_kind(message) == Some(ProviderErrorKind::ContextOverflow)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProviderError;
 
-    fn failed(error: &str) -> AssistantMessage {
-        AssistantMessage::failure("p", "m", StopReason::Error, error)
+    /// A failed message whose provider reported `error`.
+    fn failed(error: impl Into<ProviderError>) -> AssistantMessage {
+        let mut message = AssistantMessage::failure("p", "m", StopReason::Error, "failed");
+        message.provider_error = Some(error.into());
+        message
+    }
+
+    /// Asked for a retry after `retry_after_ms`, as a rate limited response says.
+    fn hinted(retry_after_ms: u64) -> AssistantMessage {
+        failed(ProviderError {
+            status: Some(429),
+            retry_after_ms: Some(retry_after_ms),
+            ..ProviderError::from(ProviderErrorKind::RateLimited)
+        })
     }
 
     fn exact() -> RetryPolicy {
@@ -274,6 +131,20 @@ mod tests {
             ..RetryPolicy::default()
         }
     }
+
+    const EVERY_KIND: [ProviderErrorKind; 11] = [
+        ProviderErrorKind::RateLimited,
+        ProviderErrorKind::Unavailable,
+        ProviderErrorKind::Transport,
+        ProviderErrorKind::Timeout,
+        ProviderErrorKind::ContextOverflow,
+        ProviderErrorKind::AccessDenied,
+        ProviderErrorKind::ApiKey,
+        ProviderErrorKind::Refused,
+        ProviderErrorKind::Protocol,
+        ProviderErrorKind::ResourceLimit,
+        ProviderErrorKind::Other,
+    ];
 
     #[test]
     fn backoff_doubles_and_caps() {
@@ -287,209 +158,63 @@ mod tests {
     #[test]
     fn jitter_shortens_a_wait_by_at_most_its_share_and_never_a_server_hint() {
         let policy = RetryPolicy::default();
+        let unavailable = failed(ProviderErrorKind::Unavailable);
         let nominal = policy.delay(3);
         let mut waits = Vec::new();
         for _ in 0..64 {
-            let wait = policy.delay_for(3, &failed("HTTP 503"));
+            let wait = policy.delay_for(3, &unavailable);
             assert!(wait <= nominal && wait >= nominal.mul_f64(0.75), "{wait:?}");
             waits.push(wait);
         }
         assert!(waits.iter().any(|wait| *wait != nominal), "the waits vary");
-        let mut hinted = failed("rate limited");
-        hinted.provider_error = Some(ProviderError::Http {
-            status: 429,
-            code: None,
-            retry_after_ms: Some(7000),
-        });
-        assert_eq!(policy.delay_for(1, &hinted), Duration::from_secs(7));
-        assert_eq!(exact().delay_for(1, &failed("HTTP 503")), Duration::from_secs(2));
-    }
-
-    #[test]
-    fn status_codes_match_only_as_whole_numbers() {
-        // Request ids are hex strings, which can contain digits such as "500" or "401".
-        assert!(!is_retryable(&failed(
-            "HTTP 400: unknown model (request_id: 9d500a1b-0c2e)"
-        )));
-        assert!(is_retryable(&failed("HTTP 503: busy (request_id: 1401ab-77)")));
-    }
-
-    #[test]
-    fn structured_status_and_error_codes_override_text() {
-        let mut message = failed("request_id: 401; billing service connection");
-        message.provider_error = Some(ProviderError::Http {
-            status: 503,
-            code: None,
-            retry_after_ms: None,
-        });
-        assert!(is_retryable(&message));
-        message.provider_error = Some(ProviderError::Http {
-            status: 400,
-            code: None,
-            retry_after_ms: None,
-        });
-        assert!(!is_retryable(&message));
-        message.provider_error = Some(ProviderError::Http {
-            status: 429,
-            code: Some("insufficient_quota".into()),
-            retry_after_ms: None,
-        });
-        assert!(!is_retryable(&message));
-        message.provider_error = Some(ProviderError::ResourceLimit);
-        assert!(!is_retryable(&message));
-        message.provider_error = Some(ProviderError::ApiKey);
-        assert!(!is_retryable(&message));
-        assert!(!is_context_overflow(&message));
-    }
-
-    #[test]
-    fn an_unknown_stream_error_code_leaves_the_decision_to_the_text() {
-        let code = |code: &str, text: &str| {
-            let mut message = failed(text);
-            message.provider_error = Some(ProviderError::Provider {
-                code: Some(code.into()),
-            });
-            message
-        };
-        assert!(is_retryable(&code("server_overloaded", "overloaded")));
-        assert!(!is_retryable(&code("server_overloaded", "unknown model")));
-        assert!(
-            is_retryable(&code("server_busy", "unknown model")),
-            "a known code decides"
-        );
-        assert!(
-            !is_retryable(&code("invalid_api_key", "overloaded")),
-            "so does a permanent one"
-        );
-        assert!(!is_retryable(&code("context_length_exceeded", "overloaded")));
+        assert_eq!(policy.delay_for(1, &hinted(7000)), Duration::from_secs(7));
+        assert_eq!(exact().delay_for(1, &unavailable), Duration::from_secs(2));
     }
 
     #[test]
     fn server_retry_hints_respect_the_configured_delay_cap() {
         let policy = exact();
-        let mut message = failed("rate limited");
-        message.provider_error = Some(ProviderError::Http {
-            status: 429,
-            code: None,
-            retry_after_ms: Some(7000),
-        });
-        assert_eq!(policy.delay_for(1, &message), Duration::from_secs(7));
-        assert_eq!(policy.delay_for(3, &message), Duration::from_secs(8));
-        message.provider_error = Some(ProviderError::Http {
-            status: 429,
-            code: None,
-            retry_after_ms: Some(120_000),
-        });
-        assert_eq!(policy.delay_for(1, &message), policy.max_delay);
-    }
-
-    fn http(status: u16, code: Option<&str>, error: &str) -> AssistantMessage {
-        let mut message = failed(error);
-        message.provider_error = Some(ProviderError::Http {
-            status,
-            code: code.map(str::to_string),
-            retry_after_ms: None,
-        });
-        message
+        assert_eq!(policy.delay_for(1, &hinted(7000)), Duration::from_secs(7));
+        assert_eq!(policy.delay_for(3, &hinted(7000)), Duration::from_secs(8));
+        assert_eq!(policy.delay_for(1, &hinted(120_000)), policy.max_delay);
     }
 
     #[test]
-    fn overflow_is_recognized_by_status_and_code() {
-        assert!(is_context_overflow(&http(413, None, "HTTP 413: Payload Too Large")));
-        assert!(is_context_overflow(&http(
-            400,
-            Some("context_length_exceeded"),
-            "HTTP 400: bad request"
-        )));
-        let mut streamed = failed("the stream failed");
-        streamed.provider_error = Some(ProviderError::Provider {
-            code: Some("Model_Context_Window_Exceeded".into()),
-        });
-        assert!(is_context_overflow(&streamed));
+    fn only_rate_limits_unavailability_lost_connections_and_timeouts_are_retried() {
+        let retried: Vec<ProviderErrorKind> = EVERY_KIND
+            .into_iter()
+            .filter(|kind| is_retryable(&failed(*kind)))
+            .collect();
+        assert_eq!(
+            retried,
+            [
+                ProviderErrorKind::RateLimited,
+                ProviderErrorKind::Unavailable,
+                ProviderErrorKind::Transport,
+                ProviderErrorKind::Timeout
+            ]
+        );
     }
 
     #[test]
-    fn overflow_is_recognized_by_generic_wording_without_a_code() {
-        for error in [
-            "HTTP 400: This model's maximum context length is 65536 tokens",
-            "HTTP 400: Your input exceeds the context window of this model",
-            "HTTP 400: prompt is too long: 213462 tokens > 200000 maximum",
-            "HTTP 400: the request exceeds the available context size",
-            "HTTP 413: request entity too large",
-        ] {
-            assert!(is_context_overflow(&failed(error)), "{error}");
+    fn only_a_context_overflow_is_one() {
+        let overflows: Vec<ProviderErrorKind> = EVERY_KIND
+            .into_iter()
+            .filter(|kind| is_context_overflow(&failed(*kind)))
+            .collect();
+        assert_eq!(overflows, [ProviderErrorKind::ContextOverflow]);
+    }
+
+    #[test]
+    fn a_cancelled_or_unclassified_failure_is_neither_retried_nor_an_overflow() {
+        for kind in [ProviderErrorKind::Unavailable, ProviderErrorKind::ContextOverflow] {
+            let mut cancelled = failed(kind);
+            cancelled.stop_reason = StopReason::Aborted;
+            assert!(!is_retryable(&cancelled), "{kind:?}");
+            assert!(!is_context_overflow(&cancelled), "{kind:?}");
         }
-        assert!(is_context_overflow(&http(
-            400,
-            None,
-            "HTTP 400: too many tokens in the prompt"
-        )));
-    }
-
-    #[test]
-    fn throttling_and_other_failures_are_not_overflow() {
-        // Throttling may mention tokens, and a server error is not about the request's size.
-        assert!(!is_context_overflow(&http(
-            429,
-            None,
-            "HTTP 429: too many tokens, please wait"
-        )));
-        assert!(!is_context_overflow(&failed(
-            "ThrottlingException: rate limit, too many tokens"
-        )));
-        assert!(!is_context_overflow(&http(
-            503,
-            None,
-            "HTTP 503: maximum context of the queue"
-        )));
-        assert!(!is_context_overflow(&http(
-            400,
-            Some("invalid_request_error"),
-            "HTTP 400: unknown model"
-        )));
-        let mut transport = failed("connection reset; context length unknown");
-        transport.provider_error = Some(ProviderError::Transport);
-        assert!(!is_context_overflow(&transport));
-        assert!(!is_context_overflow(&AssistantMessage::failure(
-            "p",
-            "m",
-            StopReason::Aborted,
-            "context length exceeded"
-        )));
-    }
-
-    #[test]
-    fn classifies_errors() {
-        assert!(is_retryable(&failed("HTTP 503: service unavailable")));
-        assert!(is_retryable(&failed("HTTP 529: overloaded_error")));
-        assert!(is_retryable(&failed("stream stalled: no data for 120s")));
-        assert!(!is_retryable(&failed("HTTP 401: invalid api key")));
-        assert!(!is_retryable(&failed("HTTP 429: insufficient_quota")));
-        assert!(!is_retryable(&failed("HTTP 400: context_length_exceeded")));
-        assert!(!is_retryable(&AssistantMessage::failure(
-            "p",
-            "m",
-            StopReason::Aborted,
-            "503"
-        )));
-    }
-
-    #[test]
-    fn an_overflow_is_never_retried_whatever_else_the_error_says() {
-        // Every overflow phrase and code is permanent, including those that only the
-        // overflow tables knew: a transient phrase next to them does not make a retry.
-        for error in [
-            "HTTP 500: your input exceeds the context window of this model",
-            "HTTP 503: prompt is too long for the model",
-            "HTTP 502: request_too_large",
-        ] {
-            assert!(is_context_overflow(&failed(error)), "{error}");
-            assert!(!is_retryable(&failed(error)), "{error}");
-        }
-        for code in ["model_context_window_exceeded", "request_too_large"] {
-            let message = http(500, Some(code), "HTTP 500: rejected");
-            assert!(is_context_overflow(&message), "{code}");
-            assert!(!is_retryable(&message), "{code}");
-        }
+        let unclassified = AssistantMessage::failure("p", "m", StopReason::Error, "HTTP 503: overloaded");
+        assert!(!is_retryable(&unclassified));
+        assert!(!is_context_overflow(&unclassified));
     }
 }

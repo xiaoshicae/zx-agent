@@ -9,7 +9,7 @@ use serde_json::json;
 use zx_agent::Session;
 use zx_agent::ai::openai::{ApiKey, BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
+use zx_agent::ai::{Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind, RunOutcome};
@@ -75,7 +75,10 @@ async fn response_budget_failure_is_not_retried() {
     let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
+    assert_eq!(
+        provider_error(&runner),
+        ProviderError::from(ProviderErrorKind::ResourceLimit)
+    );
     assert!(report.error.unwrap().contains("response exceeds the 64 byte limit"));
     assert_eq!(server.requests().len(), 1);
 }
@@ -96,7 +99,10 @@ async fn sse_event_budget_is_enforced() {
     let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
-    assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
+    assert_eq!(
+        provider_error(&runner),
+        ProviderError::from(ProviderErrorKind::ResourceLimit)
+    );
     assert!(report.error.unwrap().contains("SSE event exceeds the 32 byte limit"));
 }
 
@@ -115,8 +121,9 @@ async fn http_status_prevents_retries_from_diagnostic_words() {
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
         provider_error(&runner),
-        ProviderError::Http {
-            status: 400,
+        ProviderError {
+            kind: ProviderErrorKind::Other,
+            status: Some(400),
             code: None,
             retry_after_ms: None
         }
@@ -142,8 +149,9 @@ async fn quota_errors_are_not_retried() {
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
         provider_error(&runner),
-        ProviderError::Http {
-            status: 429,
+        ProviderError {
+            kind: ProviderErrorKind::AccessDenied,
+            status: Some(429),
             code: Some("insufficient_quota".into()),
             retry_after_ms: None,
         }
@@ -180,8 +188,9 @@ async fn numeric_retry_after_is_used_by_the_runner() {
     );
     assert!(observed.events().iter().any(|event| matches!(
         event, EventKind::MessageEnd { message: Message::Assistant(message), .. }
-            if message.provider_error == Some(ProviderError::Http {
-                status: 429, code: Some("rate_limit_exceeded".into()), retry_after_ms: Some(7000),
+            if message.provider_error == Some(ProviderError {
+                kind: ProviderErrorKind::RateLimited, status: Some(429),
+                code: Some("rate_limit_exceeded".into()), retry_after_ms: Some(7000),
             })
     )));
     assert_eq!(server.requests().len(), 1);
@@ -215,7 +224,10 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(report.final_text, "partial");
-    assert_eq!(provider_error(&runner), ProviderError::Protocol);
+    assert_eq!(
+        provider_error(&runner),
+        ProviderError::from(ProviderErrorKind::Protocol)
+    );
 }
 
 #[tokio::test]
@@ -238,8 +250,9 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
     assert!(error.contains("server_interrupted"), "{error}");
     assert_eq!(
         provider_error(&runner),
-        ProviderError::Provider {
-            code: Some("finish_reason:server_interrupted".into())
+        ProviderError {
+            code: Some("server_interrupted".into()),
+            ..ProviderError::from(ProviderErrorKind::Refused)
         }
     );
 }
@@ -426,9 +439,8 @@ fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Valu
 
 #[tokio::test]
 async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
-    // An HTTP 400 with the code, over the real provider. The error text quotes the body, so
-    // the code reaches the classification both as structured metadata and as text; the
-    // structured path alone is covered by the unit tests in zx-ai's retry module.
+    // An HTTP 400 with the code, over the real provider. Each status, code and wording the
+    // provider classifies is covered by the unit tests of zx-ai-openai's `failure/kind.rs`.
     let server = MockServer::start(vec![
         Reply::Status(
             400,
@@ -546,7 +558,7 @@ async fn a_key_source_that_does_not_answer_fails_the_request_within_the_idle_tim
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::ApiKey);
+    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error
@@ -579,7 +591,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::ApiKey);
+    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error

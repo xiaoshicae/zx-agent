@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use crate::sse::DEFAULT_MAX_EVENT_BYTES;
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Request body fields that the provider sets itself, so that
 /// [`BodyOptions::extra_fields`] cannot replace them. The output token limit is the
@@ -130,18 +130,18 @@ pub struct BodyOptions {
     /// Once one assistant message of a request carries `reasoning_content`, give the others
     /// an empty one, for servers that reject a history in which only some answers carry
     /// reasoning. Off unless set: other servers have no use for the field.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub fill_missing_reasoning: bool,
     /// How a request's [`Reasoning`](zx_ai::Reasoning) level is written.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub reasoning_format: ReasoningFormat,
     /// Send the request's [`Request::cache_key`](zx_ai::Request::cache_key) as
     /// `prompt_cache_key`, for servers that take one (OpenAI does). Off by default: other
     /// servers reject unknown fields.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub prompt_cache_key: bool,
     /// The field that carries a request's output token limit.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub max_tokens_field: MaxTokensField,
 }
 
@@ -161,11 +161,6 @@ impl BodyOptions {
     }
 }
 
-/// Whether `value` is its type's default, which the record of a request leaves out.
-fn is_default<T: Default + PartialEq>(value: &T) -> bool {
-    *value == T::default()
-}
-
 /// Where the bearer token of a request comes from.
 #[derive(Clone, Default)]
 pub enum ApiKey {
@@ -175,8 +170,8 @@ pub enum ApiKey {
     /// The same token for every request.
     Fixed(String),
     /// A token asked for before every request, for credentials that expire (pi:
-    /// `getApiKey`). A failure fails the request with
-    /// [`ProviderError::ApiKey`](zx_ai::ProviderError::ApiKey), which is not retried.
+    /// `getApiKey`). A failure fails the request as
+    /// [`ProviderErrorKind::ApiKey`](zx_ai::ProviderErrorKind::ApiKey), which is not retried.
     Dynamic(Arc<dyn ApiKeySource>),
 }
 

@@ -7,8 +7,9 @@
 //! contract. The `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
 //!
 //! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
-//! request in `failure.rs`, the message built from the stream in `accumulate.rs` and the parser
-//! of the stream's events in `sse.rs`; this module holds the provider and the HTTP flow of one
+//! request and what kind each is (the error codes and wording of OpenAI-compatible services)
+//! in `failure.rs`, the message built from the stream in `accumulate.rs` and the parser of the
+//! stream's events in `sse.rs`; this module holds the provider and the HTTP flow of one
 //! request.
 
 mod accumulate;
@@ -23,18 +24,14 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
-use zx_ai::{ProviderError, Request, StopReason, StreamEvent, duration_ms, now_ms};
+use zx_ai::{ProviderErrorKind, Request, StopReason, StreamEvent, duration_ms, now_ms};
 
 use accumulate::Accumulator;
-pub use config::{
-    ApiKey, ApiKeySource, BodyOptions, DEFAULT_MAX_RESPONSE_BYTES, MaxTokensField, OpenAiConfig, ReasoningFormat,
-    SystemUpdates,
-};
+pub use config::{ApiKey, ApiKeySource, BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
 use failure::{
     Failure, answers_json, error_object, http_failure, json_body_failure, provider_failure, transport_failure,
 };
 pub use request::replay_body;
-pub use sse::DEFAULT_MAX_EVENT_BYTES;
 use sse::SseParser;
 
 /// Longest wait for a connection to the server to be established. Fixed, unlike
@@ -113,7 +110,7 @@ async fn run(
     let mut message = match outcome {
         Ok(()) => acc
             .finish()
-            .unwrap_or_else(|error| acc.failure(StopReason::Error, error, Some(ProviderError::Protocol))),
+            .unwrap_or_else(|error| acc.failure(StopReason::Error, error, Some(ProviderErrorKind::Protocol.into()))),
         Err(Failure::Aborted) => acc.failure(StopReason::Aborted, "Request was aborted", None),
         Err(Failure::Closed) => return,
         Err(Failure::Error { details, message }) => acc.failure(StopReason::Error, message, Some(details)),
@@ -160,14 +157,14 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
         .await
         .map_err(|_| {
             Failure::error(
-                ProviderError::ApiKey,
+                ProviderErrorKind::ApiKey,
                 format!(
                     "the API key source did not answer within {}s",
                     config.idle_timeout.as_secs()
                 ),
             )
         })?
-        .map_err(|error| Failure::error(ProviderError::ApiKey, format!("cannot get an API key: {error}")))?;
+        .map_err(|error| Failure::error(ProviderErrorKind::ApiKey, format!("cannot get an API key: {error}")))?;
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }
@@ -175,7 +172,7 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
         .await
         .map_err(|_| {
             Failure::error(
-                ProviderError::Timeout,
+                ProviderErrorKind::Timeout,
                 format!(
                     "request timed out after {}s waiting for response headers",
                     config.idle_timeout.as_secs()
@@ -199,7 +196,7 @@ async fn read_stream(
     loop {
         let next = tokio::time::timeout(idle, body.next()).await.map_err(|_| {
             Failure::error(
-                ProviderError::Timeout,
+                ProviderErrorKind::Timeout,
                 format!("stream stalled: no data for {}s", idle.as_secs()),
             )
         })?;
@@ -207,14 +204,14 @@ async fn read_stream(
         let chunk = chunk.map_err(|e| transport_failure("stream read failed", &e))?;
         if chunk.len() > config.max_response_bytes.saturating_sub(received_bytes) {
             return Err(Failure::error(
-                ProviderError::ResourceLimit,
+                ProviderErrorKind::ResourceLimit,
                 format!("stream response exceeds the {} byte limit", config.max_response_bytes),
             ));
         }
         received_bytes += chunk.len();
         let events = parser
             .push(&chunk)
-            .map_err(|e| Failure::error(ProviderError::ResourceLimit, e))?;
+            .map_err(|e| Failure::error(ProviderErrorKind::ResourceLimit, e))?;
         for data in events {
             if handle_data(&data, acc, tx).await? {
                 return Ok(());
@@ -237,7 +234,7 @@ async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) ->
         return Ok(false);
     }
     let chunk: Value = serde_json::from_str(data)
-        .map_err(|e| Failure::error(ProviderError::Protocol, format!("invalid stream chunk: {e}")))?;
+        .map_err(|e| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream chunk: {e}")))?;
     if let Some(error) = error_object(&chunk) {
         return Err(provider_failure(error));
     }
@@ -260,10 +257,14 @@ mod tests {
         let chunk = r#"{"error":{"message":"overloaded","code":"server_overloaded"}}"#;
         match handle_data(chunk, &mut acc, &mut tx).await {
             Err(Failure::Error { details, message }) => {
+                // The code is not a known one, so the wording says what kind of failure it is.
                 assert_eq!(
                     details,
-                    ProviderError::Provider {
-                        code: Some("server_overloaded".into())
+                    zx_ai::ProviderError {
+                        kind: ProviderErrorKind::Unavailable,
+                        status: None,
+                        code: Some("server_overloaded".into()),
+                        retry_after_ms: None,
                     }
                 );
                 assert_eq!(message, "provider error: overloaded");

@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
+use zx_agent::ai::{
+    AssistantMessage, ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolCall, ToolResultMessage,
+};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
@@ -334,7 +336,7 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         FauxStep::text(summary_json("unknown")),
         FauxStep::truncated("cut off"),
         FauxStep::tool_call("c", "bash", json!({"command":"echo no"})),
-        FauxStep::Fail("temporarily unavailable".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "temporarily unavailable"),
     ] {
         let (store, _) = seeded_session().await;
         let before = store.raw_projection();
@@ -391,7 +393,7 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
 async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prompt() {
     let (store, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail("HTTP 503: overloaded".into()),
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: overloaded"),
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answered"),
     ]));

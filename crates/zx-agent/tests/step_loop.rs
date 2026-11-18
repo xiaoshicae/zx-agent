@@ -13,8 +13,8 @@ use zx_agent::AgentConfig;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
-    Usage,
+    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, ProviderErrorKind, Request, StopReason, SystemPrompt,
+    ToolCall, ToolDef, Usage,
 };
 use zx_agent::events::{Budget, EventKind, RunOutcome};
 use zx_agent::input::Input;
@@ -573,7 +573,10 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
 
 #[tokio::test]
 async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
-    let config = config(provider([FauxStep::Fail("HTTP 500: boom".into())]), vec![]);
+    let config = config(
+        provider([FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 500: boom")]),
+        vec![],
+    );
 
     let (result, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 

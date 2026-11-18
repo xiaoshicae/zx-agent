@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
-    AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
+    AssistantMessage, Message, ModelCost, ModelMeta, Provider, ProviderErrorKind, Request, StopReason, StreamEvent,
+    Usage,
 };
 use zx_agent::compaction::{self, Config, TokenTrigger};
 use zx_agent::events::RunOutcome;
@@ -580,7 +581,7 @@ async fn a_cost_budget_refuses_an_unpriced_automatic_summary() {
 async fn overflow_recovery_checks_the_summary_models_prices() {
     let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail("maximum context length exceeded".into()),
+        FauxStep::fail(ProviderErrorKind::ContextOverflow, "maximum context length exceeded"),
         FauxStep::text("must not request"),
     ]));
     let mut config = config(provider.clone(), vec![]);

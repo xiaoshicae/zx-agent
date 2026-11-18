@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Reasoning, Request, ToolDef};
+use zx_agent::ai::{ProviderErrorKind, Reasoning, Request, ToolDef};
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
@@ -162,7 +162,11 @@ async fn panic_during_prompt_conversion_returns_ownership() {
 
 #[tokio::test]
 async fn provider_failures_remain_reports_and_do_not_make_the_session_busy() {
-    let (session, _, _) = setup([FauxStep::Fail("bad request".into()), FauxStep::text("done")]).await;
+    let (session, _, _) = setup([
+        FauxStep::fail(ProviderErrorKind::Other, "bad request"),
+        FauxStep::text("done"),
+    ])
+    .await;
     let failed = session.prompt("first").await.unwrap();
     assert_eq!(failed.outcome, RunOutcome::Failed);
     assert_eq!(session.prompt("next").await.unwrap().outcome, RunOutcome::Completed);

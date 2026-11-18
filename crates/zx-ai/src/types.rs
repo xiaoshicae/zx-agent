@@ -32,10 +32,10 @@ pub struct Usage {
     /// Prompt tokens served from the provider cache.
     pub cache_read: u64,
     /// Prompt tokens written to the provider cache (pi: `cacheWrite`).
-    #[serde(default, skip_serializing_if = "zx_util::num::is_zero")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub cache_write: u64,
     /// Reasoning tokens, counted within `output` (pi: `reasoning`).
-    #[serde(default, skip_serializing_if = "zx_util::num::is_zero")]
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub reasoning: u64,
     pub total_tokens: u64,
     /// What the response cost by the configured prices ([`ModelCost`]), in their unit;
@@ -166,42 +166,76 @@ pub struct ToolCall {
     pub arguments_error: Option<String>,
 }
 
-/// The start of the code of a [`ProviderError::Provider`] for a response that the provider
-/// ended with a reason other than a normal one, such as a content filter
-/// (`finish_reason:content_filter`). Such a response is never retried, whatever the reason is
-/// called: the prefix keeps it apart from the error codes that are.
-pub const FINISH_REASON_CODE: &str = "finish_reason:";
-
-/// Machine-readable provider failure details. Human-readable text stays in
-/// AssistantMessage::error_message. Optional metadata is left out of the JSON when absent.
+/// Why a model request failed, as its provider reports it: the kind of failure, from which
+/// alone the kernel decides what to do next, and what the server said, kept for the record.
+/// The text for people is the message's `error_message`. Absent fields are left out of the
+/// JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum ProviderError {
-    /// An unsuccessful HTTP response.
-    Http {
-        status: u16,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
-        /// A numeric Retry-After header, converted to milliseconds.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry_after_ms: Option<u64>,
-    },
-    /// An error reported inside a successful streaming HTTP response, or a response the
-    /// provider ended with an unusual reason, whose code starts with [`FINISH_REASON_CODE`].
-    Provider {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
-    },
-    /// A connection or response-body transport failure.
+#[serde(rename_all = "camelCase")]
+pub struct ProviderError {
+    /// What kind of failure it was: what the kernel decides from.
+    pub kind: ProviderErrorKind,
+    /// The HTTP status of the response, when the server answered with an error status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// The server's error code as it sent it, or the reason it gave for ending a response
+    /// with something other than an answer, such as `content_filter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// How long the server asked the client to wait before trying again, in milliseconds,
+    /// whatever form the provider read it in, such as a `Retry-After` header in seconds or as
+    /// a date. A retry waits at least this long, up to the retry policy's longest delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl From<ProviderErrorKind> for ProviderError {
+    /// A failure of `kind` that the server said nothing more about.
+    fn from(kind: ProviderErrorKind) -> Self {
+        Self {
+            kind,
+            status: None,
+            code: None,
+            retry_after_ms: None,
+        }
+    }
+}
+
+/// What kind of failure ended a model request. The kinds name situations, not services: a
+/// provider maps what its service reports (statuses, error codes, wording) to them, and the
+/// kernel decides from the kind alone whether to try the request again
+/// ([`is_retryable`](crate::retry::is_retryable)) or to compact the context
+/// ([`is_context_overflow`](crate::retry::is_context_overflow)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderErrorKind {
+    /// The service limits how often it is asked: an HTTP 429 or a rate limit error.
+    RateLimited,
+    /// The service is overloaded, failing or otherwise unavailable for now: an HTTP 5xx or an
+    /// error that says so.
+    Unavailable,
+    /// The connection failed, or broke off before the response ended.
     Transport,
-    /// A connection, response-header, or stream idle timeout.
+    /// The service did not answer, or stopped sending, within the time allowed, or says that
+    /// it timed out itself: an HTTP 408 or an error that says so.
     Timeout,
-    /// Invalid JSON, missing completion markers, or another protocol violation.
-    Protocol,
-    /// A configured response or event byte budget was exceeded.
-    ResourceLimit,
+    /// The request does not fit the model's context window: sending it again fails again,
+    /// a smaller context may succeed.
+    ContextOverflow,
+    /// The service refused the client's credentials, permissions or quota, which someone has
+    /// to fix before a request can succeed.
+    AccessDenied,
     /// The host's API key source failed, so no request was sent.
     ApiKey,
+    /// The service ended the response with a reason of its own instead of an answer, such as
+    /// a content filter; the error's `code` holds the reason.
+    Refused,
+    /// The response broke the protocol: data that cannot be read, or no end where one was due.
+    Protocol,
+    /// The response exceeded a byte limit of the provider's settings.
+    ResourceLimit,
+    /// Any other failure, such as a request the service rejected as invalid.
+    Other,
 }
 
 /// A model response, complete or failed.
@@ -215,6 +249,9 @@ pub struct AssistantMessage {
     pub stop_reason: StopReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// What kind of failure ended the request, as its provider reports it. Absent for a
+    /// response that did not fail, for a cancelled one, and for a failure its provider did
+    /// not classify, which the kernel does not try again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_error: Option<ProviderError>,
     /// When the request started.
@@ -320,12 +357,6 @@ pub enum UserMessageKind {
     Custom,
 }
 
-impl UserMessageKind {
-    fn is_prompt(&self) -> bool {
-        *self == Self::Prompt
-    }
-}
-
 /// A transcript message. A user message of the default kind, a prompt, is written without
 /// its `kind`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -335,7 +366,7 @@ pub enum Message {
     User {
         content: String,
         timestamp: u64,
-        #[serde(default, skip_serializing_if = "UserMessageKind::is_prompt")]
+        #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
         kind: UserMessageKind,
     },
     Assistant(AssistantMessage),
@@ -359,23 +390,6 @@ impl Message {
             timestamp: now_ms(),
             kind: UserMessageKind::ContinueAnswer,
         }
-    }
-
-    /// A projection needs a separate copy; the original audit record stays unchanged.
-    /// Public only for the session in zx-core, not part of the API.
-    #[doc(hidden)]
-    pub fn with_replaced_text(&self, text: &str) -> Self {
-        let mut message = self.clone();
-        match &mut message {
-            // System changes are appended, never edited.
-            Self::System(_) => {}
-            Self::User { content, .. } => *content = text.to_string(),
-            Self::Assistant(assistant) => {
-                assistant.content = vec![ContentBlock::Text { text: text.to_string() }];
-            }
-            Self::ToolResult(result) => result.content = text.to_string(),
-        }
-        message
     }
 
     /// The serialized role name: `system`, `user`, `assistant`, or `toolResult`.

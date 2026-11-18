@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ProviderErrorKind, StopReason, ToolCall};
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
@@ -125,7 +125,7 @@ async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
 #[tokio::test]
 async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::Fail("HTTP 400: bad request".into()),
+        FauxStep::fail(ProviderErrorKind::Other, "HTTP 400: bad request"),
         FauxStep::text("second try"),
     ]));
     let (runner, events) = runner(&provider, Start::default()).await;

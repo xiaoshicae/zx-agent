@@ -8,7 +8,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
-use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms};
+use super::types::{
+    AssistantMessage, ContentBlock, Delta, ProviderError, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms,
+};
 use zx_util::sync::lock;
 
 /// One scripted response.
@@ -18,8 +20,10 @@ pub enum FauxStep {
         blocks: Vec<ContentBlock>,
         stop: StopReason,
     },
-    /// Fail before streaming, like an HTTP error.
-    Fail(String),
+    /// Fail before streaming, as a provider reports a failed request: `error` says what kind
+    /// of failure it was, which decides whether a run retries or compacts, and `message` is
+    /// its text.
+    Fail { error: ProviderError, message: String },
     /// Wait until cancelled, then end with `Aborted`.
     Hang,
     /// Decide the step from the request, for answers that must refer to what the request
@@ -41,6 +45,15 @@ impl FauxStep {
         FauxStep::Respond {
             blocks: vec![ContentBlock::Text { text: text.into() }],
             stop: StopReason::Length,
+        }
+    }
+
+    /// Fail before streaming with `error`, a [`ProviderErrorKind`](crate::ProviderErrorKind)
+    /// or a whole [`ProviderError`], and the error text `message`.
+    pub fn fail(error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
+        FauxStep::Fail {
+            error: error.into(),
+            message: message.into(),
         }
     }
 
@@ -138,7 +151,11 @@ async fn event_for(
     let failure = |stop, error: &str| AssistantMessage::failure("faux", model, stop, error);
     Some(match step {
         None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
-        Some(FauxStep::Fail(error)) => StreamEvent::Error(failure(StopReason::Error, &error)),
+        Some(FauxStep::Fail { error, message }) => {
+            let mut failed = failure(StopReason::Error, &message);
+            failed.provider_error = Some(error);
+            StreamEvent::Error(failed)
+        }
         Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(
             StopReason::Error,
             "faux provider: a computed step computed another",
@@ -263,6 +280,21 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [StreamEvent::Error(message)] if message.stop_reason == StopReason::Error
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_scripted_failure_ends_with_its_error_and_text() {
+        let provider = FauxProvider::new([FauxStep::fail(
+            crate::ProviderErrorKind::RateLimited,
+            "HTTP 429: slow down",
+        )]);
+        let events = events(&provider).await;
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::Error(message)] if message.stop_reason == StopReason::Error
+                && message.error_message.as_deref() == Some("HTTP 429: slow down")
+                && message.provider_error == Some(crate::ProviderErrorKind::RateLimited.into())
         ));
     }
 

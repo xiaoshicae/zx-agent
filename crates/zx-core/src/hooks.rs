@@ -20,7 +20,7 @@ use crate::events::{Event, EventKind, HookPhase};
 use crate::guard::{CancelSignal, Stopped};
 use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
-use crate::transcript::context_edit_refusal;
+use crate::transcript::{context_edit_refusal, replace_text};
 
 #[cfg(test)]
 use chain::HookCall;
@@ -131,10 +131,7 @@ impl ContextEdit {
                 }
                 messages.push(message.clone());
             }
-            Self::ReplaceText { index, text } => {
-                let message = editable(messages, *index, true)?;
-                *message = message.with_replaced_text(text);
-            }
+            Self::ReplaceText { index, text } => replace_text(editable(messages, *index, true)?, text),
             Self::Omit { index } => {
                 editable(messages, *index, false)?;
                 messages.remove(*index);
