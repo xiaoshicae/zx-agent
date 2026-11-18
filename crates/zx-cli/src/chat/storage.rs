@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use zx_agent::transcript::{SessionInfo, SessionList};
-use zx_app::{PlaceKind, SessionPlace, resolve_cwd};
+use zx_app::{SessionPlace, resolve_cwd};
 
 use crate::render::visible;
+use crate::session_file;
 
 /// Where conversations are kept.
 pub(super) struct Storage {
@@ -67,19 +68,26 @@ pub(super) async fn opening(
     resume: Option<Option<&str>>,
     cwd: Option<&Path>,
 ) -> Result<(Storage, First)> {
-    let (place, original) = match (no_session, session) {
-        (true, _) => (SessionPlace::memory(), None),
-        (false, Some(path)) => (SessionPlace::file(&path), Some(path)),
-        (false, None) => (SessionPlace::home()?, None),
-    };
-    let first = match (place.kind(), resume) {
-        (PlaceKind::Directory, Some(id)) => resume_target(&place, cwd, id).await?,
+    // The parser refuses `--no-session` with `--session` or `--resume`, and `--resume` with
+    // `--session`.
+    let (place, original, first) = match (no_session, session) {
+        (true, _) => (SessionPlace::memory(), None, First::Fresh),
         // `--session` continues the session its file holds, or starts the file.
-        (PlaceKind::File, _) => match place.held(cwd).await? {
-            Some(id) => First::Resume(id),
-            None => First::Fresh,
-        },
-        (PlaceKind::Memory | PlaceKind::Directory, _) => First::Fresh,
+        (false, Some(path)) => {
+            let first = match session_file::held(&path, cwd).await? {
+                Some(id) => First::Resume(id),
+                None => First::Fresh,
+            };
+            (SessionPlace::file(&path), Some(path), first)
+        }
+        (false, None) => {
+            let place = SessionPlace::home()?;
+            let first = match resume {
+                Some(id) => resume_target(&place, cwd, id).await?,
+                None => First::Fresh,
+            };
+            (place, None, first)
+        }
     };
     Ok((Storage { place, original }, first))
 }
@@ -147,6 +155,14 @@ mod tests {
             name: None,
             labels: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_kept_in_memory_continues_nothing() {
+        let (storage, first) = opening(true, None, None, None).await.unwrap();
+        assert!(!storage.place.is_persistent());
+        assert_eq!(first.id(), None);
+        assert!(storage.beside().is_none());
     }
 
     #[test]

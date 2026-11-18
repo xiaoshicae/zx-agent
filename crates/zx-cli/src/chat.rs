@@ -1,4 +1,5 @@
-//! The line-oriented terminal frontend; model and tool work stays in Session.
+//! `zx-agent chat`: a conversation in the terminal, line by line; model and tool work stays in
+//! Session.
 //!
 //! - `input`: the single owner of the terminal's input
 //! - `turn`: one operation of a conversation driven to its end, with the approvals its
@@ -28,10 +29,11 @@ use zx_agent::input::Input;
 use zx_agent::session::SessionError;
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
+use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
 use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, Interrupt, Signals, with_telemetry};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
 use crate::render::visible;
 
 use commands::Command;

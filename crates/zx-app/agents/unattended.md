@@ -1,7 +1,6 @@
 +++
-# The default of `zx-agent run`: a neutral agent without a human operator. read_output is
-# opt-in here: unattended runs keep tool results inline and never write into a working
-# directory that may be read-only.
+# A neutral agent for runs that nobody attends. read_output is opt-in here: unattended runs
+# keep tool results inline and never write into a working directory that may be read-only.
 tools = ["bash", "read_file", "read_skill"]
 continueOnLength = 1
 

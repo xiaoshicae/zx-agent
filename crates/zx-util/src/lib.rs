@@ -10,8 +10,11 @@
 //! - [`random`]: randomness for spreading retries and reconnections
 //! - [`default`]: [`default::is_default`], for leaving a type's default, such as a zero count,
 //!   out of serialized records
+//! - [`env`](mod@env): [`env::env_value`], an environment variable that counts only when it
+//!   is set and not empty
 
 pub mod default;
+pub mod env;
 pub mod random;
 pub mod sync;
 pub mod text;

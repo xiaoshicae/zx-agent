@@ -1,4 +1,4 @@
-//! Slash commands stay in the frontend and never become model input.
+//! Slash commands stay in chat and never become model input.
 
 pub(super) enum Command {
     Empty,

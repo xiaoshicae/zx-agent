@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use signal::Signal;
 pub use signal::TraceHook;
 use spans::{Runs, export};
+use zx_util::env::env_value;
 
 /// Either variable turns the trace export on. As the OTLP specification has it, the first is
 /// used as it is, and the second gets `/v1/traces` appended.
@@ -41,7 +42,7 @@ const ENDPOINT_VARIABLES: [&str; 2] = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OT
 /// Variables that may carry credentials for a collector, such as an authorization header.
 /// Commands must not inherit them, the metrics one included: this process exports no
 /// metrics, but the variable may be set for others.
-pub const HEADER_VARIABLES: [&str; 3] = [
+pub(crate) const HEADER_VARIABLES: [&str; 3] = [
     "OTEL_EXPORTER_OTLP_HEADERS",
     "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
     "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
@@ -54,8 +55,11 @@ const TRACE_CONTEXT_VARIABLES: [&str; 2] = ["TRACEPARENT", "TRACESTATE"];
 const QUEUE_CAPACITY: usize = 4096;
 /// How long shutdown waits for the collector: the SDK's own default.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `service.name`, unless `OTEL_SERVICE_NAME` sets one.
-const SERVICE_NAME: &str = "zx-agent";
+/// The standard variable that names the service over the one a host gives.
+const SERVICE_NAME_VARIABLE: &str = "OTEL_SERVICE_NAME";
+/// The tracer's name, the instrumentation scope of every span: the agent's runs, whichever
+/// host exports them.
+const TRACER_NAME: &str = "zx-agent";
 
 /// A W3C trace context received from the caller: the values of the `traceparent` and
 /// `tracestate` headers, or of `TRACEPARENT` and `TRACESTATE` in the environment. Runs observed
@@ -83,12 +87,11 @@ impl TraceParent {
         })
     }
 
-    /// From `TRACEPARENT` and `TRACESTATE`: `Ok(None)` when `TRACEPARENT` is unset or empty,
+    /// From `TRACEPARENT` and `TRACESTATE`: `Ok(None)` when `TRACEPARENT` is unset or blank,
     /// an error naming the variable when it is set but not a valid header value.
     pub fn from_env() -> Result<Option<Self>> {
-        // A value that is not UTF-8 cannot be a traceparent either: it counts as unset.
         let [parent, state] =
-            TRACE_CONTEXT_VARIABLES.map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()));
+            TRACE_CONTEXT_VARIABLES.map(|name| env_value(name).filter(|value| !value.trim().is_empty()));
         let Some(parent) = parent else {
             return Ok(None);
         };
@@ -120,19 +123,22 @@ pub struct Telemetry {
 }
 
 impl Telemetry {
-    /// Export to the endpoint that the standard variables name.
+    /// Export to the endpoint that the standard variables name, as the service `service_name`:
+    /// the host's name, which tells the traces of different programs apart, unless
+    /// `OTEL_SERVICE_NAME` names the service.
     ///
     /// Traces go out when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
-    /// is set; `None` when neither is: nothing is then sent anywhere. The SDK reads the other
+    /// is set and not empty; `None` when neither is: nothing is then sent anywhere. The SDK reads the other
     /// standard variables, such as `OTEL_EXPORTER_OTLP_HEADERS`. Needs a Tokio runtime. An error
     /// is a configuration that the exporter refuses, such as an invalid endpoint.
-    pub fn from_env() -> Result<Option<Self>> {
-        if !any_set(&ENDPOINT_VARIABLES) {
+    pub fn from_env(service_name: &str) -> Result<Option<Self>> {
+        if ENDPOINT_VARIABLES.iter().all(|name| env_value(name).is_none()) {
             return Ok(None);
         }
         let mut resource = Resource::builder();
-        if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
-            resource = resource.with_service_name(SERVICE_NAME);
+        // The SDK takes the variable when it is set and not empty.
+        if env_value(SERVICE_NAME_VARIABLE).is_none() {
+            resource = resource.with_service_name(service_name.to_string());
         }
         let exporter = SpanExporter::builder()
             .with_http()
@@ -150,7 +156,7 @@ impl Telemetry {
     pub fn with_provider(tracer_provider: SdkTracerProvider) -> Self {
         let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
         let stop = CancellationToken::new();
-        let runs = Runs::new(tracer_provider.tracer(SERVICE_NAME));
+        let runs = Runs::new(tracer_provider.tracer(TRACER_NAME));
         let task = tokio::spawn(export(receiver, runs, stop.clone()));
         Self {
             tracer_provider,
@@ -208,12 +214,6 @@ impl Telemetry {
         .await
         .context("the export failed")?
     }
-}
-
-fn any_set(names: &[&str]) -> bool {
-    names
-        .iter()
-        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 #[cfg(test)]

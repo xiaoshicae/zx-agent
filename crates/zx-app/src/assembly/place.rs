@@ -1,4 +1,4 @@
-//! Where a mode keeps its sessions.
+//! Where a host keeps the sessions of an agent.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory of
 //! session files under the zx-agent home directory, which `ZX_AGENT_HOME` moves.
@@ -6,12 +6,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
-use super::check_session_cwd;
 use crate::config;
 use zx_agent::builtin::jsonl::JsonlStorage;
-use zx_agent::transcript::{MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
+use zx_agent::transcript::{MemoryStorage, SessionList, SessionQuery, SessionStorage};
 
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";
@@ -23,27 +22,14 @@ pub struct SessionPlace(Place);
 
 #[derive(Clone)]
 enum Place {
-    /// `--no-session`: in memory. A session is kept while it is open and forgotten once it
-    /// is closed, so that a process that runs for long keeps nothing of the conversations it
-    /// has had.
+    /// In memory. A session is kept while it is open and forgotten once it is closed, so
+    /// that a process that runs for long keeps nothing of the conversations it has had.
     Memory(Arc<MemoryStorage>),
-    /// `--session`: one file, which holds one session.
+    /// One file, which holds one session.
     File(Arc<JsonlStorage>),
     /// Session files under one directory, with a directory of its own for each working
     /// directory.
     Directory(Arc<JsonlStorage>),
-}
-
-/// What a [`SessionPlace`] keeps sessions in, for a host that decides by it, such as
-/// whether to resume a session.
-#[derive(Clone, Copy)]
-pub enum PlaceKind {
-    /// Memory: [`SessionPlace::memory`].
-    Memory,
-    /// One file, which holds one session: [`SessionPlace::file`].
-    File,
-    /// Files under one directory: [`SessionPlace::directory`] and [`SessionPlace::home`].
-    Directory,
 }
 
 impl SessionPlace {
@@ -52,7 +38,8 @@ impl SessionPlace {
         Self(Place::Memory(Arc::new(MemoryStorage::forgetting())))
     }
 
-    /// Keep at most one session in this JSONL file.
+    /// Keep at most one session in this JSONL file: the storage holds none while the file
+    /// does not exist, and creating a second session fails.
     pub fn file(path: &Path) -> Self {
         Self(Place::File(Arc::new(JsonlStorage::file(path))))
     }
@@ -67,20 +54,6 @@ impl SessionPlace {
         !matches!(self.0, Place::Memory(_))
     }
 
-    /// What this place keeps sessions in.
-    pub fn kind(&self) -> PlaceKind {
-        match self.0 {
-            Place::Memory(_) => PlaceKind::Memory,
-            Place::File(_) => PlaceKind::File,
-            Place::Directory(_) => PlaceKind::Directory,
-        }
-    }
-
-    /// The file at `path`, or memory without a path.
-    pub fn file_or_memory(path: Option<&Path>) -> Self {
-        path.map_or_else(Self::memory, Self::file)
-    }
-
     /// `sessions` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
     /// Fails when no home directory is known.
     pub fn home() -> Result<Self> {
@@ -88,7 +61,8 @@ impl SessionPlace {
         Ok(Self::directory(&home.join(SESSIONS_DIR)))
     }
 
-    /// The storage of this place, for the agent whose sessions are kept here.
+    /// The storage of this place, for the agent whose sessions are kept here, and for a host
+    /// that lists them.
     pub fn storage(&self) -> Arc<dyn SessionStorage> {
         match &self.0 {
             Place::Memory(storage) => storage.clone(),
@@ -127,32 +101,6 @@ impl SessionPlace {
         self.storage().list(&query).await
     }
 
-    /// The ID of the session a single file holds already, which then continues; `None` for
-    /// a file that does not exist yet, and for a place that keeps more than one session.
-    /// Fails for a file that cannot be read as a session, and when `cwd`, an explicit working
-    /// directory, names another directory than the one the session works in.
-    pub async fn held(&self, cwd: Option<&Path>) -> Result<Option<String>> {
-        let Some(held) = self.only().await? else {
-            return Ok(None);
-        };
-        check_session_cwd(cwd, &held.cwd)?;
-        Ok(Some(held.id))
-    }
-
-    /// The session a single file holds already; `None` for a file that does not exist yet,
-    /// and for a place that keeps more than one session. A file that cannot be read as a
-    /// session is an error.
-    async fn only(&self) -> Result<Option<SessionInfo>> {
-        let Place::File(storage) = &self.0 else {
-            return Ok(None);
-        };
-        let list = storage.list(&SessionQuery::default()).await?;
-        if let Some(unreadable) = list.unreadable.first() {
-            bail!("{}", unreadable.error);
-        }
-        Ok(list.sessions.into_iter().next())
-    }
-
     /// `error`, which opening session `id` gave, naming the session's file when it has one.
     pub(crate) async fn naming_file(&self, id: &str, error: anyhow::Error) -> anyhow::Error {
         // A path that cannot be found now adds nothing to the error at hand.
@@ -176,39 +124,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_file_holds_its_session_once_it_exists() {
+    async fn a_single_file_is_where_its_session_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.jsonl");
         let place = SessionPlace::file(&path);
-        assert_eq!(place.only().await.unwrap(), None);
         assert_eq!(place.location(Path::new("/w")), Some(path.clone()));
 
         let header = SessionHeader::new(Path::new("/w"), "m");
-        let mut session = create(&place, &header).await;
-        session.append_message(Message::user("q")).await.unwrap();
-        drop(session);
+        drop(create(&place, &header).await);
 
-        let held = place.only().await.unwrap().unwrap();
-        assert_eq!(
-            (held.id.as_str(), held.cwd.as_str(), held.messages),
-            (header.id.as_str(), "/w", 1)
-        );
         assert_eq!(place.path_of(&header.id).await.unwrap(), Some(path));
-    }
-
-    #[tokio::test]
-    async fn a_file_that_is_not_a_session_is_an_error_that_names_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.jsonl");
-        std::fs::write(&path, "not json\n").unwrap();
-
-        let error = SessionPlace::file(&path).only().await.unwrap_err();
-
-        let text = format!("{error:#}");
-        assert!(
-            text.contains("invalid session header") && text.contains("run.jsonl"),
-            "{text}"
-        );
     }
 
     #[tokio::test]
@@ -241,13 +166,12 @@ mod tests {
 
         assert_eq!(place.location(Path::new("/w")), None);
         assert_eq!(place.path_of(&header.id).await.unwrap(), None);
-        assert_eq!(place.only().await.unwrap(), None);
         assert_eq!(place.started_in(Path::new("/w")).await.unwrap().sessions.len(), 1);
     }
 
     #[tokio::test]
     async fn memory_keeps_nothing_of_a_session_that_was_closed() {
-        // What `acp --no-session` relies on: it runs for long, and its client closes sessions.
+        // What a host that runs for long relies on when its clients close their sessions.
         let place = SessionPlace::memory();
         let header = SessionHeader::new(Path::new("/w"), "m");
         let mut open = create(&place, &header).await;

@@ -3,13 +3,15 @@
 //! (`src/main.rs`) only calls [`main`].
 //!
 //! Every subcommand gets its agent from `zx-app`, which reads config.toml and the agent
-//! files and knows neither a command line nor a terminal. The subcommands do not refer to
-//! each other:
+//! files, runs the process's shutdown and knows neither a command line nor a terminal. The
+//! subcommands do not refer to each other:
 //!
 //! - `run`, `chat`, `acp`, `im`, `list_sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands
+//! - `session_file`: `--session`'s file, whose session run and chat continue
 //! - `listing`: how a listing shows sessions
-//! - `process`: exit codes, signals, and what every subcommand writes to its outputs
+//! - `process`: exit codes, and what every subcommand writes to its outputs, about signals and
+//!   the trace export too
 //! - `render`: how calls, results and times are shown
 
 mod acp;
@@ -21,6 +23,7 @@ mod listing;
 mod process;
 mod render;
 mod run;
+mod session_file;
 
 use std::process::ExitCode;
 

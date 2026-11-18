@@ -10,13 +10,14 @@ use zx_agent::ai::Message;
 use zx_agent::events::{Event, EventKind, RunOutcome, RunReport};
 use zx_agent::{Run, Session};
 use zx_app::config::Builtin;
+use zx_app::otel::{Telemetry, TraceHook, TraceParent};
+use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{
-    EXIT_DENIED, JsonlEvents, exit_code, next_event, print_line, run_traces, spawn_signal_handler, with_telemetry,
-};
+use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, exit_code, print_line, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
+use crate::session_file;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
@@ -50,7 +51,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
             .with_traces(telemetry.map(run_traces));
         let session = build_session(&app, session_file.as_deref()).await?;
         let cancel = CancellationToken::new();
-        spawn_signal_handler(cancel.clone());
+        cancel_on_signals(cancel.clone());
         let run = match prompt {
             Some(prompt) => session.send(prompt)?,
             None => session.continue_run()?,
@@ -81,12 +82,31 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
+/// The trace hook of an unattended run: the run continues the caller's trace when
+/// `TRACEPARENT` names one, as a scheduler or `otel-cli` sets it. A value that is not a
+/// traceparent is reported, and the run starts a trace of its own.
+fn run_traces(telemetry: &Telemetry) -> TraceHook {
+    match TraceParent::from_env() {
+        Ok(Some(parent)) => {
+            eprintln!("[otel] continuing trace {}", parent.trace_id());
+            telemetry.hook_under(&parent)
+        }
+        Ok(None) => telemetry.hook(),
+        Err(error) => {
+            eprintln!("[otel] {error:#}; the run starts a trace of its own");
+            telemetry.hook()
+        }
+    }
+}
+
 /// A session of the `unattended` agent, or of the user's file that replaces it, in which
 /// nobody answers approvals: `--session` continues the session its file holds, or starts
-/// the file.
+/// the file; without it the session is kept in memory.
 async fn build_session(app: &Application, session: Option<&Path>) -> Result<Session> {
-    let place = SessionPlace::file_or_memory(session);
-    let held = place.held(app.cwd()).await?;
+    let (place, held) = match session {
+        Some(path) => (SessionPlace::file(path), session_file::held(path, app.cwd()).await?),
+        None => (SessionPlace::memory(), None),
+    };
     let agent = app.build(app.model(), &place, Approvals::Nobody)?;
     match held {
         Some(id) => crate::process::resume(&agent, &id).await,

@@ -16,7 +16,7 @@ use zx_agent::builtin::policy::{AutoApprove, ProgramOptions};
 
 /// One entry of `allow` or `deny`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Entry {
+pub(crate) enum Entry {
     /// A tool, by the name the model calls it.
     Tool(String),
     /// Bash commands, by a text: a prefix in `allow`, a substring in `deny`.
@@ -25,22 +25,22 @@ pub enum Entry {
 
 /// The checked `[permissions]` of an agent.
 #[derive(Debug, Default)]
-pub struct Permissions {
+pub(crate) struct Permissions {
     /// Tools whose calls need a person's approval; refused where no one can answer.
-    pub ask: Vec<String>,
+    pub(crate) ask: Vec<String>,
     /// Commands that run without asking, by prefix, and MCP tools that do.
-    pub allow: Vec<Entry>,
+    pub(crate) allow: Vec<Entry>,
     /// Texts that keep an allowed command asking, compared without case, such as `secret`.
-    pub allow_except: Vec<String>,
+    pub(crate) allow_except: Vec<String>,
     /// For a program, such as kubectl, the options an allowed command may pass; any other
     /// option asks. Programs not listed may pass any option.
-    pub allow_options: BTreeMap<String, ProgramOptions>,
+    pub(crate) allow_options: BTreeMap<String, ProgramOptions>,
     /// Tools denied whatever else says, and commands containing a text.
-    pub deny: Vec<Entry>,
+    pub(crate) deny: Vec<Entry>,
     /// Ask nobody: calls that would wait for an approval run instead, while denials and the
     /// command policy still apply. Only with container execution, where the container is the
     /// sandbox, and not together with `ask`.
-    pub approve_all: bool,
+    pub(crate) approve_all: bool,
 }
 
 /// `[permissions]` as a file writes it. Each key it sets replaces the inherited value whole,
@@ -118,27 +118,27 @@ fn entry(key: &str, value: String) -> Result<Entry> {
 
 impl Permissions {
     /// The command prefixes that run without asking.
-    pub fn allowed_commands(&self) -> Vec<String> {
+    pub(crate) fn allowed_commands(&self) -> Vec<String> {
         bash_texts(&self.allow)
     }
 
     /// The tools that run without asking: MCP tools, which otherwise ask.
-    pub fn allowed_tools(&self) -> Vec<String> {
+    pub(crate) fn allowed_tools(&self) -> Vec<String> {
         tool_names(&self.allow)
     }
 
     /// The texts whose commands are denied.
-    pub fn denied_commands(&self) -> Vec<String> {
+    pub(crate) fn denied_commands(&self) -> Vec<String> {
         bash_texts(&self.deny)
     }
 
     /// The tools that are denied.
-    pub fn denied_tools(&self) -> Vec<String> {
+    pub(crate) fn denied_tools(&self) -> Vec<String> {
         tool_names(&self.deny)
     }
 
     /// The bash commands these permissions let run without asking, for the approval rules.
-    pub fn auto_approval(&self) -> AutoApprove {
+    pub(crate) fn auto_approval(&self) -> AutoApprove {
         self.allow_options.iter().fold(
             AutoApprove::new(self.allowed_commands()).except(&self.allow_except),
             |list, (program, options)| list.options(program, options.clone()),

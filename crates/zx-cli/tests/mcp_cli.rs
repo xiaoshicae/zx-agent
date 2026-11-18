@@ -56,13 +56,13 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
     home
 }
 
-/// `zx-agent <mode>` against `model` with the zx-agent home `home`, the token set and no API
-/// key.
-fn program(mode: &str, model: &MockServer, dir: &Path, home: &Path) -> Command {
+/// `zx-agent <subcommand>` against `model` with the zx-agent home `home`, the token set and
+/// no API key.
+fn program(subcommand: &str, model: &MockServer, dir: &Path, home: &Path) -> Command {
     // chat keeps sessions under the zx-agent home by default; never the real one.
     let mut command = zx_agent_in(dir, Home::Agent(home));
     command
-        .args([mode, "--model", "mock"])
+        .args([subcommand, "--model", "mock"])
         .env("ZX_BASE_URL", &model.base_url)
         .env(TOKEN_VAR, TOKEN)
         .env_remove(KEY_VAR)
