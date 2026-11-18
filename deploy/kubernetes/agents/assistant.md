@@ -1,13 +1,11 @@
 +++
-# Agent for conversations in the resident Pod: chat (kubectl exec) and zx-im. The
-# kustomization puts it in the ConfigMap zx-agent-agents, mounted at /data/.zx-agent/agents,
-# where it replaces the built-in assistant. It adds the read-only kubectl commands to the
-# assistant's commands that run without asking, and limits their options. zx-agent itself
-# knows nothing about kubectl. The instructions are the assistant's: the body below the front
-# matter is empty.
+# Replaces the built-in assistant for chat and zx-im in the resident Pod. zx-agent knows
+# nothing about kubectl, so this file adds its read-only commands to those that run without
+# asking, and limits their options. The body below the front matter is empty: the
+# instructions are the assistant's.
 extends = "assistant"
-# The assistant's tools without edit_file and write_file, since the Pod is for looking at
-# clusters, not for changing files, and without the search tools grep, find and ls.
+# Without edit_file and write_file, since the Pod is for looking at clusters, not for changing
+# files, and without the search tools grep, find and ls.
 tools = ["bash", "read_file", "read_skill", "read_output"]
 
 [permissions]
@@ -37,9 +35,8 @@ allow = [
 # and how to show it. Every other option asks, among them those that send the request
 # elsewhere (--server), use other credentials (--kubeconfig, --token, --user, --as), skip
 # certificate checks (--insecure-skip-tls-verify), write files (--profile-output,
-# --cache-dir), read any API path (--raw) or read manifests (--filename). kubectl v1.36.1
-# sent the kubeconfig token to an HTTPS address given with --server. Checked against
-# kubectl v1.36.1.
+# --cache-dir), read any API path (--raw) or read manifests (--filename). Checked against
+# kubectl v1.36.1, which sent the kubeconfig token to an HTTPS address given with --server.
 [permissions.allowOptions.kubectl]
 long = [
   "namespace",
@@ -88,7 +85,6 @@ long = [
   "verbs",
   "client",
 ]
-# -n, -o, -l, -L and -c take a value; -A, -p and -R stand alone.
 shortWithValue = ["n", "o", "l", "L", "c"]
 shortFlags = ["A", "p", "R"]
 +++

@@ -1,5 +1,5 @@
-# Optional: the writes that chat may perform, each after a person approves the command.
-# Bound to the resident Pod's account only; scheduled inspections stay read-only.
+# Optional writes for the resident Pod's account only, so scheduled inspections stay read-only.
+# chat and zx-im ask a person before each; a run started in the Pod does not (README.md, "权限").
 #
 # Apply by itself, after writing one RoleBinding below for every namespace the agent may
 # change: kubectl apply -f deploy/kubernetes/operator.yaml

@@ -1,7 +1,5 @@
-# Configuration of zx-im in the resident Pod (README.md, "IM 服务"). Copy it to
-# im.toml, fill in the chats and approvers, and create the ConfigMap from it:
-#   kubectl create configmap zx-agent-im-config -n zx-agent --from-file=im.toml
-# The credentials come from the Secret zx-agent-im, never from this file.
+# The im.toml of zx-im in the resident Pod (README.md, "IM 服务", step 2). The credentials
+# come from the Secret zx-agent-im, never from this file.
 
 [slack]
 

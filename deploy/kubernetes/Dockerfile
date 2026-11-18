@@ -1,14 +1,10 @@
-# Image for running zx-agent in a resident Pod: zx-agent and zx-im, the IM service, with bash,
-# kubectl, curl and jq.
-# Build from the repository root (the build context must be the repository):
-#   docker build -f deploy/kubernetes/Dockerfile -t <registry>/zx-agent:<tag> .
+# zx-agent and zx-im with bash, kubectl, curl, jq and tini, for the Pods of this deployment.
+# The build context is the repository root (README.md, "部署").
 
 # The toolchain the release workflow uses (.github/workflows/release.yml).
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
-# Only what the build reads, so edits elsewhere keep it cached: the workspace manifest and its
-# crates. The programs are crates/zx-cli (zx-agent) and crates/zx-im (zx-im); the built-in
-# agents they compile in are in crates/zx-app.
+# Only what the build reads, so that edits elsewhere keep this layer cached.
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --release --locked
@@ -30,10 +26,9 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERS
  && chmod 0755 /usr/local/bin/kubectl
 COPY --from=build /src/target/release/zx-agent /usr/local/bin/zx-agent
 COPY --from=build /src/target/release/zx-im /usr/local/bin/zx-im
-# A fixed non-root user; the manifests run the Pod with the same IDs. /data is its home and
-# the mount point of the session volume, and this deployment's agents (deploy/kubernetes/agents)
-# are mounted from a ConfigMap at /data/.zx-agent/agents, where zx-agent looks for them; it exists in the image so that Pods without the
-# volume, such as scheduled inspections with a read-only root filesystem, can start in it.
+# A fixed non-root user, whose IDs the manifests use too. Its home /data holds the zx-agent
+# home (/data/.zx-agent) and is where the Pods mount their session volume; it is created and
+# owned by the user here so that it is writable without a volume as well.
 RUN groupadd --gid 10001 zx \
  && useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home --shell /bin/bash zx \
  && mkdir /data \

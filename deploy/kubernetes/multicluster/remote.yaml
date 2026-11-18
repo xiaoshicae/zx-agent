@@ -1,6 +1,5 @@
-# Apply once in every other cluster the agent should read: kubectl apply -f remote.yaml
-# It creates a read-only account (the built-in view role, without Secrets) and a long-lived
-# token for it, which goes into the Secret zx-agent-clusters of the cluster running zx-agent.
+# For every other cluster the agent reads (README.md, "多集群", step 1): a read-only account
+# (the built-in view role, without Secrets) and a long-lived token for it.
 apiVersion: v1
 kind: Namespace
 metadata:
