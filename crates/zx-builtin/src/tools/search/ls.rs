@@ -1,11 +1,14 @@
 //! The `ls` tool: the entries of one directory.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{SearchSettings, Wording, finish, first_lines, positive, quote, search_path};
+use super::{Wording, finish, first_lines, positive, quote, search, search_path};
 use crate::ai::ToolDef;
+use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
 use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
@@ -13,10 +16,18 @@ use zx_core::tools::{Tool, ToolContext, ToolOutput};
 const LS_LIMIT: usize = 500;
 
 /// Lists a directory.
-#[derive(Default)]
 pub struct LsTool {
-    /// Where and how the listing runs.
-    pub settings: SearchSettings,
+    /// Where the listing runs, and so what it must not see: on this machine, the variables in
+    /// [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
+    pub executor: Arc<dyn Executor>,
+}
+
+impl Default for LsTool {
+    fn default() -> Self {
+        Self {
+            executor: Arc::new(LocalExecutor::default()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -68,7 +79,7 @@ impl Tool for LsTool {
         let path = quote(&search_path(args.path.as_deref()));
         // -A: dotfiles without . and ..; -p: '/' after directories; -1: one per line.
         let script = format!("LC_ALL=C ls -1Ap -- {path} | {}", first_lines(limit));
-        let searched = self.settings.run(&script, ctx).await?;
+        let searched = search(self.executor.as_ref(), &script, ctx).await?;
         finish(
             &searched,
             limit,

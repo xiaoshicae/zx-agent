@@ -7,7 +7,7 @@
 //! in a container or VM, for real isolation.
 //!
 //! Only policies decide; hooks observe and transform. The policies that ship with zx-agent
-//! live outside the kernel, in the zx-tools crate (`zx_agent::builtin::policy`):
+//! live outside the kernel, in the zx-builtin crate (`zx_agent::builtin::policy`):
 //!
 //! ```compile_fail
 //! use zx_core::policy::CommandPolicy;

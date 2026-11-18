@@ -40,7 +40,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
 | `maxTokens` | 每次回复的输出 token 上限，推理也算在内，太小可能让回答为空。不设时不限 |
 | `approvalTimeoutSecs` | chat、acp 与 im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
-| `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的 `timeout_secs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
+| `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md) |
 | `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1` |
 | `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认 `OPENAI_API_KEY`；变量没有值时请求不带认证头 |
@@ -211,7 +211,7 @@ tools = ["query", "query_range"]
 
 ## skills
 
-skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。目录（名称、简介与正文文件的路径）进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。每个目录至多 64 项；`name` 为 1–64 个小写字母、数字或连字符，`description` 为 1–1024 字节，正文至多 64 KiB，按 2000 行、50 KiB 分页读取。
+skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。目录（名称、简介与正文文件的路径）进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。每个目录至多 64 项；`name` 为 1–64 个小写字母、数字或连字符，`description` 为 1–1024 字节，正文至多 64 KiB，像 `read_output` 的结果一样分页读取（见下文“工具结果落盘”），一页连同脚注至多 50 KiB，脚注为 `[Use read_skill with name="<名称>", offset=<偏移> to continue.]`。
 
 ## 上下文管理
 
@@ -230,13 +230,13 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ## 工具结果落盘
 
-agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
+agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页至多 2000 行，放得下时是整行（超长的一行在字符边界切开，下一页接着读），连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
 
 | 键 | 语义 |
 |---|---|
 | `toolOutput.thresholdBytes` | 超过此大小的结果落盘；0 保持内联，否则为 256–`maxFileBytes`，默认 8192 |
 | `toolOutput.maxFileBytes` | 单个文件上限，1–1048576，默认 1 MiB |
-| `toolOutput.directory` | 结果目录，相对 `config.toml` 所在目录；省略时为工具 cwd 下的 `.zx-agent/outputs` |
+| `toolOutput.directory` | 结果目录，相对 `config.toml` 所在目录；省略时为每个会话工作目录下的 `.zx-agent/outputs` |
 
 文件不自动删除；目录中写入忽略全部文件的 `.gitignore`，Unix 上新目录与文件的权限为 0700 与 0600。
 
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.18 · 2026年11月
+CONFIGURATION.md · v0.19 · 2026年11月

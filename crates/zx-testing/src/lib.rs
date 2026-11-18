@@ -40,7 +40,7 @@
 //! only the program's tests can have (`crates/zx-cli/tests/common/mod.rs`: the compiled
 //! `zx-agent` and a pseudo-terminal), running a chat channel
 //! (`crates/zx-agent/tests/common/im.rs`), and the unit tests' own `test_support` modules in
-//! `zx-core`'s `transcript` and `zx-tools`'s `jsonl`.
+//! `zx-core`'s `transcript` and `zx-builtin`'s `jsonl`.
 
 pub mod fake_feishu;
 pub mod fake_mcp;

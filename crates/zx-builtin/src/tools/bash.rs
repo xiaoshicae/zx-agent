@@ -15,20 +15,15 @@ use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// The timeout of a call that sets none, unless the host configures another.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-/// The most a call may ask for with `timeout_secs`, unless the host configures more.
+/// The most a call may ask for with `timeoutSecs`, unless the host configures more.
 pub(super) const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The shell program, looked up on `PATH`; the tool is named after it. A [`ContainerExecutor`]
-/// runs commands with the shell of its own configuration instead.
-///
-/// [`ContainerExecutor`]: crate::executor::ContainerExecutor
-const SHELL: &str = "bash";
-
-/// Runs `bash -c <command>` in the working directory.
+/// Runs a shell command in the working directory, with the shell of its executor: bash, for
+/// both built-in executors.
 pub struct BashTool {
-    /// Timeout when the call does not set `timeout_secs`.
+    /// Timeout when the call does not set `timeoutSecs`.
     pub default_timeout: Duration,
-    /// Upper bound for `timeout_secs`.
+    /// Upper bound for `timeoutSecs`.
     pub max_timeout: Duration,
     /// Where commands run, and so what they must not see: on this machine, the variables in
     /// [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
@@ -46,7 +41,7 @@ impl Default for BashTool {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Args {
     command: String,
     #[serde(default)]
@@ -128,7 +123,7 @@ fn parse(args: &Value) -> Result<Args, String> {
     }
     // A zero limit would end the command before it could run.
     if args.timeout_secs == Some(0) {
-        return Err("timeout_secs must be at least 1; omit it to use the default timeout".to_string());
+        return Err("timeoutSecs must be at least 1; omit it to use the default timeout".to_string());
     }
     Ok(args)
 }
@@ -154,7 +149,7 @@ impl Tool for BashTool {
             description: format!(
                 "Run a shell command in the working directory. Returns stdout, then stderr under a [stderr] marker, \
                  then the exit code. Output is truncated to the last {MAX_LINES} lines or {}KB. Commands time out \
-                 after {}s unless timeout_secs is set (max {}s); avoid commands that never exit, such as `tail -f`. \
+                 after {}s unless timeoutSecs is set (max {}s); avoid commands that never exit, such as `tail -f`. \
                  Background processes started by the command are killed when it finishes.",
                 MAX_BYTES / 1024,
                 self.default_timeout.as_secs(),
@@ -164,7 +159,7 @@ impl Tool for BashTool {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to run" },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
+                    "timeoutSecs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -180,7 +175,6 @@ impl Tool for BashTool {
         let args = parse(&args)?;
         let limit = self.timeout_for(args.timeout_secs);
         let request = ShellCommand {
-            shell: SHELL,
             command: &args.command,
             cwd: &ctx.cwd,
             timeout: limit,
@@ -262,7 +256,7 @@ mod tests {
         let started = Instant::now();
         let output = tool
             .execute(
-                json!({"command": "echo start; sleep 30 | cat; echo never", "timeout_secs": 1}),
+                json!({"command": "echo start; sleep 30 | cat; echo never", "timeoutSecs": 1}),
                 &ctx(),
             )
             .await
@@ -416,7 +410,7 @@ mod tests {
             ..BashTool::default()
         };
         let output = tool
-            .execute(json!({"command": "sleep 5", "timeout_secs": 100}), &ctx())
+            .execute(json!({"command": "sleep 5", "timeoutSecs": 100}), &ctx())
             .await
             .unwrap();
         assert!(output.content.contains("timed out after 1s"), "{}", output.content);
@@ -441,14 +435,17 @@ mod tests {
         let tool = BashTool::default();
         assert!(tool.execute(json!({"cmd": "ls"}), &ctx()).await.is_err());
         assert!(tool.execute(json!({"command": "  "}), &ctx()).await.is_err());
+        // Arguments are camelCase, like every format the agent exchanges.
+        let snake = json!({"command": "ls", "timeout_secs": 5});
+        assert!(tool.validate_arguments(&snake).unwrap_err().contains("timeout_secs"));
     }
 
     #[tokio::test]
     async fn a_zero_timeout_is_rejected_before_the_command_runs() {
         let tool = BashTool::default();
-        let args = json!({"command": "echo hi", "timeout_secs": 0});
+        let args = json!({"command": "echo hi", "timeoutSecs": 0});
         let error = tool.validate_arguments(&args).unwrap_err();
-        assert!(error.contains("timeout_secs"), "{error}");
+        assert!(error.contains("timeoutSecs"), "{error}");
         assert!(tool.execute(args, &ctx()).await.is_err());
     }
 

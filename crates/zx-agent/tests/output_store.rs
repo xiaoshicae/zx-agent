@@ -9,9 +9,11 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, ToolDef};
-use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
+use zx_agent::builtin::output_store::{
+    InvalidOutputStoreConfig, OutputStore, OutputStoreConfig, ReadOutputTool, SpillOutputs,
+};
 use zx_agent::builtin::redact::RedactSecrets;
-use zx_agent::builtin::tools::ReadFileTool;
+use zx_agent::builtin::tools::{READ_OUTPUT, ReadFileTool};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::Hook;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
@@ -19,10 +21,15 @@ use zx_agent::{Session, SessionOptions};
 
 use zx_testing::{RunnerSetup, Start, config, header_in};
 
-fn settings() -> Config {
-    Config {
+/// Where the stores of these tests keep results, below the working directory as a program
+/// may put them, and the directory above it.
+const OUTPUTS: &str = "store/outputs";
+const ABOVE_OUTPUTS: &str = "store";
+
+fn settings() -> OutputStoreConfig {
+    OutputStoreConfig {
         threshold_bytes: Some(256),
-        ..Config::default()
+        ..OutputStoreConfig::new(OUTPUTS)
     }
 }
 fn call(name: &str) -> ToolCall {
@@ -37,7 +44,7 @@ fn ctx(cwd: &Path) -> ToolContext {
     ToolContext::new(cwd.into(), CancellationToken::new())
 }
 /// The tools the command line exempts from storing: each pages its own output.
-const PAGING_TOOLS: [&str; 3] = [TOOL_NAME, "read_skill", "read_file"];
+const PAGING_TOOLS: [&str; 3] = [READ_OUTPUT, "read_skill", "read_file"];
 
 fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
     let store = OutputStore::new(dir, settings()).unwrap();
@@ -54,7 +61,7 @@ fn output_id(page: &str) -> String {
 
 /// The file in which the store of `parts(dir)` keeps the result `id`.
 fn stored_file(dir: &Path, id: &str) -> PathBuf {
-    dir.join(".zx-agent/outputs").join(format!("{id}.txt"))
+    dir.join(OUTPUTS).join(format!("{id}.txt"))
 }
 
 /// Pass `text` through `hook` as the result of a bash call. Returns what the hook leaves in
@@ -72,7 +79,7 @@ async fn spill(hook: &SpillOutputs, text: &str) -> (String, String) {
 async fn files_are_lazy_persistent_and_contain_the_exact_bounded_tool_result() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());
-    let root = dir.path().join(".zx-agent/outputs");
+    let root = dir.path().join(OUTPUTS);
     assert!(!root.exists());
     let text = "already bounded output, including its truncation notice\n".repeat(100);
     let (_, id) = spill(&hook, &text).await;
@@ -230,7 +237,7 @@ async fn a_link_named_like_an_output_is_not_followed() {
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("secret.txt");
     std::fs::write(&target, "kept outside the output directory").unwrap();
-    let outputs = dir.path().join(".zx-agent/outputs");
+    let outputs = dir.path().join(OUTPUTS);
     std::fs::create_dir_all(&outputs).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     std::os::unix::fs::symlink(&target, outputs.join(format!("{id}.txt"))).unwrap();
@@ -256,8 +263,8 @@ async fn swap_outputs_for_a_link(hook: &SpillOutputs, dir: &Path) -> (tempfile::
     let elsewhere = tempfile::tempdir().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     std::fs::write(elsewhere.path().join(format!("{id}.txt")), "from another directory").unwrap();
-    let outputs = dir.join(".zx-agent/outputs");
-    std::fs::rename(&outputs, dir.join(".zx-agent/moved")).unwrap();
+    let outputs = dir.join(OUTPUTS);
+    std::fs::rename(&outputs, dir.join(ABOVE_OUTPUTS).join("moved")).unwrap();
     std::os::unix::fs::symlink(elsewhere.path(), &outputs).unwrap();
     (elsewhere, id)
 }
@@ -301,7 +308,7 @@ async fn nothing_is_stored_through_an_output_directory_swapped_for_a_link() {
 #[tokio::test]
 async fn nothing_is_stored_through_a_link_planted_before_the_first_result() {
     // In place of the output directory, and of the directory above it.
-    for linked in [".zx-agent/outputs", ".zx-agent"] {
+    for linked in [OUTPUTS, ABOVE_OUTPUTS] {
         let dir = tempfile::tempdir().unwrap();
         let (hook, _) = parts(dir.path());
         let elsewhere = tempfile::tempdir().unwrap();
@@ -331,8 +338,8 @@ async fn an_output_is_not_read_through_a_link_planted_before_the_first_read() {
     let elsewhere = tempfile::tempdir().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     std::fs::write(elsewhere.path().join(format!("{id}.txt")), "from another directory").unwrap();
-    std::fs::create_dir_all(dir.path().join(".zx-agent")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(".zx-agent/outputs")).unwrap();
+    std::fs::create_dir_all(dir.path().join(ABOVE_OUTPUTS)).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(OUTPUTS)).unwrap();
 
     let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
 
@@ -350,7 +357,7 @@ async fn an_output_directory_outside_the_working_directory_may_be_reached_throug
     std::fs::create_dir(&real).unwrap();
     let link = elsewhere.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let config = Config {
+    let config = OutputStoreConfig {
         directory: link.join("outputs"),
         ..settings()
     };
@@ -367,7 +374,7 @@ async fn an_output_directory_outside_the_working_directory_may_be_reached_throug
 #[tokio::test]
 async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let config = Config {
+    let config = OutputStoreConfig {
         max_file_bytes: 512,
         ..settings()
     };
@@ -388,7 +395,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
         "{}",
         kept.content
     );
-    assert!(!dir.path().join(".zx-agent").exists());
+    assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
     let (_, id) = spill(&hook, &"x".repeat(512)).await;
     let args = json!({"id": id});
     assert!(reader.execute(args.clone(), &ctx(dir.path())).await.is_ok());
@@ -468,7 +475,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let (disabled, _) = SpillOutputs::with_reader(
         OutputStore::new(
             dir.path(),
-            Config {
+            OutputStoreConfig {
                 threshold_bytes: None,
                 ..settings()
             },
@@ -483,7 +490,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
             .unwrap(),
         large
     );
-    assert!(!dir.path().join(".zx-agent").exists());
+    assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
 }
 
 /// A bash command whose long output comes as its run is cancelled: it cancels the session it
@@ -543,7 +550,7 @@ async fn cancellation_skips_writes_and_reads() {
         result.is_error && result.content.starts_with("Tool output withheld"),
         "{result:?}"
     );
-    assert!(!dir.path().join(".zx-agent").exists());
+    assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
     assert_eq!(provider.requests().len(), 1);
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -590,7 +597,7 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
         FauxStep::tool_call("c", "read_file", json!({"path":"source.txt"})),
         FauxStep::text("done"),
     ]));
-    let (spill, reader) = SpillOutputs::with_reader(store, vec![TOOL_NAME.into()]);
+    let (spill, reader) = SpillOutputs::with_reader(store, vec![READ_OUTPUT.into()]);
     let mut config = config(
         provider.clone(),
         vec![Arc::new(ReadFileTool::default()), Arc::new(reader)],
@@ -627,7 +634,7 @@ async fn a_created_output_directory_keeps_its_files_out_of_git() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());
     spill(&hook, &"z".repeat(1000)).await;
-    let ignore = std::fs::read_to_string(dir.path().join(".zx-agent/outputs/.gitignore")).unwrap();
+    let ignore = std::fs::read_to_string(dir.path().join(OUTPUTS).join(".gitignore")).unwrap();
     assert!(ignore.lines().any(|line| line == "*"), "{ignore}");
 }
 
@@ -638,7 +645,7 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
     std::fs::write(dir.path().join("blocked"), "not a directory").unwrap();
     let store = OutputStore::new(
         dir.path(),
-        Config {
+        OutputStoreConfig {
             directory: PathBuf::from("blocked/outputs"),
             ..settings()
         },
@@ -677,24 +684,49 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
 
 #[test]
 fn invalid_storage_budgets_are_rejected_at_startup() {
-    for config in [
-        Config {
-            threshold_bytes: Some(1),
-            ..settings()
-        },
-        Config {
-            max_file_bytes: 0,
-            ..settings()
-        },
-        Config {
-            max_file_bytes: 1024 * 1024 + 1,
-            ..settings()
-        },
-        Config {
-            directory: PathBuf::new(),
-            ..settings()
-        },
+    for (config, expected) in [
+        (
+            OutputStoreConfig {
+                threshold_bytes: Some(1),
+                ..settings()
+            },
+            InvalidOutputStoreConfig::ThresholdBytes {
+                threshold: 1,
+                max_file_bytes: 1024 * 1024,
+            },
+        ),
+        (
+            OutputStoreConfig {
+                max_file_bytes: 0,
+                ..settings()
+            },
+            InvalidOutputStoreConfig::MaxFileBytes(0),
+        ),
+        (
+            OutputStoreConfig {
+                max_file_bytes: 1024 * 1024 + 1,
+                ..settings()
+            },
+            InvalidOutputStoreConfig::MaxFileBytes(1024 * 1024 + 1),
+        ),
+        (
+            OutputStoreConfig {
+                directory: PathBuf::new(),
+                ..settings()
+            },
+            InvalidOutputStoreConfig::EmptyDirectory,
+        ),
     ] {
-        assert!(config.validate().is_err());
+        assert_eq!(config.validate(), Err(expected.clone()));
+        assert_eq!(OutputStore::new(Path::new("/work"), config).err(), Some(expected));
     }
+    // The errors name the fields as the settings do, with what each takes.
+    assert_eq!(
+        InvalidOutputStoreConfig::ThresholdBytes {
+            threshold: 1,
+            max_file_bytes: 512
+        }
+        .to_string(),
+        "threshold_bytes is 1; it must be 256..=512 (max_file_bytes), or None to store nothing"
+    );
 }

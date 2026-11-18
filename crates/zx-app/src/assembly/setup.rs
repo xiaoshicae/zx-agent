@@ -9,11 +9,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::config::skills::TOOL_NAME;
+use crate::config::skills::READ_SKILL;
 use crate::config::{ContainerSettings, Execution, ProjectContext};
 use zx_agent::agent::{SessionParts, SessionSetup};
-use zx_agent::builtin::output_store::{self, OutputStore, SpillOutputs};
-use zx_agent::builtin::tools::{self, FileMutationQueue};
+use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, SpillOutputs};
+use zx_agent::builtin::tools::{self, EXECUTOR_TOOL_NAMES, FileMutationQueue, READ_OUTPUT};
 use zx_agent::hooks::HookChain;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
@@ -25,7 +25,8 @@ use super::execution::{check_session_outside, executor};
 /// and kept until it is closed: a container, when commands run in one, is the session's.
 pub(super) struct PerSession {
     /// The tools the agent enables, by name: those of the executor are made for each
-    /// session's working directory.
+    /// session's working directory, and read_skill and read_output read files of this
+    /// machine, wherever commands run.
     pub(super) tools: Vec<String>,
     /// Which project instructions the agent reads from a session's working directory.
     pub(super) context: ProjectContext,
@@ -39,17 +40,11 @@ pub(super) struct PerSession {
     pub(super) hidden_env: Vec<String>,
     pub(super) tool_timeout: Duration,
     /// Where long tool results go when the agent enables read_output.
-    pub(super) tool_output: output_store::Config,
+    pub(super) tool_output: OutputStoreConfig,
     /// Where the sessions are kept, which a container must not be able to read.
     pub(super) place: SessionPlace,
-    /// The turns at each file to change, shared by every session of the process.
-    pub(super) files: Arc<FileMutationQueue>,
-}
-
-/// Whether `name` is a tool of this machine rather than of the executor: read_skill and
-/// read_output read files here, whatever executor runs commands.
-fn host_tool(name: &str) -> bool {
-    name == TOOL_NAME || name == output_store::TOOL_NAME
+    /// The queue of changes to each file, shared by every session of the process.
+    pub(super) file_queue: Arc<FileMutationQueue>,
 }
 
 /// The prompt sections a session gets: where commands run, the project's instructions such
@@ -87,11 +82,11 @@ impl SessionSetup for PerSession {
             host.push(tool.clone());
             catalog = skills;
         }
-        if self.tools.iter().any(|name| name == output_store::TOOL_NAME) {
+        if self.tools.iter().any(|name| name == READ_OUTPUT) {
             let store = OutputStore::new(cwd, self.tool_output.clone())?;
             // The tools that page their own output are exempt: a page of theirs is not stored
             // again.
-            let paging = [output_store::TOOL_NAME, TOOL_NAME, tools::READ_FILE];
+            let paging = [READ_OUTPUT, READ_SKILL, tools::READ_FILE];
             let (spill, reader) = SpillOutputs::with_reader(store, paging.map(String::from).to_vec());
             // Named like the hooks every session shares (`cli::agent::hooks`).
             hooks.push("spill_outputs", Arc::new(spill));
@@ -100,7 +95,7 @@ impl SessionSetup for PerSession {
         if self.execution == Execution::Container {
             check_session_outside(self.place.location(cwd).as_deref(), cwd)?;
         }
-        let (executor, environment) = executor(
+        let executor = executor(
             self.execution,
             &self.container,
             cwd,
@@ -108,8 +103,15 @@ impl SessionSetup for PerSession {
             self.hidden_env.clone(),
         )
         .await?;
-        let built_in: Vec<String> = self.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-        let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor, &self.files)?;
+        let environment = executor.environment_section(cwd);
+        // The agent's tools were checked when it was loaded: the others are those of `host`.
+        let on_executor: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|name| EXECUTOR_TOOL_NAMES.contains(&name.as_str()))
+            .cloned()
+            .collect();
+        let mut tools = tools::executor_tools(&on_executor, self.tool_timeout, &executor, &self.file_queue)?;
         tools.extend(host);
         Ok(SessionParts {
             tools,

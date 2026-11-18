@@ -4,85 +4,121 @@
 //! result, not data discarded by that tool's own truncation. Files are not auto-deleted.
 //! When storing fails, the result stays inline: storage is an optimisation, not a filter.
 //!
-//! Only the agent stores results, but by default their directory lies in the working
+//! Only the agent stores results, but the host may put their directory in the working
 //! directory, where commands write too, those in a container included. So nothing is read
 //! or stored that a link there leads to: not a file that is one, and not a directory that
 //! is reached through one below the working directory.
 
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::ai::{ToolCall, ToolDef};
-use crate::files::{Links, open_without_blocking, read_bounded};
-use crate::text::prefix_within;
-use crate::tools::{parse_args, unless_cancelled};
+use crate::tools::paging::{Links, Pager, read_text};
+use crate::tools::{READ_OUTPUT, parse_args, unless_cancelled};
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
-/// Name of [`ReadOutputTool`], which comes with the spill hook ([`SpillOutputs::with_reader`]).
-pub const TOOL_NAME: &str = "read_output";
+/// The largest stored result, and so the largest [`OutputStoreConfig::max_file_bytes`].
+pub const MAX_FILE_BYTES: usize = 1024 * 1024;
+/// The smallest [`OutputStoreConfig::threshold_bytes`]: a page holds the threshold, footer
+/// included, and the footer alone takes about a hundred bytes.
+pub const MIN_THRESHOLD_BYTES: usize = 256;
+/// The threshold by default, and the size of a page when nothing is stored.
 const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
-const MAX_FILE_BYTES: usize = 1024 * 1024;
-// Enough for the fixed footer, a UUID and any usize offset, including on 128-bit targets.
-const FOOTER_BYTES: usize = 160;
-/// Written into the output directory: stored results may contain sensitive data, and the
-/// default directory lies inside the user's working tree.
-const GITIGNORE: &str = "# Created by zx-agent: stored tool results may contain sensitive data.\n*\n";
+/// Written into the output directory when the store creates it: stored results may contain
+/// sensitive data, and the directory may lie inside a working tree under version control.
+const GITIGNORE: &str = "# Stored tool results may contain sensitive data.\n*\n";
 
-/// Storage settings. The host maps its own notation to them, such as a zero threshold to
-/// `None`.
+/// How results are stored: where, from what size, and up to what size. The host chooses the
+/// directory; build the settings with [`OutputStoreConfig::new`] and struct update syntax.
 #[derive(Clone, Debug)]
-pub struct Config {
-    /// Relative to the tool cwd unless the host already resolved an explicit path.
+pub struct OutputStoreConfig {
+    /// Where the results are stored; a relative path is relative to the working directory of
+    /// the session ([`OutputStore::new`]).
     pub directory: PathBuf,
-    /// Results larger than this size spill; None disables writes, retaining paged reads.
+    /// Results larger than this size are stored; `None` stores nothing, while results stored
+    /// before can still be read.
     pub threshold_bytes: Option<usize>,
-    /// Hard file size limit, at most 1 MiB. It applies to both writes and actual reads.
+    /// Hard file size limit, at most [`MAX_FILE_BYTES`]. It applies to both writes and actual
+    /// reads.
     pub max_file_bytes: usize,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl OutputStoreConfig {
+    /// Settings that store results in `directory`: those over 8 KiB, up to 1 MiB each.
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
-            directory: PathBuf::from(".zx-agent/outputs"),
+            directory: directory.into(),
             threshold_bytes: Some(DEFAULT_PAGE_BYTES),
             max_file_bytes: MAX_FILE_BYTES,
         }
     }
-}
 
-impl Config {
-    /// Check the settings: the directory is named, the file size limit is within 1 MiB and
-    /// the threshold, when there is one, is at least 256 bytes and within that limit. Errors
-    /// name the field; the host adds its own name for the settings.
-    pub fn validate(&self) -> Result<()> {
-        ensure!(!self.directory.as_os_str().is_empty(), "directory must not be empty");
-        ensure!(
-            self.max_file_bytes > 0 && self.max_file_bytes <= MAX_FILE_BYTES,
-            "max_file_bytes must be 1..={MAX_FILE_BYTES}"
-        );
-        if let Some(bytes) = self.threshold_bytes {
-            ensure!(
-                bytes >= 256 && bytes <= self.max_file_bytes,
-                "threshold_bytes must be 256..=max_file_bytes, or unset to disable spilling"
-            );
+    /// Check the settings: the directory is named, the file size limit is within
+    /// [`MAX_FILE_BYTES`] and the threshold, when there is one, is at least
+    /// [`MIN_THRESHOLD_BYTES`] and within that limit.
+    pub fn validate(&self) -> Result<(), InvalidOutputStoreConfig> {
+        if self.directory.as_os_str().is_empty() {
+            return Err(InvalidOutputStoreConfig::EmptyDirectory);
+        }
+        if self.max_file_bytes == 0 || self.max_file_bytes > MAX_FILE_BYTES {
+            return Err(InvalidOutputStoreConfig::MaxFileBytes(self.max_file_bytes));
+        }
+        if let Some(threshold) = self.threshold_bytes
+            && !(MIN_THRESHOLD_BYTES..=self.max_file_bytes).contains(&threshold)
+        {
+            return Err(InvalidOutputStoreConfig::ThresholdBytes {
+                threshold,
+                max_file_bytes: self.max_file_bytes,
+            });
         }
         Ok(())
     }
 }
+
+/// A setting of an [`OutputStoreConfig`] that cannot be used. `Display` names the field as the
+/// struct does; a host that reads the settings from a file of its own matches the variant to
+/// name its own key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InvalidOutputStoreConfig {
+    /// `directory` is empty.
+    EmptyDirectory,
+    /// `max_file_bytes`, given here, is zero or over [`MAX_FILE_BYTES`].
+    MaxFileBytes(usize),
+    /// `threshold_bytes` is under [`MIN_THRESHOLD_BYTES`] or over `max_file_bytes`.
+    ThresholdBytes { threshold: usize, max_file_bytes: usize },
+}
+
+impl fmt::Display for InvalidOutputStoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyDirectory => f.write_str("directory is empty"),
+            Self::MaxFileBytes(bytes) => write!(f, "max_file_bytes is {bytes}; it must be 1..={MAX_FILE_BYTES}"),
+            Self::ThresholdBytes {
+                threshold,
+                max_file_bytes,
+            } => write!(
+                f,
+                "threshold_bytes is {threshold}; it must be {MIN_THRESHOLD_BYTES}..={max_file_bytes} (max_file_bytes), or None to store nothing"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InvalidOutputStoreConfig {}
 
 /// The filesystem address and settings of the stored results. The writer hook and the
 /// reading tool own independent copies; no open file or in-memory catalog is shared between
 /// them.
 #[derive(Clone)]
 pub struct OutputStore {
-    config: Config,
+    config: OutputStoreConfig,
     /// The directory and the directories above it, up to the working directory and without
     /// it, outermost first; none for a directory outside the working directory. Commands
     /// write the working directory, so none of these may be a symbolic link.
@@ -90,8 +126,10 @@ pub struct OutputStore {
 }
 
 impl OutputStore {
-    /// Resolve a relative directory against cwd and validate, without creating files.
-    pub fn new(cwd: &Path, mut config: Config) -> Result<Self> {
+    /// The store of a session that works in `cwd`, against which a relative directory is
+    /// resolved; checks the settings and creates no files. Errors: settings that
+    /// [`OutputStoreConfig::validate`] refuses.
+    pub fn new(cwd: &Path, mut config: OutputStoreConfig) -> Result<Self, InvalidOutputStoreConfig> {
         config.validate()?;
         config.directory = cwd.join(config.directory);
         let below_cwd = match config.directory.strip_prefix(cwd) {
@@ -208,43 +246,22 @@ impl OutputStore {
         Ok(self.config.directory.join(format!("{id}.txt")))
     }
 
+    /// The stored result at `path`, read without following a link: whoever can write the
+    /// directory can put one there, and it would lead to any file this process can read.
     async fn read(&self, path: &Path) -> Result<String, String> {
-        let unreadable = |error: &dyn std::fmt::Display| format!("cannot read tool output {}: {error}", path.display());
-        self.check_directory().await.map_err(|error| unreadable(&error))?;
-        // A link named like an output would lead to any file this process can read, and
-        // whoever can write the directory can put one there: links are not followed.
-        let (file, meta) = open_without_blocking(path, Links::Refuse)
-            .await
-            .map_err(|error| unreadable(&error))?;
-        if !meta.is_file() {
-            return Err(format!("tool output {} is not a regular file", path.display()));
-        }
+        self.check_directory().await?;
         let max = u64::try_from(self.config.max_file_bytes)
             .map_err(|error| format!("output byte limit is out of range: {error}"))?;
-        if meta.len() > max {
-            return Err(format!("tool output exceeds the {max} byte file limit"));
-        }
-        let bytes = read_bounded(file, max).await.map_err(|error| unreadable(&error))?;
-        if bytes.len() > self.config.max_file_bytes {
-            return Err(format!("tool output grew over the {max} byte file limit"));
-        }
-        String::from_utf8(bytes).map_err(|error| format!("tool output is not UTF-8: {error}"))
+        read_text(path, max, Links::Refuse).await
     }
 
-    /// One page of the stored result `id`: the start of `rest`, its text from `offset` on,
-    /// and, when more follows, a footer that says how to read on. A page with its footer
-    /// fits the threshold.
-    fn page(&self, id: &str, rest: &str, offset: usize) -> String {
-        let limit = self.config.threshold_bytes.unwrap_or(DEFAULT_PAGE_BYTES) - FOOTER_BYTES;
-        let page = prefix_within(rest, limit);
-        let mut content = page.to_string();
-        if page.len() < rest.len() {
-            let next = offset + page.len();
-            content.push_str(&format!(
-                "\n[Use read_output with id={id:?}, offset={next} to continue.]"
-            ));
+    /// How the stored result `id` is paged: a page with its footer fits the threshold.
+    fn pager<'a>(&self, id: &'a str) -> Pager<'a> {
+        Pager {
+            tool: READ_OUTPUT,
+            argument: ("id", id),
+            max_bytes: self.config.threshold_bytes.unwrap_or(DEFAULT_PAGE_BYTES),
         }
-        content
     }
 }
 
@@ -309,7 +326,7 @@ impl Hook for SpillOutputs {
             match stored {
                 // The first page, not only a reference: the model sees how the result starts
                 // without another request, and reads on only when it needs the rest.
-                Ok(id) => output.content = self.store.page(&id, &output.content, 0),
+                Ok(id) => output.content = self.store.pager(&id).page(&output.content, 0)?,
                 // This hook runs after redaction, so the bounded result is already what the
                 // session would record without spilling; hiding it would only lose evidence.
                 Err(reason) => output
@@ -322,8 +339,8 @@ impl Hook for SpillOutputs {
 }
 
 /// Reads only UUID-named regular files inside the configured output directory, without
-/// following a symbolic link. Offsets and pages are UTF-8 bytes; one result, including its
-/// continuation footer, fits the threshold.
+/// following a symbolic link. Offsets are UTF-8 bytes; pages are whole lines where they fit
+/// and, with their continuation footer, fit the threshold.
 pub struct ReadOutputTool {
     store: OutputStore,
 }
@@ -348,14 +365,14 @@ struct Args {
 #[async_trait]
 impl Tool for ReadOutputTool {
     fn name(&self) -> &str {
-        TOOL_NAME
+        READ_OUTPUT
     }
     fn effects(&self) -> Effects {
         Effects::ReadOnly
     }
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: TOOL_NAME.into(),
+            name: READ_OUTPUT.into(),
             description: "Read on in a tool result that was too long to show whole. Such a result ends with a \
                           footer that names its id and the UTF-8 byte offset of the next page; pass both. Only \
                           results this agent stored are readable."
@@ -385,11 +402,10 @@ impl Tool for ReadOutputTool {
         let args: Args = parse_args(&args)?;
         let path = self.store.path(&args.id)?;
         let read = unless_cancelled(ctx, self.store.read(&path)).await;
-        let text = read.ok_or_else(|| "output read cancelled".to_string())??;
-        let rest = text.get(args.offset..).ok_or_else(|| {
-            "output offset is out of range or inside a UTF-8 character; use the returned offset".to_string()
-        })?;
-        Ok(ToolOutput::ok(self.store.page(&args.id, rest, args.offset)))
+        let text = read
+            .ok_or_else(|| "output read cancelled".to_string())?
+            .map_err(|error| format!("cannot read tool output: {error}"))?;
+        Ok(ToolOutput::ok(self.store.pager(&args.id).page(&text, args.offset)?))
     }
 }
 
@@ -405,8 +421,8 @@ mod tests {
     #[tokio::test]
     async fn a_named_pipe_in_place_of_an_output_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let reader = ReadOutputTool::new(OutputStore::new(dir.path(), Config::default()).unwrap());
-        let outputs = dir.path().join(".zx-agent/outputs");
+        let reader = ReadOutputTool::new(OutputStore::new(dir.path(), OutputStoreConfig::new("outputs")).unwrap());
+        let outputs = dir.path().join("outputs");
         std::fs::create_dir_all(&outputs).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let path = outputs.join(format!("{id}.txt"));

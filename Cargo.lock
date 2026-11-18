@@ -3287,12 +3287,12 @@ dependencies = [
  "uuid",
  "zx-ai",
  "zx-ai-openai",
+ "zx-builtin",
  "zx-core",
  "zx-im",
  "zx-im-feishu",
  "zx-im-slack",
  "zx-testing",
- "zx-tools",
 ]
 
 [[package]]
@@ -3342,6 +3342,27 @@ dependencies = [
  "toml",
  "zx-agent",
  "zx-testing",
+]
+
+[[package]]
+name = "zx-builtin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zx-ai",
+ "zx-core",
+ "zx-util",
 ]
 
 [[package]]
@@ -3448,27 +3469,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "zx-agent",
-]
-
-[[package]]
-name = "zx-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "libc",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "uuid",
- "zx-ai",
- "zx-core",
- "zx-util",
 ]
 
 [[package]]

@@ -6,19 +6,25 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use super::read_text;
 use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{ModelCost, ModelMeta, Reasoning};
-use zx_agent::builtin::executor::{Access, check_network};
-use zx_agent::builtin::mcp::{check_server_name, tool_name as mcp_tool_name};
-use zx_agent::builtin::output_store;
+use zx_agent::builtin::executor::{Access, ContainerConfig, InvalidContainerConfig};
+use zx_agent::builtin::mcp::ServerConfig;
+use zx_agent::builtin::output_store::{
+    InvalidOutputStoreConfig, MAX_FILE_BYTES, MIN_THRESHOLD_BYTES, OutputStoreConfig,
+};
 
 /// The variable holding the API key when config.toml names none.
 const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// Where long tool results are stored unless `toolOutput.directory` says otherwise: relative
+/// to the working directory of each session.
+const DEFAULT_TOOL_OUTPUT_DIRECTORY: &str = ".zx-agent/outputs";
 
 /// Where bash and read_file run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -99,7 +105,7 @@ impl Default for ProviderSettings {
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Config {
     /// Where the file is, or would be; `None` without a home directory.
     pub path: Option<PathBuf>,
@@ -124,11 +130,32 @@ pub struct Config {
     /// Used when `execution` is `Container`.
     pub container: ContainerSettings,
     /// Where long tool results are saved when read_output is enabled.
-    pub tool_output: output_store::Config,
+    pub tool_output: OutputStoreConfig,
     /// What is known about models, by ID (`[[models]]`): the context window and prices.
     pub models: HashMap<String, ModelMeta>,
     /// External MCP servers.
     pub mcp: Vec<McpServer>,
+}
+
+impl Default for Config {
+    /// What a missing file means: the built-in defaults, and no file.
+    fn default() -> Self {
+        Self {
+            path: None,
+            model: None,
+            reasoning: None,
+            max_tokens: None,
+            tool_timeout_secs: None,
+            approval_timeout_secs: None,
+            secret_files: Vec::new(),
+            provider: ProviderSettings::default(),
+            execution: Execution::default(),
+            container: ContainerSettings::default(),
+            tool_output: OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY),
+            models: HashMap::new(),
+            mcp: Vec::new(),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -203,16 +230,17 @@ impl Config {
         Ok(config)
     }
 
-    /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries.
+    /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries:
+    /// their `name`, `url` and `tools` as [`ServerConfig::validate`] does, whose errors name
+    /// the server and those fields, and the keys that only config.toml has.
     pub fn mcp_tool_names(&self) -> Result<Vec<String>> {
         let mut servers = HashSet::new();
         let mut names = Vec::new();
         for server in &self.mcp {
+            let config = ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone());
+            names.extend(config.validate().map_err(anyhow::Error::msg)?);
             let name = server.name.as_str();
-            check_server_name(name).map_err(anyhow::Error::msg)?;
             ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
-            ensure!(!server.url.trim().is_empty(), "MCP server {name}: url is empty");
-            ensure!(!server.tools.is_empty(), "MCP server {name}: tools lists no tool");
             ensure!(
                 server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
                 "MCP server {name}: tokenEnv is empty"
@@ -221,15 +249,6 @@ impl Config {
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
             );
-            let first = names.len();
-            for tool in &server.tools {
-                let model_name = mcp_tool_name(name, tool).map_err(anyhow::Error::msg)?;
-                ensure!(
-                    !names[first..].contains(&model_name),
-                    "MCP server {name}: tool {tool:?} would be named {model_name:?}, like another of its tools"
-                );
-                names.push(model_name);
-            }
         }
         Ok(names)
     }
@@ -252,32 +271,78 @@ impl Config {
         for (id, meta) in &self.models {
             check_model(id, meta)?;
         }
-        self.tool_output.validate().context("[toolOutput]")?;
-        for (key, value) in [
-            ("container.image", &self.container.image),
-            ("container.user", &self.container.user),
-            ("container.memory", &self.container.memory),
-            ("container.network", &self.container.network),
-        ] {
-            ensure!(
-                value.as_deref().is_none_or(|value| !value.trim().is_empty()),
-                "{key} must not be empty"
-            );
+        self.tool_output.validate().map_err(|error| tool_output_error(&error))?;
+        // Without an image no container starts, and the rest of [container] is not used.
+        if self.execution == Execution::Container || self.container.image.is_some() {
+            self.container.container_config()?;
         }
-        ensure!(
-            self.container.pids_limit != Some(0),
-            "container.pidsLimit must be greater than zero"
-        );
-        if let Some(network) = &self.container.network {
-            check_network(network).context("container.network")?;
-        }
-        ensure!(
-            self.execution == Execution::Local || self.container.image.is_some(),
-            "execution = \"container\" needs container.image"
-        );
         self.mcp_tool_names()?;
         Ok(())
     }
+}
+
+impl ContainerSettings {
+    /// The settings of the containers commands run in: these over the executor's defaults,
+    /// checked. Errors name the keys of config.toml, as for a missing `container.image`.
+    pub(crate) fn container_config(&self) -> Result<ContainerConfig> {
+        let Some(image) = &self.image else {
+            bail!("execution = \"container\" needs container.image");
+        };
+        let mut config = ContainerConfig::new(image.as_str());
+        if let Some(user) = &self.user {
+            config.user.clone_from(user);
+        }
+        if let Some(memory) = &self.memory {
+            config.memory.clone_from(memory);
+        }
+        if let Some(limit) = self.pids_limit {
+            config.pids_limit = limit;
+        }
+        if let Some(network) = &self.network {
+            config.network = network.parse().map_err(container_error)?;
+        }
+        if let Some(access) = self.workspace {
+            config.workspace_access = access;
+        }
+        if let Some(access) = self.root {
+            config.root_access = access;
+        }
+        config.validate().map_err(container_error)?;
+        Ok(config)
+    }
+}
+
+/// A container setting the executor refuses, said with its key in config.toml.
+fn container_error(error: InvalidContainerConfig) -> anyhow::Error {
+    let message = match error {
+        InvalidContainerConfig::EmptyImage => "container.image must not be empty".to_string(),
+        InvalidContainerConfig::EmptyUser => "container.user must not be empty".to_string(),
+        InvalidContainerConfig::RootUser(user) => {
+            format!("container.user {user:?} is root; commands must run as an unprivileged user")
+        }
+        InvalidContainerConfig::EmptyMemory => "container.memory must not be empty".to_string(),
+        InvalidContainerConfig::ZeroPidsLimit => "container.pidsLimit must be greater than zero".to_string(),
+        InvalidContainerConfig::EmptyNetwork => "container.network must not be empty".to_string(),
+        InvalidContainerConfig::SharedNetwork(network) => format!(
+            "container.network {network:?} would share a network namespace outside the sandbox; use bridge, none or a network of your own"
+        ),
+    };
+    anyhow::anyhow!(message)
+}
+
+/// A setting of the store of long tool results that it refuses, said with its key in
+/// config.toml, where 0 is the threshold that stores nothing.
+fn tool_output_error(error: &InvalidOutputStoreConfig) -> anyhow::Error {
+    let message = match error {
+        InvalidOutputStoreConfig::EmptyDirectory => "toolOutput.directory must not be empty".to_string(),
+        InvalidOutputStoreConfig::MaxFileBytes(_) => {
+            format!("toolOutput.maxFileBytes must be 1..={MAX_FILE_BYTES}")
+        }
+        InvalidOutputStoreConfig::ThresholdBytes { max_file_bytes, .. } => format!(
+            "toolOutput.thresholdBytes must be 0, which keeps results inline, or {MIN_THRESHOLD_BYTES}..={max_file_bytes} (toolOutput.maxFileBytes)"
+        ),
+    };
+    anyhow::anyhow!(message)
 }
 
 impl RawConfig {
@@ -420,10 +485,13 @@ fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) 
 }
 
 impl RawToolOutput {
-    /// The settings over the defaults; an explicit directory is relative to `parent`.
-    fn into_config(self, parent: &Path) -> Result<output_store::Config> {
-        let mut config = output_store::Config::default();
+    /// The settings over the defaults: [`DEFAULT_TOOL_OUTPUT_DIRECTORY`] in each session's
+    /// working directory, or an explicit directory, relative to `parent`; a zero threshold
+    /// stores nothing.
+    fn into_config(self, parent: &Path) -> Result<OutputStoreConfig> {
+        let mut config = OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY);
         if let Some(path) = self.directory {
+            // Checked here: joined to `parent`, an empty path would name `parent` itself.
             ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
             config.directory = parent.join(path);
         }
@@ -466,6 +534,8 @@ mod tests {
         assert_eq!(config.provider.retry.max_retries, 3);
         assert_eq!(config.execution, Execution::Local);
         assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
+        // In each session's working directory.
+        assert_eq!(config.tool_output.directory, Path::new(".zx-agent/outputs"));
         assert!(config.mcp.is_empty() && config.models.is_empty());
     }
 
@@ -617,6 +687,35 @@ mod tests {
     }
 
     #[test]
+    fn the_executors_refusals_of_container_settings_name_their_keys() {
+        for (text, expected) in [
+            (
+                "[container]\nimage = 'x'\nuser = 'root'",
+                "container.user \"root\" is root; commands must run as an unprivileged user",
+            ),
+            (
+                "execution = 'container'\n[container]\nimage = 'x'\nuser = '0:0'",
+                "container.user \"0:0\" is root",
+            ),
+            (
+                "[container]\nimage = 'x'\npidsLimit = 0",
+                "container.pidsLimit must be greater than zero",
+            ),
+            (
+                "[container]\nimage = 'x'\nnetwork = 'host'",
+                "container.network \"host\" would share a network namespace outside the sandbox",
+            ),
+            (
+                "execution = 'container'",
+                "execution = \"container\" needs container.image",
+            ),
+        ] {
+            let error = error(text);
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn an_output_directory_is_relative_to_the_file_and_settings_validate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -631,6 +730,29 @@ mod tests {
             "[toolOutput]\nmaxFileBytes = 1048577",
         ] {
             assert!(load_text(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_stores_refusals_of_output_settings_name_their_keys() {
+        for (text, expected) in [
+            (
+                "[toolOutput]\nthresholdBytes = 1",
+                "toolOutput.thresholdBytes must be 0, which keeps results inline, or 256..=1048576 (toolOutput.maxFileBytes)",
+            ),
+            (
+                "[toolOutput]\nmaxFileBytes = 1000\nthresholdBytes = 2000",
+                "or 256..=1000 (toolOutput.maxFileBytes)",
+            ),
+            (
+                "[toolOutput]\nmaxFileBytes = 1048577",
+                "toolOutput.maxFileBytes must be 1..=1048576",
+            ),
+            ("[toolOutput]\ndirectory = ''", "toolOutput.directory must not be empty"),
+        ] {
+            let error = error(text);
+            assert!(error.contains(expected), "{text}: {error}");
+            assert!(!error.contains("threshold_bytes") && !error.contains("None"), "{error}");
         }
     }
 

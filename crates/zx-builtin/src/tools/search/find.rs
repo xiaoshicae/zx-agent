@@ -1,14 +1,17 @@
 //! The `find` tool: file paths matching a glob, with `rg --files` or POSIX find.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    SearchSettings, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes,
+    VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes, search,
     search_path,
 };
 use crate::ai::ToolDef;
+use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
 use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
@@ -16,10 +19,18 @@ use zx_core::tools::{Tool, ToolContext, ToolOutput};
 const FIND_LIMIT: usize = 1000;
 
 /// Finds files whose paths match a glob.
-#[derive(Default)]
 pub struct FindTool {
-    /// Where and how the search runs.
-    pub settings: SearchSettings,
+    /// Where the search runs, and so what it must not see: on this machine, the variables in
+    /// [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
+    pub executor: Arc<dyn Executor>,
+}
+
+impl Default for FindTool {
+    fn default() -> Self {
+        Self {
+            executor: Arc::new(LocalExecutor::default()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -106,7 +117,7 @@ impl Tool for FindTool {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args = FindArgs::parse(&args)?;
         let limit = positive(args.limit, FIND_LIMIT, "limit")?;
-        let searched = self.settings.run(&args.script(limit), ctx).await?;
+        let searched = search(self.executor.as_ref(), &args.script(limit), ctx).await?;
         finish(
             &searched,
             limit,

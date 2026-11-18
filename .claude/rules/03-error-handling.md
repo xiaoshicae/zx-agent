@@ -18,7 +18,7 @@ paths:
 - **anyhow 的错误按 `{:#}` 打印**：`{}` 只有最外层的 context。
 - **转换错误时保留原因**：写 `.map_err(|e| format!("cannot read {}: {e}", path.display()))`，不写 `.map_err(|_| "read failed")`。
 - **错误信息**写明操作对象（路径、URL、条目 id），不写入密钥。`Display` 小写开头、结尾不加句号；给模型的工具结果是完整的句子。
-- **加锁**一律用 `zx_util::sync::lock(&mutex)`（zx-core 与 zx-tools 在根部引入为 `crate::sync`），不直接写 `.lock()`。为什么可以忽略锁中毒、什么时候不能用它，见 `crates/zx-util/src/sync.rs`。
+- **加锁**一律用 `zx_util::sync::lock(&mutex)`（zx-core 与 zx-builtin 在根部引入为 `crate::sync`），不直接写 `.lock()`。为什么可以忽略锁中毒、什么时候不能用它，见 `crates/zx-util/src/sync.rs`。
 - **不调用 `std::process::exit`**：`main` 返回 `ExitCode`，退出码在 `crates/zx-cli/src/process.rs`。
 
 ## 不吞错误

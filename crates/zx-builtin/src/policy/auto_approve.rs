@@ -2,7 +2,8 @@
 
 use serde::Deserialize;
 
-use super::{begins_with, collapse_whitespace, non_empty, normalize};
+use super::{BashCall, bash_call, begins_with, collapse_whitespace, non_empty, normalize};
+use crate::ai::ToolCall;
 
 /// Punctuation that a command approved without asking may contain, besides letters, digits
 /// and whitespace. None of it lets the shell run or read anything but what the words spell;
@@ -27,6 +28,33 @@ pub struct ProgramOptions {
 }
 
 impl ProgramOptions {
+    /// Check that every option can match a command: long names without leading dashes, `=` or
+    /// whitespace, single letters or digits for the short options, and no letter that is both
+    /// a flag and an option with a value. An option that breaks these rules never matches, so
+    /// it would only make more commands ask. The error names the first such option.
+    pub fn validate(&self) -> Result<(), String> {
+        for name in &self.long {
+            if name.is_empty() || name.starts_with('-') || name.contains(|c: char| c.is_whitespace() || c == '=') {
+                return Err(format!(
+                    "long option {name:?} must be a name without dashes, such as \"namespace\""
+                ));
+            }
+        }
+        for letter in self.short_with_value.iter().chain(&self.short_flags) {
+            if !letter.is_ascii_alphanumeric() {
+                return Err(format!("short option {letter:?} must be a letter or digit"));
+            }
+        }
+        match self
+            .short_flags
+            .iter()
+            .find(|letter| self.short_with_value.contains(letter))
+        {
+            Some(letter) => Err(format!("{letter:?} cannot be both a flag and an option with a value")),
+            None => Ok(()),
+        }
+    }
+
     /// Whether `option`, a word starting with `-`, is one of these. Options keep their case:
     /// a program's `-A` and `-a` can differ.
     fn allows(&self, option: &str) -> bool {
@@ -88,12 +116,22 @@ impl AutoApprove {
 
     /// Limit the segments that run `program`, their first word compared without case, to
     /// `options`: any other option asks. Segments of programs given no options may pass any.
-    /// A second call for the same program replaces the first.
+    /// A second call for the same program replaces the first. Check `options` with
+    /// [`ProgramOptions::validate`] first: an option it refuses never matches.
     pub fn options(mut self, program: &str, options: ProgramOptions) -> Self {
         let program = normalize(program);
         self.options.retain(|(name, _)| *name != program);
         self.options.push((program, options));
         self
+    }
+
+    /// Whether `call` is a call of the `bash` tool whose command may run without asking
+    /// ([`covers`](Self::covers)). A call of another tool, or one without a command, is not.
+    pub fn covers_call(&self, call: &ToolCall) -> bool {
+        match bash_call(call) {
+            BashCall::Command(command) => self.covers(command),
+            BashCall::Other | BashCall::NoCommand => false,
+        }
     }
 
     /// Whether `command` may run without asking.
@@ -134,7 +172,58 @@ impl AutoApprove {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::policy::test_support::call;
+
+    #[test]
+    fn only_a_bash_call_with_a_covered_command_is_covered() {
+        let list = AutoApprove::new(["ls"]);
+        assert!(list.covers_call(&call("bash", json!({"command": "ls -a"}))));
+        assert!(!list.covers_call(&call("bash", json!({"command": "rm x"}))));
+        assert!(!list.covers_call(&call("bash", json!({"command": 1}))));
+        assert!(!list.covers_call(&call("read_file", json!({"command": "ls"}))));
+    }
+
+    #[test]
+    fn program_options_that_cannot_match_a_command_are_invalid() {
+        for (options, expected) in [
+            (
+                ProgramOptions {
+                    long: vec!["--namespace".into()],
+                    ..ProgramOptions::default()
+                },
+                "without dashes",
+            ),
+            (
+                ProgramOptions {
+                    long: vec!["output=json".into()],
+                    ..ProgramOptions::default()
+                },
+                "without dashes",
+            ),
+            (
+                ProgramOptions {
+                    short_flags: vec!['-'],
+                    ..ProgramOptions::default()
+                },
+                "letter or digit",
+            ),
+            (
+                ProgramOptions {
+                    short_flags: vec!['n'],
+                    short_with_value: vec!['n'],
+                    ..ProgramOptions::default()
+                },
+                "both a flag and an option with a value",
+            ),
+        ] {
+            let error = options.validate().unwrap_err();
+            assert!(error.contains(expected), "{options:?}: {error}");
+        }
+        assert_eq!(kubectl_read_only().validate(), Ok(()));
+    }
 
     #[test]
     fn auto_approval_covers_listed_read_only_pipelines() {

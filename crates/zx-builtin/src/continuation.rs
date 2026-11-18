@@ -5,19 +5,32 @@ use async_trait::async_trait;
 use crate::ai::StopReason;
 use zx_core::hooks::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
 
-/// The unattended continuation text; the runtime does not depend on this wording.
-const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
-stopped, without repeating earlier text, and keep the rest concise.";
+/// What the hook asks the model by default when an answer was cut off; the runtime does not
+/// depend on this wording.
+pub const DEFAULT_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly \
+where it stopped, without repeating earlier text, and keep the rest concise.";
 
 /// Stateless continuation policy. The runtime supplies a per-run continuation count.
 pub struct ContinueOnLength {
     max_continuations: u32,
+    prompt: String,
 }
 
 impl ContinueOnLength {
-    /// A hook that continues a cut-off answer at most `max_continuations` times per run.
+    /// A hook that continues a cut-off answer at most `max_continuations` times per run, asking
+    /// with [`DEFAULT_PROMPT`].
     pub fn new(max_continuations: u32) -> Self {
-        Self { max_continuations }
+        Self {
+            max_continuations,
+            prompt: DEFAULT_PROMPT.to_string(),
+        }
+    }
+
+    /// Ask the model to go on with `prompt` instead of [`DEFAULT_PROMPT`]; it is recorded as
+    /// the user message of each continuation.
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = prompt.into();
+        self
     }
 }
 
@@ -30,7 +43,7 @@ impl Hook for ContinueOnLength {
             && step.response.stop_reason == StopReason::Length
             && step.answer_continuations < self.max_continuations
         {
-            Ok(StepDecision::ContinueAnswer(CONTINUE_PROMPT.to_string()))
+            Ok(StepDecision::ContinueAnswer(self.prompt.clone()))
         } else {
             Ok(StepDecision::Default)
         }

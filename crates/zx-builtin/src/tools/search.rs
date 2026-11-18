@@ -7,18 +7,17 @@
 //! the work and skip only the version control directories. Every value from the model reaches
 //! the shell single-quoted, so it is never interpreted.
 //!
-//! This module holds what the tools share: their settings, running a script and reading what
-//! it printed, bounding and reporting the result, and the pieces of the scripts. Each tool is
-//! in a module of its own.
+//! This module holds what the tools share: running a script and reading what it printed,
+//! bounding and reporting the result, and the pieces of the scripts. Each tool is in a module
+//! of its own.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
-use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
+use crate::executor::{CommandEnd, Executor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
 use zx_core::tools::{ToolContext, ToolOutput};
 
@@ -45,7 +44,7 @@ macro_rules! search_tool_basics {
         }
 
         fn execution_mode(&self) -> ::zx_core::tools::ExecutionMode {
-            self.settings.executor.execution_mode()
+            self.executor.execution_mode()
         }
 
         fn effects(&self) -> ::zx_core::tools::Effects {
@@ -96,22 +95,6 @@ fn ripgrep_excludes() -> String {
         .join(" ")
 }
 
-/// What the three tools share: where they run.
-#[derive(Clone)]
-pub struct SearchSettings {
-    /// Where the programs run, and so what they must not see: on this machine, the variables
-    /// in [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
-    pub executor: Arc<dyn Executor>,
-}
-
-impl Default for SearchSettings {
-    fn default() -> Self {
-        Self {
-            executor: Arc::new(LocalExecutor::default()),
-        }
-    }
-}
-
 /// The output of one search script: its lines, which program searched, and the errors.
 struct Searched {
     stdout: String,
@@ -124,48 +107,45 @@ struct Searched {
     dropped: usize,
 }
 
-impl SearchSettings {
-    /// Run `script` with `sh -c` in the call's working directory.
-    async fn run(&self, script: &str, ctx: &ToolContext) -> Result<Searched, String> {
-        let command = ShellCommand {
-            shell: "sh",
-            command: script,
-            cwd: &ctx.cwd,
-            timeout: TIMEOUT,
-        };
-        let output = self.executor.run(&command, &ctx.cancel).await?;
-        match output.end {
-            CommandEnd::Exited(_) => {}
-            CommandEnd::TimedOut => {
-                return Err(format!(
-                    "the search took longer than {}s and was stopped; narrow the path or the pattern",
-                    TIMEOUT.as_secs()
-                ));
-            }
-            CommandEnd::Cancelled => return Err("the search was cancelled".into()),
-            CommandEnd::Signaled => return Err("the search was ended by a signal".into()),
-            CommandEnd::WaitFailed(error) => return Err(format!("the search could not be waited for: {error}")),
+/// Run `script` with `executor` in the call's working directory.
+async fn search(executor: &dyn Executor, script: &str, ctx: &ToolContext) -> Result<Searched, String> {
+    let command = ShellCommand {
+        command: script,
+        cwd: &ctx.cwd,
+        timeout: TIMEOUT,
+    };
+    let output = executor.run(&command, &ctx.cancel).await?;
+    match output.end {
+        CommandEnd::Exited(_) => {}
+        CommandEnd::TimedOut => {
+            return Err(format!(
+                "the search took longer than {}s and was stopped; narrow the path or the pattern",
+                TIMEOUT.as_secs()
+            ));
         }
-        let mut engine = None;
-        // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
-        let stderr_text = String::from_utf8_lossy(&output.stderr.bytes);
-        let stderr: Vec<&str> = stderr_text
-            .lines()
-            .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
-                Some(name) => {
-                    engine = Some(name.to_string());
-                    false
-                }
-                None => true,
-            })
-            .collect();
-        Ok(Searched {
-            stdout: String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
-            stderr: stderr.join("\n"),
-            engine,
-            dropped: output.stdout.dropped,
-        })
+        CommandEnd::Cancelled => return Err("the search was cancelled".into()),
+        CommandEnd::Signaled => return Err("the search was ended by a signal".into()),
+        CommandEnd::WaitFailed(error) => return Err(format!("the search could not be waited for: {error}")),
     }
+    let mut engine = None;
+    // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
+    let stderr_text = String::from_utf8_lossy(&output.stderr.bytes);
+    let stderr: Vec<&str> = stderr_text
+        .lines()
+        .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
+            Some(name) => {
+                engine = Some(name.to_string());
+                false
+            }
+            None => true,
+        })
+        .collect();
+    Ok(Searched {
+        stdout: String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
+        stderr: stderr.join("\n"),
+        engine,
+        dropped: output.stdout.dropped,
+    })
 }
 
 /// Each line cut to [`MAX_LINE_BYTES`] at a character boundary, then the whole text bounded
@@ -280,6 +260,7 @@ fn positive(limit: Option<usize>, default: usize, name: &str) -> Result<usize, S
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
@@ -326,12 +307,10 @@ mod tests {
 
     fn grep_printing(stdout: &[u8], stderr: &[u8]) -> GrepTool {
         GrepTool {
-            settings: SearchSettings {
-                executor: Arc::new(Scripted {
-                    stdout: stdout.to_vec(),
-                    stderr: stderr.to_vec(),
-                }),
-            },
+            executor: Arc::new(Scripted {
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+            }),
         }
     }
 

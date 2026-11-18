@@ -373,7 +373,7 @@ async fn malformed_settings_are_refused_before_connecting() {
         (ServerConfig::new("prom", "not a url", tools.clone()), "invalid url"),
         (
             ServerConfig::new("prom", "http://127.0.0.1:9/mcp", Vec::new()),
-            "no tools are configured",
+            "tools lists no tool",
         ),
     ] {
         let error = Server::connect(settings).await.err().unwrap();

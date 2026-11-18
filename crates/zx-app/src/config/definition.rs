@@ -11,8 +11,7 @@ use super::agent_file::{AgentFile, settle_token_trigger};
 use super::skills::{self, Skill};
 use super::{Config, Execution, Permissions, context, read_text};
 use zx_agent::agent::RunLimits;
-use zx_agent::builtin::output_store;
-use zx_agent::builtin::tools::BUILTIN_TOOL_NAMES;
+use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
 use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
@@ -204,9 +203,10 @@ fn exists(path: &Path) -> Result<bool> {
     }
 }
 
-/// Whether `name` is a tool the host registers itself: a built-in, read_skill or read_output.
+/// Whether `name` is a tool the host registers itself: one that runs on the executor,
+/// read_output, or read_skill.
 fn known_tool(name: &str) -> bool {
-    name == skills::TOOL_NAME || name == output_store::TOOL_NAME || BUILTIN_TOOL_NAMES.contains(&name)
+    EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == skills::READ_SKILL
 }
 
 #[cfg(test)]

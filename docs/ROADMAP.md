@@ -38,18 +38,19 @@
 | D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用；attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试 |
 | D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction（记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`、`RequestSource::Summary`）；任务请求在事件与记录里都叫 task（`kind: task`、`RequestSource::Task`） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript。事件格式版本为 7 |
-| D24 | 库与接入方式分开：`zx-agent`（`crates/zx-agent`）是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配与追踪导出在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。各 crate 共用、没有业务含义的小工具在 `zx-util`，它不依赖工作区里任何 crate，不属于 API。集成测试分三处：`crates/zx-agent/tests/`、`crates/zx-app/tests/` 与 `crates/zx-cli/tests/`，共用的测试设施在只作测试依赖的 `zx-testing`；测试替身与只给测试用的入口不进生产 API，测试经 feature 打开它们（见 [TESTS.md](TESTS.md)）。根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下，在根目录运行的命令覆盖全部 crate |
-| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），`zx-app` 的装配让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放 |
+| D24 | 库与接入方式分开：`zx-agent`（`crates/zx-agent`）是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-builtin`（附带的实现，库中名为 `builtin`）再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配与追踪导出在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。各 crate 共用、没有业务含义的小工具在 `zx-util`，它不依赖工作区里任何 crate，不属于 API。集成测试分三处：`crates/zx-agent/tests/`、`crates/zx-app/tests/` 与 `crates/zx-cli/tests/`，共用的测试设施在只作测试依赖的 `zx-testing`；测试替身与只给测试用的入口不进生产 API，测试经 feature 打开它们（见 [TESTS.md](TESTS.md)）。根目录的 `Cargo.toml` 是虚拟 workspace，不是包，所有 crate 都在 `crates/` 下，在根目录运行的命令覆盖全部 crate |
+| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具按路径排队修改，队列由宿主传入（`executor_tools` 的 `queue`），`zx-app` 的装配让一个进程的所有会话共用一个；读改写与后台写入在同一轮内完成，取消调用不提前让出 |
 | D26 | 预算按整次运行累计，用完报告 `BudgetExhausted { budget, truncated }`，续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
 | D27 | IM 路由器只分派消息，运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话作为下一次运行的提问重新排队，`/cancel` 丢弃它们；第一次为线程建会话前先读线程历史 |
 | D28 | 宿主建自己的会话索引用 `SessionStorage::headers`，只读头部，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护。IM 的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
-| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-tools，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc；只有一个程序或一种存储用的代码也不在内核（会话文件的头部行在 JSONL 存储，按会话 ID 前缀找会话在 chat），内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键。只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法，测试要这些记录时经存储写入记录行。`zx_app::Application` 让命令行与其他宿主共用配置装配，显式配置经 `Config::validate` 检查，装配不打印、措辞不提命令行参数 |
+| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-builtin，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc；只有一个程序或一种存储用的代码也不在内核（会话文件的头部行在 JSONL 存储，按会话 ID 前缀找会话在 chat），内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键。只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法，测试要这些记录时经存储写入记录行。`zx_app::Application` 让命令行与其他宿主共用配置装配，显式配置经 `Config::validate` 检查，装配不打印、措辞不提命令行参数 |
 | D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停；随上下文窗口的 token 阈值（`TokenTrigger::BelowWindow`）每次检查时按会话当时的模型取窗口（同 pi 的 `shouldCompact`），换模型后随之改变。两个 IM 平台 crate 都只依赖 `zx-im` |
 | D31 | 模型请求的失败由 provider 归类：模型层 `zx-ai` 只定义中立的种类（`ProviderErrorKind`），重试与上下文溢出恢复只看种类，没有种类的失败不重试；HTTP 状态、错误码、`finish_reason` 与措辞各表示哪一类，是协议与厂商的知识，只写在 provider 的 crate 里（`zx-ai-openai`）。服务端给出的状态、错误码与等待提示作为数据留在失败回答的 `providerError` 中。种类与处理见 [REFERENCE.md](REFERENCE.md#模型请求失败) |
+| D32 | `zx-builtin` 是通用的附带实现，与内核同一规则（D29）：设置类型自己校验（各自的 `validate`），文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键；程序的默认值由 `zx-app` 给出（如落盘目录）。执行器自己决定 shell（内置的两个都用 bash），并为提示词描述自己（`Executor::environment_section`）。命令策略的程序清单与续写的提示语是默认值，宿主可以追加或替换，不新增配置键 |
 
 ## 4. 当前阶段
 
-P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D31。真实平台与部署的验收见第 5 节。进行中：
+P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D32。真实平台与部署的验收见第 5 节。进行中：
 
 - P6 执行环境：已实现，待真实集群与真实 IM 平台验收。
 - P7 扩展与 MCP：已实现，待真实 MCP 服务器验收。
@@ -75,7 +76,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。多副本之前还需定义持久化收件、会话所有权与接管，当前以单进程为部署边界。
-- 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（43 个测试中 33 个）与 `crash_recovery.rs`（11 个中 9 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。三个 `im_*` 测试还在 `crates/zx-agent/tests/`，待移到 IM 的 crate。
+- 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（11 个中 9 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。三个 `im_*` 测试还在 `crates/zx-agent/tests/`，待移到 IM 的 crate。
 - 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过。
 - 落盘目录的符号链接检查与随后的打开之间有竞态：同时在跑的命令可以在两者之间换掉目录。要消除得从工作目录起按目录描述符逐级打开，未做。
 - 没有确定性测试的行为：chat 在会话自行关闭后重开（子进程中途写入失败无法确定性地构造，只测了从错误链认出会话已关闭）；尾记录修复在写线程上进行时，卷无响应不阻塞运行时（只测了修复本身）；MCP 放弃通知的 10 秒超时。
@@ -107,4 +108,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.33 · 2026年11月
+ROADMAP.md · v0.34 · 2026年11月

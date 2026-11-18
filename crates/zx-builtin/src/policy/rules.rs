@@ -1,13 +1,10 @@
-//! Rules by tool name, with the auto-approval list that lets a rule's Ask become Allow for a
-//! bash command.
+//! Rules by tool name, with the auto-approval list that lets a rule's Ask become Allow for the
+//! calls it covers.
 
 use async_trait::async_trait;
-use serde_json::Value;
 
 use super::auto_approve::AutoApprove;
-use super::command_of;
 use crate::ai::ToolCall;
-use crate::tools::BASH;
 use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
@@ -37,7 +34,7 @@ impl Rule {
 
 /// Deny rules are tried before Ask, then Allow; registration order breaks ties.
 /// A call with no matching rule is denied. With an [`AutoApprove`] list, an Ask verdict for
-/// a bash command the list covers becomes Allow; Deny verdicts are never changed.
+/// a call the list covers becomes Allow; Deny verdicts are never changed.
 pub struct RulePolicy {
     rules: Vec<Rule>,
     auto_approve: AutoApprove,
@@ -52,7 +49,7 @@ impl RulePolicy {
         }
     }
 
-    /// Let bash commands covered by `list` run where a rule of this policy would ask.
+    /// Let the calls that `list` covers run where a rule of this policy would ask.
     pub fn auto_approve(mut self, list: AutoApprove) -> Self {
         self.auto_approve = list;
         self
@@ -74,15 +71,12 @@ impl RulePolicy {
                 |rule| rule.decision.clone(),
             )
     }
-}
 
-impl RulePolicy {
-    /// The verdict on a call of `tool_name` with `args`: the strictest matching rule, with
-    /// an ask on an auto-approved bash command turned into an allow.
-    pub fn verdict(&self, tool_name: &str, args: &Value) -> PolicyDecision {
-        let verdict = self.rule_verdict(tool_name);
-        let covered = tool_name == BASH && command_of(args).is_some_and(|command| self.auto_approve.covers(command));
-        if covered && matches!(verdict, PolicyDecision::Ask(_)) {
+    /// The verdict on `call`: the strictest rule that matches its tool, with an ask on a call
+    /// the auto-approval list covers turned into an allow.
+    pub fn verdict(&self, call: &ToolCall) -> PolicyDecision {
+        let verdict = self.rule_verdict(&call.name);
+        if matches!(verdict, PolicyDecision::Ask(_)) && self.auto_approve.covers_call(call) {
             return PolicyDecision::Allow;
         }
         verdict
@@ -92,14 +86,16 @@ impl RulePolicy {
 #[async_trait]
 impl ToolPolicy for RulePolicy {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
-        self.verdict(&call.name, &call.arguments)
+        self.verdict(call)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
-    use crate::policy::AutoApprove;
+    use crate::policy::test_support::call;
 
     fn denied(decision: &PolicyDecision) -> bool {
         matches!(decision, PolicyDecision::Deny(_))
@@ -130,11 +126,11 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.verdict("bash", &serde_json::json!({"command": "rm x"})),
+            policy.verdict(&call("bash", json!({"command": "rm x"}))),
             PolicyDecision::Deny("first deny".into())
         );
         assert_eq!(
-            policy.verdict("read_file", &serde_json::json!({})),
+            policy.verdict(&call("read_file", json!({}))),
             PolicyDecision::Ask("second ask".into())
         );
         let policy = RulePolicy::new(vec![
@@ -152,7 +148,7 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.verdict("bash", &serde_json::json!({})),
+            policy.verdict(&call("bash", json!({}))),
             PolicyDecision::Ask("first".into())
         );
     }
@@ -163,11 +159,8 @@ mod tests {
             matcher: RuleMatcher::Tool("read_file".into()),
             decision: PolicyDecision::Allow,
         }]);
-        assert!(denied(&policy.verdict("bash", &serde_json::json!({"command": "ls"}))));
-        assert_eq!(
-            policy.verdict("read_file", &serde_json::json!({})),
-            PolicyDecision::Allow
-        );
+        assert!(denied(&policy.verdict(&call("bash", json!({"command": "ls"})))));
+        assert_eq!(policy.verdict(&call("read_file", json!({}))), PolicyDecision::Allow);
     }
 
     #[test]
@@ -184,19 +177,19 @@ mod tests {
         ])
         .auto_approve(AutoApprove::new(["ls"]));
         assert_eq!(
-            policy.verdict("bash", &serde_json::json!({"command": "ls -a"})),
+            policy.verdict(&call("bash", json!({"command": "ls -a"}))),
             PolicyDecision::Allow
         );
         assert_eq!(
-            policy.verdict("bash", &serde_json::json!({"command": "rm x"})),
+            policy.verdict(&call("bash", json!({"command": "rm x"}))),
             PolicyDecision::Ask("approve bash".into())
         );
         assert_eq!(
-            policy.verdict("bash", &serde_json::json!({})),
+            policy.verdict(&call("bash", json!({}))),
             PolicyDecision::Ask("approve bash".into())
         );
         assert_eq!(
-            policy.verdict("read_file", &serde_json::json!({"command": "ls"})),
+            policy.verdict(&call("read_file", json!({"command": "ls"}))),
             PolicyDecision::Ask("approve any".into())
         );
     }
@@ -204,17 +197,14 @@ mod tests {
     #[test]
     fn auto_approval_never_overrides_a_denial() {
         let list = AutoApprove::new(["ls"]);
-        let ls = serde_json::json!({"command": "ls -a"});
+        let ls = call("bash", json!({"command": "ls -a"}));
         let denied_by_rule = RulePolicy::new(vec![Rule {
             matcher: RuleMatcher::Tool("bash".into()),
             decision: PolicyDecision::Deny("denied".into()),
         }])
         .auto_approve(list.clone());
-        assert_eq!(
-            denied_by_rule.verdict("bash", &ls),
-            PolicyDecision::Deny("denied".into())
-        );
+        assert_eq!(denied_by_rule.verdict(&ls), PolicyDecision::Deny("denied".into()));
         let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
-        assert!(denied(&unmatched.verdict("bash", &ls)));
+        assert!(denied(&unmatched.verdict(&ls)));
     }
 }

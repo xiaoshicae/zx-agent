@@ -6,7 +6,7 @@
 //! A [`Server`] is an [`Extension`]: an agent takes it in
 //! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -81,6 +81,41 @@ impl ServerConfig {
             call_timeout: DEFAULT_CALL_TIMEOUT,
         }
     }
+
+    /// Check the settings without connecting, and return the names the model calls the
+    /// configured tools by, in their order: `<name>__<tool>`, with characters other than ASCII
+    /// letters, digits, `_` and `-` replaced by `_`. [`Server::connect`] checks the same.
+    ///
+    /// Errors, each naming the server: a name that is not ASCII lowercase letters, digits and
+    /// `-` (so that it ends at the first `__` of a tool's name); a URL that is not `http://` or
+    /// `https://`; no tools; a name longer than model APIs accept (64 characters); two tools
+    /// that would get the same name.
+    pub fn validate(&self) -> Result<Vec<String>, String> {
+        let server = self.name.as_str();
+        check_server_name(server)?;
+        if self.url.trim().is_empty() {
+            return Err(fault(server, "url is empty"));
+        }
+        let url = reqwest::Url::parse(&self.url).map_err(|error| fault(server, format!("invalid url: {error}")))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(fault(server, "the url must be http:// or https://"));
+        }
+        if self.tools.is_empty() {
+            return Err(fault(server, "tools lists no tool"));
+        }
+        let mut names: Vec<String> = Vec::new();
+        for tool in &self.tools {
+            let name = tool_name(server, tool)?;
+            if names.contains(&name) {
+                return Err(fault(
+                    server,
+                    format!("tool {tool:?} would be named {name:?}, like another of its tools"),
+                ));
+            }
+            names.push(name);
+        }
+        Ok(names)
+    }
 }
 
 type Client = RunningService<RoleClient, Handler>;
@@ -99,20 +134,11 @@ impl Server {
     /// ones. The server is asked for `server/discover` first (protocol 2026-07-28) and, if it
     /// answers as an older server does, for the `initialize` handshake (2025-11-25).
     ///
-    /// Errors, each naming the server: a malformed name or URL, no configured tools, no answer
-    /// within `connect_timeout`, a protocol or transport failure, a configured tool the server
-    /// does not offer, and tool names that cannot be given to the model (see [`tool_name`]).
-    /// The token never appears in them.
+    /// Errors, each naming the server: settings that [`ServerConfig::validate`] refuses, no
+    /// answer within `connect_timeout`, a protocol or transport failure, and a configured tool
+    /// the server does not offer. The token never appears in them.
     pub async fn connect(config: ServerConfig) -> Result<Self, String> {
-        let server = config.name.as_str();
-        check_server_name(server)?;
-        let url = reqwest::Url::parse(&config.url).map_err(|error| fault(server, format!("invalid url: {error}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(fault(server, "the url must be http:// or https://"));
-        }
-        if config.tools.is_empty() {
-            return Err(fault(server, "no tools are configured"));
-        }
+        let names = config.validate()?;
         let (client, listed) = connect_and_list(&config).await?;
         // A completed handshake or discovery records the server's information, so the empty
         // fallback is not expected; it only affects what is reported.
@@ -120,21 +146,22 @@ impl Server {
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        Self::with_tools(config, protocol_version, &listed, &Arc::new(client))
+        Self::with_tools(config, names, protocol_version, &listed, &Arc::new(client))
     }
 
-    /// The server with the configured tools among those it `listed`, as tools for the model.
+    /// The server with the configured tools among those it `listed`, as tools for the model,
+    /// which calls them by `names`, one for each configured tool.
     fn with_tools(
         config: ServerConfig,
+        names: Vec<String>,
         protocol_version: String,
         listed: &[rmcp::model::Tool],
         client: &Arc<Client>,
     ) -> Result<Self, String> {
         let server = config.name.as_str();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        let mut names = Vec::new();
-        let mut taken = HashSet::new();
-        for remote in &config.tools {
+        let names: Vec<(String, String)> = config.tools.iter().cloned().zip(names).collect();
+        for (remote, name) in &names {
             let Some(offered) = listed.iter().find(|tool| tool.name.as_ref() == remote.as_str()) else {
                 let offered: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
                 return Err(fault(
@@ -142,13 +169,6 @@ impl Server {
                     format!("it has no tool named {remote:?}; it offers: {}", offered.join(", ")),
                 ));
             };
-            let name = tool_name(server, remote)?;
-            if !taken.insert(name.clone()) {
-                return Err(fault(
-                    server,
-                    format!("tool {remote:?} would be named {name:?}, like another of its tools"),
-                ));
-            }
             tools.push(Arc::new(McpTool {
                 definition: ToolDef {
                     name: name.clone(),
@@ -160,7 +180,6 @@ impl Server {
                 client: Arc::clone(client),
                 timeout: config.call_timeout,
             }));
-            names.push((remote.clone(), name));
         }
         Ok(Self {
             name: config.name,
@@ -229,7 +248,7 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
 /// ASCII letters, digits, `_` and `-` replaced by `_`. MCP allows tool names of up to 128
 /// characters, including `.`; model APIs allow fewer (`MAX_TOOL_NAME`). A server name has no
 /// `_`, so the first `__` ends it. Errors when the name would be too long.
-pub fn tool_name(server: &str, tool: &str) -> Result<String, String> {
+fn tool_name(server: &str, tool: &str) -> Result<String, String> {
     let tool: String = tool
         .chars()
         .map(|c| {
@@ -250,9 +269,8 @@ pub fn tool_name(server: &str, tool: &str) -> Result<String, String> {
 }
 
 /// A server name is ASCII lowercase letters, digits and `-`, so that it ends at the first `__`
-/// of a tool name. Public only for loading config.toml in zx-agent, not part of the API.
-#[doc(hidden)]
-pub fn check_server_name(name: &str) -> Result<(), String> {
+/// of a tool name.
+fn check_server_name(name: &str) -> Result<(), String> {
     let well_formed = !name.is_empty()
         && name
             .chars()
@@ -564,6 +582,41 @@ mod tests {
         assert!(check_server_name("prom-2").is_ok());
         for name in ["", "Prom", "prom_x", "prom x", "prom.x"] {
             assert!(check_server_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn settings_are_checked_without_connecting_and_name_the_tools_for_the_model() {
+        let tools = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let config = ServerConfig::new("prom", "https://prom.example/mcp", tools(&["query", "range.query"]));
+        assert_eq!(config.validate().unwrap(), ["prom__query", "prom__range_query"]);
+        for (config, expected) in [
+            (
+                ServerConfig::new("Prom", "https://x", tools(&["q"])),
+                "must be ASCII lowercase",
+            ),
+            (ServerConfig::new("prom", " ", tools(&["q"])), "url is empty"),
+            (ServerConfig::new("prom", "not a url", tools(&["q"])), "invalid url"),
+            (
+                ServerConfig::new("prom", "ftp://x", tools(&["q"])),
+                "must be http:// or https://",
+            ),
+            (
+                ServerConfig::new("prom", "https://x", tools(&[])),
+                "tools lists no tool",
+            ),
+            (
+                ServerConfig::new("prom", "https://x", tools(&["a.b", "a_b"])),
+                "tool \"a_b\" would be named \"prom__a_b\", like another of its tools",
+            ),
+            (
+                ServerConfig::new("prom", "https://x", tools(&[&"x".repeat(MAX_TOOL_NAME)])),
+                "longer than 64",
+            ),
+        ] {
+            let error = config.validate().unwrap_err();
+            assert!(error.starts_with("MCP server ") && error.contains(expected), "{error}");
+            assert!(error.contains(&config.name), "{error}");
         }
     }
 

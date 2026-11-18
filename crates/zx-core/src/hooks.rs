@@ -324,7 +324,7 @@ pub trait Hook: Send + Sync {
     }
 
     /// The stage this hook runs in. Only secret redaction and output storage, which live in
-    /// the zx-tools crate, declare a stage other than [`HookStage::Default`].
+    /// the zx-builtin crate, declare a stage other than [`HookStage::Default`].
     fn stage(&self) -> HookStage {
         HookStage::Default
     }

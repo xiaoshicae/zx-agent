@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
+use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, executor_tools};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 
@@ -318,7 +318,7 @@ impl Executor for SlowReads {
 /// `executor`.
 async fn edit_in(cwd: &Path, provider: Arc<FauxProvider>, executor: &Arc<dyn Executor>) -> RunReport {
     let names = ["edit_file", "write_file"].map(String::from);
-    let tools = builtin_tools(&names, Duration::from_secs(5), executor, &Arc::default()).unwrap();
+    let tools = executor_tools(&names, Duration::from_secs(5), executor, &Arc::default()).unwrap();
     let (runner, _) = RunnerSetup {
         session: Start::New(SessionOptions::new(cwd)),
         ..RunnerSetup::new(config(provider, tools))

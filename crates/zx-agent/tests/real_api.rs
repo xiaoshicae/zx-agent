@@ -39,7 +39,7 @@ use zx_agent::SessionOptions;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider, SystemPrompt};
-use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
+use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::policy::{AutoApprove, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::{Config, Outcome};
@@ -108,7 +108,7 @@ impl Endpoint {
         config.system_prompt = SystemPrompt::new(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
         )
-        .with_section("environment", &local_environment_section(cwd));
+        .with_section("environment", &LocalExecutor::default().environment_section(cwd));
         RunnerSetup {
             limits: RunLimits {
                 max_model_requests: Some(4),

@@ -20,6 +20,7 @@ use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{
     Access, CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, Network, ShellCommand,
+    UnusableWorkspace,
 };
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::RunOutcome;
@@ -138,8 +139,13 @@ impl FakeDocker {
     fn config(&self) -> ContainerConfig {
         ContainerConfig {
             docker: self.dir.path().join("docker"),
-            ..ContainerConfig::new("fake:1", self.workspace())
+            ..ContainerConfig::new("fake:1")
         }
+    }
+
+    /// Start a container with `config` that mounts the workspace.
+    async fn start(&self, config: ContainerConfig) -> anyhow::Result<ContainerExecutor> {
+        ContainerExecutor::start(config, &self.workspace()).await
     }
 
     fn answer(&self, file: &str, text: &str) {
@@ -178,7 +184,6 @@ fn after<'a>(call: &'a [String], label: &str) -> &'a [String] {
 
 async fn run(executor: &dyn Executor, workspace: &Path, command: &str, timeout: Duration) -> CommandOutput {
     let request = ShellCommand {
-        shell: "bash",
         command,
         cwd: workspace,
         timeout,
@@ -207,10 +212,14 @@ async fn start_runs_a_container_open_inside_its_walls_and_reports_its_platform()
     let fake = FakeDocker::new();
     let user = fake.config().user;
 
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
 
-    assert!(executor.platform().os_release.contains("Fake Linux 1"));
-    assert_eq!(executor.platform().arch, "x86_64");
+    // What the container reported at start describes it to the model.
+    let section = executor.environment_section(&fake.workspace());
+    assert!(
+        section.starts_with("OS: Fake Linux 1, Linux kernel 6.0.0-fake (x86_64), in a container from image fake:1\n"),
+        "{section}"
+    );
     let calls = fake.calls();
     let run = calls.iter().find(|call| call[0] == "run").unwrap().join(" ");
     // The keep-alive processes run as root; the probe, like every call, as the command user.
@@ -237,7 +246,7 @@ async fn a_strict_container_is_started_read_only_and_offline() {
         ..fake.config()
     };
 
-    ContainerExecutor::start(config).await.unwrap();
+    fake.start(config).await.unwrap();
 
     let calls = fake.calls();
     let run = calls.iter().find(|call| call[0] == "run").unwrap().join(" ");
@@ -256,7 +265,7 @@ async fn start_refuses_a_root_user_before_docker_runs() {
         ..fake.config()
     };
 
-    let error = ContainerExecutor::start(config).await.err().unwrap().to_string();
+    let error = fake.start(config).await.err().unwrap().to_string();
 
     assert!(error.contains("is root"), "{error}");
     assert!(fake.calls().is_empty());
@@ -268,7 +277,7 @@ async fn start_refuses_an_image_whose_commands_would_run_as_root() {
     fake.answer("probe.code", "90");
     fake.answer("probe.err", "commands must not run as root (uid 0)");
 
-    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+    let error = fake.start(fake.config()).await.err().unwrap().to_string();
 
     assert_eq!(
         error,
@@ -281,7 +290,7 @@ async fn start_reports_why_docker_run_failed() {
     let fake = FakeDocker::new();
     fake.answer("run.fail", "Unable to find image 'fake:1' locally");
 
-    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+    let error = fake.start(fake.config()).await.err().unwrap().to_string();
 
     assert!(error.contains("docker run exited"), "{error}");
     assert!(error.contains("Unable to find image 'fake:1' locally"), "{error}");
@@ -293,7 +302,7 @@ async fn start_rejects_an_image_that_lacks_a_required_program() {
     fake.answer("probe.code", "91");
     fake.answer("probe.err", "the image lacks: bash");
 
-    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+    let error = fake.start(fake.config()).await.err().unwrap().to_string();
 
     assert_eq!(error, "container image fake:1 cannot be used: the image lacks: bash");
 }
@@ -303,14 +312,22 @@ async fn start_explains_a_workspace_the_container_user_cannot_read() {
     let fake = FakeDocker::new();
     fake.answer("probe.code", "93");
     fake.answer("probe.err", "");
+    let user = fake.config().user;
 
-    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+    let error = fake.start(fake.config()).await.err().unwrap();
 
+    // A host finds the problem by its type, to say it in its own terms.
     assert_eq!(
-        error,
+        error.downcast_ref::<UnusableWorkspace>(),
+        Some(&UnusableWorkspace::Unreadable {
+            user: user.clone(),
+            workspace: fake.workspace()
+        })
+    );
+    assert_eq!(
+        error.to_string(),
         format!(
-            "container image fake:1 cannot be used: user {} cannot read the workspace {}; make it readable by others, or set container.user",
-            fake.config().user,
+            "user {user} cannot read the workspace {}; make it readable by others, or set `user` to one who can read it",
             fake.workspace().display()
         )
     );
@@ -321,14 +338,21 @@ async fn start_explains_a_writable_workspace_the_container_user_cannot_write() {
     let fake = FakeDocker::new();
     fake.answer("probe.code", "98");
     fake.answer("probe.err", "");
+    let user = fake.config().user;
 
-    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+    let error = fake.start(fake.config()).await.err().unwrap();
 
     assert_eq!(
-        error,
+        error.downcast_ref::<UnusableWorkspace>(),
+        Some(&UnusableWorkspace::Unwritable {
+            user: user.clone(),
+            workspace: fake.workspace()
+        })
+    );
+    assert_eq!(
+        error.to_string(),
         format!(
-            "container image fake:1 cannot be used: user {} cannot write the workspace {}; set container.user to its owner, or mount it read-only (container.workspace = \"readOnly\")",
-            fake.config().user,
+            "user {user} cannot write the workspace {}; set `user` to its owner, or mount it read-only (`workspace_access: Access::ReadOnly`)",
             fake.workspace().display()
         )
     );
@@ -340,7 +364,7 @@ async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
     fake.answer("cmd.out", "hi\n");
     fake.answer("cmd.err", "warn\n");
     fake.answer("cmd.code", "3");
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
 
     let output = run(&executor, &fake.workspace(), "echo hi", Duration::from_secs(10)).await;
 
@@ -370,7 +394,7 @@ async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
 async fn a_timed_out_command_is_stopped_inside_the_container() {
     let fake = FakeDocker::new();
     fake.answer("cmd.hang", "");
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
 
     let output = run(&executor, &fake.workspace(), "sleep 30", Duration::from_millis(100)).await;
 
@@ -382,11 +406,10 @@ async fn a_timed_out_command_is_stopped_inside_the_container() {
 async fn a_cancelled_command_is_stopped_inside_the_container() {
     let fake = FakeDocker::new();
     fake.answer("cmd.hang", "");
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     let cancel = CancellationToken::new();
     let workspace = fake.workspace();
     let request = ShellCommand {
-        shell: "bash",
         command: "sleep 30",
         cwd: &workspace,
         timeout: Duration::from_secs(60),
@@ -406,12 +429,11 @@ async fn a_cancelled_command_is_stopped_inside_the_container() {
 #[tokio::test]
 async fn a_run_cancelled_before_it_starts_runs_nothing() {
     let fake = FakeDocker::new();
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     let cancel = CancellationToken::new();
     cancel.cancel();
     let workspace = fake.workspace();
     let request = ShellCommand {
-        shell: "bash",
         command: "echo never",
         cwd: &workspace,
         timeout: Duration::from_secs(60),
@@ -427,7 +449,7 @@ async fn a_run_cancelled_before_it_starts_runs_nothing() {
 async fn a_dropped_run_still_stops_its_command() {
     let fake = FakeDocker::new();
     fake.answer("cmd.hang", "");
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
 
     let dropped = tokio::time::timeout(
         Duration::from_millis(200),
@@ -446,7 +468,7 @@ async fn a_dropped_run_still_stops_its_command() {
 #[tokio::test]
 async fn tools_in_the_container_run_one_call_at_a_time() {
     let fake = FakeDocker::new();
-    let executor: Arc<dyn Executor> = Arc::new(ContainerExecutor::start(fake.config()).await.unwrap());
+    let executor: Arc<dyn Executor> = Arc::new(fake.start(fake.config()).await.unwrap());
 
     let bash = BashTool {
         executor: Arc::clone(&executor),
@@ -466,7 +488,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
     let fake = FakeDocker::new();
     fake.answer("cmd.hang", "");
     let bash = BashTool {
-        executor: Arc::new(ContainerExecutor::start(fake.config()).await.unwrap()),
+        executor: Arc::new(fake.start(fake.config()).await.unwrap()),
         ..BashTool::default()
     };
     let provider = Arc::new(FauxProvider::new([
@@ -514,7 +536,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
 #[tokio::test]
 async fn file_reads_map_each_refusal_to_an_actionable_error() {
     let fake = FakeDocker::new();
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     let path = Path::new("/srv/app.log");
     for (code, message) in [
         ("94", "/srv/app.log is a directory; use bash `ls` to list it"),
@@ -554,7 +576,7 @@ async fn file_reads_map_each_refusal_to_an_actionable_error() {
 async fn file_writes_pass_the_contents_on_standard_input_as_the_command_user() {
     let fake = FakeDocker::new();
     let user = fake.config().user;
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
 
     executor
         .write_file(Path::new("/srv/new/app.conf"), b"port = 8080\n")
@@ -573,7 +595,7 @@ async fn file_writes_pass_the_contents_on_standard_input_as_the_command_user() {
 #[tokio::test]
 async fn file_writes_map_each_refusal_to_an_actionable_error() {
     let fake = FakeDocker::new();
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     let path = Path::new("/srv/app.conf");
     for (code, error, message) in [
         ("94", "", "/srv/app.conf is a directory"),
@@ -602,7 +624,7 @@ async fn file_writes_map_each_refusal_to_an_actionable_error() {
 #[tokio::test]
 async fn a_file_write_dropped_half_way_still_writes_the_whole_file() {
     let fake = FakeDocker::new();
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     // More than a pipe holds, so that the write cannot end the first time it is polled.
     let contents = vec![b'x'; 4 * 1024 * 1024];
     let received = fake.dir.path().join("write.in");
@@ -626,7 +648,7 @@ async fn a_file_write_dropped_half_way_still_writes_the_whole_file() {
 #[tokio::test]
 async fn dropping_the_executor_ends_the_docker_run_client() {
     let fake = FakeDocker::new();
-    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let executor = fake.start(fake.config()).await.unwrap();
     let pid = std::fs::read_to_string(fake.dir.path().join("run.pid")).unwrap();
     let alive = || {
         std::process::Command::new("kill")
@@ -671,12 +693,11 @@ fn real_workspace() -> (tempfile::TempDir, PathBuf) {
 }
 
 async fn start_real(image: &str, workspace: &Path) -> ContainerExecutor {
-    ContainerExecutor::start(ContainerConfig {
+    let config = ContainerConfig {
         label: "zx-agent-test".into(),
-        ..ContainerConfig::new(image, workspace)
-    })
-    .await
-    .unwrap()
+        ..ContainerConfig::new(image)
+    };
+    ContainerExecutor::start(config, workspace).await.unwrap()
 }
 
 /// How many processes in the container run `sleep 30`.
@@ -713,23 +734,25 @@ async fn real_commands_run_as_the_agents_user_with_a_writable_workspace_and_netw
     // The file is the host's, and belongs to the agent's user.
     let created = std::fs::metadata(workspace.join("new")).unwrap();
     assert_eq!(created.uid(), uid);
-    assert!(!executor.platform().arch.is_empty());
+    // The description names the machine type the container reported: `(<arch>), in a ...`.
+    let section = executor.environment_section(&workspace);
+    let (_, arch) = section.split_once(" (").unwrap();
+    assert!(!arch.starts_with(')'), "{section}");
 }
 
 #[tokio::test]
 async fn real_a_strict_container_has_a_read_only_workspace_and_root_and_no_network() {
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
-    let executor = ContainerExecutor::start(ContainerConfig {
+    let config = ContainerConfig {
         label: "zx-agent-test".into(),
         user: "65534:65534".into(),
         workspace_access: Access::ReadOnly,
         root_access: Access::ReadOnly,
         network: Network::None,
-        ..ContainerConfig::new(&image, &workspace)
-    })
-    .await
-    .unwrap();
+        ..ContainerConfig::new(&image)
+    };
+    let executor = ContainerExecutor::start(config, &workspace).await.unwrap();
 
     let output = run(
         &executor,
@@ -870,14 +893,15 @@ async fn real_an_unreadable_workspace_is_refused_at_start() {
     let workspace = dir.path().canonicalize().unwrap();
 
     // Its owner, the default user, could read it; nobody cannot.
-    let error = ContainerExecutor::start(ContainerConfig {
+    let config = ContainerConfig {
         user: "65534:65534".into(),
-        ..ContainerConfig::new(&image, &workspace)
-    })
-    .await
-    .err()
-    .unwrap()
-    .to_string();
+        ..ContainerConfig::new(&image)
+    };
+    let error = ContainerExecutor::start(config, &workspace)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
 
     assert!(error.contains("cannot read the workspace"), "{error}");
 }
@@ -922,13 +946,12 @@ async fn real_files_are_written_inside_the_container() {
 async fn real_a_read_only_workspace_refuses_writes() {
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
-    let executor = ContainerExecutor::start(ContainerConfig {
+    let config = ContainerConfig {
         label: "zx-agent-test".into(),
         workspace_access: Access::ReadOnly,
-        ..ContainerConfig::new(&image, &workspace)
-    })
-    .await
-    .unwrap();
+        ..ContainerConfig::new(&image)
+    };
+    let executor = ContainerExecutor::start(config, &workspace).await.unwrap();
 
     let error = executor.write_file(&workspace.join("new.txt"), b"x").await.unwrap_err();
 
@@ -1213,6 +1236,40 @@ async fn a_container_that_cannot_start_leaves_no_session_file() {
 
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(!session.exists(), "a failed start left {}", session.display());
+}
+
+#[tokio::test]
+async fn a_workspace_the_container_user_cannot_use_is_explained_with_the_keys_of_config_toml() {
+    let home = container_home("fake:1");
+    for (code, problem, advice) in [
+        (
+            "93",
+            "cannot read the workspace",
+            "make it readable by others, or set container.user",
+        ),
+        (
+            "98",
+            "cannot write the workspace",
+            "set container.user to its owner, or mount it read-only (container.workspace = \"readOnly\")",
+        ),
+    ] {
+        let fake = FakeDocker::new();
+        fake.answer("probe.code", code);
+        fake.answer("probe.err", "");
+        let server = MockServer::start(vec![]).await;
+
+        let output = zx_run(&server, &fake.workspace(), Some(fake.dir.path()), &home, &["go"]).await;
+
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let stderr = stderr(&output);
+        let explained = format!(
+            "cannot start the container for container execution: user {} {problem} {}; {advice}",
+            fake.config().user,
+            fake.workspace().display()
+        );
+        assert!(stderr.contains(&explained), "{code}: {stderr}");
+        assert!(server.requests().is_empty());
+    }
 }
 
 #[tokio::test]

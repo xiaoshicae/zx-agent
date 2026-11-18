@@ -122,7 +122,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
   │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
   └─ zx-agent  crates/zx-agent  SDK：把下面四个 crate 再导出成一个库，没有自己的代码
-       ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
+       ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
        │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
        └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
@@ -159,7 +159,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 cargo test                                   # 不需要网络和 API key；付费的真实 API 测试默认跳过
 cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
-cargo clippy -p zx-tools --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-tools
+cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-builtin
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```

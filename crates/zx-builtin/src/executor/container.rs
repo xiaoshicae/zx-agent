@@ -16,7 +16,9 @@
 //! that keep the container alive cannot be signalled. Because a sweep would also stop a
 //! concurrent call, the executor runs one command or file read at a time.
 //!
-//! - `config`: how the container is started and described: its settings and its network
+//! - `config`: how the container is started and described: its settings and their checks
+//!   (with what the start found about the workspace), its network, and the prompt section
+//!   about it
 //! - `scripts`: the shell scripts that run inside it, and the exit codes they answer with
 
 mod config;
@@ -35,8 +37,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
-use config::parse_platform;
-pub use config::{Access, ContainerConfig, Network, Platform, check_network, environment_section};
+pub use config::{Access, ContainerConfig, InvalidContainerConfig, Network, UnusableWorkspace};
+use config::{Platform, check_workspace, container_section, parse_platform};
 use scripts::{
     EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
     PROBE_NO_WORKSPACE, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
@@ -44,12 +46,11 @@ use scripts::{
 
 use super::capture::{Capture, await_end, collect};
 use super::{
-    Captured, CommandEnd, CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error,
+    Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, check_read_within, directory_error,
+    special_file_error,
 };
 use zx_core::tools::ExecutionMode;
 
-/// The shell every command runs with; the start-up probe checks that the image has it.
-const SHELL: &str = "bash";
 /// Longest wait for a new container to accept commands.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pause between readiness probes while the container starts.
@@ -113,9 +114,14 @@ impl Target {
     }
 }
 
-/// Runs commands and reads files in one container that lives as long as this value.
+/// Runs commands and reads files in one container that lives as long as this value. Commands
+/// run with the image's `bash`, which the start checks for.
 pub struct ContainerExecutor {
     target: Target,
+    /// What the container was started with, which its prompt section describes.
+    config: ContainerConfig,
+    /// Mounted at the same path.
+    workspace: PathBuf,
     platform: Platform,
     /// Taken by one command, file read or file write at a time, because a sweep stops every
     /// process of the command user. Shared (`Arc`) with the tasks that outlive the call that
@@ -130,12 +136,20 @@ pub struct ContainerExecutor {
 }
 
 impl ContainerExecutor {
-    /// Start the container and check that it can run commands. Fails, and removes the
-    /// container, when the settings are invalid (including a root user), Docker cannot run,
-    /// the image is not present locally, the container does not accept commands within 60
-    /// seconds, the image lacks a required program, or commands would run as root.
-    pub async fn start(config: ContainerConfig) -> Result<Self> {
+    /// Start a container with `config` that mounts `workspace` at the same path, and check
+    /// that it can run commands. Fails, and removes the container, when the settings are
+    /// invalid ([`ContainerConfig::validate`], whose error the result holds), the workspace is
+    /// not an absolute path that Docker can mount, Docker cannot run, the image is not present
+    /// locally, the container does not accept commands within 60 seconds, the image lacks a
+    /// required program, commands would run as root, or the command user cannot use the
+    /// workspace ([`UnusableWorkspace`], which the result holds too).
+    ///
+    /// Everything in the workspace is readable inside the container, and with
+    /// [`Access::ReadWrite`] changeable, so keep files the container must not read or change,
+    /// such as the session file, elsewhere.
+    pub async fn start(config: ContainerConfig, workspace: &Path) -> Result<Self> {
         config.validate()?;
+        check_workspace(workspace)?;
         let name = format!("zx-agent-{}", uuid::Uuid::new_v4().simple());
         let target = Target {
             docker: config.docker.clone(),
@@ -144,7 +158,7 @@ impl ContainerExecutor {
         };
         let mut command = docker(&config.docker);
         command
-            .args(run_args(&config, &name))
+            .args(run_args(&config, workspace, &name))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -160,9 +174,10 @@ impl ContainerExecutor {
                     text(&stderr.finish().await.bytes)
                 );
             }
-            let reason = match probe(&target, &config).await {
+            let reason = match probe(&target, &config, workspace).await {
                 Probe::Ready(platform) => break platform,
                 Probe::Unusable(reason) => bail!("container image {} cannot be used: {reason}", config.image),
+                Probe::Workspace(problem) => return Err(problem.into()),
                 Probe::NotReady(reason) => reason,
             };
             ensure!(
@@ -174,16 +189,13 @@ impl ContainerExecutor {
         };
         Ok(Self {
             target,
+            config,
+            workspace: workspace.to_path_buf(),
             platform,
             turn: Arc::new(tokio::sync::Mutex::new(())),
             _client: client,
             _client_stderr: stderr,
         })
-    }
-
-    /// What the container reported at start.
-    pub fn platform(&self) -> &Platform {
-        &self.platform
     }
 
     /// The container's name, for example to find it with `docker ps`.
@@ -305,6 +317,13 @@ impl Executor for ContainerExecutor {
         ExecutionMode::Sequential
     }
 
+    /// The container: its system, as it reported at start, the image, the working directory
+    /// and whether commands may change it, the command user, the network and which of the
+    /// container's own files are writable.
+    fn environment_section(&self, cwd: &Path) -> String {
+        container_section(&self.config, &self.workspace, &self.platform, cwd)
+    }
+
     async fn run(&self, request: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
         // Declared before `cleanup`, so that a dropped run releases its turn only after the
         // cleanup task has been queued for the next one.
@@ -316,7 +335,6 @@ impl Executor for ContainerExecutor {
         // An earlier run that was dropped may have left processes whose sweep is still queued.
         self.target.sweep().await;
         // Commands never inherit the agent's environment, so there is nothing to hide from them.
-        // Always bash, which the start-up probe found, whatever shell the tool asks for.
         let mut command = self.target.exec(
             Some(request.cwd),
             Input::Closed,
@@ -453,11 +471,13 @@ enum Probe {
     Ready(Platform),
     /// The image cannot be used; retrying will not help.
     Unusable(String),
+    /// The command user cannot use the workspace; retrying will not help either.
+    Workspace(UnusableWorkspace),
     /// The container is not accepting commands yet.
     NotReady(String),
 }
 
-async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
+async fn probe(target: &Target, config: &ContainerConfig, workspace: &Path) -> Probe {
     let mut command = target.exec(
         None,
         Input::Closed,
@@ -465,7 +485,7 @@ async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
         "zx-agent-probe",
         [
             OsStr::new(SHELL),
-            config.workspace.as_os_str(),
+            workspace.as_os_str(),
             OsStr::new(match config.workspace_access {
                 Access::ReadWrite => "rw",
                 Access::ReadOnly => "ro",
@@ -485,16 +505,14 @@ async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
     match output.status.code() {
         Some(0) => Probe::Ready(parse_platform(&String::from_utf8_lossy(&output.stdout))),
         Some(PROBE_ROOT | PROBE_MISSING) => Probe::Unusable(text(&output.stderr)),
-        Some(PROBE_NO_WORKSPACE) => Probe::Unusable(format!(
-            "user {} cannot read the workspace {}; make it readable by others, or set container.user",
-            config.user,
-            config.workspace.display()
-        )),
-        Some(PROBE_READ_ONLY_WORKSPACE) => Probe::Unusable(format!(
-            "user {} cannot write the workspace {}; set container.user to its owner, or mount it read-only (container.workspace = \"readOnly\")",
-            config.user,
-            config.workspace.display()
-        )),
+        Some(PROBE_NO_WORKSPACE) => Probe::Workspace(UnusableWorkspace::Unreadable {
+            user: config.user.clone(),
+            workspace: workspace.to_path_buf(),
+        }),
+        Some(PROBE_READ_ONLY_WORKSPACE) => Probe::Workspace(UnusableWorkspace::Unwritable {
+            user: config.user.clone(),
+            workspace: workspace.to_path_buf(),
+        }),
         _ => Probe::NotReady(text(&output.stderr)),
     }
 }
@@ -510,10 +528,10 @@ fn docker(program: &Path) -> Command {
     command
 }
 
-/// Arguments for `docker run`, which stays attached so that its stdin ties the container's
-/// lifetime to the agent.
-fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
-    let workspace = config.workspace.display().to_string();
+/// Arguments for `docker run` of the container `name` that mounts `workspace`, which stays
+/// attached so that its stdin ties the container's lifetime to the agent.
+fn run_args(config: &ContainerConfig, workspace: &Path, name: &str) -> Vec<String> {
+    let workspace = workspace.display().to_string();
     let mut args: Vec<String> = [
         "run",
         "--interactive",
@@ -568,16 +586,19 @@ fn text(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The workspace the containers of these tests mount.
+    const WORK: &str = "/work";
+
     fn config() -> ContainerConfig {
         ContainerConfig {
             label: "s1".into(),
-            ..ContainerConfig::new("debian:bookworm-slim", "/work")
+            ..ContainerConfig::new("debian:bookworm-slim")
         }
     }
 
     #[test]
     fn inside_the_walls_the_container_is_open_and_tied_to_its_client() {
-        let args = run_args(&config(), "zx-agent-x");
+        let args = run_args(&config(), Path::new(WORK), "zx-agent-x");
         let joined = args.join(" ");
         for flag in [
             "run --interactive --rm --init --sig-proxy=false --pull never",
@@ -629,7 +650,7 @@ mod tests {
             network: Network::None,
             ..config()
         };
-        let joined = run_args(&strict, "zx-agent-x").join(" ");
+        let joined = run_args(&strict, Path::new(WORK), "zx-agent-x").join(" ");
         for flag in [
             "--network none --read-only --tmpfs /tmp",
             "--mount type=bind,source=/work,target=/work,readonly",
@@ -642,6 +663,7 @@ mod tests {
                 workspace_access: Access::ReadOnly,
                 ..config()
             },
+            Path::new(WORK),
             "zx-agent-x",
         )
         .join(" ");
@@ -657,7 +679,7 @@ mod tests {
         // macOS, so only the user is compared.
         let file = tempfile::NamedTempFile::new().unwrap();
         let uid = file.as_file().metadata().unwrap().uid();
-        let user = ContainerConfig::new("image", "/work").user;
+        let user = ContainerConfig::new("image").user;
         if uid == 0 {
             assert_eq!(user, config::NOBODY);
         } else {
@@ -668,18 +690,49 @@ mod tests {
     #[test]
     fn invalid_settings_are_rejected_before_docker_runs() {
         let cases = [
-            ContainerConfig::new(" ", "/work"),
-            ContainerConfig::new("image", "work"),
-            ContainerConfig::new("image", "/work,ro"),
-            ContainerConfig {
-                pids_limit: 0,
-                ..ContainerConfig::new("image", "/work")
-            },
+            (ContainerConfig::new(" "), InvalidContainerConfig::EmptyImage),
+            (
+                ContainerConfig {
+                    user: " ".into(),
+                    ..config()
+                },
+                InvalidContainerConfig::EmptyUser,
+            ),
+            (
+                ContainerConfig {
+                    memory: String::new(),
+                    ..config()
+                },
+                InvalidContainerConfig::EmptyMemory,
+            ),
+            (
+                ContainerConfig {
+                    pids_limit: 0,
+                    ..config()
+                },
+                InvalidContainerConfig::ZeroPidsLimit,
+            ),
+            // A network built directly is held to the rule that parsing one follows.
+            (
+                ContainerConfig {
+                    network: Network::Named("host".into()),
+                    ..config()
+                },
+                InvalidContainerConfig::SharedNetwork("host".into()),
+            ),
         ];
-        for config in cases {
-            assert!(config.validate().is_err(), "{config:?}");
+        for (config, expected) in cases {
+            assert_eq!(config.validate(), Err(expected), "{config:?}");
         }
-        assert!(config().validate().is_ok());
+        assert_eq!(config().validate(), Ok(()));
+    }
+
+    #[test]
+    fn workspaces_that_docker_cannot_mount_are_rejected_before_docker_runs() {
+        for workspace in ["work", "/work,ro", "/work\"x"] {
+            assert!(check_workspace(Path::new(workspace)).is_err(), "{workspace:?}");
+        }
+        check_workspace(Path::new(WORK)).unwrap();
     }
 
     #[test]
@@ -704,6 +757,7 @@ mod tests {
                 network: Network::None,
                 ..config()
             },
+            Path::new(WORK),
             "zx-agent-x",
         )
         .join(" ");
@@ -755,9 +809,10 @@ mod tests {
         };
         let open = ContainerConfig {
             user: "1000:1000".into(),
-            ..ContainerConfig::new("debian:bookworm-slim", "/srv/app")
+            ..ContainerConfig::new("debian:bookworm-slim")
         };
-        let section = environment_section(&open, &platform);
+        let app = Path::new("/srv/app");
+        let section = container_section(&open, app, &platform, app);
         let lines: Vec<&str> = section.lines().collect();
         assert_eq!(
             lines[0],
@@ -774,24 +829,47 @@ mod tests {
              the container's own files are writable and are discarded with the container."
         );
         let unnamed = Platform::default();
-        assert!(environment_section(&open, &unnamed).starts_with("OS: Linux, Linux kernel"));
+        assert!(container_section(&open, app, &unnamed, app).starts_with("OS: Linux, Linux kernel"));
     }
 
-    #[test]
-    fn a_strict_container_is_described_as_read_only_and_offline() {
-        let strict = ContainerConfig {
+    fn strict() -> ContainerConfig {
+        ContainerConfig {
             user: "65534:65534".into(),
             workspace_access: Access::ReadOnly,
             root_access: Access::ReadOnly,
             network: Network::None,
-            ..ContainerConfig::new("debian:bookworm-slim", "/srv/app")
-        };
-        let section = environment_section(&strict, &Platform::default());
+            ..ContainerConfig::new("debian:bookworm-slim")
+        }
+    }
+
+    #[test]
+    fn a_strict_container_is_described_as_read_only_and_offline() {
+        let app = Path::new("/srv/app");
+        let section = container_section(&strict(), app, &Platform::default(), app);
         let lines: Vec<&str> = section.lines().collect();
         assert_eq!(lines[2], "Working directory: /srv/app (read-only)");
         assert_eq!(
             lines[3],
             "Isolation: commands run as user 65534:65534 without network access; outside the working directory only /tmp is writable."
+        );
+    }
+
+    #[test]
+    fn a_working_directory_other_than_the_workspace_is_told_apart_from_it() {
+        let section = container_section(
+            &strict(),
+            Path::new("/srv/app"),
+            &Platform::default(),
+            Path::new("/srv/app/web"),
+        );
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(
+            lines[2..4],
+            ["Working directory: /srv/app/web", "Workspace: /srv/app (read-only)"]
+        );
+        assert!(
+            lines[4].ends_with("; outside the workspace only /tmp is writable."),
+            "{section}"
         );
     }
 }

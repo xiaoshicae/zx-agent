@@ -24,8 +24,8 @@ testing = ["zx-ai/testing"]
 [dependencies]
 zx-ai.workspace = true
 zx-ai-openai.workspace = true
+zx-builtin.workspace = true
 zx-core.workspace = true
-zx-tools.workspace = true
 
 # For tests/, the integration tests of the workspace's libraries, and for examples/.
 [dev-dependencies]
