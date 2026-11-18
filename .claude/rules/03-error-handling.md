@@ -23,4 +23,4 @@ paths:
 
 ## 不吞错误
 
-对 `Result` 用下面的写法会悄悄丢掉错误，每处都要在旁边注释为什么可以丢弃（`.claude/scripts/self-check.sh` 会列出所有 `let _ =`）：`let _ = fallible();`、`.ok()`、`.unwrap_or_default()`、`.unwrap_or(x)`、没有 else 的 `if let Ok(x) = ...`。例子：`crates/zx-ai/src/provider.rs` 的 `send_event`（接收端关闭后不再需要事件）。
+生产代码中对 `Result` 用下面的写法会悄悄丢掉错误，每处都要在旁边注释为什么可以丢弃（`.claude/scripts/self-check.sh` 会列出生产代码中的 `let _ =`）：`let _ = fallible();`、`.ok()`、`.unwrap_or_default()`、`.unwrap_or(x)`、没有 else 的 `if let Ok(x) = ...`。例子：`crates/zx-ai/src/provider.rs` 的 `send_event`（接收端关闭后不再需要事件）。
