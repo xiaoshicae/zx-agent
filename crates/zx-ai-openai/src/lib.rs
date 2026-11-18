@@ -46,9 +46,9 @@ pub struct OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
-    /// Check the settings and build the HTTP client. Errors: a byte budget or a timeout of
-    /// zero, an extra field the provider sets itself, a header the client cannot send, and a
-    /// client that cannot be built.
+    /// Check the settings and build the HTTP client. Errors: an address requests cannot go
+    /// to, a byte budget or a timeout of zero, an extra field the provider sets itself, a
+    /// header the client cannot send, and a client that cannot be built.
     pub fn new(config: OpenAiConfig) -> anyhow::Result<Self> {
         config.check()?;
         let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
