@@ -32,7 +32,7 @@
 | `crates/zx-agent/tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
 | `crates/zx-agent/tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
 | `crates/zx-agent/tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对；分支配置索引的校验在 `zx-core` 的单元测试 |
-| `crates/zx-agent/tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
+| `crates/zx-agent/tests/executor.rs` | 工具只经执行器运行命令与读写文件；本机执行器用 bash 运行命令；执行器为提示词描述自己 |
 | `crates/zx-agent/tests/search_tools.rs` | grep、find、ls |
 | `crates/zx-agent/tests/file_mutations.rs` | 文件锁跨会话共享；取消调用后仍保护后台写入，防止覆盖后续修改 |
 | `crates/zx-agent/tests/file_tools.rs` | edit_file 与 write_file；调用被丢弃时文件仍写完整 |
@@ -75,4 +75,4 @@
 
 ---
 
-TESTS.md · v0.10 · 2026年11月
+TESTS.md · v0.11 · 2026年11月
