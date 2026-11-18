@@ -1253,3 +1253,21 @@ async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
         assert_eq!(server.requests().len(), 1, "{mode}");
     }
 }
+
+#[tokio::test]
+async fn a_closed_stderr_leaves_the_exit_code_to_the_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let mut child = run(&server, dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Whoever was to read the progress and the report line is gone before the run starts.
+    drop(child.stderr.take());
+
+    let output = child.wait_with_output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "the answer\n");
+}

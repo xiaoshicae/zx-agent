@@ -15,7 +15,7 @@ use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, exit_code, print_line, with_telemetry};
+use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, eprint_line, exit_code, print_line, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::session_file;
 
@@ -88,12 +88,12 @@ fn read_prompt(arg: &str) -> Result<String> {
 fn run_traces(telemetry: &Telemetry) -> TraceHook {
     match TraceParent::from_env() {
         Ok(Some(parent)) => {
-            eprintln!("[otel] continuing trace {}", parent.trace_id());
+            eprint_line(&format!("[otel] continuing trace {}", parent.trace_id()));
             telemetry.hook_under(&parent)
         }
         Ok(None) => telemetry.hook(),
         Err(error) => {
-            eprintln!("[otel] {error:#}; the run starts a trace of its own");
+            eprint_line(&format!("[otel] {error:#}; the run starts a trace of its own"));
             telemetry.hook()
         }
     }
@@ -161,10 +161,10 @@ fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) 
                 }
                 other => other.name().to_string(),
             };
-            eprintln!(
+            eprint_line(&format!(
                 "[zx-agent] outcome={outcome} model_requests={} retries={} tokens={} (in {} / out {}){cost}{denied}{error}{session}",
                 report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
-            );
+            ));
         }
         // The `run_end` event, already written, carries the report.
         OutputMode::Jsonl => {}
@@ -204,9 +204,9 @@ fn text_progress(event: &Event) {
     } = &event.event
     {
         if let Some((_, line)) = answer_end_line(message) {
-            eprintln!("{line}");
+            eprint_line(&line);
         }
     } else if let Some((_, line)) = progress_line(&event.event) {
-        eprintln!("{line}");
+        eprint_line(&line);
     }
 }

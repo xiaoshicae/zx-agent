@@ -23,6 +23,7 @@ use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 
 use super::tool_kind;
+use crate::process::eprint_line;
 use crate::render::call_label;
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.
@@ -281,7 +282,7 @@ impl Updates {
 pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
     if let Err(error) = cx.send_notification(SessionNotification::new(session_id.clone(), update)) {
         // The connection is going away; what was underway still ends, and its response says how.
-        eprintln!("[acp] cannot send a session update: {error}");
+        eprint_line(&format!("[acp] cannot send a session update: {error}"));
     }
 }
 
