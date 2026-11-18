@@ -49,11 +49,19 @@ impl StepLoop<'_> {
         if let Err(text) = self.validate_arguments(tool.as_ref(), &ran) {
             return Checked::blocked(text);
         }
-        if let Err(text) = self.authorize(&ran).await {
-            return Checked::blocked(text);
-        }
+        // A cancelled run asks no policy and no person about a call it will not start.
         if self.run.target.trace.cancel().is_cancelled() {
-            return Checked::blocked(NOT_STARTED);
+            return Checked::NotStarted;
+        }
+        let authorized = self.authorize(&ran).await;
+        // Cancelled while the policies ran or the call waited for approval: the call does not
+        // start, whatever their answer came to, and nobody denied it.
+        if self.run.target.trace.cancel().is_cancelled() {
+            return Checked::NotStarted;
+        }
+        if let Err(text) = authorized {
+            self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
+            return Checked::blocked(text);
         }
         Checked::Ready(Runnable {
             tool,
@@ -103,10 +111,7 @@ impl StepLoop<'_> {
         self.decision(call, verdict.clone()).await;
         match verdict {
             PolicyDecision::Allow => {}
-            PolicyDecision::Deny(reason) => {
-                self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
-                return Err(blocked_by_policy(&reason));
-            }
+            PolicyDecision::Deny(reason) => return Err(blocked_by_policy(&reason)),
             PolicyDecision::Ask(reason) => {
                 if self.approvals.allows(call) {
                     let remembered = Resolved {
@@ -117,7 +122,6 @@ impl StepLoop<'_> {
                     };
                     self.approval_resolved(call, remembered).await;
                 } else if let Err(denied) = self.ask(call, reason).await {
-                    self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                     return Err(format!("Approval denied: {denied}"));
                 }
             }
@@ -244,10 +248,13 @@ impl StepLoop<'_> {
             }
         }
         // Record starts in call order before any call runs, so that recovery after a crash
-        // can tell the calls that began from those that never did.
-        for (_, checked) in &slots {
-            if let Checked::Ready(runnable) = checked {
-                self.record_start(runnable).await?;
+        // can tell the calls that began from those that never did. A run cancelled during
+        // the checks starts none of them.
+        if !self.run.target.trace.cancel().is_cancelled() {
+            for (_, checked) in &slots {
+                if let Checked::Ready(runnable) = checked {
+                    self.record_start(runnable).await?;
+                }
             }
         }
         // Phase 2: the calls run concurrently on one shared borrow of the loop; the futures
@@ -284,22 +291,27 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Run a checked call, or take the result of a blocked one, then pass the result through
-    /// the output hooks and report the call's end. The hooks see the call as it ran, with
-    /// the arguments `Tool::prepare_arguments` rewrote.
+    /// Run a checked call, or take the result of one that does not run, then pass the result
+    /// through the output hooks and report the call's end. The hooks see the call as it ran,
+    /// with the arguments `Tool::prepare_arguments` rewrote; what the kernel says of a call
+    /// that the run's cancellation kept from starting or interrupted goes past them.
     async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'c>) -> CallOutput {
-        let (ran, outcome) = match checked {
-            Checked::Blocked(outcome) => (Cow::Borrowed(call), outcome),
+        let (ran, ended) = match checked {
+            Checked::Blocked(outcome) => (Cow::Borrowed(call), Ended::Output(outcome)),
+            Checked::NotStarted => (Cow::Borrowed(call), Ended::not_started()),
             Checked::Ready(Runnable {
                 tool,
                 effects,
                 call: ran,
             }) => {
-                let outcome = self.execute(tool.as_ref(), effects, &ran).await;
-                (ran, outcome)
+                let ended = self.execute(tool.as_ref(), effects, &ran).await;
+                (ran, ended)
             }
         };
-        let outcome = self.apply_output_hooks(&ran, outcome).await;
+        let outcome = match ended {
+            Ended::Output(outcome) => self.apply_output_hooks(&ran, outcome).await,
+            Ended::Cancelled(outcome) => outcome,
+        };
         self.tool_end(call, &outcome).await;
         outcome
     }
@@ -307,10 +319,10 @@ impl StepLoop<'_> {
     /// Run `tool`, which declared it has `effects`, on `call` until it finishes or the run is
     /// cancelled, reporting its progress on the way. A failure or a panic of the tool becomes
     /// an error result.
-    async fn execute(&self, tool: &dyn Tool, effects: Effects, call: &ToolCall) -> CallOutput {
+    async fn execute(&self, tool: &dyn Tool, effects: Effects, call: &ToolCall) -> Ended {
         let cancel = self.run.target.trace.cancel();
         if cancel.is_cancelled() {
-            return CallOutput::blocked(NOT_STARTED);
+            return Ended::not_started();
         }
         let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
         let ctx = ToolContext {
@@ -328,10 +340,10 @@ impl StepLoop<'_> {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
-                    return CallOutput {
+                    return Ended::Cancelled(CallOutput {
                         output: ToolOutput::error(interrupted(effects)),
                         duration_ms: Some(duration_ms(started.elapsed())),
-                    };
+                    });
                 }
                 update = updates.recv() => {
                     if let Some(update) = update {
@@ -350,10 +362,10 @@ impl StepLoop<'_> {
             Ok(Err(error)) => ToolOutput::error(error),
             Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
         };
-        CallOutput {
+        Ended::Output(CallOutput {
             output,
             duration_ms: Some(duration_ms(started.elapsed())),
-        }
+        })
     }
 
     /// Pass one progress update of `call` through the redaction hooks, then report it.
@@ -512,10 +524,30 @@ struct Resolved {
     wait_ms: u64,
 }
 
+/// What a call came to, before the output hooks.
+enum Ended {
+    /// The tool's result, or the result of a blocked call: the output hooks see it, and one
+    /// that fails withholds it.
+    Output(CallOutput),
+    /// The run was cancelled before the call started or while it ran. The result is the
+    /// kernel's own words, with nothing of the tool's in them to withhold, and no hook sees
+    /// it: a cancelled run waits for none.
+    Cancelled(CallOutput),
+}
+
+impl Ended {
+    /// The end of a call that never started because the run was cancelled first.
+    fn not_started() -> Self {
+        Self::Cancelled(CallOutput::blocked(NOT_STARTED))
+    }
+}
+
 /// A call after its checks.
 enum Checked<'c> {
     /// The call does not run; this is its result.
     Blocked(CallOutput),
+    /// The call does not run: the run was cancelled before it could start.
+    NotStarted,
     Ready(Runnable<'c>),
 }
 

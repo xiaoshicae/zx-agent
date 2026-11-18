@@ -19,14 +19,18 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, ReadOutputTool};
+use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::tools::executor_tools;
 use zx_agent::events::{EventKind, Interruption, RunOutcome};
+use zx_agent::hooks::Hook;
+use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::Entry;
 
 use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
-use zx_testing::{RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
+use zx_testing::{EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -490,7 +494,13 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     );
 }
 
+/// Changes nothing: a hook beside the tools, as every program registers some.
+struct Unchanged;
+
+impl Hook for Unchanged {}
+
 /// Cancels a run while its `hang` call runs, then returns the result the next request sends.
+/// A cancelled run waits for no hook, so the result is the kernel's own with one registered.
 async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bool) {
     let hang = Hang::new(effects);
     let tools: Vec<Arc<dyn Tool>> = vec![hang.clone()];
@@ -498,7 +508,9 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         FauxStep::tool_call("c1", "hang", json!({})),
         FauxStep::text("checked"),
     ]));
-    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build().await;
+    let mut config = config(provider.clone(), tools);
+    config.hooks.push("unchanged", Arc::new(Unchanged));
+    let (session, events) = RunnerSetup::new(config).build().await;
     {
         let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
@@ -508,6 +520,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         session.cancel();
         assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     }
+    assert!(!hook_failed(&events.events()), "{:?}", events.events());
     let report = session.prompt("again").await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
@@ -529,6 +542,63 @@ async fn a_read_only_call_cancelled_while_running_is_reported_as_harmless() {
     let (content, is_error) = result_after_cancelling_a_running_call(Effects::ReadOnly).await;
     assert!(content.contains("changed nothing"), "{content}");
     assert!(is_error);
+}
+
+fn hook_failed(events: &[EventKind]) -> bool {
+    events.iter().any(|event| matches!(event, EventKind::HookFailed { .. }))
+}
+
+#[tokio::test]
+async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
+    let act = Arc::new(EchoTool::new("act"));
+    let tools: Vec<Arc<dyn Tool>> = vec![act.clone(), Arc::new(EchoTool::new("ask"))];
+    let provider = Arc::new(FauxProvider::new([FauxStep::tool_calls(vec![
+        ("c1", "act", json!({})),
+        ("c2", "ask", json!({})),
+    ])]));
+    let mut config = config(provider, tools);
+    config.hooks.push("unchanged", Arc::new(Unchanged));
+    let rules = vec![
+        Rule {
+            matcher: RuleMatcher::Tool("ask".into()),
+            decision: PolicyDecision::Ask("needs a person".into()),
+        },
+        Rule {
+            matcher: RuleMatcher::Any,
+            decision: PolicyDecision::Allow,
+        },
+    ];
+    config.policies.push("rules", Arc::new(RulePolicy::new(rules)));
+    config.approvals = ApprovalMode::Wait(Duration::from_secs(60));
+    // Nobody answers: the run is cancelled as soon as it asks about the second call.
+    let (session, events) = RunnerSetup::new(config)
+        .build_with(|event, session| {
+            if matches!(event.event, EventKind::ApprovalRequested { .. }) {
+                session.cancel();
+            }
+        })
+        .await;
+
+    let report = session.run("start").await;
+
+    // Cancelled, not denied: neither call ran, so neither has a start, and both results say
+    // so in the kernel's words, which no hook withholds.
+    assert_eq!((report.outcome, report.denied_calls), (RunOutcome::Cancelled, 0));
+    assert_eq!(act.calls.load(Ordering::SeqCst), 0);
+    let transcript = session.session();
+    let started = transcript
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, Entry::ToolCallStarted(_)))
+        .count();
+    assert_eq!(started, 0);
+    let results = results(&transcript.messages());
+    assert_eq!(results.len(), 2, "{results:?}");
+    for (_, content, is_error) in &results {
+        assert!(content.starts_with("Not executed: the run was cancelled"), "{content}");
+        assert!(is_error);
+    }
+    assert!(!hook_failed(&events.events()), "{:?}", events.events());
 }
 
 /// `zx-agent run` with bash against the mock server, without retries.
