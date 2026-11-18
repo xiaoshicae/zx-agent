@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::ai::{Message, UserMessageKind, now_ms};
 
@@ -449,6 +449,9 @@ impl Transcript {
             // Store before updating memory: an entry missing from the log must never become
             // the parent of later entries.
             let json = serde_json::to_string(&entry)?;
+            // Writing does not limit how deep a value is nested and reading does: a record
+            // that could not be read back would leave the whole session unreadable.
+            serde_json::from_str::<Entry>(&json).context("the entry could not be read back")?;
             let record = LogRecord {
                 seq: u64::try_from(self.entries.len())? + 1,
                 id: entry.id(),

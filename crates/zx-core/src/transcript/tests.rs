@@ -132,6 +132,36 @@ async fn a_log_receives_numbered_records_that_load_into_the_same_session() {
 }
 
 #[tokio::test]
+async fn an_entry_that_could_not_be_read_back_is_not_written() {
+    let (sender, records) = mpsc::channel();
+    let mut store = Transcript::with_log(header(), Box::new(ChannelLog(sender)));
+    store.append_message(Message::user("q")).await.unwrap();
+    // As deep as arguments read on their own may be nested. Within a record they lie deeper,
+    // which writing does not limit and reading does.
+    let arguments = (0..127).fold(serde_json::json!(1), |inner, _| serde_json::json!({ "a": inner }));
+    let mut answer = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
+    answer.error_message = None;
+    answer.content = vec![ContentBlock::ToolCall(ToolCall {
+        id: "c1".into(),
+        name: "bash".into(),
+        arguments,
+        arguments_error: None,
+    })];
+
+    let error = store.append_message(Message::Assistant(answer)).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("recursion limit"), "{error:#}");
+    // Refused, not half done: the session goes on, and what it wrote loads.
+    store.append_message(Message::user("next")).await.unwrap();
+    let written: Vec<String> = records.try_iter().map(|(_, json)| json).collect();
+    assert_eq!(written.len(), 2);
+    assert_eq!(
+        texts(&Transcript::snapshot(loaded(header(), written)).unwrap()),
+        ["q", "next"]
+    );
+}
+
+#[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one entry of every kind")]
 async fn records_carry_the_serialized_type_of_every_entry_kind() {
     let (sender, records) = mpsc::channel();
