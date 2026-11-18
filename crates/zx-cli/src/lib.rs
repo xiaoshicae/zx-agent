@@ -2,9 +2,10 @@
 //! `acp` and `sessions`, built on the `zx-agent` library. The program itself (`src/main.rs`)
 //! only calls [`main`].
 //!
-//! Every subcommand gets its agent from `zx-app`, which reads config.toml and the agent
-//! files, runs the process's shutdown and knows neither a command line nor a terminal. The
-//! subcommands do not refer to each other:
+//! `run`, `chat` and `acp` get their agent from `zx-app`, which reads config.toml and the
+//! agent files, runs the process's shutdown and knows neither a command line nor a terminal;
+//! `sessions` uses it only to find the session directory. The subcommands do not refer to
+//! each other:
 //!
 //! - `run`, `chat`, `acp`, `list_sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands

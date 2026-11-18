@@ -32,8 +32,9 @@ spec:
           containers:
             - name: inspect
               image: zx-agent
-              # zx-agent itself is PID 1: the only process holding the API key, and one that
-              # commands cannot inspect (docs/SECURITY.md).
+              # zx-agent itself is PID 1 and the only process holding the API key; commands run
+              # as the same user and can read it from /proc, and redaction replaces its value in
+              # tool output (docs/SECURITY.md).
               # This deployment's unattended agent (agents/unattended.md, mounted from the
               # ConfigMap zx-agent-agents) gives the report its fixed sections; without it, run
               # uses the neutral built-in unattended agent.

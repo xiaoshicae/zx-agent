@@ -6,8 +6,8 @@
 # knows nothing about kubectl. The instructions are the assistant's: the body below the front
 # matter is empty.
 extends = "assistant"
-# The assistant's tools without edit_file and write_file: the Pod is for looking at
-# clusters, not for changing files.
+# The assistant's tools without edit_file and write_file, since the Pod is for looking at
+# clusters, not for changing files, and without the search tools grep, find and ls.
 tools = ["bash", "read_file", "read_skill", "read_output"]
 
 [permissions]
