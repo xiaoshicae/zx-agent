@@ -23,6 +23,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 | 要做的事 | 用什么 | 要注意 |
 |---|---|---|
 | 建 agent | `Agent::new(AgentConfig)` | `AgentConfig` 是所有会话共用的角色：模型、工具、策略、钩子、扩展、上限、重试、摘要与存储 |
+| 接入别的模型服务 | 实现 `ai::Provider`，参照 `ai::openai::OpenAiCompatible` | `stream` 立即返回、从不报错：失败编码为最后的 `StreamEvent::Error`，回答的 `error_message` 写给人看，`provider_error` 是 `ProviderError`：失败的种类 `ProviderErrorKind`，加上服务端给出的状态、错误码与等待提示。内核只按种类决定重试与上下文溢出恢复，没有种类的失败不重试；服务的状态、错误码与措辞属于哪一种由 provider 判断。测试里用 `FauxStep::fail(种类, 文本)` 脚本化失败 |
 | 开、续、关会话 | `Agent` 的 `create_session`、`open_session`、`session`、`close_session`、`list_sessions` | 会话在创建时给定的目录工作（`SessionOptions::cwd`），再次打开时不变。再打开同一个会话得到同一个 `Session`；`close_session` 取消进行中的运行，之后旧句柄返回 `SessionError::Closed`。记录写不进去的会话（写入失败、超时，或在写入途中丢弃了 `Run`）在那次操作结束时自行关闭，`open_session` 从存储重新打开它 |
 | 运行 | `Session` 的 `send`、`continue_run`、`compact`，各返回一个 `Run` | 读它才推进，事件经有界通道，读得慢运行就等；丢弃即取消并归还会话。`Session` 可以克隆，克隆出来的是同一个会话；同一时间只有一次运行，重叠调用返回 Busy |
 | 给单个会话工具、钩子与提示词段落 | 实现 `agent::SessionSetup` | 创建或打开会话时调用，随会话释放；失败时新会话不会留在存储里。给出的段名经 `section_names` 声明，扩展不能再用这些名字与 `preamble`。不需要按会话区分时，工具直接放进 `AgentConfig::tools` |
@@ -49,4 +50,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.8 · 2026年11月
+LIBRARY.md · v0.9 · 2026年11月

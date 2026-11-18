@@ -12,7 +12,7 @@
 
 | crate | 位置 | 负责 |
 |---|---|---|
-| `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、`is_zero`；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
+| `zx-util` | `crates/zx-util` | 各 crate 共用的小工具：加锁（`sync`）、文本截短（`text`）、随机数（`random`）、判断是否为默认值（`default` 的 `is_default`，供 serde 省略默认值）；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | `crates/zx-ai` | 消息类型、流式事件、`Provider` 契约 |
 | `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
@@ -88,7 +88,7 @@
 
 | 新能力 | 做法 | 参照 |
 |---|---|---|
-| provider | 实现 `ai::Provider`，遵守不变量 1；解析逻辑写单元测试 | `crates/zx-agent/tests/openai_mock.rs` |
+| provider | 实现 `ai::Provider`，遵守不变量 1；每个失败归入 `ProviderErrorKind`（内核只按它重试与恢复溢出），服务的状态、错误码与措辞属于哪一种只写在 provider 的 crate 里；解析与归类写单元测试 | `crates/zx-agent/tests/openai_mock.rs` |
 | 工具 | 实现 `tools::Tool`：参数是带 `#[serde(deny_unknown_fields)]` 的结构体，输出截断，响应取消，不改状态的 `effects()` 返回 `Effects::ReadOnly`。共用的进 `AgentConfig::tools`，绑定会话目录或执行环境的由 `SessionSetup` 给出 | `crates/zx-tools/src/tools/` |
 | 策略 | 实现 `policy::ToolPolicy`，经 `PolicyChain::push` 进 `AgentConfig::policies`；无法判断时返回 `Deny`，所有策略取最严的结论。钩子不做放行判断 | `crates/zx-tools/src/policy/` |
 | 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。经 `HookChain::push(名字, Arc)` 注册，名字出现在 `hook_failed` 事件与追踪里；共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `crates/zx-agent/tests/hook_contract.rs` |

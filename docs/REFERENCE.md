@@ -24,7 +24,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
-流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码（流中报出的错误码不在已知的表里时，按错误文本判断），遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
+流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。哪些失败重试见[模型请求失败](#模型请求失败)。
 
 ## run 退出码
 
@@ -137,6 +137,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 参数校验 | 严格按 JSON Schema，不转换类型；改写只在工具的 `prepare_arguments` 中 |
 | 中断的工具调用 | 有副作用的调用执行前先记录开始；恢复时补写“结果未知”或“未执行”，不重放 |
 | 工具结果 | 只有文本 `content`，另有不发给模型的 `details` 与 `usage`；没有图片、`structuredContent`、`runToolCall` |
+| 失败分类 | provider 判断失败的种类，运行只按种类决定重试或摘要（见[模型请求失败](#模型请求失败)）；pi 按错误文本判断 |
 | 上下文过长 | 只按错误识别（HTTP 413、错误码、通用措辞），不按服务推断 |
 | 摘要 | 每次重新读取原始记录，不输入上一份摘要；每条事实引用来源条目。宿主要自己做摘要时实现独立的接口 `Summarizer`，钩子不提供摘要 |
 | 续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 |
@@ -144,6 +145,26 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 推理写法 | 由 `provider.reasoningFormat` 在三种中显式选择 |
 | 模型元数据 | 只有 `[[models]]` 给出的上下文窗口与单价，没有内置模型表 |
 | 界面 | 没有 TUI，交互界面交给 ACP 客户端 |
+
+### 模型请求失败
+
+provider 判断每次失败的种类，记在失败回答的 `providerError` 里：`kind` 是种类，`status`（HTTP 状态）、`code`（服务端的错误码）与 `retryAfterMs`（服务端要求等待的毫秒数）在服务端给出时才有。运行只按 `kind` 决定接下来做什么：
+
+| `kind` | 失败 | 之后 |
+|---|---|---|
+| `rate_limited` | 限频：HTTP 429 或限频的错误码、措辞 | 重试 |
+| `unavailable` | 服务过载、出错或暂时不可用：HTTP 5xx 或相应的错误码、措辞 | 重试 |
+| `transport` | 连接失败或中途断开 | 重试 |
+| `timeout` | 连接、等待响应头或流中下一段数据超时（后两者的时限为 `provider.idleTimeoutSecs`），或 HTTP 408 与相应的错误码 | 重试 |
+| `context_overflow` | 上下文过长：HTTP 413、相应的错误码、通用措辞，或指明上下文过长的 `finish_reason` | 开启自动摘要时摘要一次再试，否则失败 |
+| `access_denied` | 凭据、权限或配额被拒：HTTP 401、403 或相应的错误码、措辞 | 失败 |
+| `api_key` | 取不到 API key，请求没有发出 | 失败 |
+| `refused` | 服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束回答，`code` 为该取值 | 失败 |
+| `protocol` | 响应不合协议，如无法解析的数据、流结束时没有 `finish_reason` | 失败 |
+| `resource_limit` | 超出流式响应的上限 | 失败 |
+| `other` | 其他失败，如 HTTP 400 | 失败 |
+
+HTTP 错误按状态归类，错误码表明上下文过长或凭据、配额问题时以错误码为准；状态不能说明时（如 400），措辞表明上下文过长也算 `context_overflow`。2xx 响应体或流中报出的错误按错误码归类，错误码不认识或没有时按措辞。重试至多 `provider.maxRetries` 次，遵守服务端的 `Retry-After`（至多 60 秒）。
 
 ### 系统提示词的组成
 
@@ -160,10 +181,10 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 ### 事件（`--output jsonl`）
 
-每行一个事件，带信封字段：`schemaVersion`（当前为 6）、`seq`（运行内从 1 递增）、`atMs`、`sessionId`、`runId` 与 `type`。一次运行以 `run_start` 开始，以 `run_end`（`report`）结束：
+每行一个事件，带信封字段：`schemaVersion`（当前为 7）、`seq`（运行内从 1 递增）、`atMs`、`sessionId`、`runId` 与 `type`。一次运行以 `run_start` 开始，以 `run_end`（`report`）结束：
 
 ```json
-{"schemaVersion":6,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionId":"…"}}
+{"schemaVersion":7,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionId":"…"}}
 ```
 
 预算用完时，`report` 的 `outcome` 为 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`（这次运行最后的回答是否在输出 token 上限处被截断）；`attempt_end` 的 `outcome` 也是这样。文本模式的最后一行写作 `outcome=budget_exhausted budget=token_budget truncated=true`。
@@ -183,7 +204,7 @@ run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":12,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":13,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
@@ -191,7 +212,7 @@ run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
-- 只读写版本 12，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 13，其他版本的文件拒绝打开，不做升级。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；它的 `source.kind` 与 `request_start` 事件的 `kind` 一样是 `task`（任务请求）或 `summary`（摘要请求）。不记录 API key、URL 与 HTTP 头。
@@ -202,4 +223,4 @@ run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完�
 
 ---
 
-REFERENCE.md · v0.4 · 2026年11月
+REFERENCE.md · v0.5 · 2026年11月
