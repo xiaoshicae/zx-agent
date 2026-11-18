@@ -1,9 +1,6 @@
-# Scheduled inspection: an unattended run with the read-only account. The answer is written
-# to the Pod log (kubectl logs); the exit code tells the result (docs/REFERENCE.md, "run 退出码").
-# Each run also keeps its session file, the audit record of every request and command, on
-# the volume zx-agent-inspect-sessions as sessions/<Pod name>.jsonl. Before each run, session
-# files older than 30 days are removed: a full volume would fail every run, since a run stops
-# when it cannot write its session.
+# Scheduled inspection: an unattended run with the read-only account (README.md, "使用").
+# Session files older than 30 days are removed before each run: a run stops when it cannot
+# write its session, so a full volume would fail every run.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -59,12 +56,6 @@ spec:
           containers:
             - name: inspect
               image: zx-agent
-              # zx-agent itself is PID 1 and the only process holding the API key; commands run
-              # as the same user and can read it from /proc, and redaction replaces its value in
-              # tool output (docs/SECURITY.md).
-              # This deployment's unattended agent (agents/unattended.md, mounted from the
-              # ConfigMap zx-agent-agents) gives the report its fixed sections; without it, run
-              # uses the neutral built-in unattended agent.
               # $(POD_NAME) is expanded by Kubernetes, without a shell: a file per run.
               command:
                 - zx-agent

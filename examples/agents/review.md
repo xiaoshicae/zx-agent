@@ -1,6 +1,7 @@
 +++
-# A read-only code reviewer for chat. To use it, copy this directory to the agents directory
-# of a zx-agent home and rename this file assistant.md, as docs/CONFIGURATION.md shows.
+# A read-only code reviewer. To use it, copy the files of this directory, skills/ included,
+# into the agents/ directory of a zx-agent home and rename this file assistant.md, as
+# docs/CONFIGURATION.md describes: chat, acp and zx-im then use it in place of the built-in one.
 extends = "assistant"
 tools = ["read_file", "read_skill"]
 continueOnLength = 0

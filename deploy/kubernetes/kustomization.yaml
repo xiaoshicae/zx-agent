@@ -1,5 +1,4 @@
-# Apply with: kubectl apply -k deploy/kubernetes
-# The namespace must exist first: kubectl create namespace zx-agent
+# The steps, and the objects to create before applying: README.md, "部署".
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: zx-agent
@@ -9,32 +8,28 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - cronjob.yaml
-# Writes in chat are a separate step, granted per namespace: operator.yaml.
+# Writes for the resident Pod's account are a separate step, granted per namespace:
+# operator.yaml (README.md, "权限").
 # On every object and Pod, to select them in a NetworkPolicy or a log query. Not on selectors,
 # which cannot change once the Deployment exists.
 labels:
   - pairs:
       app.kubernetes.io/part-of: zx-agent
     includeTemplates: true
-# Optional components: uncomment `components:` and the ones wanted.
-# - multicluster: other clusters (README.md, "多集群"), after creating the ConfigMap
-#   zx-agent-kubeconfig and the Secret zx-agent-clusters.
-# - im: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-im-config
-#   and the Secret zx-agent-im.
+# Optional components (README.md, "多集群" and "IM 服务"): create their ConfigMap and Secret
+# first, then uncomment `components:` and the ones wanted.
 # components:
 #   - multicluster
 #   - im
-# This deployment's agents, which replace the built-in ones of their names: assistant.md for
-# chat and zx-im, unattended.md for run. The Pods mount them at /data/.zx-agent/agents, the
-# agents directory of the zx-agent home (~/.zx-agent; the home directory is /data).
+# Mounted at /data/.zx-agent/agents, the agents directory of the zx-agent home (HOME is /data),
+# where they replace the built-in agents of the same names.
 configMapGenerator:
   - name: zx-agent-agents
     files:
       - agents/assistant.md
       - agents/unattended.md
 images:
-  # Replace with the image built from deploy/kubernetes/Dockerfile and pushed to a registry
-  # the cluster can pull from.
+  # The image built and pushed in README.md, "部署", step 1.
   - name: zx-agent
     newName: zx-agent
     newTag: latest

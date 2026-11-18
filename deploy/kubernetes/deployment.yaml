@@ -1,5 +1,4 @@
-# The resident Pod. It runs nothing by itself: people start chat or one-off runs in it with
-# kubectl exec, and each of those is a zx-agent process of its own.
+# The resident Pod runs nothing by itself: chat and runs are started in it with kubectl exec.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

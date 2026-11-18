@@ -40,10 +40,10 @@ kubectl -n zx-agent logs job/inspect-now
 ```
 
 - 会话文件在卷上，用同一路径可以接着聊。一个文件同一时间只能被一个 chat 或 run 打开，否则报告 `is in use` 并以退出码 2 结束。锁依赖 `flock`，文件系统不支持时打开会话直接失败。
-- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 `docs/REFERENCE.md` 的“run 退出码”。
+- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见 [run 退出码](../../docs/REFERENCE.md#run-退出码)。
 - 巡检的会话文件写在卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`，中断后可据此 `run --continue`；每次巡检开始前删除 30 天前的文件（`cronjob.yaml` 中 `prune-sessions` 的 `-mtime`），因为卷写满后会话写不进去，巡检会全部失败。读取要在巡检不运行时用挂载这块卷的临时 Pod。
 - 巡检报告在 Pod 日志中，随 Job 保留一天（`ttlSecondsAfterFinished` 与两个 `JobsHistoryLimit`）；巡检失败没有通知，要由集群的监控发现失败的 Job。
-- 巡检的 agent 没有 `[permissions]`：除内置的拒绝规则（见仓库 `docs/SECURITY.md`）外，命令都直接执行，不会等待审批。有命令被拒时退出码仍可能是 0；在 `command` 中加 `--fail-on-denied` 后以退出码 9 结束。
+- `run`（巡检，以及在常驻 Pod 中执行的单次任务）用的 unattended agent 没有 `[permissions]`：除[内置的拒绝规则](../../docs/SECURITY.md#命令策略)外，命令都直接执行，不会等待审批。有命令被拒时退出码仍可能是 0；在 `cronjob.yaml` 的 `command` 中加 `--fail-on-denied` 后以退出码 9 结束。
 
 ## 多集群
 
@@ -81,21 +81,21 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
    kubectl -n zx-agent create configmap zx-agent-kubeconfig --save-config --from-file=kubeconfig=<kubeconfig 文件>
    ```
 
-命令用 `--context <集群名>` 选择集群，放在子命令之后，在 chat 中仍不经审批。远端 token 不过期，更换时重建远端的 `zx-agent-token` 再更新 Secret；远端账号只读。不再访问某个集群时，在该集群执行 `kubectl delete -f deploy/kubernetes/multicluster/remote.yaml --ignore-not-found`。
+命令用 `--context <集群名>` 选择集群，放在子命令之后，在 chat 与 zx-im 中仍不经审批。远端 token 不过期，更换时重建远端的 `zx-agent-token` 再更新 Secret；远端账号只读。不再访问某个集群时，在该集群执行 `kubectl delete -f deploy/kubernetes/multicluster/remote.yaml --ignore-not-found`。
 
 ## IM 服务
 
-启用 `im` 组件后，主进程是 IM 服务 `zx-im`，在 IM 中 @ 机器人排障、审批写操作（用法见仓库 README 的“IM 服务”）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
+启用 `im` 组件后，主进程是 IM 服务 `zx-im`，在 IM 中 @ 机器人排障、审批写操作（用法见 [README 的“IM 服务”](../../README.md#im-服务)）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
 
 1. 创建 Secret `zx-agent-im`，只写用到的平台（⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键，Subject to Legal/Export Compliance approval）：`kubectl -n zx-agent create secret generic zx-agent-im --from-literal=slack-app-token=xapp-... --from-literal=slack-bot-token=xoxb-...`。
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
 3. 取消 `kustomization.yaml` 中 `components:` 与 `- im` 的注释，再 `apply -k`。
 
-修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。日志的 stderr 是启动行，stdout 每行一个 JSON（`approval`、`released`、`failed`）；对话在 `/data/sessions`。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
+修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
 
 ## 权限
 
-两个账号都只能读：`view` 覆盖各命名空间中除 Secret 外的多数对象，`zx-agent-cluster-view` 补上 `view` 不含的节点、持久卷与存储类。应用 `operator.yaml` 后，`zx-agent` 在其中写了 RoleBinding 的命名空间里另有下列写权限，这些命令每次都要人工确认：
+两个账号都只能读：`view` 覆盖各命名空间中除 Secret 外的多数对象，`zx-agent-cluster-view` 补上 `view` 不含的节点、持久卷与存储类。应用 `operator.yaml` 后，`zx-agent` 在其中写了 RoleBinding 的命名空间里另有下列写权限：chat 与 zx-im 中这些命令每次都要人工确认；在常驻 Pod 中执行的 `run` 不询问，会直接执行（见“使用”）。
 
 | 命令 | 需要的权限 |
 |-|-|
@@ -107,7 +107,7 @@ RBAC 不能把 `patch` 限制为重启：能 `patch` 工作负载就能改它的
 
 ## 安全说明
 
-- 主进程 tini 的环境里有 API key（启用 `im` 时在 zx-im 进程的环境里，连同 IM 凭据；巡检的主进程就是 zx-agent），同一用户的命令可以从 `/proc` 读到。读到的值被脱敏，不进入模型上下文；被诱导的命令仍可能把它发往外部（在 chat 中要确认）。
+- 主进程 tini 的环境里有 API key（启用 `im` 时在 zx-im 进程的环境里，连同 IM 凭据；巡检的主进程就是 zx-agent），同一用户的命令可以从 `/proc` 读到。读到的值被脱敏，不进入模型上下文；被诱导的命令仍可能把它发往外部（chat 与 zx-im 中要确认，`run` 不询问）。
 - 命令与 agent 以同一用户运行，能修改 `/data` 中的会话文件。
 - 用 NetworkPolicy 默认拒绝出网时，要单独放行集群 DNS。所有对象与 Pod 都带标签 `app.kubernetes.io/part-of: zx-agent`，可用于选择。
 - `/tmp` 是上限 1Gi 的 `emptyDir`，超出后 Pod 被驱逐；常驻 Pod 被驱逐后由 Deployment 重建，进行中的 chat 会中断。
@@ -129,4 +129,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.7 · 2026年11月
+`deploy/kubernetes/README.md` · v0.8 · 2026年11月
