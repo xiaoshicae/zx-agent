@@ -32,7 +32,7 @@ contextWindow = 128000
 cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的单价
 ```
 
-模型取 `--model` > `ZX_MODEL` > `model`，服务地址取 `ZX_BASE_URL` > `provider.baseUrl` > 默认值；其余键没有命令行参数。三处都没有模型时以退出码 2 报错。
+模型取 `--model` > `ZX_MODEL` > `model`，服务地址取 `ZX_BASE_URL` > `provider.baseUrl` > 默认值；其余键没有命令行参数。这两个变量与 `ZX_AGENT_HOME` 为空或不是 UTF-8 时视为没设。三处都没有模型时以退出码 2 报错。
 
 | 键 | 语义 |
 |---|---|
@@ -101,7 +101,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 
 | | `unattended` | `assistant` |
 |---|---|---|
-| 说明 | 没有人值守：只用工具收集证据，最后给出结果 | 和终端里的人对话 |
+| 说明 | 没有人值守：只用工具收集证据，最后给出结果 | 和人对话，审批由人回答 |
 | 工具 | `bash`、`read_file`、`read_skill` | `bash`、`read_file`、`edit_file`、`write_file`、`grep`、`find`、`ls`、`read_skill`、`read_output` |
 | 权限 | 没有 `[permissions]`：bash 命令除内置的拒绝规则外都直接执行 | bash、`edit_file`、`write_file` 要审批；`grep`、`head`、`tail`、`wc`、`jq` 开头的命令直接执行（`allowExcept = ["secret"]`） |
 | 上限 | 30 次模型请求、900 秒 | 不限 |
@@ -151,7 +151,7 @@ You review code without changing files.
 
 两种预算都在每次请求之前检查，最后一次请求可能超出。`context.files` 与 `skills.path` 相对 agent 文件所在目录解析。
 
-合并规则：文件写了的键整个替换继承的值，列表也是；表（`permissions`、`limits`、`context`、`compaction`）逐键合并，`permissions.allowOptions` 按程序替换。说明不为空时替换继承的说明。命令行的 `--tools` 与预算参数再覆盖文件。agent 不改变前端：`run` 始终无人值守，chat 始终在终端审批 bash（`approveAll` 除外）。
+合并规则：文件写了的键整个替换继承的值，列表也是；表（`permissions`、`limits`、`context`、`compaction`）逐键合并，`permissions.allowOptions` 按程序替换。说明不为空时替换继承的说明。命令行的 `--tools` 与预算参数再覆盖文件。agent 不改变子命令的交互方式：`run` 始终无人值守，chat 始终在终端审批 bash（`approveAll` 除外）。
 
 ## 权限
 
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.19 · 2026年11月
+CONFIGURATION.md · v0.20 · 2026年11月
