@@ -1,26 +1,60 @@
 [package]
 name = "zx-im"
-description = "The chat platform interface of zx-agent, and a server that answers each thread with its own session"
+description = "The IM service of zx-agent: the program zx-im answers the messages of chat platforms, one session per conversation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lints]
+workspace = true
+
+[lib]
+name = "zx_im"
+path = "src/lib.rs"
+
+# The program is not documented: its pages would take the place of the library's of the
+# same name.
+[[bin]]
+name = "zx-im"
+path = "src/main.rs"
+doc = false
+
+[features]
+default = ["feishu"]
+# ⚑ D:5/CHINA FLAG: the Feishu platform (`platform::feishu`) and its im.toml section. A build
+# without it refuses that section by name.
+feishu = []
+
 [dependencies]
-zx-ai.workspace = true
-zx-core.workspace = true
+zx-agent.workspace = true
+zx-app.workspace = true
 zx-util.workspace = true
 
+anyhow.workspace = true
 async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# `#[tokio::main]` runs the program on the multi-thread runtime.
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite.workspace = true
 tokio-util.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+# The tests script the model with `ai::faux::FauxProvider`.
+zx-agent = { workspace = true, features = ["testing"] }
+zx-testing.workspace = true
 
-[lints]
-workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
+
+# ⚑ D:5/CHINA FLAG: the Feishu channel's tests need its platform.
+[[test]]
+name = "im_feishu"
+required-features = ["feishu"]

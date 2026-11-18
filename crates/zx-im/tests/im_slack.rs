@@ -12,9 +12,8 @@ use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
+    MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, ThreadId, UserId,
 };
-use zx_im_slack::{SlackChannel, SlackConfig};
 use zx_testing::fake_slack::{Answer, FakeSlack};
 use zx_testing::http::silent_listener;
 

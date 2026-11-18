@@ -29,9 +29,10 @@
 //! - [`fake_mcp`]: an MCP server written from the specification, without rmcp
 //! - [`fake_slack`], [`fake_feishu`]: the fake chat platforms
 //! - [`http`]: reading and answering one HTTP request, and a listener that never answers
-//! - [`program`]: a program a test runs, such as the compiled `zx-agent`: the command that
-//!   starts it apart from the developer's environment, the zx-agent home a test gives it, and
-//!   what it leaves behind; its [`stdout`], [`stderr`] and [`signal`] are re-exported here
+//! - [`program`]: a program a test runs, such as the compiled `zx-agent` or `zx-im`: the
+//!   command that starts it apart from the developer's environment, the zx-agent home a
+//!   test gives it, and what it leaves behind; its [`stdout`], [`stderr`] and [`signal`] are
+//!   re-exported here
 //! - [`summary_eval`] (sessions, runner): the summary evaluation, shared by the paid
 //!   evaluation and the regular tests
 //!
@@ -39,7 +40,7 @@
 //! turn it on is in `docs/TESTS.md`), `MemoryStorage` for a session store without files, what
 //! only the program's tests can have (`crates/zx-cli/tests/common/mod.rs`: the compiled
 //! `zx-agent` and a pseudo-terminal), running a chat channel
-//! (`crates/zx-agent/tests/common/im.rs`), and the unit tests' own `test_support` modules in
+//! (`crates/zx-im/tests/common/im.rs`), and the unit tests' own `test_support` modules in
 //! `zx-core`'s `transcript` and `zx-builtin`'s `jsonl`.
 
 pub mod fake_feishu;

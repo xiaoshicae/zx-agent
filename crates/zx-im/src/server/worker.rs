@@ -20,22 +20,18 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::now_ms;
+use zx_agent::events::{RunOutcome, RunReport};
+use zx_agent::input::PendingInput;
+use zx_agent::policy::ApprovalDecision;
+use zx_agent::session::SessionError;
 
-use crate::ai::now_ms;
-use crate::session::SessionError;
-use zx_core::input::PendingInput;
-
-use zx_core::events::{RunOutcome, RunReport};
-use zx_core::policy::ApprovalDecision;
+use crate::{Addressee, ApprovalCard, ApprovalId, Choice, ImChannel, MessageRef, Post, Replacement, UserId};
 
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Opened, Outlet};
-use super::server::Shared;
-use super::{
-    Addressee, ApprovalCard, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Post, Replacement, ServerEvent,
-    SessionKey, UserId,
-};
+use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
 
 /// Sent alone, cancels the conversation's run.
 const CANCEL_COMMAND: &str = "/cancel";
@@ -45,16 +41,16 @@ const NEW_COMMAND: &str = "/new";
 const UPDATE_CAPACITY: usize = 16;
 
 /// A message for the conversation, as the router passes it on.
-pub(crate) struct Incoming {
+pub(super) struct Incoming {
     /// Where it was posted, for an acknowledgement.
-    pub(crate) message: MessageRef,
-    pub(crate) sender: UserId,
-    pub(crate) addressee: Addressee,
-    pub(crate) text: String,
-    pub(crate) permit: Option<InputPermit>,
+    pub(super) message: MessageRef,
+    pub(super) sender: UserId,
+    pub(super) addressee: Addressee,
+    pub(super) text: String,
+    pub(super) permit: Option<InputPermit>,
 }
 
-pub(crate) enum WorkerInput {
+pub(super) enum WorkerInput {
     Message(Incoming),
     Decision {
         user: UserId,
@@ -64,20 +60,20 @@ pub(crate) enum WorkerInput {
 }
 
 /// Sent by an idle worker that holds no session.
-pub(crate) struct Retire {
-    pub(crate) key: SessionKey,
+pub(super) struct Retire {
+    pub(super) key: SessionKey,
     /// Input the worker has taken; the router ends it only if it has sent no more.
-    pub(crate) received: u64,
+    pub(super) received: u64,
 }
 
-pub(crate) struct WorkerSetup {
-    pub(crate) key: SessionKey,
-    pub(crate) channel: Arc<dyn ImChannel>,
-    pub(crate) shared: Arc<Shared>,
-    pub(crate) inbox: mpsc::Receiver<WorkerInput>,
-    pub(crate) budget: Arc<InputBudget>,
-    pub(crate) retire: mpsc::Sender<Retire>,
-    pub(crate) stop: CancellationToken,
+pub(super) struct WorkerSetup {
+    pub(super) key: SessionKey,
+    pub(super) channel: Arc<dyn ImChannel>,
+    pub(super) shared: Arc<Shared>,
+    pub(super) inbox: mpsc::Receiver<WorkerInput>,
+    pub(super) budget: Arc<InputBudget>,
+    pub(super) retire: mpsc::Sender<Retire>,
+    pub(super) stop: CancellationToken,
 }
 
 /// Run one conversation until the router drops its inbox.
@@ -86,7 +82,7 @@ pub(crate) struct WorkerSetup {
 /// ([`Replies::stopped`]). Input does not run once the server stops; the worker reads its
 /// inbox to the end and posts [`Replies::stopping`] in a thread with messages it will not
 /// run.
-pub(crate) async fn run(setup: WorkerSetup) {
+pub(super) async fn run(setup: WorkerSetup) {
     let mut worker = Worker::new(setup);
     let mut lifecycle = Lifecycle::Serving;
     loop {
@@ -231,7 +227,7 @@ async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
 }
 
 /// Whether `text` is one of the conversation's commands rather than something to answer.
-pub(crate) fn is_command(text: &str) -> bool {
+pub(super) fn is_command(text: &str) -> bool {
     matches!(text.trim(), CANCEL_COMMAND | NEW_COMMAND)
 }
 

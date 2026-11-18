@@ -31,10 +31,6 @@ zx-core.workspace = true
 [dev-dependencies]
 # The tests script the model with `ai::faux::FauxProvider`.
 zx-ai = { workspace = true, features = ["testing"] }
-# The chat platforms are not part of the library; their tests are with the others.
-zx-im.workspace = true
-zx-im-feishu.workspace = true
-zx-im-slack.workspace = true
 # The helpers the integration tests of the workspace share.
 zx-testing.workspace = true
 

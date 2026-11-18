@@ -12,10 +12,9 @@ use tokio::sync::mpsc;
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, FeishuChannel, FeishuConfig,
+    ImChannel, ImError, Inbound, MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
 };
-use zx_im_feishu::{FeishuChannel, FeishuConfig};
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use zx_testing::http::silent_listener;
 
@@ -323,6 +322,22 @@ async fn a_dropped_connection_is_opened_again() {
     second.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     assert_eq!(running.next().await, direct("om_1", "back"));
     assert_eq!(fake.calls("endpoint").len(), 2);
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_silent_connection_is_reported_and_opened_again() {
+    // Pings every second: three seconds of silence end the connection.
+    let mut fake = FakeFeishu::start(1).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let running = run_channel(channel, WAIT);
+    // Answers nothing, not even the pings.
+    let first = fake.socket().await;
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("silent"), "{report}");
+    let second = fake.socket().await;
+    assert_eq!(fake.calls("endpoint").len(), 2);
+    drop((first, second));
     running.stop().await.unwrap();
 }
 

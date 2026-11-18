@@ -3,17 +3,17 @@
 
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
-use zx_im::{ImError, Inbound, Keepalive, Seen};
+
+use crate::platform::{Keepalive, Next, Seen, Socket, next_message, report};
+use crate::{ImError, Inbound};
 
 use super::SlackChannel;
 use super::events::{decisions, message};
-
-pub(crate) type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl SlackChannel {
     /// Open the Socket Mode connection at `url`; a failure is reported.
@@ -27,12 +27,12 @@ impl SlackChannel {
                 self.config.request_timeout.as_secs()
             ),
         };
-        self.report(&ImError::Transport(failure));
+        report(self.config.on_error.as_ref(), &ImError::Transport(failure));
         None
     }
 
     /// Receive over one Socket Mode connection until it ends.
-    pub(crate) async fn receive(
+    pub(super) async fn receive(
         &self,
         url: &str,
         inbound: &mpsc::Sender<Inbound>,
@@ -49,30 +49,17 @@ impl SlackChannel {
             return Ended::Failed;
         };
         let mut keepalive = Keepalive::new(self.config.ping_interval);
+        // A WebSocket ping, which Slack answers with a pong.
+        let ping = Message::Ping(Bytes::new());
         loop {
-            let frame = tokio::select! {
-                () = cancel.cancelled() => {
-                    // The server is stopping; a failed close changes nothing.
-                    socket.close(None).await.ok();
-                    return Ended::Cancelled;
-                }
-                () = tokio::time::sleep_until(keepalive.next_ping()) => {
-                    if socket.send(Message::Ping(Bytes::new())).await.is_err() {
-                        return Ended::Lost;
-                    }
-                    keepalive.pinged();
-                    continue;
-                }
-                () = tokio::time::sleep_until(keepalive.deadline()) => return Ended::Silent(keepalive.silence()),
-                frame = socket.next() => frame,
-            };
-            keepalive.alive();
-            let text = match frame {
-                Some(Ok(Message::Text(text))) => text,
+            let text = match next_message(&mut socket, &mut keepalive, &ping, cancel).await {
+                Next::Message(Message::Text(text)) => text,
                 // tungstenite answers pings itself, and the pongs answer ours; Slack sends no
                 // binary frames.
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_))) => continue,
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Ended::Lost,
+                Next::Message(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_)) => continue,
+                Next::Message(Message::Close(_)) | Next::Lost => return Ended::Lost,
+                Next::Silent(silence) => return Ended::Silent(silence),
+                Next::Cancelled => return Ended::Cancelled,
             };
             let Some(frame) = self.frame_of(&text) else {
                 continue;
@@ -98,9 +85,10 @@ impl SlackChannel {
         match serde_json::from_str(text) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                self.report(&ImError::Transport(format!(
-                    "slack: a Socket Mode frame is not JSON: {error}"
-                )));
+                report(
+                    self.config.on_error.as_ref(),
+                    &ImError::Transport(format!("slack: a Socket Mode frame is not JSON: {error}")),
+                );
                 None
             }
         }
@@ -118,14 +106,14 @@ async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
 }
 
 /// The address in the answer of `apps.connections.open`.
-pub(crate) fn connection_url(answer: &Value) -> Result<String, ImError> {
+pub(super) fn connection_url(answer: &Value) -> Result<String, ImError> {
     answer["url"]
         .as_str()
         .map(String::from)
         .ok_or_else(|| ImError::Transport("slack apps.connections.open: no url in the answer".into()))
 }
 
-pub(crate) enum Ended {
+pub(super) enum Ended {
     Cancelled,
     /// Slack asked to reconnect, or the connection dropped.
     Lost,

@@ -2,22 +2,28 @@
 //! and cards the channel posts.
 
 use serde_json::{Value, json};
-use zx_im::{
-    Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
-    MessageId, Seen, ThreadId, UserId,
-};
+use zx_agent::events::ApprovalResult;
 use zx_util::sync::lock;
+
+use crate::platform::{Seen, report};
+use crate::{
+    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
+    ThreadId, UserId,
+};
 
 use super::FeishuChannel;
 use super::connection::PREFIX;
 
 impl FeishuChannel {
     /// The messages and clicks in one event.
-    pub(crate) fn events(&self, payload: &[u8], seen: &mut Seen<MessageId>) -> Vec<Inbound> {
+    pub(super) fn events(&self, payload: &[u8], seen: &mut Seen<MessageId>) -> Vec<Inbound> {
         let value: Value = match serde_json::from_slice(payload) {
             Ok(value) => value,
             Err(error) => {
-                self.report(&ImError::Transport(format!("{PREFIX}: an event is not JSON: {error}")));
+                report(
+                    self.config.on_error.as_ref(),
+                    &ImError::Transport(format!("{PREFIX}: an event is not JSON: {error}")),
+                );
                 return Vec::new();
             }
         };
@@ -162,7 +168,7 @@ fn decision(event: &Value) -> Option<Inbound> {
 
 /// The content of a text message: a JSON object as a string. Mentions in the text, which
 /// can come from the model and from what a tool returned to it, notify nobody.
-pub(crate) fn text_content(text: &str) -> String {
+pub(super) fn text_content(text: &str) -> String {
     json!({ "text": without_mentions(text) }).to_string()
 }
 
@@ -171,7 +177,7 @@ const ZERO_WIDTH_SPACE: char = '\u{200B}';
 
 /// `text` with every mention tag (`<at …>`, which notifies people, everyone with
 /// `user_id="all"`) broken by a zero-width space after its `<`.
-pub(crate) fn without_mentions(text: &str) -> String {
+pub(super) fn without_mentions(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find('<') {
@@ -187,12 +193,12 @@ pub(crate) fn without_mentions(text: &str) -> String {
 
 /// `text` with no run of three backticks, which would end the code block of a card that
 /// shows it: a zero-width space goes between every two.
-pub(crate) fn without_fences(text: &str) -> String {
+pub(super) fn without_fences(text: &str) -> String {
     text.replace("``", &format!("`{ZERO_WIDTH_SPACE}`"))
 }
 
 /// A card in JSON 2.0 that can be updated, as a string.
-pub(crate) fn card(elements: &[Value]) -> String {
+pub(super) fn card(elements: &[Value]) -> String {
     json!({
         "schema": "2.0",
         "config": {"update_multi": true},
@@ -201,11 +207,11 @@ pub(crate) fn card(elements: &[Value]) -> String {
     .to_string()
 }
 
-pub(crate) fn markdown(content: &str) -> Value {
+pub(super) fn markdown(content: &str) -> Value {
     json!({"tag": "markdown", "content": content})
 }
 
-pub(crate) fn button(label: &str, kind: &str, value: &Value) -> Value {
+pub(super) fn button(label: &str, kind: &str, value: &Value) -> Value {
     json!({
         "tag": "button",
         "type": kind,
@@ -215,7 +221,7 @@ pub(crate) fn button(label: &str, kind: &str, value: &Value) -> Value {
 }
 
 /// The result of a closed card: what happened, and who decided.
-pub(crate) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
+pub(super) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
     let what = labels.outcome(result);
     match user {
         Some(user) => format!("{what} ({user})"),

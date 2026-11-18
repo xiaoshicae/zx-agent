@@ -1,8 +1,8 @@
 //! The application layer of zx-agent: agents configured from `config.toml` and the agent
-//! files, for every host that shares these settings, such as the zx-agent program or a web
-//! service, and the shutdown every such program needs. Nothing here knows a command line, a
-//! terminal or a protocol: what startup and shutdown have to say is returned to the host,
-//! never printed, and no message names a program's options.
+//! files, for every host that shares these settings, such as the programs zx-agent and zx-im
+//! or a web service, and the shutdown every such program needs. Nothing here knows a command
+//! line, a terminal or a protocol: what startup and shutdown have to say is returned to the
+//! host, never printed, and no message names a program's options.
 //!
 //! - [`Application`]: what the agents of a process share, read and connected once; it builds
 //!   a [`ConfiguredAgent`] that keeps its sessions in a [`SessionPlace`]

@@ -1,12 +1,12 @@
 //! The command line of zx-agent: the program `zx-agent` with its subcommands `run`, `chat`,
-//! `acp`, `im` and `sessions`, built on the `zx-agent` library. The program itself
-//! (`src/main.rs`) only calls [`main`].
+//! `acp` and `sessions`, built on the `zx-agent` library. The program itself (`src/main.rs`)
+//! only calls [`main`].
 //!
 //! Every subcommand gets its agent from `zx-app`, which reads config.toml and the agent
 //! files, runs the process's shutdown and knows neither a command line nor a terminal. The
 //! subcommands do not refer to each other:
 //!
-//! - `run`, `chat`, `acp`, `im`, `list_sessions`: the subcommands
+//! - `run`, `chat`, `acp`, `list_sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands
 //! - `session_file`: `--session`'s file, whose session run and chat continue
 //! - `listing`: how a listing shows sessions
@@ -17,7 +17,6 @@
 mod acp;
 mod chat;
 mod cli;
-mod im;
 mod list_sessions;
 mod listing;
 mod process;
@@ -39,7 +38,6 @@ pub async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
-        Command::Im(args) => im::run(args).await,
         Command::Sessions(args) => list_sessions::run(args).await,
         Command::Acp(args) => acp::run(args).await,
     };

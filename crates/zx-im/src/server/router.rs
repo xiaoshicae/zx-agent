@@ -8,13 +8,14 @@ use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::admission::InputBudget;
-use super::server::Shared;
-use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
-use super::{
+use crate::{
     Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
-    SessionKey, ThreadId,
+    ThreadId,
 };
+
+use super::admission::InputBudget;
+use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
+use super::{SessionKey, Shared};
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
 const INBOUND_CAPACITY: usize = 64;
@@ -113,7 +114,7 @@ enum Forward {
 }
 
 /// Passes what the channels receive to the conversations' workers, and ends them.
-pub(crate) struct Router {
+pub(super) struct Router {
     channels: Vec<Arc<dyn ImChannel>>,
     allowed: HashMap<String, HashSet<ConversationId>>,
     shared: Arc<Shared>,
@@ -135,7 +136,7 @@ pub(crate) struct Router {
 
 impl Router {
     /// Start receiving from `channels`; nothing is routed before [`run`](Self::run).
-    pub(crate) fn new(
+    pub(super) fn new(
         channels: Vec<Arc<dyn ImChannel>>,
         allowed: HashMap<String, HashSet<ConversationId>>,
         shared: Arc<Shared>,
@@ -166,7 +167,7 @@ impl Router {
     }
 
     /// Route until the stop or a channel's failure, then end every conversation.
-    pub(crate) async fn run(mut self) -> Result<(), ImError> {
+    pub(super) async fn run(mut self) -> Result<(), ImError> {
         let result = self.serve().await;
         self.shutdown().await;
         result

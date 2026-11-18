@@ -1,12 +1,12 @@
 //! Input admission, and context recorded without starting a run.
 
-use zx_core::input::Input;
+use zx_agent::Session;
+use zx_agent::input::Input;
+
+use crate::Addressee;
+use crate::server::outlet::{Asked, said};
 
 use super::{AfterRun, CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
-use crate::{
-    Addressee, Session,
-    outlet::{Asked, said},
-};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {

@@ -15,23 +15,29 @@ mod events;
 mod frame;
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use zx_im::{
-    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
-    MessageId, MessageRef, Pacer, Post, Replacement, SEEN_CAPACITY, Seen, pause, split_text,
-};
 use zx_util::sync::lock;
 
+use crate::{
+    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
+    Replacement,
+};
+
+use super::{
+    Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, SEEN_CAPACITY, Seen, http_client, pause, report, secret,
+    split_text,
+};
 use api::CallError;
-use connection::{ClientConfig, Connection, Ended};
+use connection::{ClientConfig, Connection, Ended, PREFIX};
 use events::{button, card, markdown, resolution, text_content, without_fences, without_mentions};
 
 /// Where the open API lives.
@@ -40,6 +46,10 @@ const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
 /// `/open-apis/auth/v3/tenant_access_token/internal` is marked as a historical version.
 const DEFAULT_TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
 const PLATFORM: &str = "feishu";
+/// The variables that hold the credentials, unless the `[feishu]` section of im.toml names
+/// others.
+const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
+const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
 /// Longest interval accepted from the server (pings, reconnection, a frequency limit's
 /// wait), so that a bad value cannot stop pings or stall posts.
 const MAX_INTERVAL: Duration = Duration::from_secs(3600);
@@ -59,8 +69,9 @@ pub struct FeishuConfig {
     /// per second.
     pub post_interval: Duration,
     pub labels: CardLabels,
-    /// Called with each failed attempt to connect, before the channel waits and tries
-    /// again, so that an operator can see a platform that cannot be reached.
+    /// Called with what the channel goes on after, so that an operator can see it: each
+    /// failed attempt to connect, before the channel waits and tries again, a connection
+    /// that went silent, a frame it cannot decode, and an event that is not JSON.
     pub on_error: Option<ErrorReport>,
 }
 
@@ -72,11 +83,63 @@ impl FeishuConfig {
             app_secret,
             api_base: DEFAULT_API_BASE.into(),
             token_url: DEFAULT_TOKEN_URL.into(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             post_interval: Duration::from_millis(200),
             labels: CardLabels::default(),
             on_error: None,
         }
+    }
+}
+
+/// The `[feishu]` section of im.toml: which variables hold the app's credentials, and where
+/// its APIs are.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct FeishuSection {
+    /// Variable holding the App ID of the self-built app.
+    #[serde(default = "default_app_id_env")]
+    app_id_env: String,
+    /// Variable holding the App Secret.
+    #[serde(default = "default_app_secret_env")]
+    app_secret_env: String,
+    /// Open API base URL, for a proxy or a test server.
+    api_base: Option<String>,
+    /// Tenant token URL, for a proxy or a test server.
+    token_url: Option<String>,
+}
+
+fn default_app_id_env() -> String {
+    DEFAULT_APP_ID_ENV.into()
+}
+
+fn default_app_secret_env() -> String {
+    DEFAULT_APP_SECRET_ENV.into()
+}
+
+impl FeishuSection {
+    /// The channel this section configures, with `labels` on its cards and what it goes on
+    /// after reported to the callback `log` gives for its platform name, and the variable
+    /// holding its secret, which commands must not see: the App ID is not one. Fails when a
+    /// variable does not hold its credential, and when the channel cannot be built.
+    pub(crate) fn channel(
+        &self,
+        labels: &CardLabels,
+        log: fn(&'static str) -> ErrorReport,
+    ) -> anyhow::Result<(Arc<dyn ImChannel>, Vec<String>)> {
+        let mut config = FeishuConfig::new(
+            secret(&self.app_id_env, "the Feishu App ID")?,
+            secret(&self.app_secret_env, "the Feishu App Secret")?,
+        );
+        if let Some(base) = &self.api_base {
+            config.api_base.clone_from(base);
+        }
+        if let Some(url) = &self.token_url {
+            config.token_url.clone_from(url);
+        }
+        config.labels.clone_from(labels);
+        config.on_error = Some(log(PLATFORM));
+        let channel = FeishuChannel::new(config).map_err(anyhow::Error::msg)?;
+        Ok((Arc::new(channel), vec![self.app_secret_env.clone()]))
     }
 }
 
@@ -111,24 +174,13 @@ fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
 impl FeishuChannel {
     /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: FeishuConfig) -> Result<Self, ImError> {
-        let http = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
+            http: http_client(config.request_timeout)?,
             posts: Pacer::new(config.post_interval),
             config,
-            http,
             token: tokio::sync::Mutex::new(None),
             direct: Mutex::default(),
         })
-    }
-
-    /// Tell the operator about `error`, which the channel goes on after.
-    fn report(&self, error: &ImError) {
-        if let Some(callback) = &self.config.on_error {
-            callback(error);
-        }
     }
 
     /// Post `content` of type `msg_type`: a reply in the thread when `to` names one,
@@ -187,10 +239,15 @@ impl ImChannel for FeishuChannel {
                         Ended::Cancelled => return Ok(()),
                         // Spread reconnections out, as the server asks.
                         Ended::Lost => connection::jitter(config.nonce),
+                        Ended::Silent(silence) => {
+                            let silent = format!("{PREFIX}: silent for {} s; opening it again", silence.as_secs());
+                            report(self.config.on_error.as_ref(), &ImError::Transport(silent));
+                            connection::jitter(config.nonce)
+                        }
                     }
                 }
                 Connection::Later(reason) => {
-                    self.report(&ImError::Transport(reason));
+                    report(self.config.on_error.as_ref(), &ImError::Transport(reason));
                     config.reconnect.unwrap_or_else(|| backoff.advance())
                 }
             };
@@ -279,4 +336,18 @@ impl ImChannel for FeishuChannel {
 /// Text in parts of at most one message: the first part and the rest.
 fn split(text: &str) -> (String, Vec<String>) {
     split_text(text, MAX_TEXT_CHARS, String::push)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_feishu_section_defaults_its_variables() {
+        let section: FeishuSection = toml::from_str("").unwrap();
+        assert_eq!(
+            (section.app_id_env.as_str(), section.app_secret_env.as_str()),
+            (DEFAULT_APP_ID_ENV, DEFAULT_APP_SECRET_ENV)
+        );
+    }
 }

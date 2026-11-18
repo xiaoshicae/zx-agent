@@ -1,7 +1,14 @@
-//! `zx-agent im`: answers IM messages, one session per conversation, until stopped.
-//! The server itself is `zx_im::Server`.
+//! The program `zx-im`: reads im.toml, connects the platforms it configures, and answers
+//! their messages, one session per conversation, until a signal or a platform's failure ends
+//! it. The server itself is [`Server`]; the agent comes from `zx-app`, as the command line's
+//! do.
+//!
+//! - `args`: the command line
+
+mod args;
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,26 +18,31 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::now_ms;
 use zx_app::config::{Builtin, read_text};
 use zx_app::otel::Telemetry;
-use zx_app::{Application, Approvals, ConfiguredAgent, SessionPlace};
-use zx_im::{
+use zx_app::shutdown::{self, spawn_signal_handler};
+use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
+
+#[cfg(feature = "feishu")]
+use crate::platform::FeishuSection;
+use crate::platform::SlackSection;
+use crate::server::StatusFiles;
+use crate::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
-    ServerSink, SessionKey, StatusFiles, UserId,
+    ServerSink, SessionKey, UserId,
 };
-use zx_im_feishu::{FeishuChannel, FeishuConfig};
-use zx_im_slack::{SlackChannel, SlackConfig};
-use zx_util::env::env_value;
 
-use crate::cli::{self, ImArgs};
-use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, cancel_on_signals, with_telemetry, write_line};
+pub(crate) use args::Args;
 
-const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
-const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
-const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
-const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
+/// Exit codes, so that a supervisor can react without parsing output: serving ended as
+/// asked, a platform failed while serving, or the configuration or the credentials were
+/// refused.
+const EXIT_COMPLETED: u8 = 0;
+const EXIT_ERROR: u8 = 1;
+pub(crate) const EXIT_USAGE: u8 = 2;
+/// The traces' `service.name`, unless `OTEL_SERVICE_NAME` sets one: the program's name.
+const SERVICE_NAME: &str = "zx-im";
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
 /// keeps it apart from the platform directories, whose encoded names never contain one.
 const RUNNING_DIR: &str = ".running";
@@ -43,7 +55,12 @@ type Approvers = Vec<(String, UserId)>;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ConfigFile {
     slack: Option<SlackSection>,
+    #[cfg(feature = "feishu")]
     feishu: Option<FeishuSection>,
+    /// A build without that platform refuses its section by name, not as an unknown key.
+    #[cfg(not(feature = "feishu"))]
+    #[serde(rename = "feishu", default, deserialize_with = "not_built")]
+    _feishu: (),
     access: AccessSection,
     #[serde(default)]
     limits: LimitsSection,
@@ -56,48 +73,13 @@ struct ConfigFile {
     card_labels: CardLabels,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct SlackSection {
-    /// Variable holding the app-level token (`xapp-`), used for Socket Mode.
-    #[serde(default = "default_app_token_env")]
-    app_token_env: String,
-    /// Variable holding the bot token (`xoxb-`), used to post.
-    #[serde(default = "default_bot_token_env")]
-    bot_token_env: String,
-    /// Web API base URL, for a proxy or a test server.
-    api_base: Option<String>,
-}
-
-fn default_app_token_env() -> String {
-    DEFAULT_APP_TOKEN_ENV.into()
-}
-
-fn default_bot_token_env() -> String {
-    DEFAULT_BOT_TOKEN_ENV.into()
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct FeishuSection {
-    /// Variable holding the App ID of the self-built app.
-    #[serde(default = "default_app_id_env")]
-    app_id_env: String,
-    /// Variable holding the App Secret.
-    #[serde(default = "default_app_secret_env")]
-    app_secret_env: String,
-    /// Open API base URL, for a proxy or a test server.
-    api_base: Option<String>,
-    /// Tenant token URL, for a proxy or a test server.
-    token_url: Option<String>,
-}
-
-fn default_app_id_env() -> String {
-    DEFAULT_APP_ID_ENV.into()
-}
-
-fn default_app_secret_env() -> String {
-    DEFAULT_APP_SECRET_ENV.into()
+/// The error for the section of a platform this build was made without: its cargo feature is
+/// off.
+#[cfg(not(feature = "feishu"))]
+fn not_built<'de, D: serde::Deserializer<'de>>(_section: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "this build of zx-im has no such platform: it was built without the cargo feature `feishu`",
+    ))
 }
 
 #[derive(Deserialize)]
@@ -126,54 +108,80 @@ struct SessionsSection {
     dir: PathBuf,
 }
 
-/// Serve until SIGINT or SIGTERM, or until a platform fails. An `Err` is a configuration
-/// problem found before serving started.
-pub(crate) async fn run(args: ImArgs) -> Result<u8> {
-    let file = read_file(&args.config)?;
-    let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
+/// Serve until SIGINT or SIGTERM, or until a platform fails, and return the exit code. An
+/// `Err` is a configuration problem found before serving started.
+///
+/// Traces are exported when the environment names an OTLP endpoint ([`shutdown`]); what could
+/// not be exported is said on stderr once serving ended, and never changes the exit code.
+pub(crate) async fn run(args: Args) -> Result<u8> {
+    let (path, overrides) = args.into_parts();
+    let file = read_file(&path)?;
+    let Platforms { channels, hidden_env } = platforms(&file, &path)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &platforms)?;
-    with_telemetry(async move |telemetry| {
-        let dir = file.sessions.dir;
-        let running = create_session_dirs(&dir)?;
+    let (code, end) =
+        shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| -> Result<u8> {
+            if telemetry.is_some() {
+                eprintln!("[otel] exporting traces over OTLP/HTTP");
+            }
+            let dir = file.sessions.dir;
+            let running = create_session_dirs(&dir)?;
+            // Once for the process: every conversation's session shares the connections.
+            let app = connect(overrides)
+                .await?
+                .with_hidden_env(hidden_env)
+                .with_traces(telemetry.map(Telemetry::hook));
+            let agent = conversations_agent(&app, &dir).await?;
+            let config = ServerConfig {
+                cwd: agent.new_session_cwd(None)?,
+                ..server_config(&file.limits, file.replies, running, conversations, approvers)
+            };
+            Ok(serve(config, &agent, channels, &dir).await)
+        })
+        .await?;
+    if end.dropped > 0 {
+        eprintln!("[otel] {} event(s) were not exported: the queue was full", end.dropped);
+    }
+    if let Some(error) = end.error {
+        eprintln!("[otel] {error:#}");
+    }
+    code
+}
 
-        // Once for the process: every thread's session shares the connections.
-        let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
-            .await?
-            .with_hidden_env(hidden_env)
-            .with_traces(telemetry.map(Telemetry::hook));
-        // A wrong model, agent or tool setting would otherwise surface only at the first
-        // message, in the chat; check it once with a session that is never stored.
-        build_agent(&app, &SessionPlace::memory())?
-            .create(None)
-            .await
-            .context("cannot prepare a session with these settings")?;
-        // The sessions of every conversation are kept under `dir`; a conversation's sessions
-        // are those that carry its labels.
-        let agent = build_agent(&app, &SessionPlace::directory(&dir))?;
-        let config = ServerConfig {
-            cwd: agent.new_session_cwd(None)?,
-            ..server_config(&file.limits, file.replies, running, conversations, approvers)
-        };
-        eprintln!(
-            "[im] platforms={}; sessions in {}",
-            channels
-                .iter()
-                .map(|channel| channel.platform())
-                .collect::<Vec<_>>()
-                .join(","),
-            dir.display()
-        );
-        let cancel = CancellationToken::new();
-        cancel_on_signals(cancel.clone());
-        // The session file is the record of each conversation; the operator log holds
-        // approvals and failures (Log), and traces, when exported, the timeline.
-        let served = Server::new(config, agent.agent().clone(), Arc::new(Log))
-            .run(channels, &cancel)
-            .await;
-        Ok(serve_exit_code(served))
-    })
-    .await
+/// What the process shares, read and connected once, with its startup notices written to
+/// stderr. Without a model, the error names the program's ways to give one.
+async fn connect(overrides: Overrides) -> Result<Application> {
+    let app = Application::from_environment(overrides, Builtin::Assistant)
+        .await
+        .map_err(with_model_hint)?;
+    for notice in app.notices() {
+        eprintln!("{notice}");
+    }
+    Ok(app)
+}
+
+/// `error`, or, when no model was given, the ways to give one: `--model`, over `ZX_MODEL`,
+/// which the application reads, over config.toml.
+fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<NoModel>() {
+        Some(no_model) => anyhow::anyhow!(
+            "no model: pass --model, set ZX_MODEL, or set model in {}",
+            no_model.config_file
+        ),
+        None => error,
+    }
+}
+
+/// The agent of every conversation, whose sessions are kept under `dir`, once a session with
+/// these settings could be prepared: a wrong model, agent or tool setting would otherwise
+/// surface only at the first message, in the chat. That session is never stored.
+async fn conversations_agent(app: &Application, dir: &Path) -> Result<ConfiguredAgent> {
+    build_agent(app, &SessionPlace::memory())?
+        .create(None)
+        .await
+        .context("cannot prepare a session with these settings")?;
+    // A conversation's sessions are those under `dir` that carry its labels.
+    build_agent(app, &SessionPlace::directory(dir))
 }
 
 /// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
@@ -184,33 +192,56 @@ fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgen
     app.build(app.model(), place, approvals)
 }
 
+/// Serve `channels` as `config` says, with the sessions of `agent`, kept under `dir`, until a
+/// signal or a platform's failure; the exit code says which.
+async fn serve(config: ServerConfig, agent: &ConfiguredAgent, channels: Vec<Arc<dyn ImChannel>>, dir: &Path) -> u8 {
+    let names: Vec<&str> = channels.iter().map(|channel| channel.platform()).collect();
+    eprintln!("[im] platforms={}; sessions in {}", names.join(","), dir.display());
+    let cancel = CancellationToken::new();
+    // Without the listeners serving goes on, each run still bounded by its own limits.
+    if let Err(error) = spawn_signal_handler(cancel.clone()) {
+        eprintln!("zx-im: cannot listen for shutdown signals: {error}");
+    }
+    // The session file is the record of each conversation; the operator log holds approvals
+    // and failures (Log), and traces, when exported, the timeline.
+    let served = Server::new(config, agent.agent().clone(), Arc::new(Log))
+        .run(channels, &cancel)
+        .await;
+    serve_exit_code(served)
+}
+
 /// The configured IM platforms: a channel for each, and the environment variables that hold
 /// their secrets, which commands must not see.
+#[derive(Default)]
 struct Platforms {
     channels: Vec<Arc<dyn ImChannel>>,
     hidden_env: Vec<String>,
 }
 
+impl Platforms {
+    /// Add a platform's channel and the variables holding its secrets.
+    fn add(&mut self, (channel, secrets): (Arc<dyn ImChannel>, Vec<String>)) {
+        self.channels.push(channel);
+        self.hidden_env.extend(secrets);
+    }
+}
+
 /// The platforms `file` configures. An error when it configures none.
 fn platforms(file: &ConfigFile, path: &Path) -> Result<Platforms> {
-    let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
-    let mut hidden_env = Vec::new();
-    if let Some(slack) = &file.slack {
-        let (channel, secrets) = slack_channel(slack, &file.card_labels)?;
-        channels.push(channel);
-        hidden_env.extend(secrets);
+    let mut platforms = Platforms::default();
+    if let Some(section) = &file.slack {
+        platforms.add(section.channel(&file.card_labels, failure_log)?);
     }
-    if let Some(feishu) = &file.feishu {
-        let (channel, secrets) = feishu_channel(feishu, &file.card_labels)?;
-        channels.push(channel);
-        hidden_env.extend(secrets);
+    #[cfg(feature = "feishu")]
+    if let Some(section) = &file.feishu {
+        platforms.add(section.channel(&file.card_labels, failure_log)?);
     }
     anyhow::ensure!(
-        !channels.is_empty(),
-        "{}: no IM platform is configured; add a [slack] or [feishu] section",
+        !platforms.channels.is_empty(),
+        "{}: no IM platform is configured; add the section of one, such as [slack]",
         path.display()
     );
-    Ok(Platforms { channels, hidden_env })
+    Ok(platforms)
 }
 
 /// Create the session directory `dir` and the directory of the runs in progress under it.
@@ -282,63 +313,22 @@ fn serve_exit_code(served: Result<(), ImError>) -> u8 {
     match served {
         Ok(()) => EXIT_COMPLETED,
         Err(error @ ImError::Config(_)) => {
-            eprintln!("zx-agent: {error}");
+            eprintln!("zx-im: {error:#}");
             EXIT_USAGE
         }
         Err(error @ ImError::Transport(_)) => {
-            eprintln!("zx-agent: {error}");
+            eprintln!("zx-im: {error:#}");
             EXIT_ERROR
         }
     }
 }
 
-/// The Slack channel of its section, and the variables holding its tokens.
-fn slack_channel(section: &SlackSection, labels: &CardLabels) -> Result<(Arc<dyn ImChannel>, Vec<String>)> {
-    let mut config = SlackConfig::new(
-        secret(&section.app_token_env, "the Slack app-level token")?,
-        secret(&section.bot_token_env, "the Slack bot token")?,
-    );
-    if let Some(base) = &section.api_base {
-        config.api_base.clone_from(base);
-    }
-    config.labels.clone_from(labels);
-    config.on_error = Some(failure_log("slack"));
-    let channel = SlackChannel::new(config).map_err(anyhow::Error::msg)?;
-    Ok((
-        Arc::new(channel),
-        vec![section.app_token_env.clone(), section.bot_token_env.clone()],
-    ))
-}
-
-/// The Feishu channel of its section, and the variable holding its secret: the App ID is
-/// not one.
-fn feishu_channel(section: &FeishuSection, labels: &CardLabels) -> Result<(Arc<dyn ImChannel>, Vec<String>)> {
-    let mut config = FeishuConfig::new(
-        secret(&section.app_id_env, "the Feishu App ID")?,
-        secret(&section.app_secret_env, "the Feishu App Secret")?,
-    );
-    if let Some(base) = &section.api_base {
-        config.api_base.clone_from(base);
-    }
-    if let Some(url) = &section.token_url {
-        config.token_url.clone_from(url);
-    }
-    config.labels.clone_from(labels);
-    config.on_error = Some(failure_log("feishu"));
-    let channel = FeishuChannel::new(config).map_err(anyhow::Error::msg)?;
-    Ok((Arc::new(channel), vec![section.app_secret_env.clone()]))
-}
-
-/// Reports a platform's failed connection attempts as `failed` lines, like the server's own.
+/// Reports what a platform goes on after as `failed` lines, like the server's own; the
+/// platforms call it with their names.
 fn failure_log(platform: &'static str) -> ErrorReport {
     Arc::new(move |error: &ImError| {
         write_line(&json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()}));
     })
-}
-
-/// The value of a credential variable, which must be set and non-empty.
-fn secret(name: &str, what: &str) -> Result<String> {
-    env_value(name).with_context(|| format!("{name} must hold {what}"))
 }
 
 /// Split `platform:id` entries, each naming a configured platform.
@@ -362,6 +352,15 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
 /// The thread of `key` in a log line: `null` for a direct chat.
 fn thread(key: &SessionKey) -> Value {
     json!(key.thread.as_ref().map(|thread| thread.0.as_str()))
+}
+
+/// Print `line` and a newline on stdout, unlike `println!` without panicking when stdout is
+/// closed.
+fn write_line(line: &Value) {
+    let mut out = std::io::stdout().lock();
+    // A closed stdout (for example a log collector that exited) leaves nobody to report to;
+    // serving goes on.
+    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
 /// Writes the server's events as JSON lines on stdout, for the operator's log collection.
@@ -421,6 +420,15 @@ mod tests {
     }
 
     #[test]
+    fn the_deployment_example_is_a_valid_configuration() {
+        // The im.toml that the Kubernetes deployment starts from, read as --config is read.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/kubernetes/im/im.example.toml");
+        if let Err(error) = read_file(&path) {
+            panic!("{error:#}");
+        }
+    }
+
+    #[test]
     fn entries_split_at_the_first_colon() {
         let parsed = entries(&["slack:C1".into(), "slack:a:b".into()], &platforms(), "f").unwrap();
         assert_eq!(parsed, [("slack".into(), "C1".into()), ("slack".into(), "a:b".into())]);
@@ -441,17 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn a_feishu_section_defaults_its_variables() {
-        let file: ConfigFile =
-            toml::from_str("[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"d\"\n").unwrap();
-        let feishu = file.feishu.unwrap();
-        assert_eq!(
-            (feishu.app_id_env.as_str(), feishu.app_secret_env.as_str()),
-            (DEFAULT_APP_ID_ENV, DEFAULT_APP_SECRET_ENV)
-        );
-    }
-
-    #[test]
     fn request_limit_reply_can_be_configured() {
         let config =
             "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n[replies]\nmodelRequestLimit = \"limit\"\n";
@@ -465,11 +462,8 @@ mod tests {
         assert!(toml::from_str::<ConfigFile>("[slack]\n").is_err());
         let file: ConfigFile =
             toml::from_str("[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n").unwrap();
-        let slack = file.slack.unwrap();
-        assert_eq!(
-            (slack.app_token_env.as_str(), slack.bot_token_env.as_str()),
-            (DEFAULT_APP_TOKEN_ENV, DEFAULT_BOT_TOKEN_ENV)
-        );
+        assert!(file.slack.is_some());
+        assert_eq!(file.sessions.dir, Path::new("/data/sessions"));
     }
 
     #[test]
@@ -486,5 +480,29 @@ mod tests {
         }
         // The approval timeout is config.toml's, shared with chat and acp.
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
+    }
+
+    #[cfg(not(feature = "feishu"))]
+    #[test]
+    fn a_build_without_feishu_refuses_its_section_by_name() {
+        let config = "[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
+        let error = toml::from_str::<ConfigFile>(config).err().unwrap().to_string();
+        assert!(error.contains("this build of zx-im has no such platform"), "{error}");
+        assert!(error.contains("[feishu]"), "{error}");
+        // A file without the section is read as usual.
+        assert!(toml::from_str::<ConfigFile>(&config.replace("[feishu]\n", "")).is_ok());
+    }
+
+    #[test]
+    fn a_missing_model_names_the_programs_ways_to_give_one() {
+        let no_model = NoModel {
+            config_file: "/home/me/.zx-agent/config.toml".into(),
+        };
+        assert_eq!(
+            format!("{:#}", with_model_hint(no_model.into())),
+            "no model: pass --model, set ZX_MODEL, or set model in /home/me/.zx-agent/config.toml"
+        );
+        let other = with_model_hint(anyhow::anyhow!("something else"));
+        assert_eq!(format!("{other:#}"), "something else");
     }
 }

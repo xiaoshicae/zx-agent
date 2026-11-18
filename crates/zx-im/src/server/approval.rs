@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
-
-use zx_core::events::{ApprovalResult, Event, EventKind};
+use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_util::text::clip;
 
-use super::{ApprovalCard, ApprovalId, ServerEvent, ServerSink, SessionKey};
+use crate::{ApprovalCard, ApprovalId};
+
+use super::{ServerEvent, ServerSink, SessionKey};
 
 /// Longest command or argument text shown on a card; longer text ends with "...". A card is
 /// for deciding at a glance; the full call is in the session file.
@@ -21,7 +22,7 @@ const MAX_SUMMARY_CHARS: usize = 1500;
 /// What the worker learns about approvals, in order: a call waits for one, then the run
 /// reported how it ended. Both travel through one channel, so the request is known before
 /// its result arrives.
-pub(crate) enum ApprovalUpdate {
+pub(super) enum ApprovalUpdate {
     /// A call waits for approval: the worker posts its card.
     Requested {
         /// The request's ID in the run, which is also the card's.
@@ -39,15 +40,15 @@ pub(crate) enum ApprovalUpdate {
 }
 
 /// Passes the approval events of a run on to the worker, which posts and closes the cards.
-pub(crate) struct ApprovalEvents {
-    pub(crate) updates: mpsc::Sender<ApprovalUpdate>,
-    pub(crate) key: SessionKey,
-    pub(crate) sink: Arc<dyn ServerSink>,
+pub(super) struct ApprovalEvents {
+    pub(super) updates: mpsc::Sender<ApprovalUpdate>,
+    pub(super) key: SessionKey,
+    pub(super) sink: Arc<dyn ServerSink>,
 }
 
 impl ApprovalEvents {
     /// Pass `event` on if it is about an approval.
-    pub(crate) fn forward(&self, event: &Event) {
+    pub(super) fn forward(&self, event: &Event) {
         let update = match &event.event {
             EventKind::ApprovalRequested {
                 approval_id,
@@ -96,8 +97,9 @@ impl ApprovalEvents {
 /// The command of a bash call, or the arguments of any other call, at most
 /// [`MAX_SUMMARY_CHARS`] characters long.
 fn summarize(arguments: &Value) -> String {
-    // `command` is the argument of the bash tool (`zx-builtin`), which this crate cannot see:
-    // the one coupling to a tool here, so that a shell command reads as one on the card.
+    // `command` is the argument of the bash tool (`zx_agent::builtin`), which names it in no
+    // constant: the one coupling to a tool here, so that a shell command reads as one on the
+    // card.
     match arguments.get("command").and_then(Value::as_str) {
         Some(command) => clip(command, MAX_SUMMARY_CHARS),
         None => clip(&arguments.to_string(), MAX_SUMMARY_CHARS),

@@ -1,8 +1,8 @@
-# zx-agent im becomes the container's main process. With a shared process namespace the
-# pause container is PID 1: it reaps the processes commands leave behind, and /proc/1/environ
-# holds none of this container's variables: the keys are only in zx-agent's own environment,
-# where commands running as the same user can read them and redaction replaces their values
-# in tool output. kubectl exec still starts chat or run beside it.
+# zx-im, the IM service, becomes the container's main process. With a shared process namespace
+# the pause container is PID 1: it reaps the processes commands leave behind, and
+# /proc/1/environ holds none of this container's variables: the keys are only in zx-im's own
+# environment, where commands running as the same user can read them and redaction replaces
+# their values in tool output. kubectl exec still starts zx-agent chat or run beside it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,8 +14,7 @@ spec:
       containers:
         - name: zx-agent
           command:
-            - zx-agent
-            - im
+            - zx-im
             - --config
             - /etc/zx-agent-im/im.toml
             # The assistant agent bounds neither requests nor time. Without these, a run that

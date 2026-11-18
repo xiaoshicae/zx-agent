@@ -6,21 +6,23 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
-use zx_im::{ImError, Inbound, Keepalive, MessageId, Seen};
 use zx_util::random::random_u64;
+
+use crate::platform::{Keepalive, Next, Seen, Socket, next_message, report};
+use crate::{ImError, Inbound, MessageId};
 
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
 
 /// The prefix of every error of the long connection.
-pub(crate) const PREFIX: &str = "feishu long connection";
+pub(super) const PREFIX: &str = "feishu long connection";
 /// Where the long connection's address is requested (Go SDK `ws/const.go`).
 const ENDPOINT_PATH: &str = "/callback/ws/endpoint";
 /// Frame methods (Go SDK `ws/const.go`): control frames carry pings and pongs.
@@ -44,12 +46,12 @@ const ACK_PAYLOAD: &[u8] = br#"{"code":200,"headers":null,"data":null}"#;
 
 /// Settings the server sends with the address and in pongs.
 #[derive(Clone, Copy)]
-pub(crate) struct ClientConfig {
-    pub(crate) ping: Duration,
+pub(super) struct ClientConfig {
+    pub(super) ping: Duration,
     /// Wait between reconnection attempts; until the server sets it, a backoff is used.
-    pub(crate) reconnect: Option<Duration>,
+    pub(super) reconnect: Option<Duration>,
     /// Random delay before the first reconnection, at most this long.
-    pub(crate) nonce: Duration,
+    pub(super) nonce: Duration,
 }
 
 impl Default for ClientConfig {
@@ -84,16 +86,16 @@ impl ClientConfig {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-pub(crate) enum Ended {
+pub(super) enum Ended {
     Cancelled,
-    /// The connection dropped or went silent.
+    /// The connection dropped.
     Lost,
+    /// Nothing came over the connection for this long, not even answers to the pings.
+    Silent(Duration),
 }
 
 /// How an attempt to open the long connection went.
-pub(crate) enum Connection {
+pub(super) enum Connection {
     /// The link is boxed: the other variant is a short reason.
     Open(Box<Link>),
     /// A failure worth retrying, with the reason; the address, which carries a ticket, is
@@ -107,7 +109,7 @@ fn later(reason: impl Display) -> Connection {
 }
 
 /// One open long connection, and what it keeps while frames come in.
-pub(crate) struct Link {
+pub(super) struct Link {
     socket: Socket,
     /// The `service_id` of the address, which pings carry.
     service: i32,
@@ -142,7 +144,7 @@ enum Received {
 impl FeishuChannel {
     /// Ask for the long connection's address and open it. An error is a failure that
     /// retrying cannot fix.
-    pub(crate) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection, ImError> {
+    pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection, ImError> {
         let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
         let body = json!({
             "AppID": self.config.app_id,
@@ -208,7 +210,7 @@ impl FeishuChannel {
     }
 
     /// Receive over one connection until it ends.
-    pub(crate) async fn receive(
+    pub(super) async fn receive(
         &self,
         mut link: Link,
         config: &mut ClientConfig,
@@ -216,34 +218,23 @@ impl FeishuChannel {
         seen: &mut Seen<MessageId>,
         cancel: &CancellationToken,
     ) -> Ended {
+        let ping_frame = Message::binary(ping(link.service).encode());
         loop {
-            let message = tokio::select! {
-                () = cancel.cancelled() => {
-                    // The server is stopping; a failed close changes nothing.
-                    link.socket.close(None).await.ok();
-                    return Ended::Cancelled;
-                }
-                () = tokio::time::sleep_until(link.keepalive.next_ping()) => {
-                    if link.socket.send(Message::binary(ping(link.service).encode())).await.is_err() {
-                        return Ended::Lost;
-                    }
-                    link.keepalive.pinged();
-                    continue;
-                }
-                () = tokio::time::sleep_until(link.keepalive.deadline()) => return Ended::Lost,
-                message = link.socket.next() => message,
-            };
-            link.keepalive.alive();
-            let bytes = match message {
-                Some(Ok(Message::Binary(bytes))) => bytes,
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Ended::Lost,
+            let bytes = match next_message(&mut link.socket, &mut link.keepalive, &ping_frame, cancel).await {
+                Next::Message(Message::Binary(bytes)) => bytes,
                 // The Go SDK reads only binary messages; anything else still shows life.
-                Some(Ok(Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                Next::Message(Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
+                Next::Message(Message::Close(_)) | Next::Lost => return Ended::Lost,
+                Next::Silent(silence) => return Ended::Silent(silence),
+                Next::Cancelled => return Ended::Cancelled,
             };
             let frame = match Frame::decode(&bytes) {
                 Ok(frame) => frame,
                 Err(error) => {
-                    self.report(&ImError::Transport(format!("{PREFIX}: {error}")));
+                    report(
+                        self.config.on_error.as_ref(),
+                        &ImError::Transport(format!("{PREFIX}: {error}")),
+                    );
                     continue;
                 }
             };
@@ -345,7 +336,7 @@ fn service_id(address: &str) -> i32 {
 }
 
 /// A random wait below `nonce`.
-pub(crate) fn jitter(nonce: Duration) -> Duration {
+pub(super) fn jitter(nonce: Duration) -> Duration {
     let millis = u64::try_from(nonce.as_millis()).unwrap_or(u64::MAX);
     if millis == 0 {
         return Duration::ZERO;

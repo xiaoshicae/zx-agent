@@ -3289,9 +3289,6 @@ dependencies = [
  "zx-ai-openai",
  "zx-builtin",
  "zx-core",
- "zx-im",
- "zx-im-feishu",
- "zx-im-slack",
  "zx-testing",
 ]
 
@@ -3382,13 +3379,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "toml",
  "uuid",
  "zx-agent",
  "zx-app",
- "zx-im",
- "zx-im-feishu",
- "zx-im-slack",
  "zx-testing",
  "zx-util",
 ]
@@ -3416,46 +3409,23 @@ dependencies = [
 name = "zx-im"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "clap",
+ "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
- "zx-ai",
- "zx-core",
- "zx-util",
-]
-
-[[package]]
-name = "zx-im-feishu"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "reqwest",
- "serde_json",
- "thiserror",
- "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "zx-im",
+ "toml",
+ "zx-agent",
+ "zx-app",
+ "zx-testing",
  "zx-util",
-]
-
-[[package]]
-name = "zx-im-slack"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "reqwest",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "zx-im",
 ]
 
 [[package]]

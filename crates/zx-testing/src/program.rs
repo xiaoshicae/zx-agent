@@ -1,6 +1,6 @@
-//! A program a test runs, such as the compiled `zx-agent`: the command that starts it apart
-//! from the developer's environment, the zx-agent home a test gives it, and what it leaves
-//! behind. Cargo gives the path of a program only to the tests of its own package
+//! A program a test runs, such as the compiled `zx-agent` or `zx-im`: the command that starts
+//! it apart from the developer's environment, the zx-agent home a test gives it, and what it
+//! leaves behind. Cargo gives the path of a program only to the tests of its own package
 //! (`env!("CARGO_BIN_EXE_<name>")`), so the tests pass it in; the tests of every program of
 //! the workspace start theirs alike.
 

@@ -17,33 +17,33 @@ const LENGTH_DELIMITED: u64 = 2;
 const FIXED32: u64 = 5;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Frame {
-    pub(crate) seq_id: u64,
-    pub(crate) log_id: u64,
-    pub(crate) service: i32,
-    pub(crate) method: i32,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) payload_encoding: String,
-    pub(crate) payload_type: String,
-    pub(crate) payload: Vec<u8>,
-    pub(crate) log_id_new: String,
+pub(super) struct Frame {
+    pub(super) seq_id: u64,
+    pub(super) log_id: u64,
+    pub(super) service: i32,
+    pub(super) method: i32,
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) payload_encoding: String,
+    pub(super) payload_type: String,
+    pub(super) payload: Vec<u8>,
+    pub(super) log_id_new: String,
 }
 
 /// Why bytes are not a frame.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("malformed frame: {0}")]
-pub(crate) struct FrameError(&'static str);
+pub(super) struct FrameError(&'static str);
 
 impl Frame {
     /// The value of the first header named `key`.
-    pub(crate) fn header(&self, key: &str) -> Option<&str> {
+    pub(super) fn header(&self, key: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
     }
 
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.payload.len() + 64);
         put_varint_field(&mut out, 1, self.seq_id);
         put_varint_field(&mut out, 2, self.log_id);
@@ -63,7 +63,7 @@ impl Frame {
         out
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
         let mut frame = Frame::default();
         let mut reader = Reader(bytes);
         while !reader.0.is_empty() {

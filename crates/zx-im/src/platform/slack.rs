@@ -10,17 +10,24 @@ mod api;
 mod connection;
 mod events;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zx_im::{
-    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
-    MessageRef, Pacer, Post, RATE_LIMIT_RETRIES, Replacement, SEEN_CAPACITY, Said, Seen, ThreadId, UserId,
+
+use crate::{
+    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageRef, Post, Replacement,
+    Said, ThreadId, UserId,
 };
 
+use super::{
+    Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, http_client,
+    report, secret,
+};
 use api::CallError;
 use connection::{Ended, connection_url};
 use events::{button, card_request, escape, history, resolution, section, split};
@@ -28,6 +35,9 @@ use events::{button, card_request, escape, history, resolution, section, split};
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
 const PLATFORM: &str = "slack";
+/// The variables that hold the tokens, unless the `[slack]` section of im.toml names others.
+const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
+const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 /// Keepalive pings over the Socket Mode connection, by default: often enough to notice a
 /// connection that died within half a minute, rare enough to cost nothing.
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -81,8 +91,8 @@ pub struct SlackConfig {
     pub ping_interval: Duration,
     pub labels: CardLabels,
     /// Called with what the channel goes on after, so that an operator can see it: each
-    /// failed attempt to connect, before the channel waits and tries again, a frame it
-    /// cannot read, and a thread it could not read to its end.
+    /// failed attempt to connect, before the channel waits and tries again, a connection
+    /// that went silent, a frame it cannot read, and a thread it could not read to its end.
     pub on_error: Option<ErrorReport>,
 }
 
@@ -93,12 +103,61 @@ impl SlackConfig {
             app_token,
             bot_token,
             api_base: DEFAULT_API_BASE.into(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             post_interval: Duration::from_secs(1),
             ping_interval: DEFAULT_PING_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
         }
+    }
+}
+
+/// The `[slack]` section of im.toml: which variables hold the tokens, and where the Web API is.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct SlackSection {
+    /// Variable holding the app-level token (`xapp-`), used for Socket Mode.
+    #[serde(default = "default_app_token_env")]
+    app_token_env: String,
+    /// Variable holding the bot token (`xoxb-`), used to post.
+    #[serde(default = "default_bot_token_env")]
+    bot_token_env: String,
+    /// Web API base URL, for a proxy or a test server.
+    api_base: Option<String>,
+}
+
+fn default_app_token_env() -> String {
+    DEFAULT_APP_TOKEN_ENV.into()
+}
+
+fn default_bot_token_env() -> String {
+    DEFAULT_BOT_TOKEN_ENV.into()
+}
+
+impl SlackSection {
+    /// The channel this section configures, with `labels` on its cards and what it goes on
+    /// after reported to the callback `log` gives for its platform name, and the variables
+    /// holding its tokens, which commands must not see. Fails when a variable does not hold
+    /// its token, and when the channel cannot be built.
+    pub(crate) fn channel(
+        &self,
+        labels: &CardLabels,
+        log: fn(&'static str) -> ErrorReport,
+    ) -> anyhow::Result<(Arc<dyn ImChannel>, Vec<String>)> {
+        let mut config = SlackConfig::new(
+            secret(&self.app_token_env, "the Slack app-level token")?,
+            secret(&self.bot_token_env, "the Slack bot token")?,
+        );
+        if let Some(base) = &self.api_base {
+            config.api_base.clone_from(base);
+        }
+        config.labels.clone_from(labels);
+        config.on_error = Some(log(PLATFORM));
+        let channel = SlackChannel::new(config).map_err(anyhow::Error::msg)?;
+        Ok((
+            Arc::new(channel),
+            vec![self.app_token_env.clone(), self.bot_token_env.clone()],
+        ))
     }
 }
 
@@ -124,22 +183,11 @@ fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
 impl SlackChannel {
     /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
-        let http = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
+            http: http_client(config.request_timeout)?,
             posts: Pacer::new(config.post_interval),
             config,
-            http,
         })
-    }
-
-    /// Tell the operator about `error`, which the channel goes on after.
-    fn report(&self, error: &ImError) {
-        if let Some(callback) = &self.config.on_error {
-            callback(error);
-        }
     }
 }
 
@@ -161,7 +209,7 @@ impl ImChannel for SlackChannel {
                 Some(Ok(answer)) => break answer["user_id"].as_str().map(String::from),
                 Some(Err(error @ ImError::Config(_))) => return Err(error),
                 Some(Err(error @ ImError::Transport(_))) => {
-                    self.report(&error);
+                    report(self.config.on_error.as_ref(), &error);
                     if !backoff.wait(cancel).await {
                         return Ok(());
                     }
@@ -178,7 +226,7 @@ impl ImChannel for SlackChannel {
                 Some(Ok(url)) => Some(url),
                 Some(Err(error @ ImError::Config(_))) => return Err(error),
                 Some(Err(error @ ImError::Transport(_))) => {
-                    self.report(&error);
+                    report(self.config.on_error.as_ref(), &error);
                     None
                 }
             };
@@ -191,10 +239,13 @@ impl ImChannel for SlackChannel {
                 // Slack refreshes connections every few hours; reconnect at once.
                 Ended::Lost => backoff.reset(),
                 Ended::Silent(silence) => {
-                    self.report(&ImError::Transport(format!(
-                        "slack: the Socket Mode connection was silent for {} s; opening it again",
-                        silence.as_secs()
-                    )));
+                    report(
+                        self.config.on_error.as_ref(),
+                        &ImError::Transport(format!(
+                            "slack: the Socket Mode connection was silent for {} s; opening it again",
+                            silence.as_secs()
+                        )),
+                    );
                     backoff.reset();
                 }
                 Ended::Failed => {
@@ -293,7 +344,10 @@ impl ImChannel for SlackChannel {
                 Ok(answer) => answer,
                 Err(error) if page == 0 => return Err(error),
                 Err(error) => {
-                    self.report(&read_in_part(at, thread, &error.to_string()));
+                    report(
+                        self.config.on_error.as_ref(),
+                        &read_in_part(at, thread, &error.to_string()),
+                    );
                     return Ok(latest);
                 }
             };
@@ -307,7 +361,7 @@ impl ImChannel for SlackChannel {
             }
         }
         let longer = format!("it has more than {MAX_HISTORY_PAGES} pages of {HISTORY_PAGE_MESSAGES} messages");
-        self.report(&read_in_part(at, thread, &longer));
+        report(self.config.on_error.as_ref(), &read_in_part(at, thread, &longer));
         Ok(latest)
     }
 
@@ -364,14 +418,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seen_messages_are_dropped_and_old_ones_forgotten() {
-        let mut seen = Seen::new(SEEN_CAPACITY);
-        let key = |n: usize| ("C1".to_string(), n.to_string());
-        assert!(seen.insert(&key(0)));
-        assert!(!seen.insert(&key(0)));
-        for n in 1..=SEEN_CAPACITY {
-            assert!(seen.insert(&key(n)));
-        }
-        assert!(seen.insert(&key(0)), "the oldest key is forgotten");
+    fn a_slack_section_defaults_its_variables() {
+        let section: SlackSection = toml::from_str("").unwrap();
+        assert_eq!(
+            (section.app_token_env.as_str(), section.bot_token_env.as_str()),
+            (DEFAULT_APP_TOKEN_ENV, DEFAULT_BOT_TOKEN_ENV)
+        );
     }
 }

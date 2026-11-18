@@ -2,9 +2,12 @@
 //! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};
-use zx_im::{
-    Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound,
-    MessageId, Said, ThreadId, UserId, split_text,
+use zx_agent::events::ApprovalResult;
+
+use crate::platform::split_text;
+use crate::{
+    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId, Said,
+    ThreadId, UserId,
 };
 
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
@@ -14,7 +17,7 @@ use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 ///
 /// A mention can arrive twice, as `app_mention` and as a channel `message`; both carry the
 /// same key, so the second is left out as a redelivery.
-pub(crate) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, String), Inbound)> {
+pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, String), Inbound)> {
     // Socket Mode payloads are "identical to the typical Events API payloads", which wrap the
     // event; the page's own example shows the bare event, so both are accepted.
     let event = if payload["event"].is_object() {
@@ -75,7 +78,7 @@ fn addressee(text: &str, bot: Option<&str>) -> Addressee {
 
 /// What people said in a `conversations.replies` answer, oldest first: messages of bots,
 /// edits and joins, and those without a sender or text, left out.
-pub(crate) fn history(answer: &Value) -> Vec<Said> {
+pub(super) fn history(answer: &Value) -> Vec<Said> {
     let Some(messages) = answer["messages"].as_array() else {
         return Vec::new();
     };
@@ -93,7 +96,7 @@ pub(crate) fn history(answer: &Value) -> Vec<Said> {
 }
 
 /// Clicks on the card buttons of a `block_actions` payload.
-pub(crate) fn decisions(payload: &Value) -> Vec<Inbound> {
+pub(super) fn decisions(payload: &Value) -> Vec<Inbound> {
     if payload["type"] != "block_actions" {
         return Vec::new();
     }
@@ -151,7 +154,7 @@ fn unescape(text: &str) -> String {
 }
 
 /// `&`, `<` and `>` as entities, so that text is never read as a mention or a link.
-pub(crate) fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         push_escaped(&mut escaped, c);
@@ -171,12 +174,12 @@ fn push_escaped(out: &mut String, c: char) {
 
 /// Escaped text in parts of at most `max` characters, never cut inside an entity: the first
 /// part and the rest.
-pub(crate) fn split(text: &str, max: usize) -> (String, Vec<String>) {
+pub(super) fn split(text: &str, max: usize) -> (String, Vec<String>) {
     split_text(text, max, push_escaped)
 }
 
 /// The escaped request shown on a card, within the length of a section block.
-pub(crate) fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) -> String {
+pub(super) fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) -> String {
     let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(tool));
     let tail = format!("```\n{}: {}", escape(&labels.reason), escape(reason));
     let room = MAX_SECTION_CHARS.saturating_sub(head.chars().count() + tail.chars().count() + 1);
@@ -189,11 +192,11 @@ pub(crate) fn card_request(labels: &CardLabels, tool: &str, summary: &str, reaso
     format!("{head}{summary}{tail}")
 }
 
-pub(crate) fn section(text: &str) -> Value {
+pub(super) fn section(text: &str) -> Value {
     json!({"type": "section", "text": {"type": "mrkdwn", "text": text}})
 }
 
-pub(crate) fn button(label: &str, action: &str, value: &str, style: &str) -> Value {
+pub(super) fn button(label: &str, action: &str, value: &str, style: &str) -> Value {
     json!({
         "type": "button",
         "text": {"type": "plain_text", "text": label},
@@ -204,7 +207,7 @@ pub(crate) fn button(label: &str, action: &str, value: &str, style: &str) -> Val
 }
 
 /// The escaped result line of a closed card: what happened, and a mention of who decided.
-pub(crate) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
+pub(super) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
     let what = labels.outcome(result);
     // The mention is markup and stays as it is; only the label is text.
     match user {

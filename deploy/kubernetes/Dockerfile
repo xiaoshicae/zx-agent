@@ -1,4 +1,5 @@
-# Image for running zx-agent in a resident Pod: zx-agent with bash, kubectl, curl and jq.
+# Image for running zx-agent in a resident Pod: zx-agent and zx-im, the IM service, with bash,
+# kubectl, curl and jq.
 # Build from the repository root (the build context must be the repository):
 #   docker build -f deploy/kubernetes/Dockerfile -t <registry>/zx-agent:<tag> .
 
@@ -6,7 +7,8 @@
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
 # Only what the build reads, so edits elsewhere keep it cached: the workspace manifest and its
-# crates. The program is crates/zx-cli; the built-in agents it compiles in are in crates/zx-app.
+# crates. The programs are crates/zx-cli (zx-agent) and crates/zx-im (zx-im); the built-in
+# agents they compile in are in crates/zx-app.
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --release --locked
@@ -27,6 +29,7 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERS
     | sha256sum --check \
  && chmod 0755 /usr/local/bin/kubectl
 COPY --from=build /src/target/release/zx-agent /usr/local/bin/zx-agent
+COPY --from=build /src/target/release/zx-im /usr/local/bin/zx-im
 # A fixed non-root user; the manifests run the Pod with the same IDs. /data is its home and
 # the mount point of the session volume, and this deployment's agents (deploy/kubernetes/agents)
 # are mounted from a ConfigMap at /data/.zx-agent/agents, where zx-agent looks for them; it exists in the image so that Pods without the

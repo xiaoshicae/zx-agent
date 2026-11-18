@@ -86,21 +86,24 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal --target "$TARGET"
       - name: Test release source
         run: cargo +1.88.0 test --locked
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo +1.88.0 build --locked --release --target "$TARGET"
-      - name: Package binary
+      - name: Package binaries
         run: |
           package_dir="$(mktemp -d)"
           trap 'rm -rf -- "$package_dir"' EXIT
-          binary="target/$TARGET/release/zx-agent"
-          test "$("$binary" --version)" = "zx-agent ${RELEASE_TAG#v}"
-          install -m 755 "$binary" "$package_dir/zx-agent"
+          # The command line (crates/zx-cli) and the IM service (crates/zx-im).
+          for program in zx-agent zx-im; do
+            binary="target/$TARGET/release/$program"
+            test "$("$binary" --version)" = "$program ${RELEASE_TAG#v}"
+            install -m 755 "$binary" "$package_dir/$program"
+          done
           cp LICENSE README.md "$package_dir/"
           # The README points to the reference pages; they go with it.
           cp -R docs "$package_dir/docs"
           mkdir -p dist
           COPYFILE_DISABLE=1 tar -czf "dist/zx-agent-$RELEASE_TAG-$TARGET.tar.gz" \
-            -C "$package_dir" zx-agent LICENSE README.md docs
+            -C "$package_dir" zx-agent zx-im LICENSE README.md docs
       - name: Attest package provenance
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
