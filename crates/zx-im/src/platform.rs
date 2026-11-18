@@ -1,26 +1,80 @@
-//! Helpers for the duties every platform has: splitting long text, dropping redeliveries,
-//! pacing posts to a chat, waiting out a rate limit, keeping what an open approval card
-//! shows, waiting between attempts to reach the platform, and telling a dead connection from
-//! a quiet one.
+//! The chat platforms, each an [`ImChannel`](crate::ImChannel), and what every platform
+//! shares: an HTTP client, its connection and the loop that reads it (pings, the silence
+//! that means it died, the stop), reports to the operator, splitting long text, dropping
+//! redeliveries, pacing posts to a chat, waiting out a rate limit, and waiting between
+//! attempts to reach the platform. A platform uses these and nothing of another platform.
+//!
+//! - `slack`: Slack, over Socket Mode and the Web API
+//! - `feishu`: Feishu, over its long connection and the open API (the feature `feishu`)
+
+#[cfg(feature = "feishu")]
+mod feishu;
+mod slack;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use anyhow::Context;
+use futures::{SinkExt, StreamExt};
+use reqwest::header::{AsHeaderName, HeaderMap};
+use tokio::net::TcpStream;
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
+use zx_util::env::env_value;
 use zx_util::sync::lock;
+
+use crate::{ErrorReport, ImError};
+
+#[cfg(feature = "feishu")]
+pub(crate) use feishu::FeishuSection;
+#[cfg(feature = "feishu")]
+pub use feishu::{FeishuChannel, FeishuConfig};
+pub(crate) use slack::SlackSection;
+pub use slack::{SlackChannel, SlackConfig};
 
 /// Characters per posted message, beyond which a channel splits text with [`split_text`].
 /// Slack recommends keeping message text within 4,000 characters (chat.postMessage,
 /// "Truncating content"); other platforms take more, but longer messages read badly anywhere.
-pub const MAX_TEXT_CHARS: usize = 4000;
+const MAX_TEXT_CHARS: usize = 4000;
 /// How often a rate-limited call is retried after waiting as long as the platform asks.
-pub const RATE_LIMIT_RETRIES: u32 = 3;
+const RATE_LIMIT_RETRIES: u32 = 3;
 /// Messages a [`Seen`] remembers: platforms redeliver only for a short while, and this
 /// covers far more messages than arrive in that time.
-pub const SEEN_CAPACITY: usize = 1024;
+const SEEN_CAPACITY: usize = 1024;
+/// Limit for each call to a platform and for opening its connection, unless a channel's
+/// settings say otherwise: long enough for a slow answer, short enough that a platform that
+/// stopped answering is tried again soon.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The connection over which a platform delivers its events: a WebSocket, with TLS for
+/// `wss://`.
+type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// An HTTP client whose calls each give up after `timeout`. Fails when it cannot be built.
+fn http_client(timeout: Duration) -> Result<reqwest::Client, ImError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))
+}
+
+/// Tell the operator about `error`, which a channel goes on after: through `on_error`, the
+/// callback of the channel's settings, when there is one.
+fn report(on_error: Option<&ErrorReport>, error: &ImError) {
+    if let Some(callback) = on_error {
+        callback(error);
+    }
+}
+
+/// The value of the variable `name`, which holds a platform's credential (`what`, for the
+/// error): set and not empty, or an error.
+fn secret(name: &str, what: &str) -> anyhow::Result<String> {
+    env_value(name).with_context(|| format!("{name} must hold {what}"))
+}
 
 /// Text in parts of at most `max` characters: the first part, which may be empty, and the
 /// rest.
@@ -33,7 +87,7 @@ pub const SEEN_CAPACITY: usize = 1024;
 /// A channel posts the parts itself: the first to the destination, the rest to the thread
 /// of the first. Those few lines are in each platform; sharing them would take a callback
 /// with a boxed future, which is harder to read than they are.
-pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, Vec<String>) {
+fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, Vec<String>) {
     let mut first = None;
     let mut rest = Vec::new();
     let mut current = String::new();
@@ -74,17 +128,21 @@ pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (Strin
     }
 }
 
-/// How long a rate-limited call waits before it is tried again: `seconds`, the value of the
-/// header in which the platform says so, but at most `longest`; one second when the header
-/// is missing or not a number of seconds.
-pub fn rate_limit_wait(seconds: Option<&str>, longest: Duration) -> Duration {
-    let secs = seconds.and_then(|value| value.trim().parse().ok()).unwrap_or(1);
+/// How long a rate-limited call waits before it is tried again: the seconds in the header
+/// `name` of `headers`, the answer's, in which the platform says so, but at most `longest`;
+/// one second when that header is missing, not text, or not a number of seconds.
+fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName, longest: Duration) -> Duration {
+    let secs = headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(1);
     Duration::from_secs(secs).min(longest)
 }
 
 /// Keys seen recently, such as the messages a channel has passed on, to drop redeliveries;
 /// the oldest are forgotten first.
-pub struct Seen<K> {
+struct Seen<K> {
     order: VecDeque<K>,
     keys: HashSet<K>,
     capacity: usize,
@@ -92,7 +150,7 @@ pub struct Seen<K> {
 
 impl<K: Clone + Eq + Hash> Seen<K> {
     /// Remember the last `capacity` keys.
-    pub fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             order: VecDeque::new(),
             keys: HashSet::new(),
@@ -101,7 +159,7 @@ impl<K: Clone + Eq + Hash> Seen<K> {
     }
 
     /// Record `key`; false if it was seen already.
-    pub fn insert(&mut self, key: &K) -> bool {
+    fn insert(&mut self, key: &K) -> bool {
         if !self.keys.insert(key.clone()) {
             return false;
         }
@@ -113,30 +171,18 @@ impl<K: Clone + Eq + Hash> Seen<K> {
         }
         true
     }
-
-    /// Whether `key` is remembered.
-    pub fn contains(&self, key: &K) -> bool {
-        self.keys.contains(key)
-    }
-
-    /// Forget `key`, so that it is new to the next [`insert`](Self::insert).
-    pub fn remove(&mut self, key: &K) {
-        if self.keys.remove(key) {
-            self.order.retain(|kept| kept != key);
-        }
-    }
 }
 
 /// When each chat may be posted to next, for a platform that allows so many posts per chat
 /// per second. Concurrent sends reserve their turn under the lock and wait without it.
-pub struct Pacer {
+struct Pacer {
     interval: Duration,
     next: Mutex<HashMap<String, Instant>>,
 }
 
 impl Pacer {
     /// Posts to one chat at least `interval` apart.
-    pub fn new(interval: Duration) -> Self {
+    fn new(interval: Duration) -> Self {
         Self {
             interval,
             next: Mutex::default(),
@@ -144,7 +190,7 @@ impl Pacer {
     }
 
     /// Wait for the next turn to post to `conversation`.
-    pub async fn turn(&self, conversation: &str) {
+    async fn turn(&self, conversation: &str) {
         let at = {
             let mut next = lock(&self.next);
             let now = Instant::now();
@@ -158,7 +204,7 @@ impl Pacer {
 
 /// Waits between attempts to reach a platform: each failed attempt doubles the next wait,
 /// up to the longest one.
-pub struct Backoff {
+struct Backoff {
     min: Duration,
     max: Duration,
     next: Duration,
@@ -166,29 +212,29 @@ pub struct Backoff {
 
 impl Backoff {
     /// The shortest wait of [`Backoff::default`].
-    pub const DEFAULT_MIN: Duration = Duration::from_secs(1);
+    const DEFAULT_MIN: Duration = Duration::from_secs(1);
     /// The longest wait of [`Backoff::default`].
-    pub const DEFAULT_MAX: Duration = Duration::from_secs(60);
+    const DEFAULT_MAX: Duration = Duration::from_secs(60);
 
     /// Waits from `min`, doubling up to `max`.
-    pub fn new(min: Duration, max: Duration) -> Self {
+    fn new(min: Duration, max: Duration) -> Self {
         Self { min, max, next: min }
     }
 
     /// Start again from the shortest wait, after an attempt succeeded.
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.next = self.min;
     }
 
     /// The wait after a failed attempt; the next one is twice as long, up to the longest.
-    pub fn advance(&mut self) -> Duration {
+    fn advance(&mut self) -> Duration {
         let wait = self.next;
         self.next = wait.saturating_mul(2).min(self.max);
         wait
     }
 
     /// Wait out the current backoff, doubling it; false when `cancel` is triggered meanwhile.
-    pub async fn wait(&mut self, cancel: &CancellationToken) -> bool {
+    async fn wait(&mut self, cancel: &CancellationToken) -> bool {
         pause(self.advance(), cancel).await
     }
 }
@@ -201,7 +247,7 @@ impl Default for Backoff {
 }
 
 /// Wait `wait`; false when `cancel` is triggered meanwhile.
-pub async fn pause(wait: Duration, cancel: &CancellationToken) -> bool {
+async fn pause(wait: Duration, cancel: &CancellationToken) -> bool {
     tokio::select! {
         () = cancel.cancelled() => false,
         () = tokio::time::sleep(wait) => true,
@@ -210,7 +256,7 @@ pub async fn pause(wait: Duration, cancel: &CancellationToken) -> bool {
 
 /// When to ping a connection next, and when its silence means it is dead: a frame is
 /// expected within twice the ping interval, plus a margin, of the last one.
-pub struct Keepalive {
+struct Keepalive {
     interval: Duration,
     last_ping: Instant,
     next_ping: Instant,
@@ -220,14 +266,14 @@ pub struct Keepalive {
 impl Keepalive {
     /// Longest ping interval, so that a bad value from a server cannot stop pings or hide a
     /// dead connection for hours.
-    pub const MAX_INTERVAL: Duration = Duration::from_secs(3600);
+    const MAX_INTERVAL: Duration = Duration::from_secs(3600);
     /// Added to twice the ping interval: an answer may be a few seconds late. At most the
     /// interval itself, so that a short interval, as tests use, does not wait seconds for a
     /// dead connection.
     const MARGIN: Duration = Duration::from_secs(5);
 
     /// Ping every `interval`, the first at once; the connection counts as alive now.
-    pub fn new(interval: Duration) -> Self {
+    fn new(interval: Duration) -> Self {
         let interval = interval.min(Self::MAX_INTERVAL);
         let now = Instant::now();
         Self {
@@ -239,33 +285,35 @@ impl Keepalive {
     }
 
     /// When to ping next.
-    pub fn next_ping(&self) -> Instant {
+    fn next_ping(&self) -> Instant {
         self.next_ping
     }
 
     /// When the connection counts as dead, unless a frame arrives first.
-    pub fn deadline(&self) -> Instant {
+    fn deadline(&self) -> Instant {
         self.deadline
     }
 
     /// How long a silence counts as a dead connection.
-    pub fn silence(&self) -> Duration {
+    fn silence(&self) -> Duration {
         Self::silence_for(self.interval)
     }
 
     /// A ping went out now.
-    pub fn pinged(&mut self) {
+    fn pinged(&mut self) {
         self.last_ping = Instant::now();
         self.next_ping = self.last_ping + self.interval;
     }
 
     /// A frame arrived now.
-    pub fn alive(&mut self) {
+    fn alive(&mut self) {
         self.deadline = Instant::now() + self.silence();
     }
 
-    /// Ping every `interval` from now on, counted from the last ping.
-    pub fn set_interval(&mut self, interval: Duration) {
+    /// Ping every `interval` from now on, counted from the last ping. Only a platform whose
+    /// server changes the interval while connected needs it: Feishu's.
+    #[cfg(any(feature = "feishu", test))]
+    fn set_interval(&mut self, interval: Duration) {
         self.interval = interval.min(Self::MAX_INTERVAL);
         self.next_ping = self.last_ping + self.interval;
     }
@@ -276,22 +324,71 @@ impl Keepalive {
     }
 }
 
+/// What came next over a connection ([`next_message`]).
+enum Next {
+    /// `cancel` was triggered; the connection was closed.
+    Cancelled,
+    /// The connection failed or ended without a close frame, or a ping could not be sent.
+    Lost,
+    /// Nothing came for this long, not even answers to the pings: the connection counts as
+    /// dead.
+    Silent(Duration),
+    /// A message: data, a control frame, or the platform's close.
+    Message(Message),
+}
+
+/// The next message over `socket`, which `keepalive` keeps: `ping` goes out whenever it says
+/// so, and its deadline passing in silence gives the connection up. Any message counts as
+/// life. When `cancel` is triggered, the socket is closed.
+///
+/// `ping` is cloned for each ping; its payload is shared, not copied.
+async fn next_message(
+    socket: &mut Socket,
+    keepalive: &mut Keepalive,
+    ping: &Message,
+    cancel: &CancellationToken,
+) -> Next {
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                // The server is stopping; a failed close changes nothing.
+                socket.close(None).await.ok();
+                return Next::Cancelled;
+            }
+            () = tokio::time::sleep_until(keepalive.next_ping()) => {
+                if socket.send(ping.clone()).await.is_err() {
+                    return Next::Lost;
+                }
+                keepalive.pinged();
+            }
+            () = tokio::time::sleep_until(keepalive.deadline()) => return Next::Silent(keepalive.silence()),
+            message = socket.next() => {
+                keepalive.alive();
+                return match message {
+                    Some(Ok(message)) => Next::Message(message),
+                    Some(Err(_)) | None => Next::Lost,
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use reqwest::header::{HeaderValue, RETRY_AFTER};
+
     use super::*;
 
     #[test]
-    fn a_key_forgotten_on_purpose_is_new_again_and_kept_for_its_own_turn() {
-        let mut seen = Seen::new(2);
-        assert!(seen.insert(&"a"));
-        assert!(seen.insert(&"b"));
-        seen.remove(&"a");
-        assert!(!seen.contains(&"a"));
-        assert!(seen.insert(&"a"), "forgotten, it is new");
-        // The order follows the inserts that count: "b" is now the oldest, and goes first.
-        assert!(seen.insert(&"c"));
-        assert!(!seen.contains(&"b"));
-        assert!(seen.contains(&"a") && seen.contains(&"c"));
+    fn seen_messages_are_dropped_and_old_ones_forgotten() {
+        let mut seen = Seen::new(SEEN_CAPACITY);
+        let key = |n: usize| ("C1".to_string(), n.to_string());
+        assert!(seen.insert(&key(0)));
+        assert!(!seen.insert(&key(0)));
+        for n in 1..=SEEN_CAPACITY {
+            assert!(seen.insert(&key(n)));
+        }
+        assert!(seen.insert(&key(0)), "the oldest key is forgotten");
     }
 
     #[test]
@@ -306,10 +403,27 @@ mod tests {
     #[test]
     fn a_rate_limit_wait_is_capped_and_defaults_to_one_second() {
         let longest = Duration::from_secs(60);
-        assert_eq!(rate_limit_wait(None, longest), Duration::from_secs(1));
-        assert_eq!(rate_limit_wait(Some("soon"), longest), Duration::from_secs(1));
-        assert_eq!(rate_limit_wait(Some(" 5 "), longest), Duration::from_secs(5));
-        assert_eq!(rate_limit_wait(Some("100000"), longest), longest);
+        let wait = |value: Option<HeaderValue>| {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(RETRY_AFTER, value);
+            }
+            rate_limit_wait(&headers, RETRY_AFTER, longest)
+        };
+        assert_eq!(wait(None), Duration::from_secs(1));
+        assert_eq!(wait(Some(HeaderValue::from_static("soon"))), Duration::from_secs(1));
+        // Not text: as good as missing.
+        assert_eq!(
+            wait(Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+            Duration::from_secs(1)
+        );
+        assert_eq!(wait(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
+        assert_eq!(wait(Some(HeaderValue::from_static(" 5 "))), Duration::from_secs(5));
+        assert_eq!(wait(Some(HeaderValue::from_static("100000"))), longest);
+        // Only the named header counts.
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
+        assert_eq!(rate_limit_wait(&headers, "x-reset", longest), Duration::from_secs(1));
     }
 
     #[test]

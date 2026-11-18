@@ -1,7 +1,8 @@
-//! The compiled program with MCP servers from config.toml: run, chat and im connect them at
+//! The compiled program with MCP servers from config.toml: run and chat connect them at
 //! startup; a tool the agent's permissions.allow lists runs, the others ask (and `run`, with no one
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
-//! cannot be used stops startup.
+//! cannot be used stops startup. The IM service's test of the same is with its program
+//! (`crates/zx-im/tests/im_cli.rs`).
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::zx_agent_in;
@@ -232,45 +233,4 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
         assert!(stderr.contains(expected), "{stderr}");
     }
     assert!(model.requests().is_empty());
-}
-
-#[tokio::test]
-async fn im_connects_the_mcp_servers_before_it_serves() {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = prom().await;
-    let model = MockServer::start(Vec::new()).await;
-    let config = dir.path().join("im.toml");
-    // Nothing listens on port 9, so the Slack connection keeps failing; this test stops first.
-    std::fs::write(
-        &config,
-        "[slack]\napiBase = \"http://127.0.0.1:9/api\"\n[access]\nconversations = [\"slack:C1\"]\n\
-         approvers = [\"slack:U2\"]\n[sessions]\ndir = \"sessions\"\n",
-    )
-    .unwrap();
-    let mut child = program("im", &model, dir.path(), &agent_home(dir.path(), &fake.url, "[]"))
-        .args(["--config", config.to_str().unwrap()])
-        .env("SLACK_APP_TOKEN", "xapp-test")
-        .env("SLACK_BOT_TOKEN", "xoxb-test")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
-    let mut seen = Vec::new();
-    tokio::time::timeout(WAIT, async {
-        while let Some(line) = lines.next_line().await.unwrap() {
-            let serving = line.starts_with("[im] platforms=");
-            seen.push(line);
-            if serving {
-                return;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("im did not start: {seen:?}"));
-    child.kill().await.unwrap();
-    let mcp = seen.iter().position(|line| line.starts_with("[mcp] prom: prom__query"));
-    assert!(mcp.is_some_and(|index| index < seen.len() - 1), "{seen:?}");
-    assert!(fake.requests("tools/list").len() >= 2, "{:?}", fake.received());
 }

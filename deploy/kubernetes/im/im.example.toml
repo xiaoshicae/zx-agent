@@ -1,4 +1,4 @@
-# Configuration of zx-agent im in the resident Pod (README.md, "IM 服务"). Copy it to
+# Configuration of zx-im in the resident Pod (README.md, "IM 服务"). Copy it to
 # im.toml, fill in the chats and approvers, and create the ConfigMap from it:
 #   kubectl create configmap zx-agent-im-config -n zx-agent --from-file=im.toml
 # The credentials come from the Secret zx-agent-im, never from this file.
@@ -55,4 +55,3 @@ allowed = "已批准"
 denied = "已拒绝"
 timedOut = "无人处理，已超时，未执行"
 cancelled = "已取消，未执行"
-failed = "审批失败，未执行"

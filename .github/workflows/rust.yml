@@ -48,6 +48,8 @@ jobs:
         run: cargo +stable clippy --locked -p zx-core --no-default-features --all-targets -- -D warnings
       - name: Clippy for zx-builtin without its default features
         run: cargo +stable clippy --locked -p zx-builtin --no-default-features --all-targets -- -D warnings
+      - name: Clippy for zx-im without its default features
+        run: cargo +stable clippy --locked -p zx-im --no-default-features --all-targets -- -D warnings
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings

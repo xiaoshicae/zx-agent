@@ -6,7 +6,9 @@ use std::time::Duration;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::time::Instant;
-use zx_im::{ImError, RATE_LIMIT_RETRIES};
+
+use crate::ImError;
+use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
 
 use super::{FeishuChannel, MAX_INTERVAL};
 
@@ -21,7 +23,7 @@ const RATE_LIMIT_CODES: [i64; 2] = [99_991_400, 230_020];
 const RATE_LIMIT_RESET: &str = "x-ogw-ratelimit-reset";
 
 /// Why an API call did not succeed.
-pub(crate) enum CallError {
+pub(super) enum CallError {
     /// No token: the secret was refused, or the token endpoint failed.
     Token(ImError),
     /// The call failed; `code` is what Feishu answered, `None` when no answer came.
@@ -86,7 +88,7 @@ impl FeishuChannel {
     }
 
     /// Call an open API method. A frequency limit is waited out and retried.
-    pub(crate) async fn api(&self, method: Method, path: &str, body: &Value) -> Result<Value, CallError> {
+    pub(super) async fn api(&self, method: Method, path: &str, body: &Value) -> Result<Value, CallError> {
         let url = format!("{}{path}", self.config.api_base.trim_end_matches('/'));
         let mut retries = 0;
         loop {
@@ -103,7 +105,7 @@ impl FeishuChannel {
                     message: format!("feishu {path}: {error}"),
                 })?;
             let status = response.status();
-            let wait = rate_limit_wait(&response);
+            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET, MAX_INTERVAL);
             // A body that is not JSON leaves no code; the status then explains the failure.
             let answer: Option<Value> = response.json().await.ok();
             let code = answer.as_ref().and_then(|answer| answer["code"].as_i64());
@@ -130,15 +132,4 @@ impl FeishuChannel {
             };
         }
     }
-}
-
-/// The wait a frequency limit asks for in the reset header of `response`, at most
-/// [`MAX_INTERVAL`]; a header that is not text counts as missing, which is one second
-/// ([`zx_im::rate_limit_wait`]).
-fn rate_limit_wait(response: &reqwest::Response) -> Duration {
-    let seconds = response
-        .headers()
-        .get(RATE_LIMIT_RESET)
-        .and_then(|value| value.to_str().ok());
-    zx_im::rate_limit_wait(seconds, MAX_INTERVAL)
 }

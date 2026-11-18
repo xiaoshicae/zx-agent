@@ -19,9 +19,6 @@ zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-app = { path = "crates/zx-app" }
 zx-builtin = { path = "crates/zx-builtin" }
 zx-core = { path = "crates/zx-core" }
-zx-im = { path = "crates/zx-im" }
-zx-im-feishu = { path = "crates/zx-im-feishu" }
-zx-im-slack = { path = "crates/zx-im-slack" }
 zx-testing = { path = "crates/zx-testing" }
 zx-util = { path = "crates/zx-util" }
 
@@ -84,5 +81,5 @@ manual_let_else = "warn"
 needless_continue = "warn"
 ignored_unit_patterns = "warn"
 # Layout: one module file style, the one the Rust Reference encourages. The exception is
-# `tests/common/mod.rs` of crates/zx-agent and crates/zx-cli, which Cargo needs under that name.
+# `tests/common/mod.rs` of crates/zx-cli and crates/zx-im, which Cargo needs under that name.
 mod_module_files = "warn"

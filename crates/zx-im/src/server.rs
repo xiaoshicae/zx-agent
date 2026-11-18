@@ -1,5 +1,19 @@
 //! The server and its contracts: the session key, the operator's [`ServerSink`], the reply
-//! texts, the configuration, and what every conversation shares. Routing is in `router.rs`.
+//! texts, the configuration, and what every conversation shares.
+//!
+//! - `router`: takes each platform event and hands it to its conversation's worker
+//! - `worker`: one conversation: its session, its runs and what waits for them
+//! - `admission`: how much input a conversation may have waiting at once
+//! - `outlet`: where a conversation posts, and the session it holds
+//! - `approval`: approval requests of a run, as cards in the conversation
+//! - `status`: the status message of each run, kept so that a restart can replace it
+
+mod admission;
+mod approval;
+mod outlet;
+mod router;
+mod status;
+mod worker;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
@@ -13,15 +27,17 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use zx_agent::Agent;
+use zx_agent::events::ApprovalResult;
+use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
-use crate::Agent;
-use crate::transcript::SessionQuery;
-use zx_core::events::ApprovalResult;
+use crate::{ApprovalId, ConversationId, Destination, ImChannel, ImError, MessageRef, ThreadId, UserId};
+use router::Router;
+use status::{left_behind, replace_left_behind};
 
-use super::router::Router;
-use super::status::{left_behind, replace_left_behind};
-use super::{ApprovalId, ConversationId, Destination, ImChannel, ImError, MessageRef, StatusStore, ThreadId, UserId};
+pub(crate) use status::StatusFiles;
+pub use status::StatusStore;
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
 const DEFAULT_MAX_CONVERSATIONS: NonZeroUsize = NonZeroUsize::new(128).expect("128 is not zero");
@@ -73,7 +89,7 @@ impl SessionKey {
     }
 
     /// Where the server posts for this conversation: the direct chat, or the thread.
-    pub(crate) fn destination(&self) -> Destination {
+    fn destination(&self) -> Destination {
         Destination {
             conversation: self.conversation.clone(),
             thread: self.thread.clone(),
@@ -114,8 +130,8 @@ pub struct ApprovalRecord {
 }
 
 /// Texts the server posts besides the model's answers. The defaults are English; a
-/// deployment sets its users' language, for example in the configuration of `zx-agent im`
-/// (`[replies]`, fields in camelCase, each optional).
+/// deployment sets its users' language, for example in im.toml, the configuration of the
+/// program `zx-im` (`[replies]`, fields in camelCase, each optional).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Replies {
@@ -217,7 +233,8 @@ pub struct ServerConfig {
     /// threads saying that the work goes on.
     ///
     /// The next start replaces those statuses with [`Replies::interrupted`]. `None`, the
-    /// default, keeps nothing. [`StatusFiles`](super::StatusFiles) keeps them in a directory.
+    /// default, keeps nothing; the program `zx-im` keeps them in files under its session
+    /// directory.
     pub statuses: Option<Arc<dyn StatusStore>>,
 }
 
@@ -244,7 +261,7 @@ impl Default for ServerConfig {
 /// The sessions are the agent's: it chooses the model, tools, policies and limits, and keeps
 /// the sessions in its storage, where [`SessionKey::labels`] marks those of a conversation.
 /// Their approvals must wait for the host
-/// ([`ApprovalMode::Wait`](zx_core::policy::ApprovalMode::Wait)): the server posts a card for
+/// ([`ApprovalMode::Wait`](zx_agent::policy::ApprovalMode::Wait)): the server posts a card for
 /// each request in the conversation and answers it when an approver clicks. A session that
 /// cannot be opened is reported to the conversation after [`Replies::cannot_open`]; the next
 /// message tries again.
@@ -329,23 +346,23 @@ fn distinct_platforms(channels: &[Arc<dyn ImChannel>]) -> Result<(), ImError> {
 }
 
 /// Settings and resources every conversation reads.
-pub(crate) struct Shared {
+struct Shared {
     /// Makes the session of each conversation, and keeps it open while the conversation
     /// holds it.
-    pub(crate) agent: Agent,
+    agent: Agent,
     /// Where new sessions work.
-    pub(crate) cwd: PathBuf,
-    pub(crate) sink: Arc<dyn ServerSink>,
+    cwd: PathBuf,
+    sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
-    pub(crate) replies: Replies,
-    pub(crate) max_conversations: usize,
-    pub(crate) max_pending_messages: NonZeroUsize,
-    pub(crate) max_pending_bytes: NonZeroUsize,
-    pub(crate) idle: Duration,
-    pub(crate) outbound_timeout: Duration,
+    replies: Replies,
+    max_conversations: usize,
+    max_pending_messages: NonZeroUsize,
+    max_pending_bytes: NonZeroUsize,
+    idle: Duration,
+    outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
-    pub(crate) permits: Arc<Semaphore>,
+    permits: Arc<Semaphore>,
     statuses: Option<Arc<dyn StatusStore>>,
     /// The names of users looked up so far, by platform; a user's ID stands for a name the
     /// platform did not give. As many as there are people writing to the bot.
@@ -359,7 +376,7 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// What the conversations share, from everything in `config` but the chats served.
-    pub(crate) fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+    fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let ServerConfig {
             cwd,
             // Taken by the router before.
@@ -394,7 +411,7 @@ impl Shared {
 
     /// Find the session of each conversation the storage holds: the most recently started
     /// of those with its labels. Run once, before any message is routed.
-    pub(crate) async fn index_sessions(&self) -> Result<(), ImError> {
+    async fn index_sessions(&self) -> Result<(), ImError> {
         let headers = self
             .agent
             .session_headers(&SessionQuery::default())
@@ -411,18 +428,18 @@ impl Shared {
     }
 
     /// The session the conversation `key` goes on in, if the bot ever took part in it.
-    pub(crate) fn session_of(&self, key: &SessionKey) -> Option<String> {
+    fn session_of(&self, key: &SessionKey) -> Option<String> {
         lock(&self.sessions).get(key).cloned()
     }
 
     /// The conversation `key` goes on in the session `id` from now on: one just made for it.
-    pub(crate) fn go_on_in(&self, key: &SessionKey, id: &str) {
+    fn go_on_in(&self, key: &SessionKey, id: &str) {
         lock(&self.sessions).insert(key.clone(), id.to_string());
     }
 
     /// The name people see for `user` on `channel`, asked once and then remembered. The user's
     /// ID when the platform gives no name; a failed lookup is reported against `key`, once.
-    pub(crate) async fn name_of(&self, channel: &dyn ImChannel, key: &SessionKey, user: &UserId) -> String {
+    async fn name_of(&self, channel: &dyn ImChannel, key: &SessionKey, user: &UserId) -> String {
         let known = (channel.platform().to_string(), user.clone());
         if let Some(name) = lock(&self.names).get(&known) {
             return name.clone();
@@ -438,11 +455,11 @@ impl Shared {
         name
     }
 
-    pub(crate) fn is_approver(&self, platform: &str, user: &UserId) -> bool {
+    fn is_approver(&self, platform: &str, user: &UserId) -> bool {
         self.approvers.get(platform).is_some_and(|users| users.contains(user))
     }
 
-    pub(crate) fn failed(&self, key: Option<&SessionKey>, error: String) {
+    fn failed(&self, key: Option<&SessionKey>, error: String) {
         self.sink.emit(&ServerEvent::Failed {
             key: key.cloned(),
             error,
@@ -451,7 +468,7 @@ impl Shared {
 
     /// `operation` within the outbound timeout. A failure, or the time running out, is
     /// reported to the operator against `key` as [`timed`] words it, and leaves nothing.
-    pub(crate) async fn bounded<T, E: Display>(
+    async fn bounded<T, E: Display>(
         &self,
         key: Option<&SessionKey>,
         act: &str,
@@ -466,12 +483,12 @@ impl Shared {
         }
     }
 
-    pub(crate) fn statuses(&self) -> Option<&dyn StatusStore> {
+    fn statuses(&self) -> Option<&dyn StatusStore> {
         self.statuses.as_deref()
     }
 
     /// Keep the status of a run that starts. A failure is reported; the run goes on.
-    pub(crate) async fn keep_status(&self, key: &SessionKey, status: &MessageRef) {
+    async fn keep_status(&self, key: &SessionKey, status: &MessageRef) {
         if let Some(statuses) = self.statuses() {
             let act = format!("keep status {}", status.id);
             self.bounded(Some(key), &act, statuses.insert(key, status)).await;
@@ -479,7 +496,7 @@ impl Shared {
     }
 
     /// Forget a status about to be replaced. A failure is reported.
-    pub(crate) async fn forget_status(&self, key: &SessionKey, status: &MessageRef) {
+    async fn forget_status(&self, key: &SessionKey, status: &MessageRef) {
         if let Some(statuses) = self.statuses() {
             let act = format!("forget status {}", status.id);
             self.bounded(Some(key), &act, statuses.remove(key, status)).await;
@@ -489,7 +506,7 @@ impl Shared {
 
 /// `operation` within `timeout`. The error says what could not be done: `cannot <act>:
 /// <error>`, or `cannot <act>: took longer than <n> s`.
-pub(crate) async fn timed<T, E: Display>(
+async fn timed<T, E: Display>(
     timeout: Duration,
     act: &str,
     operation: impl Future<Output = Result<T, E>>,
@@ -502,7 +519,7 @@ pub(crate) async fn timed<T, E: Display>(
 }
 
 /// `pairs` by platform.
-pub(crate) fn group<T: Eq + Hash>(pairs: Vec<(String, T)>) -> HashMap<String, HashSet<T>> {
+fn group<T: Eq + Hash>(pairs: Vec<(String, T)>) -> HashMap<String, HashSet<T>> {
     let mut grouped: HashMap<String, HashSet<T>> = HashMap::new();
     for (platform, item) in pairs {
         grouped.entry(platform).or_default().insert(item);

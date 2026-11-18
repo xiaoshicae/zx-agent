@@ -28,10 +28,10 @@
 //!   external MCP servers (`builtin::mcp`)
 //!
 //! What brings an agent to people is built on this library and is not part of it: the
-//! configuration the command line shares with other hosts (`zx-app`), the command line
-//! (`zx-cli`, the program `zx-agent`) and the chat platforms (`zx-im` and its platform
-//! crates). An embedder that needs only part of the library can depend on
-//! `zx-core`, `zx-ai`, `zx-ai-openai` or `zx-builtin` directly.
+//! configuration the programs share with other hosts (`zx-app`), the command line (`zx-cli`,
+//! the program `zx-agent`) and the IM service with its chat platforms (`zx-im`, the program
+//! `zx-im`). An embedder that needs only part of the library can depend on `zx-core`,
+//! `zx-ai`, `zx-ai-openai` or `zx-builtin` directly.
 
 /// The model layer: the types and the provider contract of `zx-ai`, and the OpenAI-compatible
 /// provider of `zx-ai-openai` as `openai`.

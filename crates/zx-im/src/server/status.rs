@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::server::Shared;
-use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, SessionKey, ThreadId};
+use crate::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, ThreadId};
+
+use super::{SessionKey, Shared};
 
 /// The extension of a record file; a record is written under another name first.
 const RECORD: &str = "json";
@@ -57,13 +58,13 @@ pub trait StatusStore: Send + Sync {
 ///
 /// A record is written under a temporary name and then renamed, so that a crash never leaves
 /// part of one. On Unix only the owner may read a record, as with session files.
-pub struct StatusFiles {
+pub(crate) struct StatusFiles {
     dir: PathBuf,
 }
 
 impl StatusFiles {
     /// Keep statuses in `dir`, which must exist and hold nothing else.
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
@@ -217,7 +218,7 @@ impl Record {
 
 /// The statuses an earlier process left behind; none when nothing keeps statuses or they
 /// cannot be read, which is reported.
-pub(crate) async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)> {
+pub(super) async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)> {
     let Some(statuses) = shared.statuses() else {
         return Vec::new();
     };
@@ -231,7 +232,7 @@ pub(crate) async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)
 ///
 /// Each is tried once, so a message the platform no longer lets the bot edit is not tried at
 /// every start. The stop gives up on the rest, which stay kept.
-pub(crate) async fn replace_left_behind(
+pub(super) async fn replace_left_behind(
     left: Vec<(SessionKey, MessageRef)>,
     channels: Vec<Arc<dyn ImChannel>>,
     shared: Arc<Shared>,

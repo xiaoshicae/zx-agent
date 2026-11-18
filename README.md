@@ -4,7 +4,7 @@
 
 当前版本为 v0.1.0，已实现：
 
-- 子命令：无人值守的 `run`，终端对话 `chat`（应急与脚本化入口），ACP agent `acp`（交互式界面由 ACP 客户端提供），IM 服务 `im`，列出会话的 `sessions`。
+- 两个程序：`zx-agent` 的子命令有无人值守的 `run`，终端对话 `chat`（应急与脚本化入口），ACP agent `acp`（交互式界面由 ACP 客户端提供），列出会话的 `sessions`；`zx-im` 是 IM 服务。
 - OpenAI 兼容的流式 provider，带错误分类、自动重试与响应大小上限。
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
@@ -39,7 +39,7 @@ apiKeyEnv = "OPENAI_API_KEY"
 ZX_BASE_URL=http://127.0.0.1:11434/v1 ./target/release/zx-agent run --model <模型名> "排查 nginx 返回 502 的原因"
 ```
 
-配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有：`config.toml` 决定环境，agent 决定角色。`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，主目录下的 `agents/unattended.md`、`agents/assistant.md` 替换它们；两者的区别与每个键见 [CONFIGURATION.md](docs/CONFIGURATION.md)。
+配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有：`config.toml` 决定环境，agent 决定角色。`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，主目录下的 `agents/unattended.md`、`agents/assistant.md` 替换它们；两者的区别与每个键见 [CONFIGURATION.md](docs/CONFIGURATION.md)。
 
 ### 终端对话
 
@@ -96,13 +96,13 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-agent im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
+`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
 export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
 # 使用 ⚑ D:5/CHINA FLAG: 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET（企业自建应用的凭据）
-zx-agent im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
+zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
 内置的 assistant 不限模型请求数与时间，所以示例在命令行给每次运行加了上限：不加时，一次不收敛的运行会一直占着运行名额（`maxRunning`）。等待审批的时间也算在时间上限里。`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置、会话的划分、审批、日志与退出见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
@@ -113,14 +113,12 @@ zx-agent im --config im.toml --model <model> --max-model-requests 100 --timeout-
 
 ## 架构
 
-一个 Cargo workspace，12 个 crate，依赖只能自上而下，由编译器保证：
+一个 Cargo workspace，10 个 crate，依赖只能自上而下，由编译器保证：
 
 ```
-zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、sessions）
-  ├─ zx-app        crates/zx-app        应用层：config.toml 与 agent、装配 agent、OpenTelemetry 导出（依赖 zx-agent）
-  ├─ zx-im-slack   crates/zx-im-slack   Slack 平台
-  ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
-  │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
+zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、sessions）
+zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分派的服务、Slack 与 ⚑ D:5/CHINA FLAG: 飞书平台（feature feishu）
+  ├─ zx-app    crates/zx-app    应用层，两个程序共用：config.toml 与 agent、装配 agent、OpenTelemetry 导出与收尾（依赖 zx-agent）
   └─ zx-agent  crates/zx-agent  SDK：把下面四个 crate 再导出成一个库，没有自己的代码
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
@@ -131,7 +129,7 @@ zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截�
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
 ```
 
-命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`，不编译命令行解析、ACP 与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
+命令行与 IM 服务是建在库之上的两个程序，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`，不编译命令行解析、ACP 与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
 
 ## 安全模型
 
@@ -160,11 +158,12 @@ cargo test                                   # 不需要网络和 API key；付�
 cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
 cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-builtin
+cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings      # 不带 ⚑ D:5/CHINA FLAG: 飞书平台的 zx-im
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 12 个 crate；加 `-p <crate>` 只处理一个。集成测试分三处：只用库的在 `crates/zx-agent/tests/`，只用应用层的在 `crates/zx-app/tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 10 个 crate；加 `-p <crate>` 只处理一个。集成测试分四处：只用库的在 `crates/zx-agent/tests/`，只用应用层的在 `crates/zx-app/tests/`，程序 `zx-agent` 的在 `crates/zx-cli/tests/`，IM 服务的在 `crates/zx-im/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `crates/zx-agent/tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 
@@ -172,7 +171,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 `Rust` 工作流在 `main` 的 push、PR 和手动运行时检查格式、clippy、Rustdoc、actionlint 与 shellcheck，并在 Linux 与 macOS 上构建和测试，另用 Rust 1.88 编译和测试。
 
-`Release` 工作流在推送 `v*` tag 时构建 release 草稿；tag 必须与 `Cargo.toml` 中 `[workspace.package]` 的版本一致。发布包含二进制、README、`docs/` 和 MIT 许可证，支持 `x86_64-unknown-linux-gnu` 与 `aarch64-apple-darwin`，附 `SHA256SUMS` 与 [GitHub 来源证明](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)。验证：
+`Release` 工作流在推送 `v*` tag 时构建 release 草稿；tag 必须与 `Cargo.toml` 中 `[workspace.package]` 的版本一致。发布包含两个二进制（`zx-agent` 与 `zx-im`）、README、`docs/` 和 MIT 许可证，支持 `x86_64-unknown-linux-gnu` 与 `aarch64-apple-darwin`，附 `SHA256SUMS` 与 [GitHub 来源证明](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)。验证：
 
 ```bash
 ZX_ARCHIVE=zx-agent-v0.1.0-aarch64-apple-darwin.tar.gz

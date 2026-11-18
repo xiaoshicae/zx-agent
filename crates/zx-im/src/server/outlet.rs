@@ -8,17 +8,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
+use zx_agent::events::{Budget, RunOutcome, RunReport};
+use zx_agent::input::{Input, PendingInput};
+use zx_agent::session::SessionError;
+use zx_agent::transcript::{CustomMessage, SessionQuery};
+use zx_agent::{Agent, Session, SessionOptions};
 
-use crate::session::SessionError;
-use crate::transcript::{CustomMessage, SessionQuery};
-use crate::{Agent, Session};
-use zx_core::SessionOptions;
-use zx_core::events::{Budget, RunOutcome, RunReport};
-use zx_core::input::{Input, PendingInput};
+use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
 
 use super::approval::{ApprovalEvents, ApprovalUpdate};
-use super::server::{Shared, timed};
-use super::{Destination, ImChannel, MessageRef, Post, Replacement, Replies, SessionKey, UserId};
+use super::{Replies, SessionKey, Shared, timed};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.
@@ -28,10 +27,10 @@ const SAID_TYPE: &str = "im_message";
 
 /// The session while the conversation holds it. Dropping it closes the session, which frees
 /// its place in the storage and everything set up for it.
-pub(crate) struct Opened {
+pub(super) struct Opened {
     // Shared with the task that reads the current run, as a Session is meant to be:
     // meanwhile the worker steers, cancels and takes queued input through it.
-    pub(crate) session: Session,
+    pub(super) session: Session,
     /// Keeps the session open until it is closed there.
     agent: Agent,
 }
@@ -46,7 +45,7 @@ impl Opened {
     /// Whether the session is still open: not once it was closed while the conversation held
     /// it, as a session closes itself when it can no longer write its records. Asks this
     /// handle, not the agent's table, which may hold the session opened again elsewhere.
-    pub(crate) fn still_open(&self) -> bool {
+    pub(super) fn still_open(&self) -> bool {
         !self.session.is_closed()
     }
 
@@ -54,7 +53,7 @@ impl Opened {
     /// A message an extension queued goes back to the queue, which that run takes before its
     /// first request. [`SessionError::Closed`] for a session that was closed while the
     /// conversation held it.
-    pub(crate) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
+    pub(super) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
         // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
         let queued = self.session.take_queued()?;
@@ -71,7 +70,7 @@ impl Opened {
     /// What people asked after the run's last look at the queue, from a session that closed
     /// meanwhile: it takes no more input, and its queues outlive it. A message an extension
     /// queued for that session goes with it.
-    pub(crate) fn taken_back(&self) -> Vec<Asked> {
+    pub(super) fn taken_back(&self) -> Vec<Asked> {
         let queues = self.session.queues();
         let queued = queues.take_all();
         queued
@@ -85,12 +84,12 @@ impl Opened {
 }
 
 /// What a person asked the bot: the text as the model reads it, and who sent it.
-pub(crate) struct Asked(pub(crate) PendingInput);
+pub(super) struct Asked(pub(super) PendingInput);
 
 impl Asked {
     /// Several messages as one running prompt. Their reservations are released as they
     /// leave pending queues; the sender of the last message is whom the answer is for.
-    pub(crate) fn joined(asked: Vec<Self>) -> Input {
+    pub(super) fn joined(asked: Vec<Self>) -> Input {
         let mut texts = Vec::with_capacity(asked.len());
         let mut actor = None;
         for Asked(pending) in asked {
@@ -108,16 +107,16 @@ impl Asked {
 
 /// Where the conversation posts and reports. Separate from the worker (`worker.rs`) so that
 /// posting borrows only these fields while the worker's own state stays with the worker.
-pub(crate) struct Outlet {
-    pub(crate) key: SessionKey,
-    pub(crate) to: Destination,
-    pub(crate) channel: Arc<dyn ImChannel>,
-    pub(crate) shared: Arc<Shared>,
+pub(super) struct Outlet {
+    pub(super) key: SessionKey,
+    pub(super) to: Destination,
+    pub(super) channel: Arc<dyn ImChannel>,
+    pub(super) shared: Arc<Shared>,
 }
 
 impl Outlet {
     /// Post text in the conversation. A failure is reported to the operator and returns `None`.
-    pub(crate) async fn post(&self, text: String) -> Option<MessageRef> {
+    pub(super) async fn post(&self, text: String) -> Option<MessageRef> {
         let message = Post::Text(text);
         self.shared
             .bounded(Some(&self.key), "post", self.channel.send(&self.to, &message))
@@ -125,7 +124,7 @@ impl Outlet {
     }
 
     /// Replace a posted message. A failure is reported to the operator.
-    pub(crate) async fn replace(&self, posted: &MessageRef, replacement: Replacement) {
+    pub(super) async fn replace(&self, posted: &MessageRef, replacement: Replacement) {
         let act = format!("update message {}", posted.id);
         self.shared
             .bounded(Some(&self.key), &act, self.channel.update(posted, &replacement))
@@ -141,7 +140,7 @@ impl Outlet {
     /// A session the storage no longer has, such as one whose file was removed, is reported
     /// and replaced as if the conversation were new; any other failure is the caller's to
     /// report, and the next message tries again.
-    pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
+    pub(super) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
             match shared.agent.open_session(&id).await {
@@ -181,7 +180,7 @@ impl Outlet {
 
     /// Create a session with the conversation's labels, which is its latest one from now
     /// on; the earlier ones are kept.
-    pub(crate) async fn create(&self) -> Result<Opened, String> {
+    pub(super) async fn create(&self) -> Result<Opened, String> {
         let options = SessionOptions {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
@@ -204,13 +203,13 @@ impl Outlet {
     }
 
     /// Tell the conversation, and the operator, that its session could not be opened.
-    pub(crate) async fn cannot_open(&self, error: &str) {
+    pub(super) async fn cannot_open(&self, error: &str) {
         self.post(format!("{}{error}", self.replies().cannot_open)).await;
         self.failed(format!("cannot open the session: {error}"));
     }
 
     /// Post the card of an approval request. An error says why nobody can decide.
-    pub(crate) async fn ask(&self, card: &Post) -> Result<MessageRef, String> {
+    pub(super) async fn ask(&self, card: &Post) -> Result<MessageRef, String> {
         let post = self.channel.send(&self.to, card);
         timed(self.shared.outbound_timeout, "post the approval request", post).await
     }
@@ -218,7 +217,7 @@ impl Outlet {
     /// Run `prompt` in `session` to its end, as the task of a run does. How its approvals
     /// end goes to the worker through `updates`; `stop`, the server stopping, cancels the
     /// run, which is still read to its end.
-    pub(crate) fn run(
+    pub(super) fn run(
         &self,
         session: &Session,
         prompt: Input,
@@ -251,7 +250,7 @@ impl Outlet {
     }
 
     /// Replace the status with how the run ended, or post that when no status was posted.
-    pub(crate) async fn answer(
+    pub(super) async fn answer(
         &self,
         ended: Result<Result<RunReport, SessionError>, JoinError>,
         status: Option<MessageRef>,
@@ -281,13 +280,13 @@ impl Outlet {
         }
     }
 
-    pub(crate) fn failed(&self, error: String) {
+    pub(super) fn failed(&self, error: String) {
         self.shared.failed(Some(&self.key), error);
     }
 
     /// `text` as the model reads it: in a group, after its sender's name, since several
     /// people talk there.
-    pub(crate) async fn attributed(&self, sender: &UserId, text: &str) -> String {
+    pub(super) async fn attributed(&self, sender: &UserId, text: &str) -> String {
         if self.key.thread.is_none() {
             return text.to_string();
         }
@@ -297,7 +296,7 @@ impl Outlet {
 
     /// Show the sender that a message reached the run that is answering. A failure is
     /// reported to the operator.
-    pub(crate) async fn acknowledge(&self, message: &MessageRef) {
+    pub(super) async fn acknowledge(&self, message: &MessageRef) {
         let act = format!("acknowledge message {}", message.id);
         self.shared
             .bounded(Some(&self.key), &act, self.channel.acknowledge(message))
@@ -340,14 +339,14 @@ impl Outlet {
         earlier
     }
 
-    pub(crate) fn replies(&self) -> &Replies {
+    pub(super) fn replies(&self) -> &Replies {
         &self.shared.replies
     }
 }
 
 /// What someone said without the bot answering, as the session records it: the model reads
 /// it with the next prompt.
-pub(crate) fn said(content: String) -> CustomMessage {
+pub(super) fn said(content: String) -> CustomMessage {
     CustomMessage {
         custom_type: SAID_TYPE.into(),
         content,
@@ -399,8 +398,9 @@ fn render(report: &RunReport, replies: &Replies) -> String {
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::Usage;
+
     use super::*;
-    use crate::ai::Usage;
 
     fn report(outcome: RunOutcome, final_text: &str, error: Option<&str>) -> RunReport {
         RunReport {

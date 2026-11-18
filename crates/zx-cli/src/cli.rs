@@ -21,8 +21,6 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Start a conversation with streaming output and terminal approvals.
     Chat(ChatArgs),
-    /// Answer chat messages from IM platforms, one session per thread, until stopped.
-    Im(ImArgs),
     /// List the session files chat keeps for a working directory, most recent first.
     Sessions(SessionsArgs),
     /// Serve the Agent Client Protocol over stdio for an editor or a terminal client.
@@ -132,20 +130,6 @@ pub(crate) struct AcpArgs {
 }
 
 #[derive(Args)]
-pub(crate) struct ImArgs {
-    /// IM service configuration (TOML): platforms, who may use the bot, limits and the session
-    /// directory. Not config.toml; see docs/CONFIGURATION.md, section "im.toml".
-    #[arg(long)]
-    pub(crate) config: PathBuf,
-
-    #[command(flatten)]
-    pub(crate) base: BaseArgs,
-
-    #[command(flatten)]
-    pub(crate) budget: BudgetArgs,
-}
-
-#[derive(Args)]
 pub(crate) struct SessionsArgs {
     /// Working directory whose session directory is listed: sessions/--<cwd with / as ->--
     /// in the zx-agent home (ZX_AGENT_HOME, else ~/.zx-agent). Defaults to the current one.
@@ -215,8 +199,6 @@ pub(crate) enum OutputMode {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
@@ -232,11 +214,6 @@ mod tests {
             Command::Chat(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
             _ => panic!("chat command"),
         }
-        let cli = Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--model", "m", flag, "3"]).unwrap();
-        match cli.command {
-            Command::Im(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
-            _ => panic!("im command"),
-        }
         assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
     }
 
@@ -249,7 +226,7 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.base.tools, None);
             }
-            Command::Chat(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
+            Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
@@ -258,23 +235,13 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
-            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+            Command::Run(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
     }
 
     #[test]
-    fn im_takes_a_configuration_file_and_the_shared_settings() {
-        let cli = Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--model", "m"]).unwrap();
-        match cli.command {
-            Command::Im(args) => {
-                assert_eq!(args.config, Path::new("im.toml"));
-                assert_eq!(args.budget.max_model_requests, None);
-            }
-            Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("im command"),
-        }
-        assert!(Cli::try_parse_from(["zx-agent", "im", "--model", "m"]).is_err());
-        // Each conversation of im, and each session of acp, has a file of its own.
-        assert!(Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--session", "s.jsonl"]).is_err());
+    fn acp_takes_no_session_file() {
+        // Each session of acp has a file of its own.
         assert!(Cli::try_parse_from(["zx-agent", "acp", "--session", "s.jsonl"]).is_err());
     }
 
@@ -288,7 +255,7 @@ mod tests {
         };
         // The client names the directory of each session it creates.
         assert!(cwd_help("acp").contains("session/list"), "{}", cwd_help("acp"));
-        for subcommand in ["run", "chat", "im"] {
+        for subcommand in ["run", "chat"] {
             assert_eq!(
                 cwd_help(subcommand),
                 "Working directory for tools. Defaults to the current directory"
@@ -302,7 +269,7 @@ mod tests {
             let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"].iter().chain(args)).unwrap();
             match cli.command {
                 Command::Chat(args) => (args.resume, args.no_session),
-                Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => {
+                Command::Run(_) | Command::Sessions(_) | Command::Acp(_) => {
                     panic!("chat command")
                 }
             }
@@ -362,12 +329,12 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
-            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+            Command::Run(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => assert_eq!(args.budget.timeout_secs, Some(900)),
-            Command::Chat(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
+            Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
     }
 }

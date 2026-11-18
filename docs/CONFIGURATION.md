@@ -39,7 +39,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `model` | 模型 ID |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
 | `maxTokens` | 每次回复的输出 token 上限，推理也算在内，太小可能让回答为空。不设时不限 |
-| `approvalTimeoutSecs` | chat、acp 与 im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
+| `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md) |
 | `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1` |
@@ -97,7 +97,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 
 ### 内置 agent
 
-`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-app/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
+`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-app/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
 
 | | `unattended` | `assistant` |
 |---|---|---|
@@ -172,7 +172,7 @@ shortFlags = ["A"]
 
 | 键 | 语义 |
 |---|---|
-| `ask` | 要审批的工具名，不能写 `bash(...)`。run 没有人审批而拒绝，chat 在终端询问，im 发审批卡片，acp 交给客户端 |
+| `ask` | 要审批的工具名，不能写 `bash(...)`。run 没有人审批而拒绝，chat 在终端询问，zx-im 发审批卡片，acp 交给客户端 |
 | `allow` | `bash(<前缀>)`：以该前缀开头（按词比较，区分大小写，只合并空白）的命令不经审批直接执行，只在 bash 需要审批时起作用；带 shell 语法、URL 或串联多个命令的仍要审批，见 [SECURITY.md](SECURITY.md)。MCP 工具名：该工具直接执行（MCP 工具默认都要审批）。写内置工具名，或同一工具同时在 `ask` 与 `allow` 中，报错 |
 | `allowExcept` | 命令中出现其中的字词（不分大小写，子串比较）时，`allow` 放行的命令仍要审批 |
 | `allowOptions.<程序>` | 该程序的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名）、`shortWithValue`（带值的单字母选项，如 `-oyaml`）、`shortFlags`（不带值、须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项 |
@@ -242,7 +242,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-agent im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.20 · 2026年11月
+CONFIGURATION.md · v0.21 · 2026年11月

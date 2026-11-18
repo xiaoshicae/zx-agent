@@ -1,19 +1,20 @@
-//! `zx-agent im`: configuration errors, and the whole path against a fake Slack and a fake
-//! model: a mention, an approval card and its click, hidden and redacted Slack tokens, the
-//! session file, the operator log, the stop, and a restart after a kill.
-mod common;
+//! The program `zx-im`: configuration errors, the MCP servers it connects before serving,
+//! and the whole path against a fake Slack and a fake model: a mention, an approval card and
+//! its click, hidden and redacted Slack tokens, the session file, the operator log, the stop,
+//! and a restart after a kill.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use common::zx_agent_in;
+use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::fake_slack::FakeSlack;
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, fake_model_config};
+use zx_testing::program::{self, Home, fake_model_config, write_agent};
 use zx_testing::{json_lines, stderr, stdout};
 
 const APP_TOKEN: &str = "xapp-1-im-test-token";
@@ -21,14 +22,27 @@ const BOT_TOKEN: &str = "xoxb-im-test-token";
 /// Only reached when the server never answers.
 const WAIT: Duration = Duration::from_secs(20);
 
-/// `zx-agent im` with `config`, in `dir`, against `model`; Slack tokens are set, and the
-/// zx-agent home in `dir` has a config.toml without retries.
+/// The error for a `[feishu]` section whose secret is not set: a build without that platform
+/// refuses the section itself.
+#[cfg(feature = "feishu")]
+const FEISHU_SECRET_UNSET: &str = "FEISHU_APP_SECRET must hold";
+#[cfg(not(feature = "feishu"))]
+const FEISHU_SECRET_UNSET: &str = "this build of zx-im has no such platform";
+
+/// The compiled `zx-im`, started in `cwd` with the zx-agent home `home` and apart from the
+/// developer's environment, as [`program::command`] starts a program.
+fn zx_im_in(cwd: &Path, home: Home<'_>) -> Command {
+    program::command(Path::new(env!("CARGO_BIN_EXE_zx-im")), cwd, home)
+}
+
+/// `zx-im` with `config`, in `dir`, against `model`; Slack tokens are set, and the zx-agent
+/// home in `dir` has a config.toml without retries.
 fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
-    zx_testing::program::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
-    let mut command = zx_agent_in(dir, Home::Agent(&home));
+    program::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
+    let mut command = zx_im_in(dir, Home::Agent(&home));
     command
-        .args(["im", "--config", config.to_str().unwrap(), "--model", "mock"])
+        .args(["--config", config.to_str().unwrap(), "--model", "mock"])
         .env("ZX_BASE_URL", model)
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)
@@ -49,7 +63,7 @@ fn only_session(sessions: &Path) -> String {
     std::fs::read_to_string(&files[0]).unwrap()
 }
 
-fn write_config(dir: &Path, text: &str) -> std::path::PathBuf {
+fn write_config(dir: &Path, text: &str) -> PathBuf {
     let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
     path
@@ -91,7 +105,7 @@ async fn configuration_errors_are_reported_before_serving() {
             "[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],
             Some("FEISHU_APP_SECRET"),
-            "FEISHU_APP_SECRET must hold",
+            FEISHU_SECRET_UNSET,
         ),
         (
             "[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
@@ -349,4 +363,74 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         .unwrap()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+const MCP_TOKEN_VAR: &str = "ZX_IM_CLI_TEST_MCP_TOKEN";
+const MCP_TOKEN: &str = "mcp-im-secret-5678";
+
+/// A zx-agent home in `dir` whose assistant agent enables no built-in tools, and whose
+/// config.toml has one MCP server at `url`, where `query` runs without approval and `range`
+/// asks.
+fn mcp_home(dir: &Path, url: &str) -> PathBuf {
+    let home = dir.join(".zx-agent");
+    write_agent(
+        &home,
+        "assistant",
+        "tools = []\n[context]\ndiscover = false\n[permissions]\nallow = [\"prom__query\"]\n",
+    );
+    program::write_config(
+        &home,
+        &format!(
+            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\n\
+             tools = [\"query\", \"range\"]\n\
+             [provider]\napiKeyEnv = \"ZX_IM_CLI_TEST_KEY\"\nmaxRetries = 0\n"
+        ),
+    );
+    home
+}
+
+#[tokio::test]
+async fn im_connects_the_mcp_servers_before_it_serves() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeMcp::start(
+        Era::Modern,
+        vec![tool("query", "Instant query."), tool("range", "Range query.")],
+    )
+    .await;
+    let model = MockServer::start(Vec::new()).await;
+    // Nothing listens on port 9, so the Slack connection keeps failing; this test stops first.
+    let config = write_config(
+        dir.path(),
+        "[slack]\napiBase = \"http://127.0.0.1:9/api\"\n[access]\nconversations = [\"slack:C1\"]\n\
+         approvers = [\"slack:U2\"]\n[sessions]\ndir = \"sessions\"\n",
+    );
+    let mut child = zx_im_in(dir.path(), Home::Agent(&mcp_home(dir.path(), &fake.url)))
+        .args(["--config", config.to_str().unwrap(), "--model", "mock"])
+        .env("ZX_BASE_URL", &model.base_url)
+        .env(MCP_TOKEN_VAR, MCP_TOKEN)
+        .env("SLACK_APP_TOKEN", "xapp-test")
+        .env("SLACK_BOT_TOKEN", "xoxb-test")
+        .env_remove("ZX_SECRET_FILES")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut seen = Vec::new();
+    tokio::time::timeout(WAIT, async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let serving = line.starts_with("[im] platforms=");
+            seen.push(line);
+            if serving {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("zx-im did not start: {seen:?}"));
+    child.kill().await.unwrap();
+    let mcp = seen.iter().position(|line| line.starts_with("[mcp] prom: prom__query"));
+    assert!(mcp.is_some_and(|index| index < seen.len() - 1), "{seen:?}");
+    assert!(fake.requests("tools/list").len() >= 2, "{:?}", fake.received());
 }

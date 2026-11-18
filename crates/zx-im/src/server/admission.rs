@@ -6,13 +6,13 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use zx_core::input::{Input, PendingInput};
+use zx_agent::input::{Input, PendingInput};
 use zx_util::sync::lock;
 
 /// The limit on one conversation's pending messages and their UTF-8 text bytes. The router and
 /// the worker reserve from it concurrently.
 #[derive(Debug)]
-pub(crate) struct InputBudget {
+pub(super) struct InputBudget {
     max_messages: usize,
     max_bytes: usize,
     /// Messages and text bytes reserved now.
@@ -20,7 +20,7 @@ pub(crate) struct InputBudget {
 }
 
 impl InputBudget {
-    pub(crate) fn new(max_messages: NonZeroUsize, max_bytes: NonZeroUsize) -> Self {
+    pub(super) fn new(max_messages: NonZeroUsize, max_bytes: NonZeroUsize) -> Self {
         Self {
             max_messages: max_messages.get(),
             max_bytes: max_bytes.get(),
@@ -30,7 +30,7 @@ impl InputBudget {
 
     /// Reserve one message of `bytes`; `None` when either limit would be passed. Dropping the
     /// permit returns both.
-    pub(crate) fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<InputPermit> {
+    pub(super) fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<InputPermit> {
         let mut used = lock(&self.used);
         if used.0 >= self.max_messages || bytes > self.max_bytes - used.1 {
             return None;
@@ -44,7 +44,7 @@ impl InputBudget {
     }
 
     /// `input` with a share of this budget as its hold; `None` when the budget is full.
-    pub(crate) fn try_admit(self: &Arc<Self>, input: Input) -> Option<PendingInput> {
+    pub(super) fn try_admit(self: &Arc<Self>, input: Input) -> Option<PendingInput> {
         let permit = self.try_reserve(text_bytes(&input))?;
         Some(PendingInput::held(input, permit))
     }
@@ -59,7 +59,7 @@ impl InputBudget {
 /// One message's share of an [`InputBudget`], returned when it is dropped. It moves with the
 /// message and is never copied, so moving a message between queues admits nothing new.
 #[derive(Debug)]
-pub(crate) struct InputPermit {
+pub(super) struct InputPermit {
     budget: Arc<InputBudget>,
     bytes: usize,
 }
@@ -68,7 +68,7 @@ impl InputPermit {
     /// `input`, the message as the session will record it, holding this share resized to its
     /// text, which may have grown by the sender's name; `None`, the share returned, when the
     /// budget has no room for the larger text.
-    pub(crate) fn attach(mut self, input: Input) -> Option<PendingInput> {
+    pub(super) fn attach(mut self, input: Input) -> Option<PendingInput> {
         let bytes = text_bytes(&input);
         {
             let mut used = lock(&self.budget.used);
@@ -101,7 +101,7 @@ fn text_bytes(input: &Input) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use zx_core::input::InputQueues;
+    use zx_agent::input::InputQueues;
 
     use super::*;
 
