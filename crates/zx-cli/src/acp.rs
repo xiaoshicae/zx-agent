@@ -21,6 +21,7 @@ mod commands;
 mod permissions;
 mod updates;
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -516,13 +517,15 @@ fn session_info(session: &StoredSession) -> SessionInfo {
         .updated_at(updated_at)
 }
 
-/// The text of a prompt: its text blocks, one per line. The agent advertises no image, audio
-/// or embedded-context capability, so clients send nothing else.
+/// The text of a prompt: its text blocks, one per line, and a line naming each resource
+/// link, which the protocol has every agent take. The agent advertises no image, audio or
+/// embedded-context capability, so clients send nothing else.
 fn prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text.as_str()),
+            ContentBlock::Text(text) => Some(Cow::Borrowed(text.text.as_str())),
+            ContentBlock::ResourceLink(link) => Some(Cow::Owned(format!("[resource {} ({})]", link.uri, link.name))),
             // The protocol may add block kinds: the enum is non-exhaustive.
             _ => None,
         })
@@ -569,7 +572,7 @@ fn tool_kind(name: &str) -> ToolKind {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::v1::schema::TextContent;
+    use agent_client_protocol::v1::schema::{ResourceLink, TextContent};
     use zx_agent::ai::Usage;
 
     use super::*;
@@ -626,6 +629,18 @@ mod tests {
         ];
         assert_eq!(prompt_text(&blocks), "one\ntwo");
         assert_eq!(prompt_text(&[]), "");
+    }
+
+    #[test]
+    fn a_resource_link_in_a_prompt_reaches_the_model_as_a_line_naming_it() {
+        let blocks = vec![
+            ContentBlock::Text(TextContent::new("review this")),
+            ContentBlock::ResourceLink(ResourceLink::new("main.rs", "file:///work/src/main.rs")),
+        ];
+        assert_eq!(
+            prompt_text(&blocks),
+            "review this\n[resource file:///work/src/main.rs (main.rs)]"
+        );
     }
 
     #[test]
