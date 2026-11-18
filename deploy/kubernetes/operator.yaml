@@ -1,5 +1,14 @@
 # Optional: the writes that chat may perform, each after a person approves the command.
 # Bound to the resident Pod's account only; scheduled inspections stay read-only.
+#
+# Apply by itself, after writing one RoleBinding below for every namespace the agent may
+# change: kubectl apply -f deploy/kubernetes/operator.yaml
+# It is not part of kustomization.yaml, which would move every RoleBinding into the
+# namespace zx-agent.
+#
+# The grant is per namespace on purpose. RBAC cannot narrow patch to a restart: whoever may
+# patch a workload may change its image, command and service account. Leave out kube-system
+# and the namespace of zx-agent itself.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -18,15 +27,18 @@ rules:
     resources: ["pods"]
     verbs: ["delete"]
 ---
+# One of these per namespace: copy it and change metadata.namespace. The subject's namespace
+# is the one zx-agent runs in (kustomization.yaml).
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: zx-agent-operator
+  namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: zx-agent-operator
-# No namespace: kustomize fills it in (see rbac.yaml).
 subjects:
   - kind: ServiceAccount
     name: zx-agent
+    namespace: zx-agent

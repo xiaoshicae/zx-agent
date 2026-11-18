@@ -6,7 +6,7 @@
 
 - `Dockerfile`：zx-agent、IM 服务 zx-im 与 bash、kubectl、curl、jq、tini，以 10001 号非 root 用户运行。
 - `agents/`：生成 ConfigMap `zx-agent-agents`，挂载到主目录的 `agents/`，替换同名内置 agent。`assistant.md`（chat 与 zx-im）加入只读 kubectl 命令及其选项；`unattended.md`（巡检与单次任务）要求排障报告的固定小节。
-- `serviceaccounts.yaml`、`rbac.yaml`：常驻 Pod 的 `zx-agent` 与巡检的 `zx-agent-inspect`，都绑定预置的只读角色 `view`（不含 Secret）；`operator.yaml` 是可选的写权限。
+- `serviceaccounts.yaml`、`rbac.yaml`：常驻 Pod 的 `zx-agent` 与巡检的 `zx-agent-inspect`，都绑定预置的只读角色 `view`（不含 Secret）与 `zx-agent-cluster-view`（节点、持久卷、存储类）；`operator.yaml` 是可选的写权限，按命名空间授予，单独应用。
 - `pvc.yaml` 是 `/data` 的卷；`im/` 与 `multicluster/` 是可选组件。
 
 ## 部署
@@ -27,8 +27,8 @@
    kubectl -n zx-agent create secret generic zx-agent-model --from-file=api-key=<存放 API key 的文件>
    ```
 
-3. 执行 `kubectl apply -k deploy/kubernetes`。`rbac.yaml` 与 `operator.yaml` 由 kustomize 填入命名空间，只能用 `apply -k`；换命名空间时改 `kustomization.yaml` 的 `namespace`。
-4. 需要写操作时，取消 `kustomization.yaml` 中 `operator.yaml` 一行的注释，再执行第 3 步。
+3. 执行 `kubectl apply -k deploy/kubernetes`。`rbac.yaml` 由 kustomize 填入命名空间，只能用 `apply -k`；换命名空间时改 `kustomization.yaml` 的 `namespace`，以及 `operator.yaml` 中 `subjects` 的 `namespace`。
+4. 需要写操作时，在 `operator.yaml` 中为每个允许修改的命名空间写一个 RoleBinding（文件中的一个以 `default` 为例），再执行 `kubectl apply -f deploy/kubernetes/operator.yaml`。它不在 `kustomization.yaml` 中：kustomize 会把所有 RoleBinding 改到 `zx-agent` 命名空间。
 
 ## 使用
 
@@ -41,7 +41,8 @@ kubectl -n zx-agent logs job/inspect-now
 
 - 会话文件在卷上，用同一路径可以接着聊。一个文件同一时间只能被一个 chat 或 run 打开，否则报告 `is in use` 并以退出码 2 结束。锁依赖 `flock`，文件系统不支持时打开会话直接失败。
 - 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 `docs/REFERENCE.md` 的“run 退出码”。
-- 巡检的会话文件写在卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`，中断后可据此 `run --continue`；文件不自动清理，读取要在巡检不运行时用挂载这块卷的临时 Pod。
+- 巡检的会话文件写在卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`，中断后可据此 `run --continue`；每次巡检开始前删除 30 天前的文件（`cronjob.yaml` 中 `prune-sessions` 的 `-mtime`），因为卷写满后会话写不进去，巡检会全部失败。读取要在巡检不运行时用挂载这块卷的临时 Pod。
+- 巡检报告在 Pod 日志中，随 Job 保留一天（`ttlSecondsAfterFinished` 与两个 `JobsHistoryLimit`）；巡检失败没有通知，要由集群的监控发现失败的 Job。
 - 巡检的 agent 没有 `[permissions]`：除内置的拒绝规则（见仓库 `docs/SECURITY.md`）外，命令都直接执行，不会等待审批。有命令被拒时退出码仍可能是 0；在 `command` 中加 `--fail-on-denied` 后以退出码 9 结束。
 
 ## 多集群
@@ -94,7 +95,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 ## 权限
 
-两个账号都只有 `view`。启用 `operator.yaml` 后 `zx-agent` 另有下列写权限，这些命令每次都要人工确认：
+两个账号都只能读：`view` 覆盖各命名空间中除 Secret 外的多数对象，`zx-agent-cluster-view` 补上 `view` 不含的节点、持久卷与存储类。应用 `operator.yaml` 后，`zx-agent` 在其中写了 RoleBinding 的命名空间里另有下列写权限，这些命令每次都要人工确认：
 
 | 命令 | 需要的权限 |
 |-|-|
@@ -102,11 +103,14 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 | `kubectl scale` | `apps` 组 `deployments/scale`、`statefulsets/scale` 的 `patch` |
 | `kubectl delete pod` | `pods` 的 `delete` |
 
+RBAC 不能把 `patch` 限制为重启：能 `patch` 工作负载就能改它的镜像、启动命令与 ServiceAccount。所以写权限按命名空间授予，不要包含 `kube-system` 与 zx-agent 自己的命名空间。
+
 ## 安全说明
 
 - 主进程 tini 的环境里有 API key（启用 `im` 时在 zx-im 进程的环境里，连同 IM 凭据；巡检的主进程就是 zx-agent），同一用户的命令可以从 `/proc` 读到。读到的值被脱敏，不进入模型上下文；被诱导的命令仍可能把它发往外部（在 chat 中要确认）。
 - 命令与 agent 以同一用户运行，能修改 `/data` 中的会话文件。
-- 用 NetworkPolicy 默认拒绝出网时，要单独放行集群 DNS。
+- 用 NetworkPolicy 默认拒绝出网时，要单独放行集群 DNS。所有对象与 Pod 都带标签 `app.kubernetes.io/part-of: zx-agent`，可用于选择。
+- `/tmp` 是上限 1Gi 的 `emptyDir`，超出后 Pod 被驱逐；常驻 Pod 被驱逐后由 Deployment 重建，进行中的 chat 会中断。
 
 ## 清理
 
@@ -117,7 +121,7 @@ kubectl -n zx-agent delete secret zx-agent-model
 kubectl delete namespace zx-agent
 ```
 
-启用 IM 时另删 `zx-agent-im-config` 与 `zx-agent-im`；启用多集群时另删 `zx-agent-kubeconfig` 与 `zx-agent-clusters`，并在每个远端集群删除 `remote.yaml`。会话文件是否随存储卷声明删除，取决于 StorageClass 的回收策略。
+应用过 `operator.yaml` 时，先执行 `kubectl delete -f deploy/kubernetes/operator.yaml --ignore-not-found`。启用 IM 时另删 `zx-agent-im-config` 与 `zx-agent-im`；启用多集群时另删 `zx-agent-kubeconfig` 与 `zx-agent-clusters`，并在每个远端集群删除 `remote.yaml`。会话文件是否随存储卷声明删除，取决于 StorageClass 的回收策略。
 
 ## 验证记录
 
@@ -125,4 +129,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.6 · 2026年11月
+`deploy/kubernetes/README.md` · v0.7 · 2026年11月

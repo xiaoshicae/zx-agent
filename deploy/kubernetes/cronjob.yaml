@@ -1,7 +1,9 @@
 # Scheduled inspection: an unattended run with the read-only account. The answer is written
 # to the Pod log (kubectl logs); the exit code tells the result (docs/REFERENCE.md, "run 退出码").
 # Each run also keeps its session file, the audit record of every request and command, on
-# the volume zx-agent-inspect-sessions as sessions/<Pod name>.jsonl.
+# the volume zx-agent-inspect-sessions as sessions/<Pod name>.jsonl. Before each run, session
+# files older than 30 days are removed: a full volume would fail every run, since a run stops
+# when it cannot write its session.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -9,8 +11,10 @@ metadata:
 spec:
   schedule: "0 * * * *"
   concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
+  # A day of hourly reports stays readable with kubectl logs; ttlSecondsAfterFinished below
+  # removes each Job after the same day.
+  successfulJobsHistoryLimit: 24
+  failedJobsHistoryLimit: 24
   jobTemplate:
     spec:
       backoffLimit: 0
@@ -29,6 +33,29 @@ spec:
             fsGroup: 10001
             seccompProfile:
               type: RuntimeDefault
+          initContainers:
+            # The directory does not exist before the first run. Change the 30 after -mtime to
+            # keep the audit records for another number of days.
+            - name: prune-sessions
+              image: zx-agent
+              command:
+                - sh
+                - -c
+                - "[ ! -d /data/sessions ] || find /data/sessions -maxdepth 1 -type f -name '*.jsonl' -mtime +30 -delete"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: sessions
+                  mountPath: /data
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
           containers:
             - name: inspect
               image: zx-agent
@@ -95,5 +122,7 @@ spec:
             - name: agents
               configMap:
                 name: zx-agent-agents
+            # Beyond this the kubelet evicts the Pod, instead of commands filling the node's disk.
             - name: tmp
-              emptyDir: {}
+              emptyDir:
+                sizeLimit: 1Gi
