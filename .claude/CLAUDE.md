@@ -30,7 +30,7 @@
 - **`Agent` 是唯一入口**（D21）：`AgentConfig` 是所有会话共用的角色，属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 给出。`Session` 的 `send`、`continue_run`、`compact` 返回 `Run`，读它才推进；事件只从 `Run` 读出，观察所有运行用 `Hook::on_event`。
 - **审批由内核等待，不是接口**：策略询问时，默认（`ApprovalMode::Deny`）立即拒绝，`Wait` 时调用在内核里等宿主经 `Session::resolve_approval` 回答；审批不写入会话。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
-- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和命令行；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
+- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和命令行；同层模块互不引用（规则 08）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13）：`chat` 只作应急与脚本化入口，不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
 
 ## 命令
@@ -60,7 +60,7 @@
 2. 生产代码不用 `unwrap()`。`expect("原因")` 只用于可以证明成立的不变量。测试代码可以用 `unwrap()`。
 3. 不用 `#[allow(...)]` 压制警告。确实需要例外时用 `#[expect(lint, reason = "...")]`。唯一的例外见 `.claude/rules/01-code-style.md`。
 4. 持有 `std::sync::Mutex` 的 guard 时不 `.await`；async 代码里不调用阻塞 API，少量、有界的同步 I/O 除外（见 `.claude/rules/04-async-concurrency.md`）。
-5. 不新增依赖、不升级依赖、不修改 `rust-version`、不修改 `edition`，除非用户明确同意（`.claude/rules/08-dependencies.md`；已获授权的依赖见 `docs/ROADMAP.md` 的决策 D2）。
+5. 不新增依赖、不升级依赖、不修改 `rust-version`、不修改 `edition`，除非用户明确同意（`.claude/rules/07-dependencies.md`；已获授权的依赖见 `docs/ROADMAP.md` 的决策 D2）。
 6. 不使用 Rust 1.88 之后才稳定的语言特性和标准库 API。标准库 API 由 clippy 的 `incompatible_msrv` 检查；语言特性用 `cargo +1.88.0 check --all-targets` 验证。
 7. 测试失败时先查实现，不改断言去迁就错误的实现，不删除或 `#[ignore]` 失败的测试。`#[ignore]` 只用于付费的真实 API 测试。
 8. 不编造 crate、API、feature 名。不确定时查 `~/.cargo/registry/src/` 里对应版本的源码。

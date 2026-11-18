@@ -49,7 +49,7 @@ toml = { version = "1.1.8", default-features = false, features = ["parse", "serd
 uuid = { version = "1", features = ["v4"] }
 
 # Lints beyond clippy's defaults; clippy runs with `-D warnings`, so each is an error. The
-# thresholds are in clippy.toml; .claude/rules/09-size-and-duplication.md says what to do
+# thresholds are in clippy.toml; .claude/rules/08-size-and-duplication.md says what to do
 # with a hit.
 [workspace.lints.rust]
 # `pub` only where something outside the crate can reach it.

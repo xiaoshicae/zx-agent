@@ -20,7 +20,7 @@
 
 | 编号 | 现行规则 |
 |---|---|
-| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端（规则 08）；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。serde_json 开启 `preserve_order`（规则 01）。其他新依赖与升级先征得同意 |
+| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端（规则 07）；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。serde_json 开启 `preserve_order`（规则 01）。其他新依赖与升级先征得同意 |
 | D4 | 会话 API 是进程内方法调用，不做提交队列 / 事件队列（SQ/EQ） |
 | D5 | 命令默认在本机执行；容器执行在 `config.toml` 中显式开启。理由：Kubernetes Job 的 Pod 内通常没有 Docker |
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |

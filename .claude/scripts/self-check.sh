@@ -13,7 +13,7 @@ check() {
 }
 
 # 只看生产代码：从紧跟在 #[cfg(test)] 或 #[cfg(all(test, ...))] 后面的内联 mod（`mod tests {`）开始，到文件结尾都跳过；
-# 整个 `tests.rs` 与 `test_support.rs` 也跳过，它们只以 `#[cfg(test)] mod tests;` 或 `mod test_support;` 引入（规则 09）。
+# 整个 `tests.rs` 与 `test_support.rs` 也跳过，它们只以 `#[cfg(test)] mod tests;` 或 `mod test_support;` 引入（规则 08）。
 # 这样的声明本身不跳过任何内容：它可以写在文件开头，后面还是生产代码（如 crates/zx-core/src/transcript.rs）。
 # 单独带 #[cfg(test)] 的函数（如 crates/zx-core/src/transcript.rs 的 with_writer）不跳过。测试设施 crates/zx-testing
 # 是测试代码（红线 2 允许 unwrap），整个跳过。
