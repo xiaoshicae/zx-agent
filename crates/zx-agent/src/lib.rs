@@ -21,7 +21,7 @@
 //!   [`agent::RunLimits`].
 //! - [`ai`]: message types, the streaming event protocol and the provider contract of
 //!   `zx-ai` (pi: packages/ai), with the provider of `zx-ai-openai` as `ai::openai`
-//! - [`builtin`]: the implementations of `zx-tools`: the built-in tools (`builtin::tools`),
+//! - [`builtin`]: the implementations of `zx-builtin`: the built-in tools (`builtin::tools`),
 //!   where they run commands (`builtin::executor`), the policies (`builtin::policy`), the
 //!   hooks that continue a cut-off answer, redact known secrets and save long results
 //!   (`builtin::continuation`, `builtin::redact`, `builtin::output_store`), and the tools of
@@ -31,7 +31,7 @@
 //! configuration the command line shares with other hosts (`zx-app`), the command line
 //! (`zx-cli`, the program `zx-agent`) and the chat platforms (`zx-im` and its platform
 //! crates). An embedder that needs only part of the library can depend on
-//! `zx-core`, `zx-ai`, `zx-ai-openai` or `zx-tools` directly.
+//! `zx-core`, `zx-ai`, `zx-ai-openai` or `zx-builtin` directly.
 
 /// The model layer: the types and the provider contract of `zx-ai`, and the OpenAI-compatible
 /// provider of `zx-ai-openai` as `openai`.
@@ -39,6 +39,6 @@ pub mod ai {
     pub use zx_ai::*;
     pub use zx_ai_openai as openai;
 }
+/// The implementations that ship with zx-agent: the `zx-builtin` crate.
+pub use zx_builtin as builtin;
 pub use zx_core::*;
-/// The implementations that ship with zx-agent: the `zx-tools` crate.
-pub use zx_tools as builtin;

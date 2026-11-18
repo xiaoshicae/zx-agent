@@ -10,7 +10,7 @@ use zx_agent::agent::RunLimits;
 use zx_agent::ai::SystemPrompt;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::builtin::continuation::ContinueOnLength;
-use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
+use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
@@ -45,13 +45,20 @@ async fn main() -> anyhow::Result<()> {
         },
     ])
     .auto_approve(AutoApprove::new(["df", "free", "uptime", "head"]));
-    let system_prompt = SystemPrompt::new(INSTRUCTIONS).with_section("environment", &local_environment_section(&cwd));
-    // The key must not reach commands, where `env` would reveal it.
+    // Commands run on this machine, which the executor describes to the model. The key must
+    // not reach commands, where `env` would reveal it.
+    let executor = Arc::new(LocalExecutor {
+        hidden_env: vec!["OPENAI_API_KEY".to_string()],
+    });
+    let system_prompt =
+        SystemPrompt::new(INSTRUCTIONS).with_section("environment", &executor.environment_section(&cwd));
     let bash = BashTool {
-        executor: Arc::new(LocalExecutor {
-            hidden_env: vec!["OPENAI_API_KEY".to_string()],
-        }),
+        executor: executor.clone(),
         ..BashTool::default()
+    };
+    let read_file = ReadFileTool {
+        executor,
+        ..ReadFileTool::default()
     };
 
     let api_key = std::env::var("OPENAI_API_KEY").ok();
@@ -62,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let mut config = AgentConfig {
         system_prompt,
-        tools: vec![Arc::new(bash), Arc::new(ReadFileTool::default())],
+        tools: vec![Arc::new(bash), Arc::new(read_file)],
         // Nobody can stop an unattended run, so it gets bounds of its own.
         limits: RunLimits {
             max_model_requests: Some(30),

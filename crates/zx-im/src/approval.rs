@@ -96,7 +96,7 @@ impl ApprovalEvents {
 /// The command of a bash call, or the arguments of any other call, at most
 /// [`MAX_SUMMARY_CHARS`] characters long.
 fn summarize(arguments: &Value) -> String {
-    // `command` is the argument of the bash tool (`zx-tools`), which this crate cannot see:
+    // `command` is the argument of the bash tool (`zx-builtin`), which this crate cannot see:
     // the one coupling to a tool here, so that a shell command reads as one on the card.
     match arguments.get("command").and_then(Value::as_str) {
         Some(command) => clip(command, MAX_SUMMARY_CHARS),

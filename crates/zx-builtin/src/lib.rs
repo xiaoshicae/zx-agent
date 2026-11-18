@@ -1,7 +1,6 @@
 //! Everything of zx-agent that runs outside the kernel but ships with it: the built-in tools,
 //! where they run, the built-in policies and hooks, the storage of session files, and the
-//! MCP client. The `zx-agent` crate
-//! re-exports this crate as `builtin`.
+//! MCP client. The `zx-agent` crate re-exports this crate as `builtin`.
 //!
 //! - [`tools`]: built-in tools
 //! - [`executor`]: where built-in tools run commands and read or write files
@@ -10,6 +9,9 @@
 //! - [`policy`]: the built-in command and rule policies
 //! - [`continuation`]: the hook that continues an answer cut off at the output token limit
 //! - [`redact`]: the hook that redacts known secrets from tool output
+//! - `files`: bounded reads of regular files that never wait on a FIFO, for the executors,
+//!   the paging of tool output, the redaction and zx-app's configuration files; hidden, not
+//!   part of the API
 //! - `calendar`: dates of the Gregorian calendar, for the times that file names and prompts
 //!   show
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by

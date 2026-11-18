@@ -54,34 +54,30 @@ impl RedactSecrets {
     ///
     /// A directory stands for every file directly inside it whose name does not start with a
     /// dot, so a whole Kubernetes Secret volume can be given and keys added to it later are
-    /// covered. Every redaction reads them again, so a rotated value is covered and earlier
-    /// values stay redacted; surrounding whitespace is ignored. Content that is not UTF-8 is
-    /// matched as the built-in tools print it, decoded lossily. A file that is missing, or
-    /// that this process may not read, is skipped: commands running as the same user cannot
-    /// read it either. Any other failure, such as a file over 64 KiB or one that is not a
-    /// regular file, fails the hook, which discards the tool output; check the files with
-    /// [`check_secret_files`] before use to report those at startup.
+    /// covered. Every redaction reads them again, on a blocking thread, so a rotated value is
+    /// covered and earlier values stay redacted; surrounding whitespace is ignored. Content
+    /// that is not UTF-8 is matched as the built-in tools print it, decoded lossily. A file
+    /// that is missing, or that this process may not read, is skipped: commands running as
+    /// the same user cannot read it either. Any other failure, such as a file over 64 KiB or
+    /// one that is not a regular file, fails the hook, which discards the tool output; check
+    /// the files with [`check_secret_files`] before use to report those at startup.
     pub fn with_secret_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
         self.files.extend(files);
         self
     }
 
     /// The current values of the secret files, and earlier ones within [`MAX_FILE_SECRETS`].
-    fn file_secrets(&self) -> Result<Vec<String>, String> {
-        let mut current = Vec::new();
-        for path in &self.files {
-            for file in secret_files_at(path)? {
-                // Small, bounded local reads, synchronous like the other configuration reads.
-                match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
-                    // The built-in tools decode output the same way, so a value that is not
-                    // UTF-8 appears in their output exactly like this.
-                    Ok(bytes) => current.push(String::from_utf8_lossy(&bytes).trim().to_string()),
-                    Err(error) if is_unreadable(&error) => {}
-                    Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
-                }
-            }
+    async fn file_secrets(&self) -> Result<Vec<String>, String> {
+        if self.files.is_empty() {
+            return Ok(Vec::new());
         }
-        current.retain(|value| !value.is_empty());
+        // Listing directories and reading files block, which a hook must not do on the async
+        // thread: its timeout could not fire meanwhile (see `Hook`). The copy of the paths is
+        // the blocking task's own.
+        let files = self.files.clone();
+        let current = tokio::task::spawn_blocking(move || current_values(&files))
+            .await
+            .map_err(|error| format!("cannot read the secret files to redact tool output: {error}"))??;
         let mut seen = lock(&self.file_secrets);
         for value in &current {
             if !seen.contains(value) {
@@ -100,6 +96,25 @@ impl RedactSecrets {
         // A copy, so the lock is not held while the output is rewritten.
         Ok(seen.clone())
     }
+}
+
+/// The values the secret files registered at `paths` hold now, read synchronously: small,
+/// bounded local reads, on a blocking thread when a redaction needs them.
+fn current_values(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut current = Vec::new();
+    for path in paths {
+        for file in secret_files_at(path)? {
+            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+                // The built-in tools decode output the same way, so a value that is not
+                // UTF-8 appears in their output exactly like this.
+                Ok(bytes) => current.push(String::from_utf8_lossy(&bytes).trim().to_string()),
+                Err(error) if is_unreadable(&error) => {}
+                Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
+            }
+        }
+    }
+    current.retain(|value| !value.is_empty());
+    Ok(current)
 }
 
 /// The files to read for a registered path: the path itself, or for a directory the entries
@@ -142,7 +157,7 @@ impl Hook for RedactSecrets {
     }
 
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
-        let file_secrets = self.file_secrets()?;
+        let file_secrets = self.file_secrets().await?;
         let mut secrets: Vec<&str> = self.secrets.iter().chain(&file_secrets).map(String::as_str).collect();
         secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         secrets.dedup();

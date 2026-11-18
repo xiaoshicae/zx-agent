@@ -1,23 +1,47 @@
-//! The built-in tool-call policies, each a [`ToolPolicy`](zx_core::policy::ToolPolicy): rules by
-//! tool, the command policy of the `bash` tool, and the auto-approval of plain commands.
+//! The built-in tool-call policies, each a [`ToolPolicy`](zx_core::policy::ToolPolicy): rules
+//! by tool, and the command policy of the `bash` tool; with them [`AutoApprove`], the bash
+//! commands that a [`RulePolicy`] lets run where one of its rules asks.
 //!
 //! - `rules`: rules by tool name
 //! - `command`: the command policy of `bash`: denied patterns and programs
 //! - `auto_approve`: the bash commands that run without asking where a rule would ask
+//! - `test_support`, compiled for tests only: the calls the tests of the policies check
 
 mod auto_approve;
 mod command;
 mod rules;
+#[cfg(test)]
+mod test_support;
 
 use serde_json::Value;
 
 pub use auto_approve::{AutoApprove, ProgramOptions};
-pub use command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DENIED_PROGRAMS};
+pub use command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DEFAULT_DENIED_PROGRAMS, DEFAULT_READ_ONLY_PROGRAMS};
 pub use rules::{Rule, RuleMatcher, RulePolicy};
 
-/// The `command` argument of a bash call, when it is a string.
-fn command_of(args: &Value) -> Option<&str> {
-    args.get("command").and_then(Value::as_str)
+use crate::ai::ToolCall;
+use crate::tools::BASH;
+
+/// A tool call, as the policies that read bash commands see it.
+enum BashCall<'a> {
+    /// A call of another tool.
+    Other,
+    /// A call of bash whose `command` argument is missing or not a string.
+    NoCommand,
+    /// A call of bash, with its command.
+    Command(&'a str),
+}
+
+/// What `call` is to the policies that read bash commands: whether it calls bash, and with
+/// what command.
+fn bash_call(call: &ToolCall) -> BashCall<'_> {
+    if call.name != BASH {
+        return BashCall::Other;
+    }
+    match call.arguments.get("command").and_then(Value::as_str) {
+        Some(command) => BashCall::Command(command),
+        None => BashCall::NoCommand,
+    }
 }
 
 /// Whether a pipeline segment starts with `prefix` at a word boundary. Both have their

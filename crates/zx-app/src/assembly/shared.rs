@@ -39,9 +39,9 @@ pub(crate) struct Shared {
     pub(super) hidden_env: Vec<String>,
     /// The hook that exports every session's runs as traces, when an export is configured.
     pub(super) traces: Option<TraceHook>,
-    /// The turns at each file to change, which the file tools of every session take, so that
-    /// two sessions never overwrite each other's edit.
-    pub(super) files: Arc<FileMutationQueue>,
+    /// The queue of changes to each file, which the file tools of every session wait in, so
+    /// that two sessions never overwrite each other's edit.
+    pub(super) file_queue: Arc<FileMutationQueue>,
 }
 
 impl Shared {
@@ -78,7 +78,7 @@ impl Shared {
             notices,
             hidden_env: Vec::new(),
             traces: None,
-            files: Arc::default(),
+            file_queue: Arc::default(),
             settings,
             overrides,
             agent,

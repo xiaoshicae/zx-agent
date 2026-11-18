@@ -6,11 +6,13 @@
 //!   at a time
 //! - `search`: `grep`, `find` and `ls`
 //! - `truncate`: the bounds every tool's output keeps
+//! - `paging`: text a tool returns a page at a time, and the files of this machine read for it
 
 mod bash;
 mod edit;
 mod edit_text;
 mod mutation;
+pub mod paging;
 mod read;
 mod search;
 pub mod truncate;
@@ -29,7 +31,7 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use mutation::FileMutationQueue;
 pub use read::ReadFileTool;
-pub use search::{FindTool, GrepTool, LsTool, SearchSettings};
+pub use search::{FindTool, GrepTool, LsTool};
 pub use write::WriteFileTool;
 
 use crate::executor::Executor;
@@ -49,32 +51,33 @@ pub const GREP: &str = "grep";
 pub const FIND: &str = "find";
 /// Name of the built-in tool that lists a directory.
 pub const LS: &str = "ls";
+/// Name of the built-in tool that reads on in a stored tool result:
+/// [`ReadOutputTool`](crate::output_store::ReadOutputTool), which comes with the hook that
+/// stores long results.
+pub const READ_OUTPUT: &str = "read_output";
 
-/// Names accepted by [`builtin_tools`].
-pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, FIND, LS];
+/// The tools that run commands or read and write files through an executor: the names
+/// [`executor_tools`] builds.
+pub const EXECUTOR_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, FIND, LS];
 
 /// The largest file edit_file edits and, by default, read_file reads: enough for any source
 /// file, and far more than one call can show.
 const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Build built-in tools by name, in the given order, without duplicates, running commands and
-/// reading and writing files through `executor`, which also decides what commands must not
-/// see (see [`LocalExecutor::hidden_env`]). edit_file and write_file take their turns at each
-/// file from `files`, which the tools of other sessions may share to coordinate with them.
-/// Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
+/// Build the tools of [`EXECUTOR_TOOL_NAMES`] named in `names`, in the given order, without
+/// duplicates, running commands and reading and writing files through `executor`, which also
+/// decides what commands must not see (see [`LocalExecutor::hidden_env`]). edit_file and
+/// write_file wait for their turn at each file in `queue`, which the tools of other sessions
+/// may share to coordinate with them. Errors: a name that is not in [`EXECUTOR_TOOL_NAMES`].
 ///
 /// [`LocalExecutor::hidden_env`]: crate::executor::LocalExecutor::hidden_env
-pub fn builtin_tools(
+pub fn executor_tools(
     names: &[String],
     bash_timeout: Duration,
     executor: &Arc<dyn Executor>,
-    files: &Arc<FileMutationQueue>,
+    queue: &Arc<FileMutationQueue>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let queue = Arc::clone(files);
-    let search = SearchSettings {
-        executor: Arc::clone(executor),
-    };
     for name in names {
         let name = name.trim();
         if name.is_empty() || tools.iter().any(|tool| tool.name() == name) {
@@ -92,22 +95,22 @@ pub fn builtin_tools(
             }),
             EDIT_FILE => Arc::new(EditFileTool {
                 executor: Arc::clone(executor),
-                queue: queue.clone(),
+                queue: Arc::clone(queue),
             }),
             WRITE_FILE => Arc::new(WriteFileTool {
                 executor: Arc::clone(executor),
-                queue: queue.clone(),
+                queue: Arc::clone(queue),
             }),
             GREP => Arc::new(GrepTool {
-                settings: search.clone(),
+                executor: Arc::clone(executor),
             }),
             FIND => Arc::new(FindTool {
-                settings: search.clone(),
+                executor: Arc::clone(executor),
             }),
             LS => Arc::new(LsTool {
-                settings: search.clone(),
+                executor: Arc::clone(executor),
             }),
-            other => bail!("unknown tool {other:?}; available: {}", BUILTIN_TOOL_NAMES.join(", ")),
+            other => bail!("unknown tool {other:?}; available: {}", EXECUTOR_TOOL_NAMES.join(", ")),
         };
         tools.push(tool);
     }
@@ -179,25 +182,28 @@ mod tests {
     #[test]
     fn builds_tools_in_order_without_duplicates_or_blanks() {
         let requested = ["read_file", " bash ", "read_file", ""].map(String::from);
-        let tools = builtin_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
+        let tools = executor_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
         assert_eq!(names(&tools), ["read_file", "bash"]);
     }
 
     #[test]
     fn rejects_unknown_tool_names() {
-        let error = builtin_tools(&["curl".to_string()], Duration::from_secs(5), &local(), &Arc::default())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.starts_with("unknown tool \"curl\""), "{error}");
+        // read_output reads the results a hook stored, not through an executor.
+        for name in ["curl", READ_OUTPUT] {
+            let error = executor_tools(&[name.to_string()], Duration::from_secs(5), &local(), &Arc::default())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.starts_with(&format!("unknown tool {name:?}")), "{error}");
+        }
     }
 
     #[test]
     fn bash_gets_the_default_timeout_and_keeps_the_larger_maximum() {
-        let tools = builtin_tools(&["bash".to_string()], Duration::from_secs(7), &local(), &Arc::default()).unwrap();
+        let tools = executor_tools(&["bash".to_string()], Duration::from_secs(7), &local(), &Arc::default()).unwrap();
         let description = tools[0].definition().description;
         assert!(
-            description.contains("after 7s unless timeout_secs is set (max 600s)"),
+            description.contains("after 7s unless timeoutSecs is set (max 600s)"),
             "{description}"
         );
     }

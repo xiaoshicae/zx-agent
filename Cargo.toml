@@ -17,12 +17,12 @@ zx-agent = { path = "crates/zx-agent" }
 zx-ai = { path = "crates/zx-ai" }
 zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-app = { path = "crates/zx-app" }
+zx-builtin = { path = "crates/zx-builtin" }
 zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }
 zx-im-slack = { path = "crates/zx-im-slack" }
 zx-testing = { path = "crates/zx-testing" }
-zx-tools = { path = "crates/zx-tools" }
 zx-util = { path = "crates/zx-util" }
 
 agent-client-protocol = { version = "5.0", default-features = false, features = ["stdio"] }

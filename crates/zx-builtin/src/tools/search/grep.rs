@@ -1,14 +1,17 @@
 //! The `grep` tool: file contents matching a pattern, with ripgrep or POSIX grep.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    MAX_LINE_BYTES, SearchSettings, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote,
-    ripgrep_excludes, search_path,
+    MAX_LINE_BYTES, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes,
+    search, search_path,
 };
 use crate::ai::ToolDef;
+use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES};
 use zx_core::tools::{Tool, ToolContext, ToolOutput};
@@ -19,10 +22,18 @@ const GREP_LIMIT: usize = 100;
 const MAX_CONTEXT: usize = 10;
 
 /// Searches file contents for a pattern.
-#[derive(Default)]
 pub struct GrepTool {
-    /// Where and how the search runs.
-    pub settings: SearchSettings,
+    /// Where the search runs, and so what it must not see: on this machine, the variables in
+    /// [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
+    pub executor: Arc<dyn Executor>,
+}
+
+impl Default for GrepTool {
+    fn default() -> Self {
+        Self {
+            executor: Arc::new(LocalExecutor::default()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -138,7 +149,7 @@ impl Tool for GrepTool {
         let limit = positive(args.limit, GREP_LIMIT, "limit")?;
         // A match with its context, and the separator between groups of them.
         let lines = limit.saturating_mul(2 * args.context + 2).min(MAX_LINES);
-        let searched = self.settings.run(&args.script(lines), ctx).await?;
+        let searched = search(self.executor.as_ref(), &args.script(lines), ctx).await?;
         // Without context every line is a match, so only `limit` of them are shown.
         let shown = if args.context == 0 { limit } else { lines };
         finish(

@@ -1,5 +1,5 @@
 [package]
-name = "zx-tools"
+name = "zx-builtin"
 description = "Built-in tools, executors, tool policies, built-in hooks and the MCP client of zx-agent"
 version.workspace = true
 edition.workspace = true

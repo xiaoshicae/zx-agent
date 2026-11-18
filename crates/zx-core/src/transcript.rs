@@ -7,7 +7,7 @@
 //!
 //! A [`SessionStorage`] keeps the sessions, and the [`SessionLog`] it hands out keeps one
 //! session's entries: memory ([`MemoryStorage`]), session files (`JsonlStorage` of the
-//! zx-tools crate), or a backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
+//! zx-builtin crate), or a backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
 //! written.
 //!
 //! - `entry`: the header and the entries of the tree

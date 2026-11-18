@@ -3,8 +3,10 @@
 //! Facts the model needs, such as the operating system and the date, are written into the
 //! prompt when a session is opened instead of being left for the model to discover:
 //! discovering them costs turns, and a policy may deny or ask for the commands that would
-//! reveal them. [`environment_section`] describes this machine; a container describes itself
-//! with the same time and OS name ([`current_time`], [`pretty_name`]).
+//! reveal them. [`machine_section`] describes this machine, for [`LocalExecutor`]; a container
+//! describes itself with the same time and OS name ([`current_time`], [`pretty_name`]).
+//!
+//! [`LocalExecutor`]: super::LocalExecutor
 
 use std::path::Path;
 
@@ -17,7 +19,7 @@ use crate::calendar::civil_from_days;
 /// The section is made when the session is opened, and says so: the runs of a session that
 /// stays open, as in a chat, come later. The time is part of the prompt, so a resumed session
 /// gets a new prompt prefix and misses the provider's prompt cache on its first request.
-pub fn environment_section(cwd: &Path) -> String {
+pub(super) fn machine_section(cwd: &Path) -> String {
     let os = format!("{} ({})", os_release(), std::env::consts::ARCH);
     format!(
         "OS: {os}\nSession opened: {}\nWorking directory: {}",
@@ -113,7 +115,7 @@ mod tests {
 
     #[test]
     fn environment_names_the_os_the_time_the_session_was_opened_and_the_directory() {
-        let section = environment_section(Path::new("/srv/app"));
+        let section = machine_section(Path::new("/srv/app"));
         let lines: Vec<&str> = section.lines().collect();
         assert_eq!(lines.len(), 3, "{section}");
         assert!(lines[0].starts_with("OS: "), "{section}");

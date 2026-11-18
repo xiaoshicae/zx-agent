@@ -934,6 +934,24 @@ async fn continues_a_truncated_answer_and_joins_the_parts() {
 }
 
 #[tokio::test]
+async fn a_continuation_asks_with_the_prompt_the_host_gives() {
+    let provider = provider([FauxStep::truncated("Part one, "), FauxStep::text("part two.")]);
+    let mut config = config(provider.clone(), vec![]);
+    let hook = ContinueOnLength::new(1).with_prompt("Go on where you stopped.");
+    config.hooks.push("continue_on_length", Arc::new(hook));
+    let (runner, _) = RunnerSetup::new(config).build().await;
+
+    let report = runner.run("go").await;
+
+    assert_eq!(report.final_text, "Part one, part two.");
+    let second = summarize(&provider.requests()[1].messages);
+    assert_eq!(
+        second,
+        ["user:go", "assistant:Part one, ", "user:Go on where you stopped."]
+    );
+}
+
+#[tokio::test]
 async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
     let provider = provider([
         FauxStep::truncated("Steps:\n1. Check logs\n2. Add a pre-deploy"),

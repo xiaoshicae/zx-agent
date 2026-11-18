@@ -11,10 +11,12 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{Capture, await_end, collect};
-use super::{CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error};
+use super::environment::machine_section;
+use super::{CommandOutput, Executor, SHELL, ShellCommand, check_read_within, directory_error, special_file_error};
 use crate::files::{Links, open_without_blocking, read_bounded};
 
-/// Runs commands as child processes of the agent and reads files directly.
+/// Runs commands as child processes of the agent, with the `bash` found on `PATH`, and reads
+/// files directly.
 ///
 /// Each command leads its own process group, which is killed when the command ends, times out
 /// or is cancelled. A process that leaves the group, for example with `setsid` or by
@@ -60,8 +62,13 @@ impl Drop for ProcessGroup {
 
 #[async_trait]
 impl Executor for LocalExecutor {
+    /// This machine: its operating system and version, the time and the working directory.
+    fn environment_section(&self, cwd: &Path) -> String {
+        machine_section(cwd)
+    }
+
     async fn run(&self, request: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
-        let mut command = Command::new(request.shell);
+        let mut command = Command::new(SHELL);
         command
             .arg("-c")
             .arg(request.command)
@@ -76,9 +83,7 @@ impl Executor for LocalExecutor {
         // Lead a new process group so a timeout can stop pipelines and background children.
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to start {}: {e}", request.shell))?;
+        let mut child = command.spawn().map_err(|e| format!("failed to start {SHELL}: {e}"))?;
         let mut group = ProcessGroup(child.id());
         let stdout = Capture::spawn(child.stdout.take());
         let stderr = Capture::spawn(child.stderr.take());

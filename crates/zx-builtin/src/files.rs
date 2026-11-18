@@ -1,7 +1,8 @@
 //! Bounded reads of regular files, opened without blocking so that a FIFO is refused rather
-//! than waited on: synchronous for configuration at startup and secret files before a
-//! redaction, asynchronous for the files that tools read. The text reader is shared with
-//! zx-app, which reads configuration with it; not part of the API.
+//! than waited on: synchronous for configuration at startup and for secret files before a
+//! redaction (`redact`), asynchronous for the files that tools read (`LocalExecutor` and
+//! `tools::paging`). [`read_text_file`] is public for zx-app, which reads its configuration
+//! files with it; the module is not part of the API.
 
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -49,7 +50,7 @@ pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> 
 
 /// What opening a file does with a symbolic link in its place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Links {
+pub enum Links {
     /// Follows it to the file it names.
     Follow,
     /// Refuses it: the open fails.

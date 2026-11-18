@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::config::skills::{ReadSkillTool, TOOL_NAME};
+use crate::config::skills::{READ_SKILL, ReadSkillTool};
 use crate::config::{AgentDefinition, Config};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
@@ -97,7 +97,7 @@ impl ConfiguredAgent {
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
-                files: Arc::clone(&shared.files),
+                file_queue: Arc::clone(&shared.file_queue),
             })),
             ..AgentConfig::new(provider.clone(), model)
         };
@@ -240,7 +240,7 @@ fn provider(config: &Config) -> Result<(OpenAiCompatible, Option<String>)> {
 /// read_skill with the catalog of its skills for the prompt, when the agent enables it and
 /// has skills.
 fn skills_tool(agent: &mut AgentDefinition) -> Result<Option<(Arc<dyn Tool>, String)>> {
-    if agent.skills.is_empty() || !agent.tools.iter().any(|name| name == TOOL_NAME) {
+    if agent.skills.is_empty() || !agent.tools.iter().any(|name| name == READ_SKILL) {
         return Ok(None);
     }
     let tool = ReadSkillTool::new(std::mem::take(&mut agent.skills))?;

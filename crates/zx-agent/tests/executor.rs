@@ -10,14 +10,13 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::executor::{Captured, CommandEnd, CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::builtin::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, SearchSettings, WriteFileTool};
+use zx_agent::builtin::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, WriteFileTool};
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext};
 
 /// What a tool asked its executor to do.
 #[derive(Debug, PartialEq)]
 enum Request {
     Run {
-        shell: String,
         command: String,
         cwd: PathBuf,
         timeout: Duration,
@@ -53,7 +52,6 @@ impl Recorder {
 impl Executor for Recorder {
     async fn run(&self, command: &ShellCommand<'_>, _cancel: &CancellationToken) -> Result<CommandOutput, String> {
         self.requests.lock().unwrap().push(Request::Run {
-            shell: command.shell.into(),
             command: command.command.into(),
             cwd: command.cwd.into(),
             timeout: command.timeout,
@@ -98,7 +96,7 @@ async fn bash_hands_the_whole_command_to_its_executor() {
     };
 
     let output = tool
-        .execute(json!({"command": "ls -l", "timeout_secs": 7}), &ctx())
+        .execute(json!({"command": "ls -l", "timeoutSecs": 7}), &ctx())
         .await
         .unwrap();
 
@@ -106,7 +104,6 @@ async fn bash_hands_the_whole_command_to_its_executor() {
     assert_eq!(
         *executor.requests.lock().unwrap(),
         [Request::Run {
-            shell: "bash".into(),
             command: "ls -l".into(),
             cwd: "/work".into(),
             timeout: Duration::from_secs(7),
@@ -231,9 +228,7 @@ fn tools_declare_the_execution_mode_of_their_executor() {
 async fn grep_hands_its_script_to_its_executor() {
     let recorder = Recorder::new(|| CommandEnd::Exited(0));
     let grep = GrepTool {
-        settings: SearchSettings {
-            executor: recorder.clone(),
-        },
+        executor: recorder.clone(),
     };
 
     grep.execute(json!({"pattern": "it's", "path": "src"}), &ctx())
@@ -241,18 +236,44 @@ async fn grep_hands_its_script_to_its_executor() {
         .unwrap();
 
     let requests = recorder.requests.lock().unwrap();
-    let [
-        Request::Run {
-            shell, command, cwd, ..
-        },
-    ] = requests.as_slice()
-    else {
+    let [Request::Run { command, cwd, .. }] = requests.as_slice() else {
         panic!("one command: {requests:?}");
     };
-    assert_eq!(shell, "sh");
     assert_eq!(cwd, Path::new("/work"));
     // The pattern and the path reach the shell single-quoted.
     assert!(command.contains(r"-- 'it'\''s' 'src'"), "{command}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_on_this_machine_run_with_bash() {
+    let dir = tempfile::tempdir().unwrap();
+    // Only bash sets BASH_VERSION; sh, which some systems link to dash, does not.
+    let command = ShellCommand {
+        command: "echo \"shell[${BASH_VERSION:+bash}]\"",
+        cwd: dir.path(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let output = LocalExecutor::default()
+        .run(&command, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout.bytes), "shell[bash]\n");
+}
+
+#[test]
+fn executors_describe_where_commands_run_for_the_prompt() {
+    let cwd = Path::new("/work");
+    // An executor that says nothing more names the working directory.
+    let recorder = Recorder::new(|| CommandEnd::Exited(0));
+    assert_eq!(recorder.environment_section(cwd), "Working directory: /work");
+    let section = LocalExecutor::default().environment_section(cwd);
+    let lines: Vec<&str> = section.lines().collect();
+    assert!(lines[0].starts_with("OS: "), "{section}");
+    assert!(lines[1].starts_with("Session opened: "), "{section}");
+    assert_eq!(lines[2..], ["Working directory: /work"]);
 }
 
 /// Cargo sets this variable for every test process, so commands inherit it unless hidden.
@@ -301,9 +322,7 @@ async fn commands_on_this_machine_do_not_see_the_hidden_variables_whichever_tool
             ..BashTool::default()
         };
         let grep = GrepTool {
-            settings: SearchSettings {
-                executor: executor(hidden_env),
-            },
+            executor: executor(hidden_env),
         };
         let ran = bash.execute(json!({"command": "true"}), &ctx).await.unwrap();
         let searched = grep.execute(json!({"pattern": "absent"}), &ctx).await.unwrap();

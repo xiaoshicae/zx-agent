@@ -193,34 +193,17 @@ fn tool_names(entries: &[Entry]) -> Vec<String> {
         .collect()
 }
 
-/// A program name of `permissions.allowOptions` is one lowercase word, since a command's
-/// program is looked up there without regard to case; options are written without their
-/// dashes, and a letter is either a flag or takes a value.
+/// A program name of `permissions.allowOptions` is one word, as a command's program is, and
+/// lowercase, since it is looked up without regard to case: `Tool` and `tool` would name one
+/// program twice. Its options must be ones that can match a command.
 fn check_program_options(program: &str, options: &ProgramOptions) -> Result<()> {
     ensure!(
         !program.is_empty() && !program.contains(char::is_whitespace) && program.to_lowercase() == program,
         "permissions.allowOptions: program {program:?} must be one lowercase word"
     );
-    for name in &options.long {
-        ensure!(
-            !name.is_empty() && !name.starts_with('-') && !name.contains(|c: char| c.is_whitespace() || c == '='),
-            "permissions.allowOptions.{program}: long option {name:?} must be a name without dashes, such as \"namespace\""
-        );
-    }
-    for letter in options.short_with_value.iter().chain(&options.short_flags) {
-        ensure!(
-            letter.is_ascii_alphanumeric(),
-            "permissions.allowOptions.{program}: short option {letter:?} must be a letter or digit"
-        );
-    }
-    if let Some(letter) = options
-        .short_flags
-        .iter()
-        .find(|letter| options.short_with_value.contains(letter))
-    {
-        bail!("permissions.allowOptions.{program}: {letter:?} cannot be both a flag and an option with a value");
-    }
-    Ok(())
+    options
+        .validate()
+        .map_err(|error| anyhow::anyhow!("permissions.allowOptions.{program}: {error}"))
 }
 
 #[cfg(test)]

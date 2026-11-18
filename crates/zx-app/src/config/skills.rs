@@ -9,14 +9,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use zx_agent::ai::ToolDef;
-use zx_agent::builtin::executor::{Executor, LocalExecutor};
-use zx_agent::builtin::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
+use zx_agent::builtin::tools::paging::{Links, Pager, read_text};
+use zx_agent::builtin::tools::truncate::MAX_BYTES;
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 use super::MAX_FILE_BYTES;
 
-/// Name exposed to the model when an agent enables skill loading.
-pub const TOOL_NAME: &str = "read_skill";
+/// Name of the tool that reads the body of a skill, which an agent enables like the built-in
+/// tools.
+pub const READ_SKILL: &str = "read_skill";
 
 /// Metadata supplied by an agent. `path` is relative to the agent file until resolved.
 #[derive(Debug, Deserialize)]
@@ -107,7 +108,7 @@ struct Args {
 #[async_trait]
 impl Tool for ReadSkillTool {
     fn name(&self) -> &str {
-        TOOL_NAME
+        READ_SKILL
     }
 
     fn effects(&self) -> Effects {
@@ -116,7 +117,7 @@ impl Tool for ReadSkillTool {
 
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: TOOL_NAME.into(),
+            name: READ_SKILL.into(),
             description: "Read registered skill instructions on demand. Large output is paginated; use the returned byte offset to continue. Does not execute scripts.".into(),
             parameters: json!({"type":"object","properties":{"name":{"type":"string","enum":self.skills.iter().map(|skill| &skill.name).collect::<Vec<_>>()},"offset":{"type":"integer","minimum":0,"description":"UTF-8 byte offset, supplied by a previous page"}},"required":["name"],"additionalProperties":false}),
         }
@@ -130,27 +131,20 @@ impl Tool for ReadSkillTool {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(args).map_err(|error| format!("invalid arguments: {error}"))?;
         let skill = self.find(&args.name)?;
-        // Skills are registered files on this machine, wherever commands run.
-        let local = LocalExecutor::default();
-        let bytes = tokio::select! {
+        // Skills are registered files on this machine, wherever commands run; the agent file
+        // that registers one may name it through a link.
+        let text = tokio::select! {
             biased;
             () = ctx.cancel.cancelled() => return Err("skill read cancelled".into()),
-            result = local.read_file(&skill.path, MAX_FILE_BYTES) => result?,
-        };
-        let text = String::from_utf8(bytes).map_err(|error| format!("skill {:?} is not UTF-8: {error}", skill.name))?;
-        let remaining = text.get(args.offset..).ok_or_else(|| {
-            "skill offset is out of range or inside a UTF-8 character; use the returned offset".to_string()
-        })?;
-        let page = truncate_head(remaining, MAX_LINES, MAX_BYTES);
-        let next = args.offset + page.text.len();
-        let mut content = page.text;
-        if next < text.len() {
-            content.push_str(&format!(
-                "\n[Skill output truncated; use read_skill with name={:?}, offset={next} to continue.]",
-                skill.name
-            ));
+            result = read_text(&skill.path, MAX_FILE_BYTES, Links::Follow) => result,
         }
-        Ok(ToolOutput::ok(content))
+        .map_err(|error| format!("cannot read skill {:?}: {error}", skill.name))?;
+        let pager = Pager {
+            tool: READ_SKILL,
+            argument: ("name", &skill.name),
+            max_bytes: MAX_BYTES,
+        };
+        Ok(ToolOutput::ok(pager.page(&text, args.offset)?))
     }
 }
 
@@ -211,16 +205,10 @@ mod tests {
             .await
             .unwrap()
             .content;
-        let (prefix, footer) = first.split_once("\n[Skill output truncated;").unwrap();
-        let offset: usize = footer
-            .split("offset=")
-            .nth(1)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .parse()
+        let (prefix, footer) = first
+            .split_once("\n[Use read_skill with name=\"review\", offset=")
             .unwrap();
+        let offset: usize = footer.split_whitespace().next().unwrap().parse().unwrap();
         assert_eq!(prefix.len(), offset);
         let second = tool
             .execute(json!({"name":"review","offset":offset}), &ctx(dir.path()))

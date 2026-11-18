@@ -1,13 +1,15 @@
 //! Where built-in tools run commands and read files.
 //!
 //! Tools keep their arguments, result format and truncation; an executor only runs a
-//! command, reads a file or writes one. [`LocalExecutor`] uses this machine; [`ContainerExecutor`]
-//! runs the same tools in an isolated Docker container.
+//! command, reads a file or writes one, and says where it does so. [`LocalExecutor`] uses
+//! this machine; [`ContainerExecutor`] runs the same tools in an isolated Docker container.
+//! Both run commands with bash.
 //!
 //! - `local`: commands and files on this machine
 //! - `container`: commands and files in one Docker container
 //! - `capture`: the bounded capture of a child's output, which both use
-//! - `environment`: what a system prompt says about the machine commands run on
+//! - `environment`: what a system prompt says about this machine, and the parts a container's
+//!   description shares with it
 
 mod capture;
 mod container;
@@ -22,18 +24,12 @@ use tokio_util::sync::CancellationToken;
 
 use zx_core::tools::ExecutionMode;
 
-pub use container::{
-    Access, ContainerConfig, ContainerExecutor, Network, Platform, check_network,
-    environment_section as container_environment_section,
-};
-pub use environment::environment_section as local_environment_section;
+pub use container::{Access, ContainerConfig, ContainerExecutor, InvalidContainerConfig, Network, UnusableWorkspace};
 pub use local::LocalExecutor;
 
-/// One shell command: `<shell> -c <command>` in `cwd`.
+/// One command line, run in `cwd` with the executor's shell: the model's command for the bash
+/// tool, a POSIX script for the search tools.
 pub struct ShellCommand<'a> {
-    /// The shell the tool is configured with. [`ContainerExecutor`] ignores it and uses the
-    /// shell of its configuration, which it checked at start.
-    pub shell: &'a str,
     pub command: &'a str,
     pub cwd: &'a Path,
     pub timeout: Duration,
@@ -83,7 +79,20 @@ pub trait Executor: Send + Sync {
         ExecutionMode::Parallel
     }
 
-    /// Run `command` until it exits, its timeout passes, or `cancel` fires.
+    /// What the `environment` section of a system prompt says about where this executor runs
+    /// the commands of a session that works in `cwd`, so that the model need not spend calls
+    /// finding out. [`LocalExecutor`] names this machine's operating system and
+    /// [`ContainerExecutor`] its container and how it is isolated, each with the time the
+    /// section is made and the working directory. Defaults to the working directory alone.
+    ///
+    /// Called when a session is set up; reading a few small local files there is fine.
+    fn environment_section(&self, cwd: &Path) -> String {
+        format!("Working directory: {}", cwd.display())
+    }
+
+    /// Run `command` with the executor's shell until it exits, its timeout passes, or
+    /// `cancel` fires. The built-in executors run `bash -c <command>`, so bash syntax works
+    /// wherever commands run.
     ///
     /// Then, and when the future is dropped, the processes it started are stopped, background
     /// children included. How far that reaches depends on the executor: [`LocalExecutor`]
@@ -108,6 +117,10 @@ pub trait Executor: Send + Sync {
     /// token before calling, and a caller that is dropped cannot tell when the write ends.
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String>;
 }
+
+/// The shell both built-in executors run commands with: the bash tool is named after it, and
+/// the search tools' scripts are POSIX, which it runs too.
+const SHELL: &str = "bash";
 
 /// The error for `path` being a directory where a file was expected, with what the model
 /// can do instead.

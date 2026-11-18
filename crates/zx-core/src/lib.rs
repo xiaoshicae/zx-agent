@@ -89,7 +89,7 @@
 //! [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
 //! [`transcript::SessionLog`]; approvals are answered through the session. The storage in
 //! memory ships with the kernel; the storage of session files, the built-in tools,
-//! executors, policies and hooks live in the `zx-tools` crate, providers in crates such as
+//! executors, policies and hooks live in the `zx-builtin` crate, providers in crates such as
 //! `zx-ai-openai`.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
