@@ -16,7 +16,7 @@
 
 ## config.toml
 
-最多 64 KiB 的普通 UTF-8 文件。键用 camelCase，顶层的键写在第一个 `[表]` 之前。未知的键与无效的值以退出码 2 报错，错误信息带文件路径（值无效时还带键名）；唯一的例外是 `[[models]]` 的 `cost` 中的未知键：它们被忽略，拼错的 `cacheRead`、`cacheWrite` 因此按 0 计。
+最多 64 KiB 的普通 UTF-8 文件。键用 camelCase，顶层的键写在第一个 `[表]` 之前。未知的键与无效的值以退出码 2 报错，错误信息带文件路径（值无效时还带键名）。
 
 ```toml
 model = "my-model"
@@ -281,4 +281,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.23 · 2026年11月
+CONFIGURATION.md · v0.24 · 2026年11月
