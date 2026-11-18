@@ -244,8 +244,8 @@ fn replayed_reasoning(assistant: &AssistantMessage, provider: &str, model: &str)
 
 /// Give every assistant message the `reasoning_content` field once one of them carries it,
 /// empty where there was none: thinking-mode servers can reject a history in which only
-/// some answers carry reasoning (what such a server answers, and what was observed, is in
-/// the README's notes on that service).
+/// some answers carry reasoning (the provider example in docs/CONFIGURATION.md quotes such a
+/// rejection).
 fn fill_missing_reasoning(messages: &mut [Value]) {
     const FIELD: &str = "reasoning_content";
     if !messages.iter().any(|message| message.get(FIELD).is_some()) {
