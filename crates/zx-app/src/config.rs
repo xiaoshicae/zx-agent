@@ -49,13 +49,16 @@ pub const HOME_ENV: &str = "ZX_AGENT_HOME";
 /// another.
 const HOME_DIR: &str = ".zx-agent";
 
+/// The configuration file in the zx-agent home.
+pub(crate) const CONFIG_FILE: &str = "config.toml";
+
 /// Maximum size of an agent file, context file or skill body.
 pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// The zx-agent home directory, which holds `config.toml`, `agents/` and `sessions/`:
 /// [`HOME_ENV`] when it is set and not empty, else `~/.zx-agent`; `None` when neither is
 /// known. A relative [`HOME_ENV`] is an error: it would depend on the working directory. A
-/// value that is not UTF-8 counts as unset, as for every variable the configuration reads.
+/// value that is not UTF-8 counts as unset.
 pub fn home() -> Result<Option<PathBuf>> {
     match env_value(HOME_ENV) {
         Some(value) => {

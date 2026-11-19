@@ -16,7 +16,7 @@ use zx_agent::builtin::policy::{AutoApprove, ProgramOptions};
 
 /// One entry of `allow` or `deny`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Entry {
+enum Entry {
     /// A tool, by the name the model calls it.
     Tool(String),
     /// Bash commands, by a text: a prefix in `allow`, a substring in `deny`.
@@ -29,14 +29,14 @@ pub(crate) struct Permissions {
     /// Tools whose calls need a person's approval; refused where no one can answer.
     pub(crate) ask: Vec<String>,
     /// Commands that run without asking, by prefix, and MCP tools that do.
-    pub(crate) allow: Vec<Entry>,
+    allow: Vec<Entry>,
     /// Texts that keep an allowed command asking, compared without case, such as `secret`.
     pub(crate) allow_except: Vec<String>,
     /// For a program, such as kubectl, the options an allowed command may pass; any other
     /// option asks. Programs not listed may pass any option.
     pub(crate) allow_options: BTreeMap<String, ProgramOptions>,
     /// Tools denied whatever else says, and commands containing a text.
-    pub(crate) deny: Vec<Entry>,
+    deny: Vec<Entry>,
     /// Ask nobody: calls that would wait for an approval run instead, while denials and the
     /// command policy still apply. Only where the executor isolates commands, such as the
     /// container, which the assembly checks, and not together with `ask`.
@@ -145,10 +145,15 @@ impl Permissions {
         )
     }
 
-    /// Check the tool names against what is registered: `known` for the tools that run unless
-    /// asked about, the built-in ones and the host's own, and `asking` for those that ask
-    /// unless allowed, the MCP tools and the host's extensions' tools; and the program options.
+    /// Check that `ask` is empty where every call is approved; the tool names against what is
+    /// registered: `known` for the tools that run unless asked about, the built-in ones and the
+    /// host's own, and `asking` for those that ask unless allowed, the MCP tools and the host's
+    /// extensions' tools; and the program options.
     pub(super) fn validate(&self, known: impl Fn(&str) -> bool, asking: &[String]) -> Result<()> {
+        ensure!(
+            !self.approve_all || self.ask.is_empty(),
+            "permissions.approveAll asks for no approval, so permissions.ask must be empty"
+        );
         let registered = |tool: &str| known(tool) || asking.iter().any(|name| name == tool);
         for tool in &self.ask {
             ensure!(registered(tool), "permissions.ask: unknown tool {tool:?}");

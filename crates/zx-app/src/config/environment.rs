@@ -62,14 +62,12 @@ pub struct McpServer {
     pub url: String,
     /// The variable holding the token sent as `Authorization: Bearer`; unset sends none.
     /// Commands do not see the variable, and its value is redacted from tool output.
-    #[serde(default)]
     pub token_env: Option<String>,
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
     /// Longest a call may go without an answer or a progress notification, in seconds;
     /// unset uses `toolTimeoutSecs`. A call that keeps reporting progress is bounded by the
     /// run's timeout and cancellation.
-    #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
 
@@ -162,9 +160,7 @@ struct RawToolOutput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawModel {
     id: String,
-    #[serde(default)]
     context_window: Option<u64>,
-    #[serde(default)]
     cost: Option<ModelCost>,
 }
 

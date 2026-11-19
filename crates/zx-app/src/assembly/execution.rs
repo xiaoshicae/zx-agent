@@ -88,7 +88,7 @@ impl ExecutorFactory for Container {
         let container = ContainerExecutor::start(config, session.cwd)
             .await
             .map_err(in_config_terms)
-            .context("cannot start the container for container execution")?;
+            .context("cannot start the container")?;
         Ok(Arc::new(container))
     }
 }

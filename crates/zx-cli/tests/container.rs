@@ -1267,7 +1267,7 @@ async fn a_workspace_the_container_user_cannot_use_is_explained_with_the_keys_of
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
         let stderr = stderr(&output);
         let explained = format!(
-            "cannot start the container for container execution: user {} {problem} {}; {advice}",
+            "cannot start the container: user {} {problem} {}; {advice}",
             fake.config().user,
             fake.workspace().display()
         );

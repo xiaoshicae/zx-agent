@@ -65,11 +65,13 @@ pub(crate) struct AgentDefinition {
     pub(crate) name: String,
     /// Effective preamble, before generated machine and project sections.
     pub(crate) instructions: String,
-    /// Requested built-in tools; read_skill is omitted when no catalog is registered.
+    /// The tools the agent enables, by name: built-in ones and the host's own. read_skill is
+    /// offered only to an agent with skills.
     pub(crate) tools: Vec<String>,
-    /// What the host lets the agent do, independently of prompt text.
+    /// What the agent may do, whatever its instructions say: which tools ask, which calls run
+    /// without asking and which are denied.
     pub(crate) permissions: Permissions,
-    /// Per-prompt request and time budgets.
+    /// The limits of each run: model requests, time, tokens and cost.
     pub(crate) limits: RunLimits,
     /// Number of length-truncated responses to continue automatically.
     pub(crate) continue_on_length: u32,
@@ -182,10 +184,6 @@ impl AgentDefinition {
         asking.extend(host.extensions.iter().cloned());
         self.permissions.validate(known, &asking)?;
         self.compaction.validate().map_err(|error| compaction_error(&error))?;
-        ensure!(
-            !self.permissions.approve_all || self.permissions.ask.is_empty(),
-            "permissions.approveAll asks for no approval, so permissions.ask must be empty"
-        );
         validate_skills(&self.skills)
     }
 }

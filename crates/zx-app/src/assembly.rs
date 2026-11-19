@@ -290,7 +290,8 @@ pub struct Overrides {
     pub model: Option<String>,
     /// Where new sessions work; the current directory without it.
     pub cwd: Option<PathBuf>,
-    /// The enabled tools, in place of the agent's.
+    /// The enabled tools, by name, in place of the agent's: each name is trimmed of
+    /// surrounding whitespace, and an empty one is dropped.
     pub tools: Option<Vec<String>>,
     /// Model requests per run, failed attempts included.
     pub max_model_requests: Option<u32>,

@@ -37,11 +37,19 @@ pub struct ProviderInput<'a> {
 
 /// A provider a factory built.
 pub struct BuiltProvider {
+    /// The provider the agent's sessions ask.
     pub provider: Arc<dyn Provider>,
     /// Whether requests carry the session's ID as the server's cache key
     /// ([`AgentConfig::session_cache_key`](zx_agent::AgentConfig::session_cache_key)).
     pub session_cache_key: bool,
 }
+
+/// The variable that holds the API key of the OpenAI-compatible provider unless
+/// `provider.apiKeyEnv` names another.
+const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+/// The variable that holds the API key of the Anthropic provider unless `provider.apiKeyEnv`
+/// names another.
+const DEFAULT_ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// The providers every application has, by name.
 pub(super) fn built_in() -> Registry<dyn ProviderFactory> {
@@ -63,7 +71,7 @@ struct OpenAi;
 
 impl ProviderFactory for OpenAi {
     fn api_key_env(&self) -> &str {
-        "OPENAI_API_KEY"
+        DEFAULT_OPENAI_API_KEY_ENV
     }
 
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
@@ -83,7 +91,7 @@ struct Anthropic;
 
 impl ProviderFactory for Anthropic {
     fn api_key_env(&self) -> &str {
-        "ANTHROPIC_API_KEY"
+        DEFAULT_ANTHROPIC_API_KEY_ENV
     }
 
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {

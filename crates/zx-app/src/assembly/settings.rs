@@ -66,7 +66,7 @@ impl Settings {
     pub(super) fn from_environment(model: Option<String>) -> Result<Self> {
         let home = config::home()?;
         let config = match &home {
-            Some(home) => Config::load(&home.join("config.toml"))?,
+            Some(home) => Config::load(&home.join(config::CONFIG_FILE))?,
             None => Config::default(),
         };
         let model = model.or_else(|| env_value(MODEL_ENV));
@@ -86,7 +86,7 @@ impl Settings {
             let config_file = config
                 .path
                 .as_ref()
-                .map_or_else(|| "config.toml".to_string(), |path| path.display().to_string());
+                .map_or_else(|| config::CONFIG_FILE.to_string(), |path| path.display().to_string());
             return Err(NoModel { config_file }.into());
         };
         anyhow::ensure!(!model.trim().is_empty(), "the model must not be empty");
@@ -131,7 +131,7 @@ pub(super) fn secret_files(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
         .chain(configured.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
         .collect();
-    checked_secret_files(secret_files).context("secretFiles in config.toml or ZX_SECRET_FILES")
+    checked_secret_files(secret_files).with_context(|| format!("secretFiles in config.toml or {SECRET_FILES_ENV}"))
 }
 
 /// `secret_files`, checked: each exists, and each is a file the redaction can match. No
@@ -140,7 +140,7 @@ pub(super) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<Pat
     for path in &secret_files {
         std::fs::metadata(path).with_context(|| format!("cannot use secret file {}", path.display()))?;
     }
-    check_secret_files(&secret_files).map_err(|error| anyhow::anyhow!("{error}"))?;
+    check_secret_files(&secret_files).map_err(anyhow::Error::msg)?;
     Ok(secret_files)
 }
 
