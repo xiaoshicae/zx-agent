@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError, mpsc};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
@@ -210,7 +210,8 @@ impl Phase {
 
 enum Step {
     Slot(Result<OwnedSemaphorePermit, AcquireError>),
-    Ended(Result<Result<Finished, SessionError>, JoinError>),
+    /// The work ended: how, or why it gave no report.
+    Ended(Result<Finished, String>),
     Idle,
 }
 
@@ -227,7 +228,13 @@ async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
             Step::Idle
         }
         Phase::Waiting { slot, .. } => Step::Slot(slot.as_mut().await),
-        Phase::Running { task, .. } => Step::Ended(task.await),
+        Phase::Running { task, .. } => Step::Ended(match task.await {
+            // The session refused the work: only this worker prompts it, one run at a time, so
+            // never for being busy.
+            Ok(ended) => ended.map_err(|error| error.to_string()),
+            // The work panicked.
+            Err(error) => Err(error.to_string()),
+        }),
     }
 }
 
@@ -508,7 +515,7 @@ impl Worker {
     /// ended. The run gives up its slot first, so that the next run waits its turn like any
     /// other. After `/new` that input runs in the new session, after `/cancel` it is dropped,
     /// and while the server stops it stays in the backlog, with what was heard.
-    async fn ended(&mut self, ended: Result<Result<Finished, SessionError>, JoinError>, closing: bool) {
+    async fn ended(&mut self, ended: Result<Finished, String>, closing: bool) {
         let (status, open, after, asked) = match self.take_phase() {
             Phase::Running {
                 slot,
@@ -527,7 +534,7 @@ impl Worker {
                 return;
             }
         };
-        let cancelled = matches!(&ended, Ok(Ok(finished)) if finished.cancelled());
+        let cancelled = matches!(&ended, Ok(finished) if finished.cancelled());
         self.out.answer(ended, status, closing).await;
         let leftover = self.leftover(open);
         if closing {

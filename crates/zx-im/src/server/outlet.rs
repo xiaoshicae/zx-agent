@@ -6,7 +6,6 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use zx_agent::events::{Budget, RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
@@ -281,7 +280,7 @@ impl Outlet {
     /// the status could not be replaced.
     pub(super) async fn answer(
         &self,
-        ended: Result<Result<Finished, SessionError>, JoinError>,
+        ended: Result<Finished, String>,
         status: Option<MessageRef>,
         closing: bool,
     ) {
@@ -289,11 +288,9 @@ impl Outlet {
         let answer = match ended {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
             // the same way and is told the same.
-            Ok(Ok(finished)) if closing && finished.cancelled() => replies.stopped.clone(),
-            Ok(Ok(Finished::Run(report))) => render(&report, replies),
-            Ok(Ok(Finished::Compaction(report))) => render_compaction(&report, replies),
-            // Only this worker prompts the session, one run at a time, so Busy cannot occur.
-            Ok(Err(error)) => format!("{}{error}", replies.failed),
+            Ok(finished) if closing && finished.cancelled() => replies.stopped.clone(),
+            Ok(Finished::Run(report)) => render(&report, replies),
+            Ok(Finished::Compaction(report)) => render_compaction(&report, replies),
             Err(error) => format!("{}{error}", replies.failed),
         };
         match status {
