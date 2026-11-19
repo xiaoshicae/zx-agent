@@ -23,14 +23,17 @@ use crate::{
     ThreadId, UserId,
 };
 
-use super::{Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, http_client, report, secret};
+use super::{
+    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput,
+    RATE_LIMIT_RETRIES, http_client, report, secret,
+};
 use api::CallError;
 use connection::{Ended, connection_url};
 use events::{Me, button, card_request, escape, history, resolution, section, split};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
-const PLATFORM: &str = "slack";
+pub(super) const PLATFORM: &str = "slack";
 /// The variables that hold the tokens, unless the `[slack]` section of im.toml names others.
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -111,7 +114,7 @@ impl SlackConfig {
 /// The `[slack]` section of im.toml: which variables hold the tokens, and where the Web API is.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct SlackSection {
+struct SlackSection {
     /// Variable holding the app-level token (`xapp-`), used for Socket Mode.
     #[serde(default = "default_app_token_env")]
     app_token_env: String,
@@ -130,30 +133,28 @@ fn default_bot_token_env() -> String {
     DEFAULT_BOT_TOKEN_ENV.into()
 }
 
-impl SlackSection {
-    /// The channel this section configures, with `labels` on its cards and what it goes on
-    /// after reported to the callback `log` gives for its platform name, and the variables
-    /// holding its tokens, which commands must not see. Fails when a variable does not hold
-    /// its token, and when the channel cannot be built.
-    pub(crate) fn channel(
-        &self,
-        labels: &CardLabels,
-        log: fn(&'static str) -> ErrorReport,
-    ) -> anyhow::Result<(Arc<dyn ImChannel>, Vec<String>)> {
+/// Slack, configured by the `[slack]` section of im.toml.
+pub(super) struct Slack;
+
+impl PlatformFactory for Slack {
+    /// The variables holding the tokens are the ones commands must not see. Fails when a
+    /// variable does not hold its token, and when the channel cannot be built.
+    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+        let section: SlackSection = toml::Value::Table(input.section.clone()).try_into()?;
         let mut config = SlackConfig::new(
-            secret(&self.app_token_env, "the Slack app-level token")?,
-            secret(&self.bot_token_env, "the Slack bot token")?,
+            secret(&section.app_token_env, "the Slack app-level token")?,
+            secret(&section.bot_token_env, "the Slack bot token")?,
         );
-        if let Some(base) = &self.api_base {
-            config.api_base.clone_from(base);
+        if let Some(base) = section.api_base {
+            config.api_base = base;
         }
-        config.labels.clone_from(labels);
-        config.on_error = Some(log(PLATFORM));
+        config.labels.clone_from(input.labels);
+        config.on_error = Some(input.on_error);
         let channel = SlackChannel::new(config).map_err(anyhow::Error::msg)?;
-        Ok((
-            Arc::new(channel),
-            vec![self.app_token_env.clone(), self.bot_token_env.clone()],
-        ))
+        Ok(BuiltChannel {
+            channel: Arc::new(channel),
+            hidden_env: vec![section.app_token_env, section.bot_token_env],
+        })
     }
 }
 

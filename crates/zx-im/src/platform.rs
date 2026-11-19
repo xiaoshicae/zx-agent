@@ -3,7 +3,8 @@
 //! that means it died, the stop), keeping a delivery's messages before it is acknowledged,
 //! reports to the operator, splitting long text, pacing posts to a chat, waiting out a rate
 //! limit, and waiting between attempts to reach the platform. A platform uses these and
-//! nothing of another platform.
+//! nothing of another platform. Each builds its channel from its im.toml section through a
+//! [`PlatformFactory`], registered under the section's name.
 //!
 //! - `slack`: Slack, over Socket Mode and the Web API
 //! - `feishu`: Feishu, over its long connection and the open API (the feature `feishu`)
@@ -13,7 +14,7 @@ mod feishu;
 mod slack;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -25,16 +26,70 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use zx_util::env::env_value;
+use zx_util::registry::Registry;
 use zx_util::sync::lock;
 
-use crate::{ErrorReport, ImError, Inbound, Inlet, Kept};
+use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
 
 #[cfg(feature = "feishu")]
-pub(crate) use feishu::FeishuSection;
-#[cfg(feature = "feishu")]
 pub use feishu::{FeishuChannel, FeishuConfig};
-pub(crate) use slack::SlackSection;
 pub use slack::{SlackChannel, SlackConfig};
+
+/// The name of Feishu's section, which a build without the platform refuses by name.
+#[cfg(not(feature = "feishu"))]
+const FEISHU: &str = "feishu";
+
+/// Builds a platform's channel from the section of im.toml named as the platform is
+/// registered ([`Program::register_platform`](crate::Program::register_platform)).
+pub trait PlatformFactory: Send + Sync {
+    /// The channel `input` describes. Fails on a section it cannot use, the error naming its
+    /// keys as im.toml writes them, and on a credential it cannot read.
+    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel>;
+}
+
+/// What a platform's channel is built from.
+pub struct PlatformInput<'a> {
+    /// The platform's section of im.toml.
+    pub section: &'a toml::Table,
+    /// The texts of approval cards: `[cardLabels]` over the English defaults.
+    pub labels: &'a CardLabels,
+    /// Where the channel reports what it goes on after: the operator log, as `failed` lines
+    /// with the platform's name.
+    pub on_error: ErrorReport,
+}
+
+/// A channel a factory built.
+pub struct BuiltChannel {
+    /// It goes by the name its platform is registered under ([`ImChannel::platform`]).
+    pub channel: Arc<dyn ImChannel>,
+    /// The variables that hold the platform's credentials: commands do not see them, and
+    /// their values are redacted from tool output.
+    pub hidden_env: Vec<String>,
+}
+
+/// The platforms every program has: Slack, and Feishu, which a build without it refuses.
+pub(crate) fn built_in() -> Registry<dyn PlatformFactory> {
+    let slack: Arc<dyn PlatformFactory> = Arc::new(slack::Slack);
+    #[cfg(feature = "feishu")]
+    let feishu = (feishu::PLATFORM, Arc::new(feishu::Feishu) as Arc<dyn PlatformFactory>);
+    #[cfg(not(feature = "feishu"))]
+    let feishu = (FEISHU, Arc::new(NotBuilt) as Arc<dyn PlatformFactory>);
+    Registry::new(
+        "IM platform",
+        vec![(slack::PLATFORM.to_string(), slack), (feishu.0.to_string(), feishu.1)],
+    )
+}
+
+/// Feishu's place in a build without it, so that its section is refused by name.
+#[cfg(not(feature = "feishu"))]
+struct NotBuilt;
+
+#[cfg(not(feature = "feishu"))]
+impl PlatformFactory for NotBuilt {
+    fn channel(&self, _input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+        anyhow::bail!("this build of zx-im has no such platform: it was built without the cargo feature `feishu`")
+    }
+}
 
 /// Characters per posted message, beyond which a channel splits text with [`split_text`].
 /// Slack recommends keeping message text within 4,000 characters (chat.postMessage,

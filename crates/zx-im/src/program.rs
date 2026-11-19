@@ -1,7 +1,8 @@
 //! The program `zx-im`: reads im.toml, connects the platforms it configures, and answers
 //! their messages, one session per conversation, until a signal or a platform's failure ends
 //! it. The server itself is [`Server`]; the agent comes from `zx-app`, as the command line's
-//! do.
+//! do. [`Program`] is the program with the platforms a host registers besides the built-in
+//! ones.
 //!
 //! - `args`: the command line
 
@@ -11,10 +12,12 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
+use clap::Parser;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -23,11 +26,10 @@ use zx_app::config::{Builtin, read_text};
 use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
+use zx_util::registry::Registry;
 
 use crate::backlog::BacklogFiles;
-#[cfg(feature = "feishu")]
-use crate::platform::FeishuSection;
-use crate::platform::SlackSection;
+use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
 use crate::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
@@ -53,17 +55,56 @@ const BACKLOG_DIR: &str = ".backlog";
 type Conversations = Vec<(String, ConversationId)>;
 type Approvers = Vec<(String, UserId)>;
 
-/// The IM service configuration file.
+/// The sections of im.toml that are the server's; each of the others configures the platform
+/// registered under its name.
+const SERVER_SECTIONS: [&str; 5] = ["access", "limits", "sessions", "replies", "cardLabels"];
+
+/// The program `zx-im` with the platforms a host registers besides Slack and Feishu: a
+/// program of the host's own runs it from its `main`, as `zx-im` does through
+/// [`main`](crate::main).
+pub struct Program {
+    platforms: Registry<dyn PlatformFactory>,
+}
+
+impl Default for Program {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Program {
+    /// The program with the built-in platforms: Slack, and Feishu where the build has it.
+    pub fn new() -> Self {
+        Self {
+            platforms: platform::built_in(),
+        }
+    }
+
+    /// Register `factory` under `name`, the im.toml section that configures it; its channel
+    /// goes by that name. A name that another platform goes by already fails the start.
+    pub fn register_platform(mut self, name: &str, factory: Arc<dyn PlatformFactory>) -> Self {
+        self.platforms.register(name, factory);
+        self
+    }
+
+    /// Run with the command line the process was started with, and return its exit code. A
+    /// configuration problem found before serving started is written to stderr and exits
+    /// with the code of a usage error.
+    pub async fn run(self) -> ExitCode {
+        match run(Args::parse(), &self.platforms).await {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("zx-im: {error:#}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        }
+    }
+}
+
+/// The IM service configuration file: the server's sections, and a section for each platform.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ConfigFile {
-    slack: Option<SlackSection>,
-    #[cfg(feature = "feishu")]
-    feishu: Option<FeishuSection>,
-    /// A build without that platform refuses its section by name, not as an unknown key.
-    #[cfg(not(feature = "feishu"))]
-    #[serde(rename = "feishu", default, deserialize_with = "not_built")]
-    _feishu: (),
     access: AccessSection,
     #[serde(default)]
     limits: LimitsSection,
@@ -74,15 +115,31 @@ struct ConfigFile {
     /// Texts of approval cards on every platform; each field optional, the defaults English.
     #[serde(default)]
     card_labels: CardLabels,
+    /// The section of each platform, by its name: what is left of the file but the server's.
+    #[serde(skip)]
+    platforms: Vec<(String, toml::Table)>,
 }
 
-/// The error for the section of a platform this build was made without: its cargo feature is
-/// off.
-#[cfg(not(feature = "feishu"))]
-fn not_built<'de, D: serde::Deserializer<'de>>(_section: D) -> Result<(), D::Error> {
-    Err(serde::de::Error::custom(
-        "this build of zx-im has no such platform: it was built without the cargo feature `feishu`",
-    ))
+impl ConfigFile {
+    /// The file `text` holds: its server's sections, checked, and the others, which only the
+    /// platforms they name can check.
+    fn parse(text: &str) -> Result<Self> {
+        let mut server = toml::Table::new();
+        let mut platforms = Vec::new();
+        for (key, value) in toml::from_str::<toml::Table>(text)? {
+            if SERVER_SECTIONS.contains(&key.as_str()) {
+                server.insert(key, value);
+                continue;
+            }
+            let toml::Value::Table(section) = value else {
+                bail!("unknown key `{key}`: a platform is configured by a section, such as [slack]");
+            };
+            platforms.push((key, section));
+        }
+        let mut file: Self = toml::Value::Table(server).try_into()?;
+        file.platforms = platforms;
+        Ok(file)
+    }
 }
 
 #[derive(Deserialize)]
@@ -116,10 +173,10 @@ struct SessionsSection {
 ///
 /// Traces are exported when the environment names an OTLP endpoint ([`shutdown`]); what could
 /// not be exported is said on stderr once serving ended, and never changes the exit code.
-pub(crate) async fn run(args: Args) -> Result<u8> {
+async fn run(args: Args, registered: &Registry<dyn PlatformFactory>) -> Result<u8> {
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
-    let Platforms { channels, hidden_env } = platforms(&file, &path)?;
+    let Platforms { channels, hidden_env } = platforms(&file, registered, &path)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &platforms)?;
     let (code, end) =
@@ -228,23 +285,37 @@ struct Platforms {
 
 impl Platforms {
     /// Add a platform's channel and the variables holding its secrets.
-    fn add(&mut self, (channel, secrets): (Arc<dyn ImChannel>, Vec<String>)) {
-        self.channels.push(channel);
-        self.hidden_env.extend(secrets);
+    fn add(&mut self, built: BuiltChannel) {
+        self.channels.push(built.channel);
+        self.hidden_env.extend(built.hidden_env);
     }
 }
 
-/// The platforms `file` configures. An error when it configures none.
-fn platforms(file: &ConfigFile, path: &Path) -> Result<Platforms> {
+/// The platforms `file` configures, each built by the factory `registered` under its
+/// section's name. An error when it configures none, when no factory or two are registered
+/// under a name, and when a channel goes by another name than its section's.
+fn platforms(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path: &Path) -> Result<Platforms> {
+    registered.check_names().map_err(anyhow::Error::msg)?;
     let mut platforms = Platforms::default();
-    if let Some(section) = &file.slack {
-        platforms.add(section.channel(&file.card_labels, failure_log)?);
+    for (name, section) in &file.platforms {
+        let factory = registered
+            .get(name)
+            .map_err(|error| anyhow::anyhow!("[{name}]: {error}"))?;
+        let built = factory
+            .channel(PlatformInput {
+                section,
+                labels: &file.card_labels,
+                on_error: failure_log(name),
+            })
+            .with_context(|| format!("[{name}]"))?;
+        let platform = built.channel.platform();
+        ensure!(
+            platform == name,
+            "[{name}]: its channel goes by the platform {platform:?}; a channel goes by the name its platform is registered under"
+        );
+        platforms.add(built);
     }
-    #[cfg(feature = "feishu")]
-    if let Some(section) = &file.feishu {
-        platforms.add(section.channel(&file.card_labels, failure_log)?);
-    }
-    anyhow::ensure!(
+    ensure!(
         !platforms.channels.is_empty(),
         "{}: no IM platform is configured; add the section of one, such as [slack]",
         path.display()
@@ -265,7 +336,7 @@ fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
 /// within a size limit. A startup read; nothing runs concurrently yet.
 fn read_file(path: &Path) -> Result<ConfigFile> {
     let text = read_text(path)?;
-    toml::from_str(&text).with_context(|| format!("invalid IM service configuration {}", path.display()))
+    ConfigFile::parse(&text).with_context(|| format!("invalid IM service configuration {}", path.display()))
 }
 
 /// The chats the bot answers in and the users who may approve, each on a configured platform.
@@ -331,9 +402,10 @@ fn serve_exit_code(served: Result<(), ImError>) -> u8 {
     }
 }
 
-/// Reports what a platform goes on after as `failed` lines, like the server's own; the
-/// platforms call it with their names.
-fn failure_log(platform: &'static str) -> ErrorReport {
+/// Reports what the channel of `platform` goes on after as `failed` lines, like the server's
+/// own.
+fn failure_log(platform: &str) -> ErrorReport {
+    let platform = platform.to_string();
     Arc::new(move |error: &ImError| {
         write_line(&json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()}));
     })
@@ -412,10 +484,65 @@ impl ServerSink for Log {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use async_trait::async_trait;
 
-    fn platforms() -> HashSet<&'static str> {
+    use super::*;
+    use crate::{Destination, Inlet, MessageRef, Post, Replacement};
+
+    /// The server's sections of a file that configures no platform.
+    const SERVER: &str = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
+
+    fn slack_only() -> HashSet<&'static str> {
         HashSet::from(["slack"])
+    }
+
+    /// A channel that only goes by its platform's name.
+    struct Named(String);
+
+    #[async_trait]
+    impl ImChannel for Named {
+        fn platform(&self) -> &str {
+            &self.0
+        }
+
+        async fn run(&self, _inlet: Inlet, _cancel: &CancellationToken) -> Result<(), ImError> {
+            Ok(())
+        }
+
+        async fn send(&self, _to: &Destination, _message: &Post) -> Result<MessageRef, ImError> {
+            Err(ImError::Transport("nothing is sent".into()))
+        }
+
+        async fn update(&self, _posted: &MessageRef, _replacement: &Replacement) -> Result<(), ImError> {
+            Ok(())
+        }
+    }
+
+    /// A platform a host registers: its channel goes by `teams`, or by the `goesBy` of its
+    /// section, and the variable `TEAMS_TOKEN` holds its credential.
+    struct Teams;
+
+    impl PlatformFactory for Teams {
+        fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+            let name = input.section.get("goesBy").and_then(toml::Value::as_str);
+            Ok(BuiltChannel {
+                channel: Arc::new(Named(name.unwrap_or("teams").into())),
+                hidden_env: vec!["TEAMS_TOKEN".into()],
+            })
+        }
+    }
+
+    /// The built-in platforms and `teams`.
+    fn with_teams() -> Registry<dyn PlatformFactory> {
+        let mut registry = platform::built_in();
+        registry.register("teams", Arc::new(Teams));
+        registry
+    }
+
+    /// The error of the platforms of the file `text`, with `registry`.
+    fn platform_error(text: &str, registry: &Registry<dyn PlatformFactory>) -> String {
+        let file = ConfigFile::parse(text).unwrap();
+        format!("{:#}", platforms(&file, registry, Path::new("im.toml")).err().unwrap())
     }
 
     #[test]
@@ -438,67 +565,92 @@ mod tests {
 
     #[test]
     fn entries_split_at_the_first_colon() {
-        let parsed = entries(&["slack:C1".into(), "slack:a:b".into()], &platforms(), "f").unwrap();
+        let parsed = entries(&["slack:C1".into(), "slack:a:b".into()], &slack_only(), "f").unwrap();
         assert_eq!(parsed, [("slack".into(), "C1".into()), ("slack".into(), "a:b".into())]);
     }
 
     #[test]
     fn entries_without_a_platform_or_an_id_are_refused() {
         for entry in ["C1", ":C1", "slack:"] {
-            let error = entries(&[entry.into()], &platforms(), "access.conversations").unwrap_err();
+            let error = entries(&[entry.into()], &slack_only(), "access.conversations").unwrap_err();
             assert!(error.to_string().contains("platform:id"), "{entry}: {error}");
         }
     }
 
     #[test]
     fn entries_for_an_unconfigured_platform_are_refused() {
-        let error = entries(&["teams:C1".into()], &platforms(), "access.approvers").unwrap_err();
+        let error = entries(&["teams:C1".into()], &slack_only(), "access.approvers").unwrap_err();
         assert!(error.to_string().contains("not configured"), "{error}");
     }
 
     #[test]
     fn request_limit_reply_can_be_configured() {
-        let config =
-            "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n[replies]\nmodelRequestLimit = \"limit\"\n";
-        let file: ConfigFile = toml::from_str(config).unwrap();
+        let config = format!("{SERVER}[replies]\nmodelRequestLimit = \"limit\"\n");
+        let file = ConfigFile::parse(&config).unwrap();
         assert_eq!(file.replies.model_request_limit, "limit");
-        assert!(toml::from_str::<ConfigFile>(&config.replace("modelRequestLimit", "maxTurns")).is_err());
+        assert!(ConfigFile::parse(&config.replace("modelRequestLimit", "maxTurns")).is_err());
     }
 
     #[test]
     fn a_configuration_needs_access_and_a_session_directory() {
-        assert!(toml::from_str::<ConfigFile>("[slack]\n").is_err());
-        let file: ConfigFile =
-            toml::from_str("[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n").unwrap();
-        assert!(file.slack.is_some());
+        assert!(ConfigFile::parse("[slack]\n").is_err());
+        let file =
+            ConfigFile::parse("[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n").unwrap();
+        assert_eq!(file.platforms, [("slack".to_string(), toml::Table::new())]);
         assert_eq!(file.sessions.dir, Path::new("/data/sessions"));
     }
 
     #[test]
     fn unknown_keys_and_a_zero_run_limit_are_refused() {
-        let base = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
-        assert!(toml::from_str::<ConfigFile>(&format!("{base}[teams]\n")).is_err());
+        // A key before the first section: after one, it would be that section's.
+        let error = format!("{:#}", ConfigFile::parse(&format!("typo = 1\n{SERVER}")).err().unwrap());
+        assert!(error.contains("unknown key `typo`"), "{error}");
         for name in [
             "maxRunning",
             "maxConversations",
             "maxPendingMessages",
             "maxPendingBytes",
         ] {
-            assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\n{name} = 0\n")).is_err());
+            assert!(ConfigFile::parse(&format!("{SERVER}[limits]\n{name} = 0\n")).is_err());
         }
         // The approval timeout is config.toml's, shared with chat and acp.
-        assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
+        assert!(ConfigFile::parse(&format!("{SERVER}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
+    }
+
+    #[test]
+    fn a_section_configures_the_platform_registered_under_its_name() {
+        let file = ConfigFile::parse(&format!("[teams]\n{SERVER}")).unwrap();
+        let built = platforms(&file, &with_teams(), Path::new("im.toml")).unwrap();
+        let names: Vec<&str> = built.channels.iter().map(|channel| channel.platform()).collect();
+        assert_eq!(names, ["teams"]);
+        assert_eq!(built.hidden_env, ["TEAMS_TOKEN"]);
+    }
+
+    #[test]
+    fn a_section_of_no_platform_and_a_channel_named_otherwise_are_refused() {
+        assert_eq!(
+            platform_error(&format!("[irc]\n{SERVER}"), &with_teams()),
+            "[irc]: no IM platform is registered under the name \"irc\"; use one of slack, feishu, teams"
+        );
+        let error = platform_error(&format!("[teams]\ngoesBy = \"msteams\"\n{SERVER}"), &with_teams());
+        assert!(
+            error.starts_with("[teams]: its channel goes by the platform \"msteams\""),
+            "{error}"
+        );
+        let mut twice = with_teams();
+        twice.register("slack", Arc::new(Teams));
+        assert_eq!(
+            platform_error(&format!("[teams]\n{SERVER}"), &twice),
+            "more than one IM platform is registered under the name \"slack\""
+        );
     }
 
     #[cfg(not(feature = "feishu"))]
     #[test]
     fn a_build_without_feishu_refuses_its_section_by_name() {
-        let config = "[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
-        let error = toml::from_str::<ConfigFile>(config).err().unwrap().to_string();
+        let error = platform_error(&format!("[feishu]\n{SERVER}"), &platform::built_in());
         assert!(error.contains("this build of zx-im has no such platform"), "{error}");
         assert!(error.contains("[feishu]"), "{error}");
-        // A file without the section is read as usual.
-        assert!(toml::from_str::<ConfigFile>(&config.replace("[feishu]\n", "")).is_ok());
     }
 
     #[test]
