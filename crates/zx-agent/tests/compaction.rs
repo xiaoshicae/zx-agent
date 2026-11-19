@@ -9,9 +9,7 @@ use serde_json::{Value, json};
 
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{
-    AssistantMessage, ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolCall, ToolResultMessage,
-};
+use zx_agent::ai::{ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
@@ -258,14 +256,8 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
         .append_message(Message::user("observed ".repeat(600)))
         .await
         .unwrap();
-    let mut call = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    call.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    })];
-    store.append_message(Message::Assistant(call)).await.unwrap();
+    let call = zx_testing::tool_call_answer("faux", "m", "echo", json!({}));
+    store.append_message(call).await.unwrap();
     let mut result = ToolResultMessage {
         tool_call_id: "c1".into(),
         tool_name: "echo".into(),

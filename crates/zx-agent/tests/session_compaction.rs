@@ -57,15 +57,13 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
 
 /// An answer that calls `read_file` as `id`, and that call's result.
 fn exchange(id: &str) -> [Message; 2] {
-    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
-    let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    assistant.error_message = None;
-    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: id.into(),
-        name: "read_file".into(),
-        arguments: json!({"path": "x"}),
-        arguments_error: None,
-    })];
+    use zx_agent::ai::{StopReason, ToolResultMessage};
+    let assistant = zx_testing::finished_answer(
+        "faux",
+        "m",
+        StopReason::ToolUse,
+        vec![zx_testing::tool_call_block(id, "read_file", json!({"path": "x"}))],
+    );
     let result = ToolResultMessage {
         tool_call_id: id.into(),
         tool_name: "read_file".into(),

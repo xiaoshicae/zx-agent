@@ -369,13 +369,14 @@ async fn session_of(messages: &[Message]) -> Transcript {
 
 #[tokio::test]
 async fn the_context_estimate_starts_from_the_last_reported_usage() {
-    let mut counted = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    counted.error_message = None;
-    counted.usage = Usage {
-        input: 100,
-        output: 20,
-        total_tokens: 120,
-        ..Usage::default()
+    let counted = AssistantMessage {
+        usage: Usage {
+            input: 100,
+            output: 20,
+            total_tokens: 120,
+            ..Usage::default()
+        },
+        ..zx_testing::finished_answer("p", "m", StopReason::Stop, Vec::new())
     };
     let messages = vec![
         Message::user("a".repeat(400)),

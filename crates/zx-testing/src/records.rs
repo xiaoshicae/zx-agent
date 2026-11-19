@@ -8,33 +8,53 @@ use serde_json::{Value, json};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, Usage};
 use zx_agent::transcript::{Entry, Transcript};
 
-/// An answer by `provider` and `model` that asked for `tool` with `arguments` and was cut
-/// off before the call ran: the shape a crash leaves in a session file.
-pub fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
-    let mut answer = AssistantMessage::failure(provider, model, StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
+/// An answer by `provider` and `model` with `content`, ended for `stop` without an error.
+pub fn finished_answer(provider: &str, model: &str, stop: StopReason, content: Vec<ContentBlock>) -> AssistantMessage {
+    AssistantMessage {
+        content,
+        error_message: None,
+        ..AssistantMessage::failure(provider, model, stop, "")
+    }
+}
+
+/// The call `id` of `tool` with `arguments`, as an answer holds it.
+pub fn tool_call_block(id: &str, tool: &str, arguments: Value) -> ContentBlock {
+    ContentBlock::ToolCall(ToolCall {
+        id: id.into(),
         name: tool.into(),
         arguments,
         arguments_error: None,
-    })];
-    Message::Assistant(answer)
+    })
+}
+
+/// An answer by `provider` and `model` that asked for `tool` with `arguments`, as the call
+/// `c1`, and was cut off before the call ran: the shape a crash leaves in a session file.
+pub fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
+    Message::Assistant(finished_answer(
+        provider,
+        model,
+        StopReason::ToolUse,
+        vec![tool_call_block("c1", tool, arguments)],
+    ))
 }
 
 /// A finished answer that reported `input` prompt tokens and 10 output tokens, as the last
 /// answer of a long conversation does.
 pub fn answer_reporting(input: u64) -> Message {
-    let mut answer = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::Text { text: "noted".into() }];
-    answer.usage = Usage {
-        input,
-        output: 10,
-        total_tokens: input + 10,
-        ..Usage::default()
-    };
-    Message::Assistant(answer)
+    Message::Assistant(AssistantMessage {
+        usage: Usage {
+            input,
+            output: 10,
+            total_tokens: input + 10,
+            ..Usage::default()
+        },
+        ..finished_answer(
+            "p",
+            "m",
+            StopReason::Stop,
+            vec![ContentBlock::Text { text: "noted".into() }],
+        )
+    })
 }
 
 /// A summary citing `id`, as the JSON the model answers a summary request with.

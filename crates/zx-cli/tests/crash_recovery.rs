@@ -16,7 +16,7 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
+use zx_agent::ai::{Message, StopReason, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, ReadOutputTool};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
@@ -30,7 +30,10 @@ use zx_agent::transcript::Entry;
 use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
-use zx_testing::{Collect, Driven, EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
+use zx_testing::{
+    Collect, Driven, EchoTool, RunnerSetup, Seed, config, finished_answer, header, read_lines, stderr,
+    tool_call_answer, tool_call_block,
+};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -154,20 +157,13 @@ impl Tool for Hang {
 
 /// An answer that asked for `calls`, given as `(id, name)`.
 fn answer(calls: &[(&str, &str)]) -> Message {
-    let mut answer = AssistantMessage::failure("faux", "test-model", StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = calls
-        .iter()
-        .map(|(id, name)| {
-            ContentBlock::ToolCall(ToolCall {
-                id: (*id).into(),
-                name: (*name).into(),
-                arguments: json!({}),
-                arguments_error: None,
-            })
-        })
-        .collect();
-    Message::Assistant(answer)
+    let calls = calls.iter().map(|(id, name)| tool_call_block(id, name, json!({})));
+    Message::Assistant(finished_answer(
+        "faux",
+        "test-model",
+        StopReason::ToolUse,
+        calls.collect(),
+    ))
 }
 
 fn result(id: &str, name: &str, content: &str) -> Message {
