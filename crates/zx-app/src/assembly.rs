@@ -58,6 +58,8 @@ pub struct Application {
     hidden_env: Vec<String>,
     /// The hook that exports every session's runs as traces, when the host exports them.
     traces: Option<TraceHook>,
+    /// The prompt sections the host adds to every session, as `(name, content)`.
+    host_sections: Vec<(String, String)>,
     /// The queue of changes to each file, which the file tools of every session wait in, so
     /// that two sessions never overwrite each other's edit.
     file_queue: Arc<FileMutationQueue>,
@@ -122,6 +124,7 @@ impl Application {
             notices,
             hidden_env: Vec::new(),
             traces: None,
+            host_sections: Vec::new(),
             file_queue: Arc::default(),
         })
     }
@@ -138,6 +141,14 @@ impl Application {
     /// ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here installs it.
     pub fn with_traces(mut self, traces: Option<TraceHook>) -> Self {
         self.traces = traces;
+        self
+    }
+
+    /// Add the section `name` to the prompt of every session, after those the assembly
+    /// gives: what the model should know of the host itself, such as how its answers reach
+    /// people. The agent's instructions name no host, so that one agent serves them all.
+    pub fn with_prompt_section(mut self, name: &str, content: &str) -> Self {
+        self.host_sections.push((name.into(), content.into()));
         self
     }
 

@@ -12,7 +12,8 @@ use zx_agent::events::{Budget, RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
 use zx_agent::session::SessionError;
 use zx_agent::transcript::{CustomMessage, SessionQuery};
-use zx_agent::{Agent, Session, SessionOptions};
+use zx_agent::{Agent, Session, SessionOptions, compaction};
+use zx_app::shutdown::next_event;
 
 use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
 
@@ -106,6 +107,22 @@ impl Asked {
             actor,
         };
         PendingInput::held(prompt, holds)
+    }
+}
+
+/// How the task of a running conversation ended: a prompt's run, or `/compact`'s.
+pub(super) enum Finished {
+    Run(RunReport),
+    Compaction(compaction::Report),
+}
+
+impl Finished {
+    /// Whether it ended because it was cancelled: by `/cancel`, by `/new` or by the stop.
+    pub(super) fn cancelled(&self) -> bool {
+        match self {
+            Self::Run(report) => report.outcome == RunOutcome::Cancelled,
+            Self::Compaction(report) => report.outcome == compaction::Outcome::Cancelled,
+        }
     }
 }
 
@@ -229,7 +246,7 @@ impl Outlet {
         prompt: PendingInput,
         updates: &mpsc::Sender<ApprovalUpdate>,
         stop: CancellationToken,
-    ) -> impl Future<Output = Result<RunReport, SessionError>> + Send + 'static {
+    ) -> impl Future<Output = Result<Finished, SessionError>> + Send + 'static {
         let session = session.clone();
         let approvals = ApprovalEvents {
             updates: updates.clone(),
@@ -251,15 +268,30 @@ impl Outlet {
                     },
                 }
             }
-            Ok(run.wait().await)
+            Ok(Finished::Run(run.wait().await))
         }
     }
 
-    /// Replace the status with how the run ended, or post that when no status was posted or
+    /// Summarize the earlier part of `session` to the compaction's end, as the task of
+    /// `/compact` does; `stop` cancels it as it cancels a run.
+    pub(super) fn compact(
+        &self,
+        session: &Session,
+        stop: CancellationToken,
+    ) -> impl Future<Output = Result<Finished, SessionError>> + Send + 'static {
+        let session = session.clone();
+        async move {
+            let mut run = session.compact()?;
+            while next_event(&mut run, &session, &stop).await.is_some() {}
+            Ok(Finished::Compaction(run.wait().await))
+        }
+    }
+
+    /// Replace the status with how the work ended, or post that when no status was posted or
     /// the status could not be replaced.
     pub(super) async fn answer(
         &self,
-        ended: Result<Result<RunReport, SessionError>, JoinError>,
+        ended: Result<Result<Finished, SessionError>, JoinError>,
         status: Option<MessageRef>,
         closing: bool,
     ) {
@@ -267,8 +299,9 @@ impl Outlet {
         let answer = match ended {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
             // the same way and is told the same.
-            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Cancelled) => replies.stopped.clone(),
-            Ok(Ok(report)) => render(&report, replies),
+            Ok(Ok(finished)) if closing && finished.cancelled() => replies.stopped.clone(),
+            Ok(Ok(Finished::Run(report))) => render(&report, replies),
+            Ok(Ok(Finished::Compaction(report))) => render_compaction(&report, replies),
             // Only this worker prompts the session, one run at a time, so Busy cannot occur.
             Ok(Err(error)) => format!("{}{error}", replies.failed),
             Err(error) => format!("{}{error}", replies.failed),
@@ -399,15 +432,30 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         // The last answer in the session may be an earlier run's, so it is not repeated.
         RunOutcome::TimedOut => replies.timed_out.clone(),
         RunOutcome::Cancelled => replies.cancelled.clone(),
-        RunOutcome::Failed => match &report.error {
-            Some(error) => format!("{}{error}", replies.failed),
-            // The reply leads into the error; without one, drop the separator it ends with,
-            // whatever the reply's language.
-            None => replies
-                .failed
-                .trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '\u{ff1a}')
-                .to_string(),
-        },
+        RunOutcome::Failed => failure(report.error.as_deref(), replies),
+    }
+}
+
+/// The text that replaces the status message at the end of `/compact`.
+fn render_compaction(report: &compaction::Report, replies: &Replies) -> String {
+    match report.outcome {
+        compaction::Outcome::Completed => replies.compacted.clone(),
+        compaction::Outcome::Noop => replies.nothing_to_compact.clone(),
+        compaction::Outcome::Cancelled => replies.cancelled.clone(),
+        compaction::Outcome::Failed => failure(report.error.as_deref(), replies),
+    }
+}
+
+/// That the work failed, with `error` when there is one.
+fn failure(error: Option<&str>, replies: &Replies) -> String {
+    match error {
+        Some(error) => format!("{}{error}", replies.failed),
+        // The reply leads into the error; without one, drop the separator it ends with,
+        // whatever the reply's language.
+        None => replies
+            .failed
+            .trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '\u{ff1a}')
+            .to_string(),
     }
 }
 
@@ -482,5 +530,35 @@ mod tests {
             render(&report(RunOutcome::Failed, "earlier", Some("HTTP 500")), &replies),
             format!("{}HTTP 500", replies.failed)
         );
+    }
+
+    #[test]
+    fn a_compaction_says_how_it_ended() {
+        use compaction::Outcome;
+
+        let replies = Replies::default();
+        let ended = |outcome, error: Option<&str>| compaction::Report {
+            outcome,
+            requests: 1,
+            usage: Usage::default(),
+            input_bytes: 10,
+            output_bytes: 5,
+            entry_id: None,
+            error: error.map(String::from),
+        };
+        let shown = |outcome, error| render_compaction(&ended(outcome, error), &replies);
+        assert_eq!(shown(Outcome::Completed, None), replies.compacted);
+        assert_eq!(shown(Outcome::Noop, None), replies.nothing_to_compact);
+        assert_eq!(shown(Outcome::Cancelled, None), replies.cancelled);
+        assert_eq!(
+            shown(Outcome::Failed, Some("no summary")),
+            format!("{}no summary", replies.failed)
+        );
+        // Without an error the reply does not end with the separator that leads into one.
+        assert_eq!(shown(Outcome::Failed, None), "The run failed");
+        // A cancelled one is told as a cancelled run is: by the stop when the server stops.
+        assert!(Finished::Compaction(ended(Outcome::Cancelled, None)).cancelled());
+        assert!(!Finished::Compaction(ended(Outcome::Completed, None)).cancelled());
+        assert!(Finished::Run(report(RunOutcome::Cancelled, "", None)).cancelled());
     }
 }

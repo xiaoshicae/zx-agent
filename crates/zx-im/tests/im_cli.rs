@@ -256,6 +256,38 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
 
 #[cfg(unix)]
 #[tokio::test]
+async fn im_tells_the_model_how_the_conversation_reaches_people() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::text("done")]).await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_config(
+        dir.path(),
+        &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
+    );
+    let mut child = im(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "hello")).await;
+    model.wait_for_requests(1).await;
+
+    // A section of the prompt, after what the assembly says of the machine: only the last
+    // answer of a run is posted, so the model is told to make it stand alone.
+    let system = &model.requests()[0].body["messages"][0];
+    assert_eq!(system["role"], json!("system"));
+    let prompt = system["content"].as_str().unwrap();
+    let (before, section) = prompt.split_once("<conversation>").expect(prompt);
+    assert!(before.contains("<environment>"), "{prompt}");
+    assert!(section.contains("Only your final answer"), "{prompt}");
+    assert!(section.contains("sender's name"), "{prompt}");
+    child.kill().await.unwrap();
+}
+
+#[tokio::test]
 async fn configured_replies_and_card_labels_replace_the_english_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::bash("c1", "echo hi"), Reply::text("done")]).await;

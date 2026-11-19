@@ -12,12 +12,33 @@ use crate::{
 
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 
-/// A message from a person: a direct message, a channel message that mentions the bot, or a
-/// reply in a channel's thread.
+/// The bot as `auth.test` names it, which tells its own posts from everyone else's.
+#[derive(Default)]
+pub(super) struct Me {
+    /// Its user ID, which a mention of it names.
+    pub(super) user: Option<String>,
+    /// Its bot ID, which its posts carry, some of them without its user ("bot_message": "it
+    /// has no associated user"). Other bots are heard only once it is known.
+    pub(super) bot: Option<String>,
+}
+
+impl Me {
+    /// Whether `message` is said by someone else: not an edit or a join, not the bot's own
+    /// post, and another bot's only when the bot can tell it from its own.
+    fn hears(&self, message: &Value) -> bool {
+        let mine = |own: &Option<String>, field: &str| own.is_some() && message[field].as_str() == own.as_deref();
+        let own = mine(&self.user, "user") || mine(&self.bot, "bot_id");
+        is_talk(message) && !own && (message.get("bot_id").is_none() || self.bot.is_some())
+    }
+}
+
+/// A message to pass on: a direct message, a channel message that mentions the bot, or a
+/// reply in a channel's thread. Another bot's reply in a thread is passed on as meant for
+/// others, whatever it mentions: bots are heard, and start no conversation and no answer.
 ///
 /// A mention can arrive twice, as `app_mention` and as a channel `message`; both are the
 /// message with its channel and `ts`, which the backlog knows the second time.
-pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<Inbound> {
+pub(super) fn message(payload: &Value, me: &Me) -> Option<Inbound> {
     // Socket Mode payloads are "identical to the typical Events API payloads", which wrap the
     // event; the page's own example shows the bare event, so both are accepted.
     let event = if payload["event"].is_object() {
@@ -30,22 +51,23 @@ pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<Inbound> {
         (Some("message"), Some("im")) => ChatKind::Direct,
         _ => return None,
     };
-    if !is_talk(event) {
+    let by_bot = event.get("bot_id").is_some();
+    // Every direct message is meant for the bot, so none there is taken from a bot.
+    if !me.hears(event) || (by_bot && chat == ChatKind::Direct) {
         return None;
     }
-    let user = event["user"].as_str()?;
-    if Some(user) == bot {
-        return None;
-    }
+    let sender = speaker(event)?;
     let channel = event["channel"].as_str()?;
     let ts = event["ts"].as_str()?;
     // A message without text has nothing for the model: not passed on, like one without a
     // sender.
-    let raw = event["text"].as_str()?;
+    let raw = text_of(event)?;
+    let bot = me.user.as_deref();
     let thread = event["thread_ts"].as_str().map(|ts| ThreadId(ts.into()));
     let addressee = match (chat, event["type"].as_str()) {
+        _ if by_bot => Addressee::Others,
         (ChatKind::Direct, _) | (ChatKind::Group, Some("app_mention")) => Addressee::Bot,
-        (ChatKind::Group, _) => addressee(raw, bot),
+        (ChatKind::Group, _) => addressee(&raw, bot),
     };
     // Talk in the channel itself is none of the bot's business unless it is mentioned.
     if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
@@ -59,9 +81,48 @@ pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<Inbound> {
         },
         chat,
         addressee,
-        sender: UserId(user.into()),
-        text: unescape(&without_mention(raw, bot)),
+        sender: UserId(sender.into()),
+        text: unescape(&without_mention(&raw, bot)),
     })
+}
+
+/// Who posted `message`: its user, or for an integration, which has none, its bot ID.
+fn speaker(message: &Value) -> Option<&str> {
+    message["user"].as_str().or_else(|| message["bot_id"].as_str())
+}
+
+/// What `message` says: its text, or with none what its attachments say, where integrations
+/// put theirs. `None` without a text field.
+fn text_of(message: &Value) -> Option<String> {
+    let text = message["text"].as_str()?;
+    let attached = if text.trim().is_empty() {
+        attached_text(message)
+    } else {
+        None
+    };
+    Some(attached.unwrap_or_else(|| text.to_string()))
+}
+
+/// What the attachments of `message` say, a line each: of an attachment its `pretext`,
+/// `title` and `text`, or without them its `fallback`, the "plain text summary of the
+/// attachment". `None` when they say nothing.
+fn attached_text(message: &Value) -> Option<String> {
+    fn said(value: &Value) -> Option<&str> {
+        value.as_str().map(str::trim).filter(|text| !text.is_empty())
+    }
+    let mut lines = Vec::new();
+    for attachment in message["attachments"].as_array()? {
+        let before = lines.len();
+        lines.extend(
+            ["pretext", "title", "text"]
+                .iter()
+                .filter_map(|key| said(&attachment[*key])),
+        );
+        if lines.len() == before {
+            lines.extend(said(&attachment["fallback"]));
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Whom a channel message is meant for, by its user mentions (`<@U…>`).
@@ -75,20 +136,21 @@ fn addressee(text: &str, bot: Option<&str>) -> Addressee {
     }
 }
 
-/// What people said in a `conversations.replies` answer, oldest first: messages of bots,
-/// edits and joins, and those without a sender or text, left out.
-pub(super) fn history(answer: &Value) -> Vec<Said> {
+/// What was said in a `conversations.replies` answer, oldest first, other bots' messages
+/// among it: the bot's own posts, edits and joins, and messages without a sender or text,
+/// left out.
+pub(super) fn history(answer: &Value, me: &Me) -> Vec<Said> {
     let Some(messages) = answer["messages"].as_array() else {
         return Vec::new();
     };
     messages
         .iter()
-        .filter(|message| is_talk(message))
+        .filter(|message| me.hears(message))
         .filter_map(|message| {
             Some(Said {
                 id: MessageId(message["ts"].as_str()?.into()),
-                sender: UserId(message["user"].as_str()?.into()),
-                text: unescape(message["text"].as_str()?.trim()),
+                sender: UserId(speaker(message)?.into()),
+                text: unescape(text_of(message)?.trim()),
             })
         })
         .collect()
@@ -216,14 +278,13 @@ pub(super) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: App
 }
 
 /// Whether `message` is what someone said: edits, deletions and joins carry a subtype, but a
-/// thread reply also sent to the channel carries `thread_broadcast` and is said like any
-/// other; the bot's own posts carry a bot_id.
+/// thread reply also sent to the channel carries `thread_broadcast` and an integration's post
+/// `bot_message`, and both are said like any other.
 fn is_talk(message: &Value) -> bool {
-    let said = match message.get("subtype") {
+    match message.get("subtype") {
         None => true,
-        Some(subtype) => subtype == "thread_broadcast",
-    };
-    said && message.get("bot_id").is_none()
+        Some(subtype) => subtype == "thread_broadcast" || subtype == "bot_message",
+    }
 }
 
 #[cfg(test)]

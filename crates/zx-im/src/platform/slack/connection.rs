@@ -12,7 +12,7 @@ use crate::platform::{Keepalive, Next, Socket, keep, next_message, report};
 use crate::{ImError, Inbound, Inlet};
 
 use super::SlackChannel;
-use super::events::{decisions, message};
+use super::events::{Me, decisions, message};
 
 impl SlackChannel {
     /// Open the Socket Mode connection at `url`; a failure is reported.
@@ -31,13 +31,7 @@ impl SlackChannel {
     }
 
     /// Receive over one Socket Mode connection until it ends.
-    pub(super) async fn receive(
-        &self,
-        url: &str,
-        inlet: &Inlet,
-        bot: Option<&str>,
-        cancel: &CancellationToken,
-    ) -> Ended {
+    pub(super) async fn receive(&self, url: &str, inlet: &Inlet, me: &Me, cancel: &CancellationToken) -> Ended {
         let opened = tokio::select! {
             biased;
             () = cancel.cancelled() => return Ended::Cancelled,
@@ -62,7 +56,7 @@ impl SlackChannel {
             let Some(frame) = self.frame_of(&text) else {
                 continue;
             };
-            let events = match envelope(&frame, bot) {
+            let events = match envelope(&frame, me) {
                 Envelope::Disconnect => return Ended::Lost,
                 Envelope::Events(events) => events,
             };
@@ -134,10 +128,10 @@ enum Envelope {
 }
 
 /// What `frame` asks for.
-fn envelope(frame: &Value, bot: Option<&str>) -> Envelope {
+fn envelope(frame: &Value, me: &Me) -> Envelope {
     match frame["type"].as_str() {
         Some("disconnect") => Envelope::Disconnect,
-        Some("events_api") => Envelope::Events(message(&frame["payload"], bot).into_iter().collect()),
+        Some("events_api") => Envelope::Events(message(&frame["payload"], me).into_iter().collect()),
         Some("interactive") => Envelope::Events(decisions(&frame["payload"])),
         _ => Envelope::Events(Vec::new()),
     }

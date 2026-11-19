@@ -10,7 +10,7 @@ mod api;
 mod connection;
 mod events;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,7 +26,7 @@ use crate::{
 use super::{Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, http_client, report, secret};
 use api::CallError;
 use connection::{Ended, connection_url};
-use events::{button, card_request, escape, history, resolution, section, split};
+use events::{Me, button, card_request, escape, history, resolution, section, split};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
@@ -165,10 +165,15 @@ impl SlackSection {
 /// thread that do not mention the bot, and let it read a thread it is first mentioned in;
 /// `users:read` gives senders' names; `reactions:write` acknowledges steering. Without them
 /// the bot answers mentions only and shows user IDs.
+///
+/// What other bots post in a thread is heard like anyone's talk there, an alert that someone
+/// asks about for one, and read with the thread; it is never answered, and starts nothing.
 pub struct SlackChannel {
     config: SlackConfig,
     http: reqwest::Client,
     posts: Pacer,
+    /// Who the bot is, once `run` has asked: a thread read before that leaves every bot out.
+    me: OnceLock<Me>,
 }
 
 /// What a card shows of the request `card`, open and once closed.
@@ -183,6 +188,7 @@ impl SlackChannel {
             http: http_client(config.request_timeout)?,
             posts: Pacer::new(config.post_interval),
             config,
+            me: OnceLock::new(),
         })
     }
 }
@@ -195,14 +201,20 @@ impl ImChannel for SlackChannel {
 
     async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut backoff = Backoff::default();
-        // The bot's own user ID tells its messages apart; asking also checks the bot token.
-        let bot = loop {
+        // The bot's own IDs tell its messages apart; asking also checks the bot token.
+        let me = loop {
             match self
                 .call_unless_cancelled("auth.test", &self.config.bot_token, cancel)
                 .await
             {
                 None => return Ok(()),
-                Some(Ok(answer)) => break answer["user_id"].as_str().map(String::from),
+                Some(Ok(answer)) => {
+                    let id = |field: &str| answer[field].as_str().map(String::from);
+                    break Me {
+                        user: id("user_id"),
+                        bot: id("bot_id"),
+                    };
+                }
                 Some(Err(error @ ImError::Config(_))) => return Err(error),
                 Some(Err(error @ ImError::Transport(_))) => {
                     report(self.config.on_error.as_ref(), &error);
@@ -212,6 +224,7 @@ impl ImChannel for SlackChannel {
                 }
             }
         };
+        let me = self.me.get_or_init(|| me);
         loop {
             let opened = self
                 .call_unless_cancelled("apps.connections.open", &self.config.app_token, cancel)
@@ -226,7 +239,7 @@ impl ImChannel for SlackChannel {
                 }
             };
             let ended = match url {
-                Some(url) => self.receive(&url, &inlet, bot.as_deref(), cancel).await,
+                Some(url) => self.receive(&url, &inlet, me, cancel).await,
                 None => Ended::Failed,
             };
             match ended {
@@ -329,6 +342,8 @@ impl ImChannel for SlackChannel {
         let Some(thread) = &at.thread else {
             return Ok(Vec::new());
         };
+        let unknown = Me::default();
+        let me = self.me.get().unwrap_or(&unknown);
         let mut latest = Vec::new();
         let mut cursor = String::new();
         for page in 0..MAX_HISTORY_PAGES {
@@ -346,7 +361,7 @@ impl ImChannel for SlackChannel {
                     return Ok(latest);
                 }
             };
-            latest.extend(history(&answer));
+            latest.extend(history(&answer, me));
             // Only the latest are asked for: the older ones go as the pages come.
             let older = latest.len().saturating_sub(limit);
             latest.drain(..older);
@@ -360,11 +375,18 @@ impl ImChannel for SlackChannel {
         Ok(latest)
     }
 
-    /// `users.info` (needs `users:read`): the display name, else the real name.
+    /// `users.info` (needs `users:read`): the display name, else the real name. An
+    /// integration that posts without a user is known by its bot ID, which `bots.info` names
+    /// (the same scope).
     async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
-        let answer = self
-            .call("users.info", &self.config.bot_token, &[("user", user.0.as_str())], None)
-            .await?;
+        let token = &self.config.bot_token;
+        let answer = match self.call("users.info", token, &[("user", user.0.as_str())], None).await {
+            Err(ImError::Transport(error)) if error.ends_with("user_not_found") => {
+                let answer = self.call("bots.info", token, &[("bot", user.0.as_str())], None).await?;
+                return Ok(answer["bot"]["name"].as_str().map(String::from));
+            }
+            answer => answer?,
+        };
         let profile = &answer["user"]["profile"];
         Ok([
             &profile["display_name"],

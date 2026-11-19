@@ -135,6 +135,15 @@ pub struct ApprovalRecord {
     pub ended_ms: u64,
 }
 
+/// The prompt section that tells the model what it cannot see of a conversation the server
+/// runs: whose words a message carries, and that of all it writes in a run only the last
+/// answer is posted, in place of [`Replies::working`]. The agent's instructions name no host,
+/// so the host that builds the agent adds it.
+pub(crate) const CONVERSATION_SECTION: &str = "conversation";
+pub(crate) const CONVERSATION: &str = "You talk with people through a chat platform. In a group several people write, \
+     and each message starts with its sender's name. Only your final answer to a message is posted there, not the \
+     text you write before a tool call nor a tool's output, so the final answer must be complete on its own.";
+
 /// Texts the server posts besides the model's answers. The defaults are English; a
 /// deployment sets its users' language, for example in im.toml, the configuration of the
 /// program `zx-im` (`[replies]`, fields in camelCase, each optional).
@@ -157,6 +166,12 @@ pub struct Replies {
     pub nothing_to_cancel: String,
     /// The answer to `/new`: the conversation goes on in a new session.
     pub new_session: String,
+    /// `/compact` summarized the earlier part of the conversation.
+    pub compacted: String,
+    /// The answer to `/compact` when nothing is old enough to summarize.
+    pub nothing_to_compact: String,
+    /// The answer to `/compact` while a task runs or waits, or no run slot is free.
+    pub busy: String,
     /// A run that completed without text.
     pub no_answer: String,
     /// Appended to an answer cut off at the output limit.
@@ -193,6 +208,9 @@ impl Default for Replies {
             cancelled: "Cancelled.".into(),
             nothing_to_cancel: "Nothing is running.".into(),
             new_session: "Started a new conversation; earlier messages are no longer in its context.".into(),
+            compacted: "Summarized the earlier part of the conversation; the summary now stands in for it.".into(),
+            nothing_to_compact: "Nothing to summarize yet.".into(),
+            busy: "A task is running; send this again once it has ended.".into(),
             no_answer: "(no answer)".into(),
             truncated: "(the answer reached the output limit and was cut off)".into(),
             model_request_limit: "(the model request limit was reached; the task is not finished)".into(),

@@ -1,6 +1,6 @@
 //! What the assembly sets up for each session: where its commands run, the tools that work
 //! there, the store of long tool results in its working directory, and the prompt sections
-//! that describe the machine, the project and the skills.
+//! that describe the machine, the project and the skills, with the host's own after them.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +44,8 @@ pub(super) struct PerSession {
     pub(super) place: SessionPlace,
     /// The queue of changes to each file, shared by every session of the process.
     pub(super) file_queue: Arc<FileMutationQueue>,
+    /// The sections the host adds after the assembly's own, as `(name, content)`.
+    pub(super) host_sections: Vec<(String, String)>,
 }
 
 /// The prompt sections a session gets: where commands run, the project's instructions such
@@ -55,9 +57,12 @@ const AVAILABLE_SKILLS: &str = "available_skills";
 #[async_trait]
 impl SessionSetup for PerSession {
     fn section_names(&self) -> Vec<String> {
+        let host = self.host_sections.iter().map(|(name, _)| name.clone());
         [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS]
             .map(String::from)
-            .to_vec()
+            .into_iter()
+            .chain(host)
+            .collect()
     }
 
     /// Startup reads, and in container mode starting the container. Configuration errors
@@ -112,14 +117,16 @@ impl SessionSetup for PerSession {
             .collect();
         let mut tools = tools::executor_tools(&on_executor, self.tool_timeout, &executor, &self.file_queue)?;
         tools.extend(host);
+        let mut prompt_sections = vec![
+            (ENVIRONMENT.to_string(), environment),
+            (PROJECT_CONTEXT.to_string(), context),
+            (AVAILABLE_SKILLS.to_string(), catalog.to_string()),
+        ];
+        prompt_sections.extend(self.host_sections.iter().cloned());
         Ok(SessionParts {
             tools,
             hooks,
-            prompt_sections: vec![
-                (ENVIRONMENT.to_string(), environment),
-                (PROJECT_CONTEXT.to_string(), context),
-                (AVAILABLE_SKILLS.to_string(), catalog.to_string()),
-            ],
+            prompt_sections,
         })
     }
 }

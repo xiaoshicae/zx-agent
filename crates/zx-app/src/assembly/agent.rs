@@ -107,6 +107,7 @@ impl ConfiguredAgent {
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
                 file_queue: Arc::clone(&app.file_queue),
+                host_sections: app.host_sections.clone(),
             })),
             ..AgentConfig::new(provider.clone(), model)
         };

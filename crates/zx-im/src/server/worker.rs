@@ -21,7 +21,6 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
-use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::input::PendingInput;
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
@@ -30,7 +29,7 @@ use crate::{Addressee, ApprovalCard, ApprovalId, Choice, ImChannel, MessageRef, 
 
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
-use super::outlet::{Asked, Opened, Outlet};
+use super::outlet::{Asked, Finished, Opened, Outlet};
 use super::received::Receipt;
 use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
 
@@ -38,6 +37,8 @@ use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
 const CANCEL_COMMAND: &str = "/cancel";
 /// Sent alone, starts a new session for the conversation, as chat's `/new` does.
 const NEW_COMMAND: &str = "/new";
+/// Sent alone, summarizes the earlier part of the conversation, as chat's `/compact` does.
+const COMPACT_COMMAND: &str = "/compact";
 /// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
 const UPDATE_CAPACITY: usize = 16;
 
@@ -171,10 +172,10 @@ enum Phase {
         /// The message that asked, which a first session reads the thread up to.
         trigger: Option<MessageRef>,
     },
-    /// A prompt runs in its own task and holds a run slot; `status` is the message that
-    /// says so, replaced by the answer at the end.
+    /// A prompt, or `/compact`, runs in its own task and holds a run slot; `status` is the
+    /// message that says so, replaced by the answer at the end.
     Running {
-        task: JoinHandle<Result<RunReport, SessionError>>,
+        task: JoinHandle<Result<Finished, SessionError>>,
         slot: OwnedSemaphorePermit,
         status: Option<MessageRef>,
         open: Opened,
@@ -209,7 +210,7 @@ impl Phase {
 
 enum Step {
     Slot(Result<OwnedSemaphorePermit, AcquireError>),
-    Ended(Result<Result<RunReport, SessionError>, JoinError>),
+    Ended(Result<Result<Finished, SessionError>, JoinError>),
     Idle,
 }
 
@@ -232,7 +233,7 @@ async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
 
 /// Whether `text` is one of the conversation's commands rather than something to answer.
 pub(super) fn is_command(text: &str) -> bool {
-    matches!(text.trim(), CANCEL_COMMAND | NEW_COMMAND)
+    matches!(text.trim(), CANCEL_COMMAND | NEW_COMMAND | COMPACT_COMMAND)
 }
 
 /// A card waiting for its result.
@@ -365,8 +366,6 @@ impl Worker {
 
     /// Open the session unless `open` holds it and write what was heard into it, then run
     /// what was `asked` there; with nothing asked, the slot served only to record, and goes.
-    /// Opening waits as long as what it waits for: the platform's calls, each bounded, and
-    /// the session's setup; the stop ends the wait.
     async fn open_and_start(
         &mut self,
         open: Option<Opened>,
@@ -374,59 +373,109 @@ impl Worker {
         slot: OwnedSemaphorePermit,
         trigger: Option<&MessageRef>,
     ) {
+        let Some(open) = self.opened(open, trigger, !asked.is_empty()).await else {
+            return;
+        };
+        if asked.is_empty() {
+            self.phase = Phase::idle(Some(open));
+            return;
+        }
+        let prompt = Asked::joined(asked);
+        let run = self.out.run(&open.session, prompt, &self.updates, self.stop.clone());
+        self.start(open, slot, run).await;
+    }
+
+    /// The conversation's session with what was heard written into it, opened unless `open`
+    /// still holds it; `None` when it cannot be opened or the stop ends the wait. The
+    /// conversation hears why only when something was `asked` of it. Opening waits as long as
+    /// what it waits for: the platform's calls, each bounded, and the session's setup.
+    async fn opened(&mut self, open: Option<Opened>, trigger: Option<&MessageRef>, asked: bool) -> Option<Opened> {
         let open = match open.filter(Opened::still_open) {
             Some(open) => open,
             None => {
                 let opened = tokio::select! {
                     // What was asked and heard stays in the backlog.
-                    () = self.stop.cancelled() => return,
+                    () = self.stop.cancelled() => return None,
                     opened = self.out.open(trigger) => opened,
                 };
                 match opened {
                     Ok(open) => open,
+                    Err(error) if asked => {
+                        self.out.cannot_open(&error).await;
+                        return None;
+                    }
                     // Nobody asked, so only the operator hears of it.
-                    Err(error) if asked.is_empty() => {
+                    Err(error) => {
                         self.out.failed(format!(
                             "cannot open the session; {} message(s) not recorded: {error}",
                             self.heard.len()
                         ));
                         self.heard.clear();
-                        return;
-                    }
-                    Err(error) => {
-                        self.out.cannot_open(&error).await;
-                        return;
+                        return None;
                     }
                 }
             }
         };
         self.record_in(&open.session).await;
-        if asked.is_empty() {
-            self.phase = Phase::idle(Some(open));
-            return;
-        }
-        self.start(open, asked, slot).await;
+        Some(open)
     }
 
-    /// Post that the work started, and run what was asked as one prompt.
-    async fn start(&mut self, open: Opened, asked: Vec<Asked>, slot: OwnedSemaphorePermit) {
+    /// Post that work started, then do `work`, a prompt's run or `/compact`'s, in a task of
+    /// its own, which holds the session and the run slot until it ends.
+    async fn start(
+        &mut self,
+        open: Opened,
+        slot: OwnedSemaphorePermit,
+        work: impl Future<Output = Result<Finished, SessionError>> + Send + 'static,
+    ) {
         let status = self.out.post(self.out.replies().working.clone()).await;
         if let Some(status) = &status {
-            // Kept before the run starts: should the process end from here on, the next
+            // Kept before the work starts: should the process end from here on, the next
             // start replaces this status.
             self.out.shared.keep_status(&self.out.key, status).await;
         }
-        let prompt = Asked::joined(asked);
-        let run = self.out.run(&open.session, prompt, &self.updates, self.stop.clone());
-        let task = tokio::spawn(run);
         self.phase = Phase::Running {
-            task,
+            task: tokio::spawn(work),
             slot,
             status,
             open,
             after: AfterRun::Continue,
             asked: Vec::new(),
         };
+    }
+
+    /// `/compact`: summarize the earlier part of the conversation, as work of its own that
+    /// holds a run slot, shows its status, and that `/cancel`, `/new` and the stop end like a
+    /// run. Only while the conversation is idle and a slot is free: otherwise it says that it
+    /// is busy, and the command is to be sent again. A conversation without a session has
+    /// nothing to summarize, and none is made for the command.
+    async fn compact(&mut self) {
+        let free = match self.take_phase() {
+            Phase::Idle { open, .. } => {
+                if open.is_none() && self.out.shared.session_of(&self.out.key).is_none() {
+                    self.out.post(self.out.replies().nothing_to_compact.clone()).await;
+                    return;
+                }
+                match Arc::clone(&self.out.shared.permits).try_acquire_owned() {
+                    Ok(slot) => Ok((open, slot)),
+                    Err(_) => Err(Phase::idle(open)),
+                }
+            }
+            busy @ (Phase::Waiting { .. } | Phase::Running { .. }) => Err(busy),
+        };
+        let (open, slot) = match free {
+            Ok(free) => free,
+            Err(busy) => {
+                self.phase = busy;
+                self.out.post(self.out.replies().busy.clone()).await;
+                return;
+            }
+        };
+        let Some(open) = self.opened(open, None, true).await else {
+            return;
+        };
+        let work = self.out.compact(&open.session, self.stop.clone());
+        self.start(open, slot, work).await;
     }
 
     /// Take the phase, leaving Idle without a session; the caller sets what follows.
@@ -459,7 +508,7 @@ impl Worker {
     /// ended. The run gives up its slot first, so that the next run waits its turn like any
     /// other. After `/new` that input runs in the new session, after `/cancel` it is dropped,
     /// and while the server stops it stays in the backlog, with what was heard.
-    async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
+    async fn ended(&mut self, ended: Result<Result<Finished, SessionError>, JoinError>, closing: bool) {
         let (status, open, after, asked) = match self.take_phase() {
             Phase::Running {
                 slot,
@@ -478,7 +527,7 @@ impl Worker {
                 return;
             }
         };
-        let cancelled = matches!(&ended, Ok(Ok(report)) if report.outcome == RunOutcome::Cancelled);
+        let cancelled = matches!(&ended, Ok(Ok(finished)) if finished.cancelled());
         self.out.answer(ended, status, closing).await;
         let leftover = self.leftover(open);
         if closing {
