@@ -90,22 +90,30 @@ impl Kept {
 }
 
 /// What a summary would read and keep, chosen from the current projection.
-struct Candidate {
+struct Candidate<'s> {
     first_kept: String,
     /// The latest input, when the boundary is after it: it is kept in the context as it is.
     kept_input: Option<String>,
     /// The records the summary reads, which its facts may cite.
     source_ids: Vec<String>,
-    source: Source,
+    source: Source<'s>,
     kept: Kept,
 }
 
 /// The records a summary reads, as whoever makes it takes them.
-enum Source {
+enum Source<'s> {
     /// For the kernel's request to the model: its content, the records as JSON.
     Text(String),
     /// For the host's summarizer.
-    Records(Vec<ProjectedMessage>),
+    Records(&'s dyn Summarizer, Vec<ProjectedMessage>),
+}
+
+/// What an open compaction asks for its summary.
+enum Ask<'s> {
+    /// The model, with the request recorded for it.
+    Model(Request),
+    /// The host's summarizer, with the records it reads.
+    Summarizer(&'s dyn Summarizer, Vec<ProjectedMessage>),
 }
 
 /// A compaction whose start is recorded in the session, waiting for its summary.
@@ -150,7 +158,7 @@ enum Cause {
     Unrecorded(anyhow::Error),
 }
 
-impl Compactor<'_> {
+impl<'a> Compactor<'a> {
     /// Run one compaction: choose what to summarize, record its start, ask for the summary,
     /// check it, then record the result or the failure. When it ends `Completed`, the
     /// session's projection is the new context.
@@ -167,10 +175,11 @@ impl Compactor<'_> {
         if self.cancel.is_cancelled() {
             return Compacted::without_request(input_bytes, End::Cancelled(CANCELLED.into()));
         }
-        let (open, made) = match self.begin(candidate, input_bytes).await {
-            Ok(begun) => begun,
+        let (open, ask) = match self.open(candidate, input_bytes).await {
+            Ok(opened) => opened,
             Err(error) => return Compacted::without_request(input_bytes, End::Unrecorded(error)),
         };
+        let made = self.ask(ask).await;
         let usage = match &made {
             Ok(made) => made.usage().clone(),
             Err(_) => Usage::default(),
@@ -225,7 +234,7 @@ impl Compactor<'_> {
     /// What a summary would read and keep. `None` when there is nothing old enough to
     /// summarize, or the latest summary already covers it; an error when what it would read
     /// or keep is out of bounds.
-    fn candidate(&self) -> Result<Option<Candidate>> {
+    fn candidate(&self) -> Result<Option<Candidate<'a>>> {
         let transcript = &*self.transcript;
         let raw = transcript.raw_projection();
         let Some(last_user) = raw
@@ -265,7 +274,7 @@ impl Compactor<'_> {
             kept_input: kept_input.map(|index| raw[index].entry_id.clone()),
             source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
             source: match self.summarizer {
-                Some(_) => Source::Records(without_details(source).into_owned()),
+                Some(summarizer) => Source::Records(summarizer, without_details(source).into_owned()),
                 None => Source::Text(input),
             },
             kept: Kept::of(&raw, cut, kept_input),
@@ -301,11 +310,11 @@ impl Compactor<'_> {
         self.token_trigger().is_some_and(|limit| tokens > limit)
     }
 
-    /// Who makes the summary, as the start records it.
-    fn summarized_by(&self) -> SummarizedBy {
-        match self.summarizer {
-            Some(summarizer) => SummarizedBy::Summarizer(summarizer.name().to_string()),
-            None => SummarizedBy::Request(SummaryRequest {
+    /// Who makes the summary of `source`, as the start records it.
+    fn summarized_by(&self, source: &Source<'_>) -> SummarizedBy {
+        match source {
+            Source::Records(summarizer, _) => SummarizedBy::Summarizer(summarizer.name().to_string()),
+            Source::Text(_) => SummarizedBy::Request(SummaryRequest {
                 provider: self.provider.name().into(),
                 model: self.model.to_string(),
                 instructions: SUMMARY_INSTRUCTIONS.into(),
@@ -314,16 +323,16 @@ impl Compactor<'_> {
         }
     }
 
-    /// Record the start in the session, announce it, and ask for the summary: the host's
-    /// summarizer when there is one, else the model, whose request is recorded and announced
-    /// first. An error means the session could not record.
-    async fn begin(&mut self, candidate: Candidate, input_bytes: usize) -> Result<(OpenCompaction, Result<Made>)> {
+    /// Record the start in the session and, when the model makes the summary, the request
+    /// for it; then announce them. Returns the open compaction and what it asks for its
+    /// summary. An error means the session could not record.
+    async fn open<'s>(&mut self, candidate: Candidate<'s>, input_bytes: usize) -> Result<(OpenCompaction, Ask<'s>)> {
         let plan = CompactionPlan {
             first_kept_entry_id: candidate.first_kept,
             kept_input_entry_id: candidate.kept_input,
             // A copy: the start records the sources, and the summary is checked against them.
             source_entry_ids: candidate.source_ids.clone(),
-            by: self.summarized_by(),
+            by: self.summarized_by(&candidate.source),
             input_bytes,
         };
         let id = self
@@ -331,15 +340,15 @@ impl Compactor<'_> {
             .begin_compaction(plan)
             .await
             .context("cannot persist compaction start")?;
-        let made = match candidate.source {
+        let ask = match candidate.source {
             Source::Text(input) => {
                 let (request, request_entry) = self.record_request(&id, input).await?;
                 self.announce(input_bytes, Some(request_entry)).await;
-                self.request_summary(request).await.map(Made::Answer)
+                Ask::Model(request)
             }
-            Source::Records(records) => {
+            Source::Records(summarizer, records) => {
                 self.announce(input_bytes, None).await;
-                self.ask_summarizer(&records).await.map(Made::Summary)
+                Ask::Summarizer(summarizer, records)
             }
         };
         let open = OpenCompaction {
@@ -347,7 +356,15 @@ impl Compactor<'_> {
             source_ids: candidate.source_ids,
             kept: candidate.kept,
         };
-        Ok((open, made))
+        Ok((open, ask))
+    }
+
+    /// Ask for the summary as `ask` says. An error is why none was made.
+    async fn ask(&self, ask: Ask<'_>) -> Result<Made> {
+        match ask {
+            Ask::Model(request) => self.request_summary(request).await.map(Made::Answer),
+            Ask::Summarizer(summarizer, records) => self.ask_summarizer(summarizer, &records).await.map(Made::Summary),
+        }
     }
 
     /// Announce a recorded start, then its request when the kernel makes one.
@@ -370,12 +387,9 @@ impl Compactor<'_> {
         }
     }
 
-    /// Ask the host's summarizer for the summary of `records`, bounded as a summary request
+    /// Ask the host's `summarizer` for the summary of `records`, bounded as a summary request
     /// is: by the compaction's timeout and the run's cancellation, and a panic is a failure.
-    async fn ask_summarizer(&self, records: &[ProjectedMessage]) -> Result<Summarized> {
-        let Some(summarizer) = self.summarizer else {
-            bail!("no summarizer is configured");
-        };
+    async fn ask_summarizer(&self, summarizer: &dyn Summarizer, records: &[ProjectedMessage]) -> Result<Summarized> {
         // A token of the call's own, so that work the summarizer started hears that a
         // summary that timed out is no longer wanted, without cancelling the run.
         let child = self.cancel.child_token();
@@ -498,7 +512,7 @@ impl Compactor<'_> {
 
     /// `summary` checked against the start, whoever made it: it cites only what the
     /// compaction read, fits the limits and shrinks the context. Returns it with the new
-    /// context's size.
+    /// context's size; an error also when the run was cancelled meanwhile.
     fn check(
         &self,
         open: &OpenCompaction,
