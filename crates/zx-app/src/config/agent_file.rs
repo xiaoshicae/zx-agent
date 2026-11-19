@@ -53,28 +53,31 @@ struct RawCompaction {
     timeout_secs: Option<u64>,
 }
 
+/// The `[limits]` of an agent file, and the budgets a host gives over an agent's
+/// ([`Overrides`](crate::Overrides)): each one given replaces the agent's.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawLimits {
-    max_model_requests: Option<ModelRequestLimit>,
-    timeout_secs: Option<u64>,
+pub(crate) struct RawLimits {
+    pub(crate) max_model_requests: Option<ModelRequestLimit>,
+    /// 0 disables a time limit that the extended agent set.
+    pub(crate) timeout_secs: Option<u64>,
     /// 0 disables a budget that the extended agent set.
-    token_budget: Option<u64>,
+    pub(crate) token_budget: Option<u64>,
     /// In the unit of the `[[models]]` prices; 0 disables a budget that the extended agent
     /// set.
-    cost_budget: Option<f64>,
+    pub(crate) cost_budget: Option<f64>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum ModelRequestLimit {
+pub(crate) enum ModelRequestLimit {
     Count(u32),
     Unlimited(Unlimited),
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Unlimited {
+pub(crate) enum Unlimited {
     Unlimited,
 }
 
@@ -153,7 +156,8 @@ impl AgentFile {
 }
 
 impl RawLimits {
-    fn apply(self, limits: &mut RunLimits) -> Result<()> {
+    /// Lay these over `limits`. A cost budget that is negative or not finite is an error.
+    pub(crate) fn apply(self, limits: &mut RunLimits) -> Result<()> {
         if let Some(turns) = self.max_model_requests {
             limits.max_model_requests = match turns {
                 ModelRequestLimit::Count(count) => Some(count),

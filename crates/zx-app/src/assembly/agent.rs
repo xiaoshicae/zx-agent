@@ -9,11 +9,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::config::{AgentDefinition, HostTools, READ_SKILL, cost_budget, known_tool};
+use crate::config::{AgentDefinition, HostTools, ModelRequestLimit, READ_SKILL, RawLimits, known_tool};
 use crate::otel;
 use zx_agent::ai::{PREAMBLE, Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
@@ -306,28 +305,20 @@ fn load_agent(app: &Application, host: &HostTools) -> Result<AgentDefinition> {
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut agent, &app.overrides)?;
+    budgets(&app.overrides).apply(&mut agent.limits)?;
     agent.validate(config, host)?;
     Ok(agent)
 }
 
-/// The request limit, the time limit and the token and cost budgets of `budget` over the
-/// agent's; a zero timeout or budget removes the agent's. A cost budget that an agent file
-/// could not hold either is an error.
-fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) -> Result<()> {
-    if let Some(turns) = budget.max_model_requests {
-        agent.limits.max_model_requests = Some(turns);
+/// The request limit, the time limit and the token and cost budgets of `overrides`, laid over
+/// the agent's as the `[limits]` of an agent file are.
+fn budgets(overrides: &Overrides) -> RawLimits {
+    RawLimits {
+        max_model_requests: overrides.max_model_requests.map(ModelRequestLimit::Count),
+        timeout_secs: overrides.timeout_secs,
+        token_budget: overrides.token_budget,
+        cost_budget: overrides.cost_budget,
     }
-    if let Some(secs) = budget.timeout_secs {
-        agent.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
-    }
-    if let Some(tokens) = budget.token_budget {
-        agent.limits.token_budget = (tokens > 0).then_some(tokens);
-    }
-    if let Some(amount) = budget.cost_budget {
-        agent.limits.cost_budget = cost_budget(amount)?;
-    }
-    Ok(())
 }
 
 /// read_skill with the catalog of its skills for the prompt, when the agent enables it and

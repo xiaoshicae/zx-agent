@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
 
-pub(crate) use agent_file::cost_budget;
+pub(crate) use agent_file::{ModelRequestLimit, RawLimits, cost_budget};
 pub use definition::Builtin;
 pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
 pub use environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
