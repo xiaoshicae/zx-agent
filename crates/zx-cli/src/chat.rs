@@ -32,7 +32,7 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
-use crate::application::{connect, open_session};
+use crate::application::{connect, open_or_create};
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
 use crate::render::visible;
@@ -86,10 +86,7 @@ impl Chat {
         // The person at the terminal answers; `drive_turn` passes the answer on.
         let approvals = Approvals::Person("shell commands require interactive approval");
         let agent = self.app.build(model, place, approvals)?;
-        let session = match resume {
-            Some(id) => open_session(&agent, id).await?,
-            None => agent.create(None).await?,
-        };
+        let session = open_or_create(&agent, resume).await?;
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
         let commands = session
             .commands()

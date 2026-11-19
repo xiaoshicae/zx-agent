@@ -50,6 +50,15 @@ pub(crate) async fn open_session(agent: &ConfiguredAgent, id: &str) -> Result<Se
     Ok(session)
 }
 
+/// The session `id` of `agent`, opened as [`open_session`] opens it, or a new session of
+/// `agent` without an ID.
+pub(crate) async fn open_or_create(agent: &ConfiguredAgent, id: Option<&str>) -> Result<Session> {
+    match id {
+        Some(id) => open_session(agent, id).await,
+        None => agent.create(None).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

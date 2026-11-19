@@ -74,11 +74,8 @@ pub(super) async fn opening(
         (true, _) => (SessionPlace::memory(), None, First::Fresh),
         // `--session` continues the session its file holds, or starts the file.
         (false, Some(path)) => {
-            let first = match session_file::held(&path, cwd).await? {
-                Some(id) => First::Resume(id),
-                None => First::Fresh,
-            };
-            (SessionPlace::file(&path), Some(path), first)
+            let (place, held) = session_file::open(&path, cwd).await?;
+            (place, Some(path), held.map_or(First::Fresh, First::Resume))
         }
         (false, None) => {
             let place = SessionPlace::home()?;

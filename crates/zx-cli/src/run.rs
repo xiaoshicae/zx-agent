@@ -14,7 +14,7 @@ use zx_app::otel::{Telemetry, TraceHook, TraceParent};
 use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 
-use crate::application::{connect, open_session};
+use crate::application::{connect, open_or_create};
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, eprint_line, exit_code, print_line, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
@@ -108,14 +108,11 @@ fn run_traces(telemetry: &Telemetry) -> TraceHook {
 /// without it the session is kept in memory.
 async fn build_session(app: &Application, file: Option<&Path>) -> Result<Session> {
     let (place, held) = match file {
-        Some(path) => (SessionPlace::file(path), session_file::held(path, app.cwd()).await?),
+        Some(path) => session_file::open(path, app.cwd()).await?,
         None => (SessionPlace::memory(), None),
     };
     let agent = app.build(app.model(), &place, Approvals::Nobody)?;
-    match held {
-        Some(id) => open_session(&agent, &id).await,
-        None => agent.create(None).await,
-    }
+    open_or_create(&agent, held.as_deref()).await
 }
 
 /// Read `run` to its end, showing its events as `progress` does. A signal, which cancels
