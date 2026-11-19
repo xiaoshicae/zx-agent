@@ -255,18 +255,8 @@ impl Outlet {
         };
         async move {
             let mut run = session.send(prompt)?;
-            let mut stopped = false;
-            loop {
-                tokio::select! {
-                    () = stop.cancelled(), if !stopped => {
-                        session.cancel();
-                        stopped = true;
-                    }
-                    event = run.next() => match event {
-                        Some(event) => approvals.forward(&event),
-                        None => break,
-                    },
-                }
+            while let Some(event) = next_event(&mut run, &session, &stop).await {
+                approvals.forward(&event);
             }
             Ok(Finished::Run(run.wait().await))
         }
