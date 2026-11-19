@@ -102,8 +102,9 @@ pub enum CommandError {
 enum State {
     // A full Runner is only needed while idle, so keep the state enum small.
     Idle(Box<Runner>),
-    /// An operation holds the Runner; the token cancels it.
-    Leased(CancellationToken),
+    /// An operation holds the Runner: a run or a compaction, which the token cancels, or one
+    /// of the short operations that read or write the session while idle, which has none.
+    Leased(Option<CancellationToken>),
     /// Closed while an operation held the Runner: the operation was cancelled, and its lease
     /// drops the Runner instead of returning it.
     Closing,
@@ -112,12 +113,19 @@ enum State {
 }
 
 impl State {
-    /// Why an operation cannot take the Runner in this state, which is not `Idle`.
+    /// Why an operation cannot take the Runner in this state, which is not `Idle`: another
+    /// operation holds it, or the session is closed.
     fn refusal(&self) -> SessionError {
-        match self {
-            Self::Idle(_) | Self::Leased(_) => SessionError::Busy,
-            Self::Closing | Self::Closed => SessionError::Closed,
+        if self.is_closed() {
+            SessionError::Closed
+        } else {
+            SessionError::Busy
         }
+    }
+
+    /// Whether the session is closed, or closes once the operation that holds it ends.
+    fn is_closed(&self) -> bool {
+        matches!(self, Self::Closing | Self::Closed)
     }
 }
 
@@ -249,7 +257,7 @@ impl Session {
     /// the reader's end of its events.
     fn begin(&self) -> Result<(Lease, RunLink, mpsc::Receiver<Event>), SessionError> {
         let cancel = CancellationToken::new();
-        let lease = self.lease(cancel.clone())?;
+        let lease = self.lease(Some(cancel.clone()))?;
         let (events, reader) = mpsc::channel(EVENT_BUFFER);
         let link = RunLink {
             id: uuid::Uuid::new_v4().to_string(),
@@ -344,7 +352,7 @@ impl Session {
         &self,
         append: impl AsyncFnOnce(&mut Runner) -> anyhow::Result<String>,
     ) -> Result<String, SessionError> {
-        let mut lease = self.lease(CancellationToken::new())?;
+        let mut lease = self.lease(None)?;
         append(lease.runner())
             .await
             .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
@@ -363,14 +371,13 @@ impl Session {
     }
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
-    /// result. Returns false when idle or closed. The short operations that read or write the
-    /// session while idle (`with_transcript`, `append_custom_entry`, `append_custom_message`,
-    /// `set_name`) lease the conversation as well: during one of them this returns true,
-    /// although they have nothing to cancel.
+    /// result. Returns false when there is none: idle, closed, or during one of the short
+    /// operations that read or write the session while idle (`with_transcript`,
+    /// `append_custom_entry`, `append_custom_message`, `set_name`).
     pub fn cancel(&self) -> bool {
         let cancel = match &*lock(&self.shared.state) {
-            State::Idle(_) | State::Closing | State::Closed => return false,
-            State::Leased(cancel) => cancel.clone(),
+            State::Leased(Some(cancel)) => cancel.clone(),
+            State::Idle(_) | State::Leased(None) | State::Closing | State::Closed => return false,
         };
         // Waking a waiting future can call host-provided wakers; do it unlocked.
         cancel.cancel();
@@ -382,7 +389,7 @@ impl Session {
     /// A closed handle stays closed; [`Agent::open_session`](crate::Agent::open_session)
     /// gives the session again.
     pub fn is_closed(&self) -> bool {
-        matches!(&*lock(&self.shared.state), State::Closing | State::Closed)
+        lock(&self.shared.state).is_closed()
     }
 
     /// Close the conversation: cancel the operation in progress, if there is one, and let go
@@ -399,10 +406,10 @@ impl Session {
             std::mem::replace(&mut *state, next)
         };
         match previous {
-            State::Leased(cancel) => cancel.cancel(),
+            State::Leased(Some(cancel)) => cancel.cancel(),
             // The Runner is dropped here, without the state lock: closing a storage and
             // dropping the tools and hooks is host code.
-            State::Idle(_) | State::Closing | State::Closed => {}
+            State::Idle(_) | State::Leased(None) | State::Closing | State::Closed => {}
         }
         true
     }
@@ -472,7 +479,7 @@ impl Session {
     /// position. `f` runs with the conversation leased, as a run does: other calls get
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
     pub fn with_transcript<T>(&self, f: impl FnOnce(&Transcript) -> T) -> Result<T, SessionError> {
-        let mut lease = self.lease(CancellationToken::new())?;
+        let mut lease = self.lease(None)?;
         Ok(f(lease.runner().transcript()))
     }
 
@@ -492,9 +499,9 @@ impl Session {
         Ok(f(runner))
     }
 
-    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it,
-    /// Closed once the session is closed.
-    fn lease(&self, cancel: CancellationToken) -> Result<Lease, SessionError> {
+    /// Take the Runner for one operation, which `cancel` cancels if it is a run or a
+    /// compaction; Busy while another holds it, Closed once the session is closed.
+    fn lease(&self, cancel: Option<CancellationToken>) -> Result<Lease, SessionError> {
         let mut state = lock(&self.shared.state);
         match std::mem::replace(&mut *state, State::Leased(cancel.clone())) {
             State::Idle(runner) => Ok(Lease {
@@ -519,7 +526,7 @@ impl Session {
 struct Lease {
     shared: Arc<Shared>,
     runner: Option<Box<Runner>>,
-    cancel: CancellationToken,
+    cancel: Option<CancellationToken>,
 }
 
 impl Lease {
@@ -532,7 +539,9 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
         let runner = self
             .runner
             .take()
@@ -542,12 +551,14 @@ impl Drop for Lease {
         let unwritable = runner.transcript().lost_its_log();
         let mut state = lock(&self.shared.state);
         let released = match &*state {
-            State::Leased(_) | State::Idle(_) if !unwritable => {
+            State::Leased(_) if !unwritable => {
                 *state = State::Idle(runner);
                 None
             }
-            // Unwritable, or closed meanwhile: the Runner goes instead of coming back.
-            State::Leased(_) | State::Idle(_) | State::Closing | State::Closed => {
+            // Unwritable, or closed meanwhile: the Runner goes instead of coming back. While a
+            // lease lives only `close` changes the state, to `Closing`, so `Idle` and `Closed`
+            // do not occur here; closing is the safe end for them too.
+            State::Leased(_) | State::Closing | State::Idle(_) | State::Closed => {
                 *state = State::Closed;
                 Some(runner)
             }

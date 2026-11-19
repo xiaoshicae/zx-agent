@@ -132,6 +132,15 @@ async fn aborting_an_idle_session_has_no_effect_on_the_next_prompt() {
 }
 
 #[tokio::test]
+async fn reading_the_session_leaves_nothing_to_cancel() {
+    let (session, _, _) = setup([]).await;
+
+    let cancelled = session.with_transcript(|_| session.cancel()).unwrap();
+
+    assert!(!cancelled);
+}
+
+#[tokio::test]
 async fn dropping_a_prompt_cancels_the_provider_and_returns_ownership() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]).await;
     let mut running = Box::pin(session.prompt("first"));
