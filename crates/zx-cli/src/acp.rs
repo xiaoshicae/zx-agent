@@ -340,7 +340,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
-        .with_traces(traces);
+        .set_traces(traces);
     let place = if args.no_session {
         SessionPlace::memory()
     } else {

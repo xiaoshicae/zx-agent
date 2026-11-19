@@ -30,6 +30,8 @@ enum Place {
     /// Session files under one directory, with a directory of its own for each working
     /// directory.
     Directory(Arc<JsonlStorage>),
+    /// The host's own storage, such as a database.
+    Storage(Arc<dyn SessionStorage>),
 }
 
 impl SessionPlace {
@@ -49,7 +51,13 @@ impl SessionPlace {
         Self(Place::Directory(Arc::new(JsonlStorage::in_directory(root))))
     }
 
-    /// Whether closed sessions remain in files and can be opened later.
+    /// Keep the sessions in `storage`, the host's own, such as a database: closed sessions
+    /// stay there to be opened again, and none has a file.
+    pub fn from_storage(storage: Arc<dyn SessionStorage>) -> Self {
+        Self(Place::Storage(storage))
+    }
+
+    /// Whether closed sessions remain and can be opened later: everywhere but in memory.
     pub fn is_persistent(&self) -> bool {
         !matches!(self.0, Place::Memory(_))
     }
@@ -67,23 +75,24 @@ impl SessionPlace {
         match &self.0 {
             Place::Memory(storage) => storage.clone(),
             Place::File(storage) | Place::Directory(storage) => storage.clone(),
+            Place::Storage(storage) => Arc::clone(storage),
         }
     }
 
     fn files(&self) -> Option<&JsonlStorage> {
         match &self.0 {
-            Place::Memory(_) => None,
+            Place::Memory(_) | Place::Storage(_) => None,
             Place::File(storage) | Place::Directory(storage) => Some(storage),
         }
     }
 
     /// Where the sessions started in `cwd` are kept: the session file, or the directory of
-    /// that working directory's files; `None` in memory.
+    /// that working directory's files; `None` without files.
     pub fn location(&self, cwd: &Path) -> Option<PathBuf> {
         self.files().map(|files| files.location(cwd))
     }
 
-    /// The file of session `id`; `None` in memory.
+    /// The file of session `id`; `None` without files.
     pub async fn path_of(&self, id: &str) -> Result<Option<PathBuf>> {
         match self.files() {
             Some(files) => files.path_of(id).await,
@@ -166,6 +175,21 @@ mod tests {
 
         assert_eq!(place.location(Path::new("/w")), None);
         assert_eq!(place.path_of(&header.id).await.unwrap(), None);
+        assert_eq!(place.started_in(Path::new("/w")).await.unwrap().sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_hosts_own_storage_keeps_the_sessions_and_has_no_files() {
+        let storage = Arc::new(MemoryStorage::default());
+        let place = SessionPlace::from_storage(storage.clone());
+        let header = SessionHeader::new(Path::new("/w"), "m");
+        drop(create(&place, &header).await);
+
+        assert!(place.is_persistent());
+        assert_eq!(place.location(Path::new("/w")), None);
+        assert_eq!(place.path_of(&header.id).await.unwrap(), None);
+        let kept = storage.list(&SessionQuery::default()).await.unwrap();
+        assert_eq!(kept.sessions.len(), 1);
         assert_eq!(place.started_in(Path::new("/w")).await.unwrap().sessions.len(), 1);
     }
 

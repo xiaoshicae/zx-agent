@@ -48,7 +48,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     with_telemetry(async move |telemetry| {
         let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
-            .with_traces(telemetry.map(run_traces));
+            .set_traces(telemetry.map(run_traces));
         let session = build_session(&app, session_file.as_deref()).await?;
         let cancel = CancellationToken::new();
         cancel_on_signals(cancel.clone());

@@ -46,6 +46,16 @@ impl Builtin {
     }
 }
 
+/// The tools a host registers besides the built-in ones, by name, which an agent may name:
+/// `own`, which the agent's `tools` enables and which run unless `permissions.ask` names them,
+/// as the built-in tools do; and those of its `extensions`, offered to every agent, which ask
+/// unless `permissions.allow` names them, as the tools of MCP servers do.
+#[derive(Default)]
+pub(crate) struct HostTools {
+    pub(crate) own: Vec<String>,
+    pub(crate) extensions: Vec<String>,
+}
+
 /// Which project instructions a session reads when it is set up. Explicit paths are
 /// absolute after load.
 #[derive(Debug)]
@@ -89,16 +99,16 @@ pub(crate) struct AgentDefinition {
 }
 
 impl AgentDefinition {
-    /// The agent `builtin`, checked against `config`: the user's `agents/<name>.md` in the
-    /// zx-agent `home` when that file exists, else the built-in agent. No other file is read:
-    /// a file in `agents/` with another name is ignored.
-    pub(crate) fn load(builtin: Builtin, home: Option<&Path>, config: &Config) -> Result<Self> {
+    /// The agent `builtin`, checked against `config` and the tools of the `host`: the user's
+    /// `agents/<name>.md` in the zx-agent `home` when that file exists, else the built-in
+    /// agent. No other file is read: a file in `agents/` with another name is ignored.
+    pub(crate) fn load(builtin: Builtin, home: Option<&Path>, config: &Config, host: &HostTools) -> Result<Self> {
         let mut agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", builtin.name()))) {
             Some(path) if exists(&path)? => Self::from_file(&path)?,
             _ => Self::builtin(builtin)?,
         };
         settle_token_trigger(&mut agent.compaction);
-        agent.validate(config)?;
+        agent.validate(config, host)?;
         Ok(agent)
     }
 
@@ -170,13 +180,16 @@ impl AgentDefinition {
     }
 
     /// Check tool names, permissions and skill registrations without reading skill bodies;
-    /// permissions may name the MCP tools of `config`, and approving every call needs its
-    /// container.
-    pub(crate) fn validate(&self, config: &Config) -> Result<()> {
+    /// the tools may be the `host`'s own, permissions may name those and the tools of its
+    /// extensions and the MCP tools of `config`, and approving every call needs its container.
+    pub(crate) fn validate(&self, config: &Config, host: &HostTools) -> Result<()> {
+        let known = |name: &str| known_tool(name) || host.own.iter().any(|own| own == name);
         for name in &self.tools {
-            ensure!(known_tool(name), "unknown tool {name:?}");
+            ensure!(known(name), "unknown tool {name:?}");
         }
-        self.permissions.validate(known_tool, &config.mcp_tool_names()?)?;
+        let mut asking = config.mcp_tool_names()?;
+        asking.extend(host.extensions.iter().cloned());
+        self.permissions.validate(known, &asking)?;
         self.compaction.validate().context("invalid [compaction] settings")?;
         if self.permissions.approve_all {
             ensure!(
@@ -204,7 +217,8 @@ fn exists(path: &Path) -> Result<bool> {
 
 /// Whether `name` is a tool the host registers itself: one that runs on the executor,
 /// read_output, or read_skill.
-fn known_tool(name: &str) -> bool {
+/// Whether `name` is one of the built-in tools an agent may enable.
+pub(crate) fn known_tool(name: &str) -> bool {
     EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == READ_SKILL
 }
 

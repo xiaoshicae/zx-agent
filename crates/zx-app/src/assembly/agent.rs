@@ -1,18 +1,19 @@
 //! The agent a host builds: the agent file with the host's [`Overrides`] over it, in the
 //! environment of the settings, with the provider, the policies and the hooks every agent
-//! registers, and the sessions the host creates or opens with it.
+//! registers, the host's own parts, and the sessions the host creates or opens with it.
 //!
 //! The agent file is loaded here, once for each agent a host builds, and everything that
-//! depends on it is decided here too, such as which MCP tools ask. What belongs to one
-//! session is in `setup`.
+//! depends on it is decided here too, such as which of the host's tools it enables and which
+//! tools of extensions ask. What belongs to one session is in `setup`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::config::{AgentDefinition, Config, READ_SKILL, cost_budget};
+use crate::config::{AgentDefinition, Config, HostTools, READ_SKILL, cost_budget, known_tool};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::{Provider, SystemPrompt};
@@ -27,9 +28,29 @@ use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 use zx_util::env::env_value;
 
 use super::settings::BASE_URL_ENV;
-use super::setup::PerSession;
+use super::setup::{PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
+
+/// The names of the hooks and policies the assembly registers, which `hook_failed` events,
+/// traces and policy errors show.
+const CONTINUE_ON_LENGTH: &str = "continue_on_length";
+const REDACT_SECRETS: &str = "redact_secrets";
+const TRACE_EXPORT: &str = "trace_export";
+const COMMAND_POLICY: &str = "command_policy";
+const AGENT_PERMISSIONS: &str = "agent_permissions";
+const BASH_APPROVAL: &str = "bash_approval";
+/// Those names, and the one each session's store of long results goes by: a host's hook or
+/// policy may not take them.
+const BUILT_IN_NAMES: [&str; 7] = [
+    CONTINUE_ON_LENGTH,
+    REDACT_SECRETS,
+    TRACE_EXPORT,
+    SPILL_OUTPUTS,
+    COMMAND_POLICY,
+    AGENT_PERMISSIONS,
+    BASH_APPROVAL,
+];
 
 /// Who answers when a tool call of the agent's sessions needs approval.
 #[derive(Clone, Copy)]
@@ -60,7 +81,8 @@ impl ConfiguredAgent {
     /// `app` read and connected. Startup reads; no session exists yet.
     ///
     /// Configuration errors are reported here: an agent file or a tool setting that cannot
-    /// be used, a cost budget without prices, invalid provider settings.
+    /// be used, a cost budget without prices, invalid provider settings, and a part of the
+    /// host's whose name another part goes by.
     pub(super) fn build(
         app: &Application,
         model: &str,
@@ -69,7 +91,9 @@ impl ConfiguredAgent {
     ) -> Result<Self> {
         let settings = &app.settings;
         let config = &settings.config;
-        let mut agent = load_agent(app)?;
+        let host = host_tools(app);
+        check_names(app, &host)?;
+        let mut agent = load_agent(app, &host)?;
         let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
@@ -79,22 +103,31 @@ impl ConfiguredAgent {
         let (provider, api_key) = provider(config)?;
         let provider: Arc<dyn Provider> = Arc::new(provider);
         let skills = skills_tool(&mut agent)?;
-        let (policies, approvals) = policies(app, &mut agent, approvals);
+        let (policies, approvals) = policies(app, &mut agent, &host, approvals);
+        // The host's tools that the agent enables, as it enables the built-in ones.
+        let tools = app
+            .tools
+            .iter()
+            .filter(|tool| agent.tools.iter().any(|name| name == tool.name()))
+            .cloned()
+            .collect();
         let name = std::mem::take(&mut agent.name);
         let auto_approve_commands = agent.permissions.allowed_commands();
         let role = AgentConfig {
             system_prompt: SystemPrompt::new(&agent.instructions),
+            tools,
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             hooks: hooks(app, &agent, api_key),
             policies,
             approvals,
-            extensions: app.mcp.servers.clone(),
+            extensions: app.mcp.servers.iter().chain(&app.extensions).cloned().collect(),
             models,
             session_cache_key: config.provider.openai.body.prompt_cache_key,
             limits: agent.limits,
             retry: config.provider.retry.clone(),
             compaction: agent.compaction,
+            summarizer: app.summarizer.clone(),
             storage: place.storage(),
             session_setup: Some(Arc::new(PerSession {
                 tools: agent.tools,
@@ -192,11 +225,55 @@ fn check_reasoning_fields(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The names of the host's own tools and of its extensions' tools, which the agent may name.
+fn host_tools(app: &Application) -> HostTools {
+    HostTools {
+        own: app.tools.iter().map(|tool| tool.name().to_string()).collect(),
+        extensions: app
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.tools())
+            .map(|tool| tool.name().to_string())
+            .collect(),
+    }
+}
+
+/// Refuse a part of the host's whose name another part goes by already. A tool of the host
+/// or of its extensions may not be named like a built-in tool, which a session gets only when
+/// it is made; tools that share a name otherwise, and extensions that do, the kernel refuses
+/// as the agent is made. Extensions name their own hooks and policies, so the host's hooks
+/// and policies may not be named like a built-in hook or policy, an extension, or another of
+/// the host's.
+fn check_names(app: &Application, host: &HostTools) -> Result<()> {
+    for name in host.own.iter().chain(&host.extensions) {
+        anyhow::ensure!(
+            !known_tool(name),
+            "the host's tool {name:?} has the name of a built-in tool"
+        );
+    }
+    let mut taken: HashSet<&str> = BUILT_IN_NAMES.into();
+    taken.extend(
+        app.mcp
+            .servers
+            .iter()
+            .chain(&app.extensions)
+            .map(|extension| extension.name()),
+    );
+    let hooks = app.hooks.iter().map(|(name, _)| name);
+    for name in hooks.chain(app.policies.iter().map(|(name, _)| name)) {
+        anyhow::ensure!(
+            taken.insert(name),
+            "the host's hook or policy {name:?} has a name that a built-in hook or policy, an extension or another of the host's goes by"
+        );
+    }
+    Ok(())
+}
+
 /// The agent `app` runs, with the host's tools and budgets over it, validated: explicit
-/// values replace the agent's.
-fn load_agent(app: &Application) -> Result<AgentDefinition> {
+/// values replace the agent's, and its tools may be the `host`'s.
+fn load_agent(app: &Application, host: &HostTools) -> Result<AgentDefinition> {
     let config = &app.settings.config;
-    let mut agent = AgentDefinition::load(app.builtin, app.settings.home.as_deref(), config)?;
+    let mut agent = AgentDefinition::load(app.builtin, app.settings.home.as_deref(), config, host)?;
     if let Some(tools) = &app.overrides.tools {
         agent.tools = tools
             .iter()
@@ -206,7 +283,7 @@ fn load_agent(app: &Application) -> Result<AgentDefinition> {
             .collect();
     }
     apply_budgets(&mut agent, &app.overrides)?;
-    agent.validate(config)?;
+    agent.validate(config, host)?;
     Ok(agent)
 }
 
@@ -257,20 +334,30 @@ fn skills_tool(agent: &mut AgentDefinition) -> Result<Option<(Arc<dyn Tool>, Str
 }
 
 /// The policies every session of the agent asks, in this order: the command policy, the
-/// policy of the agent's permissions with the MCP tools it does not allow, and, where a
-/// person answers, the one that asks before bash commands. With them, who answers.
+/// policy of the agent's permissions with the tools of MCP servers and of the `host`'s
+/// extensions that it does not allow, the host's own, and, where a person answers, the one
+/// that asks before bash commands. With them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest verdict of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
-fn policies(app: &Application, agent: &mut AgentDefinition, approvals: Approvals<'_>) -> (PolicyChain, ApprovalMode) {
+fn policies(
+    app: &Application,
+    agent: &mut AgentDefinition,
+    host: &HostTools,
+    approvals: Approvals<'_>,
+) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
     // The commands an agent allows run without asking, the others ask.
     let commands = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
-    policies.push("command_policy", Arc::new(commands));
+    policies.push(COMMAND_POLICY, Arc::new(commands));
     let auto_approve = agent.permissions.auto_approval();
-    let mcp_ask = mcp_asking(agent, &app.mcp.names);
-    if let Some(rules) = rules_policy(agent, &mcp_ask, auto_approve.clone()) {
-        policies.push("agent_permissions", Arc::new(rules));
+    let extension_tools: Vec<String> = app.mcp.names.iter().chain(&host.extensions).cloned().collect();
+    let asking = asking_tools(agent, &extension_tools);
+    if let Some(rules) = rules_policy(agent, &asking, auto_approve.clone()) {
+        policies.push(AGENT_PERMISSIONS, Arc::new(rules));
+    }
+    for (name, policy) in &app.policies {
+        policies.push(name.as_str(), Arc::clone(policy));
     }
     let reason = match approvals {
         Approvals::Nobody => return (policies, ApprovalMode::Deny),
@@ -288,13 +375,13 @@ fn policies(app: &Application, agent: &mut AgentDefinition, approvals: Approvals
             },
         ])
         .auto_approve(auto_approve);
-        policies.push("bash_approval", Arc::new(bash));
+        policies.push(BASH_APPROVAL, Arc::new(bash));
     }
     (policies, ApprovalMode::Wait(app.settings.approval_timeout))
 }
 
 /// The hooks every session of the agent shares: continuation, redaction of the API key
-/// `api_key` and the other credentials, and the trace export.
+/// `api_key` and the other credentials, the trace export, and the host's own.
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
@@ -303,16 +390,19 @@ fn policies(app: &Application, agent: &mut AgentDefinition, approvals: Approvals
 fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
     let mut hooks = HookChain::new();
     hooks.push(
-        "continue_on_length",
+        CONTINUE_ON_LENGTH,
         Arc::new(ContinueOnLength::new(agent.continue_on_length)),
     );
     // The hook reads the secret files again before every use.
     let redaction =
         RedactSecrets::new(api_key.into_iter().chain(hidden_values(app))).with_secret_files(app.secret_files.clone());
-    hooks.push("redact_secrets", Arc::new(redaction));
+    hooks.push(REDACT_SECRETS, Arc::new(redaction));
     // Observes every run of every session, whoever reads its events.
     if let Some(traces) = &app.traces {
-        hooks.push("trace_export", Arc::new(traces.clone()));
+        hooks.push(TRACE_EXPORT, Arc::new(traces.clone()));
+    }
+    for (name, hook) in &app.hooks {
+        hooks.push(name.as_str(), Arc::clone(hook));
     }
     hooks
 }
@@ -339,9 +429,10 @@ fn hidden_values(app: &Application) -> impl Iterator<Item = String> + '_ {
         .filter_map(env_value)
 }
 
-/// The MCP tools, of `names`, that ask a person: those not in the agent's `permissions.allow`,
-/// and none when the agent approves every call, since the container is the sandbox.
-fn mcp_asking(agent: &AgentDefinition, names: &[String]) -> Vec<String> {
+/// The tools of `names`, those of MCP servers and of the host's extensions, that ask a person:
+/// those not in the agent's `permissions.allow`, and none when the agent approves every call,
+/// since the container is the sandbox.
+fn asking_tools(agent: &AgentDefinition, names: &[String]) -> Vec<String> {
     if agent.permissions.approve_all {
         return Vec::new();
     }
@@ -349,9 +440,13 @@ fn mcp_asking(agent: &AgentDefinition, names: &[String]) -> Vec<String> {
     names.iter().filter(|name| !allowed.contains(name)).cloned().collect()
 }
 
-/// The agent's denied and asking tools and the MCP tools that ask, as one policy that allows
-/// the rest; none without any of them.
-fn rules_policy(agent: &mut AgentDefinition, mcp_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
+/// The agent's denied and asking tools and the tools of extensions that ask, MCP servers
+/// among them, as one policy that allows the rest; none without any of them.
+fn rules_policy(
+    agent: &mut AgentDefinition,
+    extension_ask: &[String],
+    auto_approve: AutoApprove,
+) -> Option<RulePolicy> {
     let denied = agent.permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
         decision: PolicyDecision::Deny("tool denied by the agent".into()),
@@ -361,11 +456,12 @@ fn rules_policy(agent: &mut AgentDefinition, mcp_ask: &[String], auto_approve: A
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });
     // An MCP server's tools ask unless permissions.allow lists them: annotations are hints.
-    let mcp = mcp_ask.iter().map(|tool| Rule {
+    // So do those of the host's extensions, which are treated as MCP servers are.
+    let extension = extension_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
-        decision: PolicyDecision::Ask("MCP tool requires approval (not in permissions.allow)".into()),
+        decision: PolicyDecision::Ask("this tool requires approval (not in permissions.allow)".into()),
     });
-    let mut rules: Vec<Rule> = denied.chain(asked).chain(mcp).collect();
+    let mut rules: Vec<Rule> = denied.chain(asked).chain(extension).collect();
     if rules.is_empty() {
         return None;
     }

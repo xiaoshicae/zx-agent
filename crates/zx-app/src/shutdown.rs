@@ -138,7 +138,7 @@ pub struct ExportEnd {
 /// the service `service_name`, the host's name ([`Telemetry::from_env`]); once `body` returns,
 /// whatever it returns, what remains to export is sent before this returns. `body` gets the
 /// export, `None` when nothing is exported, to observe the agents' runs with its hook
-/// ([`Application::with_traces`](crate::Application::with_traces)).
+/// ([`Application::set_traces`](crate::Application::set_traces)).
 ///
 /// Fails before `body` starts when the exporter refuses its configuration, such as an invalid
 /// endpoint. The export never changes what `body` returns: how it ended comes beside it.

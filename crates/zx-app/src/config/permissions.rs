@@ -145,10 +145,11 @@ impl Permissions {
         )
     }
 
-    /// Check the tool names against what is registered: `known` for the host's own tools and
-    /// `mcp` for the configured MCP tools, and the program options.
-    pub(super) fn validate(&self, known: impl Fn(&str) -> bool, mcp: &[String]) -> Result<()> {
-        let registered = |tool: &str| known(tool) || mcp.iter().any(|name| name == tool);
+    /// Check the tool names against what is registered: `known` for the tools that run unless
+    /// asked about, the built-in ones and the host's own, and `asking` for those that ask
+    /// unless allowed, the MCP tools and the host's extensions' tools; and the program options.
+    pub(super) fn validate(&self, known: impl Fn(&str) -> bool, asking: &[String]) -> Result<()> {
+        let registered = |tool: &str| known(tool) || asking.iter().any(|name| name == tool);
         for tool in &self.ask {
             ensure!(registered(tool), "permissions.ask: unknown tool {tool:?}");
         }
