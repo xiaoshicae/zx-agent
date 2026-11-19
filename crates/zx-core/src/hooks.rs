@@ -165,7 +165,8 @@ pub struct RequestSettings {
 }
 
 /// What [`Hook::prepare_request`] sees of the request about to be sent.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RequestPlan<'a> {
     /// The context the request sends, as recorded in the session.
     pub messages: &'a [Message],

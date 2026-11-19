@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
-use zx_agent::hooks::{ContextEdit, FinishedStep, HookContext, RequestSettings, StepDecision, StepDisposition};
+use zx_agent::hooks::{
+    ContextEdit, FinishedStep, HookContext, RequestPlan, RequestSettings, StepDecision, StepDisposition,
+};
 use zx_agent::policy::{ApprovalDecision, PolicyDecision};
 use zx_agent::tools::ToolOutput;
 
@@ -184,6 +186,25 @@ fn the_hook_context_names_the_labels_and_the_actor_when_it_has_them() {
             "labels": {"tenant": "acme"},
             "actor": "alice",
         })
+    );
+}
+
+#[test]
+fn a_request_plan_serializes_for_hook_processes() {
+    let messages = vec![Message::user("go")];
+    let settings = RequestSettings {
+        model: "m".into(),
+        reasoning: None,
+    };
+    let plan = RequestPlan {
+        messages: &messages,
+        step: 2,
+        settings: &settings,
+    };
+
+    assert_eq!(
+        serde_json::to_value(plan).unwrap(),
+        json!({"messages": serde_json::to_value(&messages).unwrap(), "step": 2, "settings": {"model": "m"}})
     );
 }
 
