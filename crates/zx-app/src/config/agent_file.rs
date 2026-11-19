@@ -13,7 +13,7 @@ use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
 use zx_agent::agent::RunLimits;
-use zx_agent::compaction::{self, TokenTrigger};
+use zx_agent::compaction::{self, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";
@@ -210,6 +210,28 @@ impl RawCompaction {
             config.timeout = Duration::from_secs(secs);
         }
     }
+}
+
+/// A `[compaction]` setting that the kernel refuses, said with its key in the agent file,
+/// where 0 turns a trigger off.
+pub(super) fn compaction_error(error: &InvalidConfig) -> anyhow::Error {
+    let message = match error {
+        InvalidConfig::ZeroKeepRecentBytes => "compaction.keepRecentBytes must be greater than zero".to_string(),
+        // `triggerTokens = 0` turns the token trigger off, so no file comes here.
+        InvalidConfig::ZeroTriggerTokens => {
+            "compaction.triggerTokens must be greater than zero (0 turns the token trigger off)".to_string()
+        }
+        InvalidConfig::TriggerTokensWithinKept => "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes, the tokens the kept recent messages take".to_string(),
+        InvalidConfig::TriggerBytesWithinKept => {
+            "compaction.triggerBytes must exceed compaction.keepRecentBytes (0 turns the byte trigger off)".to_string()
+        }
+        InvalidConfig::TriggerBytesBeyondSource => format!(
+            "compaction.triggerBytes may exceed compaction.keepRecentBytes by at most {MAX_SOURCE_BYTES} bytes, the most a summary reads"
+        ),
+        InvalidConfig::MaxSummaryTokens => format!("compaction.maxSummaryTokens must be 1..={MAX_SUMMARY_TOKENS}"),
+        InvalidConfig::ZeroTimeout => "compaction.timeoutSecs must be greater than zero".to_string(),
+    };
+    anyhow::anyhow!(message)
 }
 
 /// Settle the token trigger of `config` once every file of an agent is applied. One that no

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use super::agent_file::{AgentFile, settle_token_trigger};
+use super::agent_file::{AgentFile, compaction_error, settle_token_trigger};
 use super::permissions::Permissions;
 use super::skills::{READ_SKILL, Skill, validate_skills};
 use super::{Config, context, read_text};
@@ -103,27 +103,25 @@ impl AgentDefinition {
     /// `agents/<name>.md` in the zx-agent `home` when that file exists, else the built-in
     /// agent. No other file is read: a file in `agents/` with another name is ignored.
     pub(crate) fn load(builtin: Builtin, home: Option<&Path>, config: &Config, host: &HostTools) -> Result<Self> {
-        let mut agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", builtin.name()))) {
-            Some(path) if exists(&path)? => Self::from_file(&path)?,
-            _ => Self::builtin(builtin)?,
-        };
-        settle_token_trigger(&mut agent.compaction);
-        agent.validate(config, host)?;
-        Ok(agent)
+        match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", builtin.name()))) {
+            Some(path) if exists(&path)? => Self::from_file(&path, config, host),
+            _ => Self::builtin(builtin)?.checked(config, host),
+        }
     }
 
     /// The agent of the file at `path`, over the built-in agent it extends, named after the
-    /// file.
-    fn from_file(path: &Path) -> Result<Self> {
+    /// file and [`checked`](Self::checked); an error in the file names it.
+    fn from_file(path: &Path, config: &Config, host: &HostTools) -> Result<Self> {
         let path = path
             .canonicalize()
             .with_context(|| format!("cannot locate agent {}", path.display()))?;
+        let invalid = || format!("invalid agent {}", path.display());
         let name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .with_context(|| format!("agent {} has no name", path.display()))?
             .to_string();
-        let file = AgentFile::parse(&read_text(&path)?).with_context(|| format!("invalid agent {}", path.display()))?;
+        let file = AgentFile::parse(&read_text(&path)?).with_context(invalid)?;
         let mut agent = match file.extends() {
             Some(builtin) => Self::builtin(builtin)?,
             None => {
@@ -137,10 +135,18 @@ impl AgentDefinition {
         };
         // A canonical file path always has a parent, but keep this error actionable.
         let parent = path.parent().context("the agent has no parent directory")?;
-        file.apply(&mut agent, parent)
-            .with_context(|| format!("invalid agent {}", path.display()))?;
+        file.apply(&mut agent, parent).with_context(invalid)?;
         agent.name = name;
-        Ok(agent)
+        agent.checked(config, host).with_context(invalid)
+    }
+
+    /// The agent once every file of it is applied: its token trigger settled
+    /// ([`settle_token_trigger`]) and its settings checked against `config` and the tools of
+    /// the `host`.
+    fn checked(mut self, config: &Config, host: &HostTools) -> Result<Self> {
+        settle_token_trigger(&mut self.compaction);
+        self.validate(config, host)?;
+        Ok(self)
     }
 
     /// The built-in agent `builtin`, over the empty base.
@@ -186,12 +192,12 @@ impl AgentDefinition {
     pub(crate) fn validate(&self, config: &Config, host: &HostTools) -> Result<()> {
         let known = |name: &str| known_tool(name) || host.own.iter().any(|own| own == name);
         for name in &self.tools {
-            ensure!(known(name), "unknown tool {name:?}");
+            ensure!(known(name), "tools: unknown tool {name:?}");
         }
         let mut asking = config.mcp_tool_names()?;
         asking.extend(host.extensions.iter().cloned());
         self.permissions.validate(known, &asking)?;
-        self.compaction.validate().context("invalid [compaction] settings")?;
+        self.compaction.validate().map_err(|error| compaction_error(&error))?;
         ensure!(
             !self.permissions.approve_all || self.permissions.ask.is_empty(),
             "permissions.approveAll asks for no approval, so permissions.ask must be empty"
