@@ -17,8 +17,6 @@ const BLOCK_LINES: usize = 60;
 /// Argument fields that say what a call does, shown instead of the whole JSON: the first
 /// one present is the call's main value, the others follow as `name=value`.
 const LABEL_FIELDS: [&str; 3] = ["command", "pattern", "path"];
-/// Characters of a call's arguments on a `[tool]` progress line.
-const PROGRESS_ARGS_CHARS: usize = 300;
 /// Characters of a call's label on a progress or result line, or as a client's title;
 /// approvals show everything.
 const LABEL_CHARS: usize = 80;
@@ -152,14 +150,9 @@ pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, S
 #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
 pub(crate) fn progress_line(event: &EventKind) -> Option<(Severity, String)> {
     let line = match event {
-        EventKind::ToolExecutionStart { tool_name, args, .. } => (
-            Severity::Info,
-            format!(
-                "[tool] {} {}",
-                visible(tool_name),
-                visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
-            ),
-        ),
+        EventKind::ToolExecutionStart { tool_name, args, .. } => {
+            (Severity::Info, format!("[tool] {}", call_label(tool_name, args)))
+        }
         EventKind::ToolExecutionUpdate { tool_name, content, .. } => (
             Severity::Info,
             format!("[tool] {}: {}", visible(tool_name), visible(content)),
@@ -334,6 +327,17 @@ mod tests {
             describe_call("bash", &json!("not an object")),
             "bash: \"not an object\""
         );
+    }
+
+    #[test]
+    fn a_call_that_starts_is_shown_by_its_label() {
+        let started = EventKind::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: json!({"command": "ls -la", "timeoutSecs": 5}),
+        };
+        let line = progress_line(&started).map(|(_, line)| line);
+        assert_eq!(line.as_deref(), Some("[tool] bash: ls -la"));
     }
 
     #[test]
