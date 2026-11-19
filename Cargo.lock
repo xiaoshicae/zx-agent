@@ -3286,6 +3286,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "zx-ai",
+ "zx-ai-anthropic",
  "zx-ai-openai",
  "zx-builtin",
  "zx-core",
@@ -3302,6 +3303,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "zx-util",
+]
+
+[[package]]
+name = "zx-ai-anthropic"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "zx-ai",
  "zx-util",
 ]
 

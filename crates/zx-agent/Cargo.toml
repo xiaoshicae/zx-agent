@@ -23,6 +23,7 @@ testing = ["zx-ai/testing"]
 
 [dependencies]
 zx-ai.workspace = true
+zx-ai-anthropic.workspace = true
 zx-ai-openai.workspace = true
 zx-builtin.workspace = true
 zx-core.workspace = true
