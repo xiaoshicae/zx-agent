@@ -399,7 +399,7 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
 }
 
 #[test]
-fn zero_turns_and_unlimited_are_distinct_configurations() {
+fn zero_requests_and_unlimited_are_distinct_configurations() {
     assert_eq!(
         load_file("[limits]\nmaxModelRequests = 0")
             .unwrap()

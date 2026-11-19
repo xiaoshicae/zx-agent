@@ -100,7 +100,7 @@ impl ConfiguredAgent {
             agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
             "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
         );
-        let executor = executor(app, &agent)?;
+        let executor_factory = executor_factory(app, &agent)?;
         let factory = app
             .providers
             .get(&config.provider.api)
@@ -148,7 +148,7 @@ impl ConfiguredAgent {
                 tools: agent.tools,
                 context: agent.context,
                 skills,
-                executor,
+                executor_factory,
                 hidden_env: hidden_env(app, key_env),
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
@@ -279,7 +279,7 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
 
 /// The factory of the executor config.toml names in `execution`. Fails when there is none,
 /// and when `agent` approves every call but the factory does not isolate commands.
-fn executor(app: &Application, agent: &AgentDefinition) -> Result<Arc<dyn ExecutorFactory>> {
+fn executor_factory(app: &Application, agent: &AgentDefinition) -> Result<Arc<dyn ExecutorFactory>> {
     let name = &app.settings.config.execution;
     let factory = app
         .executors
@@ -411,7 +411,7 @@ fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
     std::iter::once(key_env.to_string())
         .chain(app.hidden_env.iter().cloned())
         .chain(app.mcp.token_env.iter().cloned())
-        .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
+        .chain(otel::HEADER_ENVS.iter().map(std::string::ToString::to_string))
         .collect()
 }
 
@@ -422,7 +422,7 @@ fn hidden_values(app: &Application) -> impl Iterator<Item = String> + '_ {
         .iter()
         .chain(&app.mcp.token_env)
         .map(String::as_str)
-        .chain(otel::HEADER_VARIABLES)
+        .chain(otel::HEADER_ENVS)
         .filter_map(env_value)
 }
 

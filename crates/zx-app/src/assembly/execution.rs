@@ -1,5 +1,5 @@
 //! Where a session's commands run: the factory registered under the name config.toml gives in
-//! `execution` starts an executor for each session (D34). `local`, this machine, and
+//! `execution` starts an executor for each session. `local`, this machine, and
 //! `container`, a Docker container for each session, are built in, the latter with the checks
 //! it needs and its failures in the terms of config.toml; a host registers others with
 //! [`Application::register_executor`](super::Application::register_executor).
@@ -38,7 +38,7 @@ pub struct ExecutorSession<'a> {
     /// Where its records are kept on this machine: its file, or the directory its file is
     /// in; `None` in memory or in the host's storage. A sandbox that can read the working
     /// directory must not reach them.
-    pub records: Option<&'a Path>,
+    pub location: Option<&'a Path>,
     /// Variables that commands must not see: the API key's and the other credentials'.
     pub hidden_env: &'a [String],
 }
@@ -78,7 +78,7 @@ impl ExecutorFactory for Container {
 
     /// Configuration errors are reported before the container starts.
     async fn start(&self, session: ExecutorSession<'_>) -> Result<Arc<dyn Executor>> {
-        check_session_outside(session.records, session.cwd)?;
+        check_session_outside(session.location, session.cwd)?;
         let config = ContainerConfig {
             label: session.id.into(),
             ..self.0.container_config()?

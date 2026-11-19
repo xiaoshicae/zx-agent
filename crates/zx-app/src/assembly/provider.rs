@@ -1,5 +1,5 @@
 //! The provider of an agent: the factory registered under the name config.toml gives in
-//! `provider.api` builds it from the `[provider]` table (D34). `openai` and `anthropic` are
+//! `provider.api` builds it from the `[provider]` table. `openai` and `anthropic` are
 //! built in; a host registers others with
 //! [`Application::register_provider`](super::Application::register_provider).
 
