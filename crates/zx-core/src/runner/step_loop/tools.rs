@@ -116,14 +116,14 @@ impl StepLoop<'_> {
     /// Run the policy on `call`, then ask for the host's approval when it says so. An error
     /// is the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
-        let verdict = self
+        let decision = self
             .scope
             .config
             .policies
             .check(call, &self.scope.target.trace.policy_context())
             .await;
-        self.report_decision(call, verdict.clone()).await;
-        match verdict {
+        self.report_decision(call, decision.clone()).await;
+        match decision {
             PolicyDecision::Allow => {}
             PolicyDecision::Deny(reason) => return Err(blocked_by_policy(&reason)),
             PolicyDecision::Ask(reason) => {
@@ -195,7 +195,7 @@ impl StepLoop<'_> {
         denial.map_or(Ok(()), Err)
     }
 
-    /// Report the policies' verdict on `call`.
+    /// Report the policies' decision on `call`.
     async fn report_decision(&self, call: &ToolCall, decision: PolicyDecision) {
         self.emit(EventKind::ToolDecision {
             tool_call_id: call.id.clone(),

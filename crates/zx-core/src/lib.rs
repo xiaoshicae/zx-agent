@@ -66,8 +66,8 @@
 //!     `transcript/storage.rs` (the name a listing shows)
 //!   - acts: `session.rs` (naming a session while idle)
 //! - **Tool policies and approval**
-//!   - records: none; verdicts and approvals are not recorded
-//!   - acts: `policy.rs` (the policy interface and its verdict), `policy/chain.rs` (asking
+//!   - records: none; decisions and approvals are not recorded
+//!   - acts: `policy.rs` (the policy interface and its decision), `policy/chain.rs` (asking
 //!     every policy, each bounded), `policy/approval.rs` (the gate where a call waits for the
 //!     host's answer, and the session's grants), `runner/step_loop/tools.rs` (checking a
 //!     call and waiting at the gate), `session.rs` (the host's answer)

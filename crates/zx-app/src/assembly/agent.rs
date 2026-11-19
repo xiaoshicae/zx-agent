@@ -337,7 +337,7 @@ fn skills_tool(agent: &mut AgentDefinition) -> Result<Option<(Arc<dyn Tool>, Str
 /// extensions that it does not allow, the host's own, and, where a person answers, the one
 /// that asks before bash commands. With them, who answers.
 ///
-/// Every policy that asks for bash gets the auto-approved commands: the strictest verdict of
+/// Every policy that asks for bash gets the auto-approved commands: the strictest decision of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
 fn policies(
     app: &Application,

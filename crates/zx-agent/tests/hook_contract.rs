@@ -20,7 +20,7 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
 }
 
 #[test]
-fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
+fn decisions_are_named_and_give_a_reason_to_deny_or_ask() {
     round_trip(&PolicyDecision::Allow, json!({"decision": "allow"}));
     round_trip(
         &PolicyDecision::Deny("not on the list".into()),

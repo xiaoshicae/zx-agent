@@ -173,9 +173,9 @@ impl CommandPolicy {
         PolicyDecision::Allow
     }
 
-    /// The verdict on `call`: every tool but `bash` is allowed, and a bash call without a
+    /// The decision on `call`: every tool but `bash` is allowed, and a bash call without a
     /// command is denied.
-    pub fn verdict(&self, call: &ToolCall) -> PolicyDecision {
+    pub fn decision(&self, call: &ToolCall) -> PolicyDecision {
         match bash_call(call) {
             BashCall::Other => PolicyDecision::Allow,
             BashCall::NoCommand => PolicyDecision::Deny("missing \"command\" argument".to_string()),
@@ -220,7 +220,7 @@ impl CommandPolicy {
 #[async_trait]
 impl ToolPolicy for CommandPolicy {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
-        self.verdict(call)
+        self.decision(call)
     }
 }
 
@@ -381,9 +381,9 @@ mod tests {
     fn only_bash_is_checked() {
         let policy = CommandPolicy::new();
         assert_eq!(
-            policy.verdict(&call("read_file", json!({"path": "/etc/hosts"}))),
+            policy.decision(&call("read_file", json!({"path": "/etc/hosts"}))),
             PolicyDecision::Allow
         );
-        assert!(denied(&policy.verdict(&call("bash", json!({})))));
+        assert!(denied(&policy.decision(&call("bash", json!({})))));
     }
 }

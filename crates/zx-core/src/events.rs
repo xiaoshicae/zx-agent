@@ -247,7 +247,7 @@ pub enum EventKind {
         tool_name: String,
         content: String,
     },
-    /// The verdict of the tool policies on a call, in JSON its `decision` and, for a denial or
+    /// The decision of the tool policies on a call, in JSON its `decision` and, for a denial or
     /// a question, its `reason`. A policy that panics, runs past its timeout or is cut short
     /// by cancellation denies the call, and the reason names it.
     ToolDecision {
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_decision_carries_the_verdict_as_policies_give_it() {
+    fn a_tool_decision_carries_the_decision_as_policies_give_it() {
         let decision = |decision| EventKind::ToolDecision {
             tool_call_id: "c".into(),
             tool_name: "bash".into(),

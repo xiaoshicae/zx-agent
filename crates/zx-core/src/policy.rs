@@ -1,8 +1,8 @@
-//! Whether a tool call may run: the [`ToolPolicy`] interface, the verdict it gives, and the
+//! Whether a tool call may run: the [`ToolPolicy`] interface, the decision it gives, and the
 //! approval of a call a policy asks about (pi: `beforeToolCall`, wired to the extension
 //! `tool_call` event).
 //!
-//! An unattended run has no one to ask, so a policy should deny when unsure. A verdict is a
+//! An unattended run has no one to ask, so a policy should deny when unsure. A decision is a
 //! first line of defense, not a security boundary: run the agent as a least-privilege user,
 //! in a container or VM, for real isolation.
 //!
@@ -13,7 +13,7 @@
 //! use zx_core::policy::CommandPolicy;
 //! ```
 //!
-//! - `chain`: the policies of a loop, and how their verdicts combine
+//! - `chain`: the policies of a loop, and how their decisions combine
 //! - `approval`: who answers when a policy asks, the answer, and the gate where the call
 //!   waits for it
 
@@ -35,7 +35,7 @@ pub use approval::{ApprovalDecision, ApprovalMode};
 pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the
-/// strictest verdict of all policies stands.
+/// strictest decision of all policies stands.
 ///
 /// `check` is called after the tool is found and its arguments are validated, before it
 /// runs; the call cannot be changed here. Return [`PolicyDecision::Deny`] when unsure. A
@@ -85,7 +85,7 @@ impl PolicyContext {
     }
 }
 
-/// The verdict on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
+/// The decision on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
 /// `reason`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "reason", rename_all = "snake_case")]

@@ -209,7 +209,7 @@ impl Application {
         self
     }
 
-    /// Add `policy` as `name`. The strictest verdict of all policies stands, so a policy can
+    /// Add `policy` as `name`. The strictest decision of all policies stands, so a policy can
     /// tighten what the agent's permissions allow but never loosen it.
     pub fn add_policy(mut self, name: &str, policy: Arc<dyn ToolPolicy>) -> Self {
         self.policies.push((name.into(), policy));

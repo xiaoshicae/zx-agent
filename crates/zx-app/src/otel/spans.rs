@@ -151,7 +151,7 @@ impl Runs {
             What::RequestStart { kind, model, attempt } => run.request_start(kind, model, attempt),
             What::Response { usage, stop } => run.response(&usage, stop),
             What::ToolStart { call, tool } => run.tool_start(call, tool),
-            What::Decision { call, verdict } => run.decision(&call, verdict),
+            What::Decision { call, decision } => run.decision(&call, decision),
             What::ApprovalRequested { call } => run.approval_requested(&call),
             What::ApprovalResolved { call, result, wait_ms } => run.approval_resolved(&call, result, wait_ms),
             What::ToolEnd { call, is_error, usage } => run.tool_end(&call, is_error, usage.as_ref()),
@@ -287,8 +287,8 @@ impl OpenRun<'_> {
         self.spans.tools.insert(call, cx);
     }
 
-    fn decision(&self, call: &str, verdict: &'static str) {
-        let attributes = vec![KeyValue::new("zx.verdict", verdict)];
+    fn decision(&self, call: &str, decision: &'static str) {
+        let attributes = vec![KeyValue::new("zx.decision", decision)];
         event(self.spans.for_call(call), "decision", self.at, attributes);
     }
 

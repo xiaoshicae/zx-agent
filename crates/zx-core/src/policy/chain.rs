@@ -18,7 +18,7 @@ struct Registered {
     timeout: Duration,
 }
 
-/// The policies of an agent, asked in the order they were registered. The strictest verdict
+/// The policies of an agent, asked in the order they were registered. The strictest decision
 /// stands, so the order never loosens one: a deny ends the check, and an ask outweighs an
 /// allow. A clone is a chain of the same policies: each session of the agent asks one.
 #[derive(Clone, Default)]
@@ -57,11 +57,11 @@ impl PolicyChain {
         self.policies.is_empty()
     }
 
-    /// The verdict on `call`: the first deny, else the first ask, else allow. A policy that
+    /// The decision on `call`: the first deny, else the first ask, else allow. A policy that
     /// panics, runs past its timeout or is cut short by cancellation denies the call, and the
     /// reason names it.
     pub(crate) async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
-        let mut verdict = PolicyDecision::Allow;
+        let mut strictest = PolicyDecision::Allow;
         for entry in &self.policies {
             let checked = bounded(
                 entry.policy.check(call, ctx),
@@ -76,11 +76,11 @@ impl PolicyChain {
             };
             match decision {
                 PolicyDecision::Deny(_) => return decision,
-                PolicyDecision::Ask(_) if matches!(verdict, PolicyDecision::Allow) => verdict = decision,
+                PolicyDecision::Ask(_) if matches!(strictest, PolicyDecision::Allow) => strictest = decision,
                 PolicyDecision::Ask(_) | PolicyDecision::Allow => {}
             }
         }
-        verdict
+        strictest
     }
 }
 
@@ -108,14 +108,14 @@ mod tests {
         }
     }
 
-    struct Verdict {
+    struct Decides {
         decision: PolicyDecision,
         index: usize,
         seen: Arc<Mutex<Vec<usize>>>,
     }
 
     #[async_trait]
-    impl ToolPolicy for Verdict {
+    impl ToolPolicy for Decides {
         async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
             self.seen.lock().unwrap().push(self.index);
             self.decision.clone()
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_strictest_verdict_stands_in_registration_order() {
+    async fn the_strictest_decision_stands_in_registration_order() {
         for (decisions, expected, visited) in [
             (
                 vec![
@@ -154,7 +154,7 @@ mod tests {
             for (index, decision) in decisions.into_iter().enumerate() {
                 chain.push(
                     format!("policy{index}"),
-                    Arc::new(Verdict {
+                    Arc::new(Decides {
                         decision,
                         index,
                         seen: seen.clone(),

@@ -85,7 +85,7 @@ pub trait Extension: Send + Sync {
     }
 
     /// Policies that decide whether a tool call may run, registered under the extension's
-    /// name. The strictest verdict of all policies stands, so an extension can tighten what
+    /// name. The strictest decision of all policies stands, so an extension can tighten what
     /// the host allows but never loosen it.
     fn policies(&self) -> Vec<Arc<dyn ToolPolicy>> {
         Vec::new()

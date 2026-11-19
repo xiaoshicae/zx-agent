@@ -29,9 +29,9 @@ use zx_testing::{
     run_prompt, summarize, take_queued_inputs,
 };
 
-struct Verdict(PolicyDecision);
+struct Decides(PolicyDecision);
 #[async_trait]
-impl ToolPolicy for Verdict {
+impl ToolPolicy for Decides {
     async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.clone()
     }
@@ -46,12 +46,12 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool.clone()]);
     config.policies.push(
-        "verdict",
-        Arc::new(Verdict(PolicyDecision::Ask("review required".into()))),
+        "decision",
+        Arc::new(Decides(PolicyDecision::Ask("review required".into()))),
     );
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Allow)));
+        .push("decision", Arc::new(Decides(PolicyDecision::Allow)));
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -95,7 +95,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
         let mut config = config(provider, vec![tool.clone()]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
         let (result, _) = run_approved(config, host.clone(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
@@ -172,7 +172,7 @@ async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on
     let mut config = config(provider.clone(), vec![tool.clone()]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     config.approvals = ApprovalMode::Wait(Duration::ZERO);
     let host = Arc::new(WaitingHost(Arc::default()));
     let (result, _) = run_approved(config, host, "go").await;
@@ -197,7 +197,7 @@ async fn cancellation_interrupts_a_pending_approval() {
     let mut config = config(provider, vec![tool.clone()]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let (runner, _) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
@@ -1036,7 +1036,7 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     );
 }
 
-/// The policy verdicts and approvals of a run, in order, as `(call, what)` pairs.
+/// The policy decisions and approvals of a run, in order, as `(call, what)` pairs.
 fn approvals(events: &zx_testing::Collect) -> Vec<(String, String)> {
     events
         .events()
@@ -1062,14 +1062,14 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
-    for verdict in [PolicyDecision::Allow, PolicyDecision::Deny("not on the list".into())] {
+async fn the_policy_decision_of_every_call_is_reported_with_its_reason() {
+    for decision in [PolicyDecision::Allow, PolicyDecision::Deny("not on the list".into())] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c1", "echo", json!({})),
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.policies.push("verdict", Arc::new(Verdict(verdict.clone())));
+        config.policies.push("decision", Arc::new(Decides(decision.clone())));
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1081,7 +1081,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
                 _ => None,
             })
             .collect();
-        assert_eq!(decisions, [verdict]);
+        assert_eq!(decisions, [decision]);
         assert_eq!(approvals(&events).len(), 1, "nobody is asked");
     }
 }
@@ -1132,7 +1132,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
         let host = Arc::new(Approver {
             approval,
             calls: AtomicUsize::new(0),
@@ -1163,7 +1163,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let host = Arc::new(SlowApprover(Duration::from_millis(20)));
 
     let (_, events) = run_approved(config, host, "go").await;
@@ -1193,7 +1193,7 @@ async fn an_approval_ends_as_denied_without_anyone_to_ask_and_as_timed_out_witho
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
         config.approvals = approvals;
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
@@ -1222,7 +1222,7 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let (runner, events) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)

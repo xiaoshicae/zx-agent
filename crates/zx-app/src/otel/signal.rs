@@ -92,8 +92,8 @@ pub(super) enum What {
     },
     Decision {
         call: String,
-        /// The policies' verdict, without its reason, which may quote the call.
-        verdict: &'static str,
+        /// The policies' decision, without its reason, which may quote the call.
+        decision: &'static str,
     },
     ApprovalRequested {
         call: String,
@@ -182,7 +182,7 @@ impl Signal {
                 tool_call_id, decision, ..
             } => What::Decision {
                 call: tool_call_id.clone(),
-                verdict: decision.name(),
+                decision: decision.name(),
             },
             EventKind::ApprovalRequested { tool_call_id, .. } => What::ApprovalRequested {
                 call: tool_call_id.clone(),
