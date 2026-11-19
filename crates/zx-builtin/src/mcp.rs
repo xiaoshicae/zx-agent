@@ -91,9 +91,14 @@ impl ServerConfig {
     ///
     /// Errors, each naming the server: a name that is not ASCII lowercase letters, digits and
     /// `-` (so that it ends at the first `__` of a tool's name); a URL that is not `http://` or
-    /// `https://`; no tools; a name longer than model APIs accept ([`MAX_TOOL_NAME_CHARS`]); two tools
-    /// that would get the same name.
+    /// `https://`; no tools; a name longer than model APIs accept ([`MAX_TOOL_NAME_CHARS`]);
+    /// two tools that would get the same name.
     pub fn validate(&self) -> Result<Vec<String>, String> {
+        self.check().map(|checked| checked.names)
+    }
+
+    /// What [`validate`](Self::validate) checks, with the origin of the URL it parsed.
+    fn check(&self) -> Result<Checked, String> {
         let server = self.name.as_str();
         check_server_name(server)?;
         if self.url.trim().is_empty() {
@@ -117,8 +122,19 @@ impl ServerConfig {
             }
             names.push(name);
         }
-        Ok(names)
+        Ok(Checked {
+            origin: url.origin().ascii_serialization(),
+            names,
+        })
     }
+}
+
+/// The settings of a server, checked.
+struct Checked {
+    /// The scheme, host and port of its URL.
+    origin: String,
+    /// The names the model calls its tools by, in configuration order.
+    names: Vec<String>,
 }
 
 type Client = RunningService<RoleClient, Handler>;
@@ -126,6 +142,7 @@ type Client = RunningService<RoleClient, Handler>;
 /// A connected MCP server and the tools taken from it.
 pub struct Server {
     name: String,
+    origin: String,
     protocol_version: String,
     tools: Vec<Arc<dyn Tool>>,
     /// The names the model calls the tools by, in configuration order.
@@ -141,7 +158,7 @@ impl Server {
     /// answer within `connect_timeout`, a protocol or transport failure, and a configured tool
     /// the server does not offer. The token never appears in them.
     pub async fn connect(config: ServerConfig) -> Result<Self, String> {
-        let names = config.validate()?;
+        let checked = config.check()?;
         let (client, listed) = connect_and_list(&config).await?;
         // A completed handshake or discovery records the server's information, so the empty
         // fallback is not expected; it only affects what is reported.
@@ -149,21 +166,21 @@ impl Server {
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        Self::with_tools(config, names, protocol_version, &listed, &Arc::new(client))
+        Self::with_tools(config, checked, protocol_version, &listed, &Arc::new(client))
     }
 
     /// The server with the configured tools among those it `listed`, as tools for the model,
-    /// which calls them by `names`, one for each configured tool.
+    /// which calls them by the `checked` names, one for each configured tool.
     fn with_tools(
         config: ServerConfig,
-        names: Vec<String>,
+        checked: Checked,
         protocol_version: String,
         listed: &[rmcp::model::Tool],
         client: &Arc<Client>,
     ) -> Result<Self, String> {
         let server = config.name.as_str();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        for (remote, name) in config.tools.iter().zip(&names) {
+        for (remote, name) in config.tools.iter().zip(&checked.names) {
             let Some(offered) = listed.iter().find(|tool| tool.name.as_ref() == remote.as_str()) else {
                 let offered: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
                 return Err(fault(
@@ -185,10 +202,17 @@ impl Server {
         }
         Ok(Self {
             name: config.name,
+            origin: checked.origin,
             protocol_version,
             tools,
-            names,
+            names: checked.names,
         })
+    }
+
+    /// The scheme, host and port of the server's URL, such as `https://mcp.example.com`: what
+    /// may be shown of it, since its user, path or query may hold a credential.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// The protocol version settled with the server, such as `2026-07-28`.

@@ -72,6 +72,18 @@ async fn a_current_server_is_discovered_and_only_the_configured_tools_are_offere
 }
 
 #[tokio::test]
+async fn the_origin_of_a_server_leaves_out_the_path_and_query_of_its_url() {
+    let fake = FakeMcp::start(Era::Modern, three_tools()).await;
+    let url = format!("{}?key=secret", fake.url);
+
+    let server = Server::connect(ServerConfig::new("prom", url, vec!["query".into()]))
+        .await
+        .unwrap();
+
+    assert_eq!(Some(server.origin()), fake.url.strip_suffix("/mcp"));
+}
+
+#[tokio::test]
 async fn an_older_server_gets_the_initialize_handshake_and_its_session() {
     let fake = FakeMcp::start(Era::Legacy, three_tools()).await;
     let server = connect(&fake, &["query"]).await;

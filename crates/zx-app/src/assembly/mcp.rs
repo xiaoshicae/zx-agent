@@ -54,11 +54,7 @@ impl McpTools {
         for (entry, server) in mcp.iter().zip(connected) {
             let server = server.map_err(anyhow::Error::msg)?;
             let names: Vec<&str> = server.tool_names().iter().map(String::as_str).collect();
-            // The origin only: a path or query may hold a credential. `Server::connect` has parsed
-            // the URL already, so the empty fallback is never shown.
-            let origin = reqwest::Url::parse(&entry.url)
-                .map(|url| url.origin().ascii_serialization())
-                .unwrap_or_default();
+            let origin = server.origin();
             let plain = if entry.token_env.is_some() && origin.starts_with("http://") {
                 "; the token is sent unencrypted"
             } else {
