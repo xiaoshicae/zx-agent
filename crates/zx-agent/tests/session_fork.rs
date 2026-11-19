@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use zx_agent::ai::Message;
+use serde_json::json;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::{Message, ToolResultMessage};
 use zx_agent::events::RunOutcome;
-use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, Transcript};
-use zx_testing::{RunnerSetup, config, header, read_lines};
+use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, StartRecord, Transcript};
+use zx_testing::{RunnerSetup, Seed, config, header, read_lines, tool_call_answer};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.id().to_string()).collect()
@@ -117,6 +118,50 @@ async fn a_branch_is_copied_only_into_an_empty_session() {
     // The parent is named by its ID, so a source that nothing stores has one too.
     assert_eq!(fresh.header().parent_session, Some(source.header().id.clone()));
     assert_eq!(fresh.header().version, SESSION_VERSION);
+}
+
+/// The calls a session's branch ends with and has no results for, and what it knows of their
+/// starts.
+fn unanswered(session: &Transcript) -> Vec<(String, StartRecord)> {
+    session
+        .interrupted_tool_calls()
+        .into_iter()
+        .map(|call| (call.tool_call_id, call.start))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_fork_that_ends_at_an_answer_knows_which_of_its_calls_started() {
+    let mut source = Seed::in_memory(header()).await;
+    source.append_message(Message::user("fix it")).await.unwrap();
+    let answer = source
+        .append_message(tool_call_answer("p", "m", "bash", json!({})))
+        .await
+        .unwrap();
+    source.record_tool_call_started("c1", "bash").await.unwrap();
+    source
+        .append_message(Message::ToolResult(ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            content: "done".into(),
+            is_error: false,
+            timestamp: 0,
+            duration_ms: None,
+            details: None,
+            usage: None,
+        }))
+        .await
+        .unwrap();
+
+    let mut fork = Transcript::in_memory(source.fork_header(std::path::Path::new("."), "m"));
+    let copied = fork.copy_branch(&source, &answer).await.unwrap();
+
+    // The start and the result follow the answer in the source, so neither is copied; the
+    // fork says of the call what the source says once it goes back to the answer.
+    assert_eq!(copied, 2);
+    source.branch(&answer).unwrap();
+    assert_eq!(unanswered(&source), [("c1".to_string(), StartRecord::Present)]);
+    assert_eq!(unanswered(&fork), unanswered(&source));
 }
 
 #[test]
