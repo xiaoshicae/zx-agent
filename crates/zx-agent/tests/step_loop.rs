@@ -143,7 +143,13 @@ async fn a_call_that_repeats_the_id_of_an_earlier_call_of_the_answer_is_answered
     };
     assert_eq!((first.content.as_str(), first.is_error), ("first", false));
     assert!(second.is_error, "{second:?}");
-    assert!(second.content.contains("same ID"), "{}", second.content);
+    assert!(
+        second
+            .content
+            .starts_with("Not executed: an earlier call of this answer has the ID"),
+        "{}",
+        second.content
+    );
 }
 
 #[tokio::test]
@@ -400,11 +406,11 @@ async fn failures_become_error_results_and_the_loop_continues() {
     assert_eq!(
         summarize(&context)[2..7],
         [
-            "tool:a=Tool missing not found!",
-            "tool:b=Invalid arguments for tool \"other\": expected a JSON object!",
-            "tool:c=Blocked by policy: echo is disabled!",
+            "tool:a=Not executed: there is no tool \"missing\". Call one of the tools offered.!",
+            "tool:b=Not executed: the arguments of \"other\" are invalid: expected a JSON object!",
+            "tool:c=Not executed: a policy denied it: echo is disabled!",
             "tool:d=disk not mounted!",
-            "tool:e=Tool other panicked!",
+            "tool:e=Failed: the tool \"other\" panicked.!",
         ]
     );
     assert_eq!(echo.calls.load(Ordering::SeqCst), 0, "denied calls never run");
@@ -777,7 +783,9 @@ async fn prepared_arguments_must_still_match_the_schema() {
     let result = tool_result(&requests[1].messages, 2);
     assert!(result.is_error);
     assert!(
-        result.content.starts_with("Invalid arguments for tool \"renaming\""),
+        result
+            .content
+            .starts_with("Not executed: the arguments of \"renaming\" are invalid"),
         "{}",
         result.content
     );
@@ -799,7 +807,10 @@ async fn a_panicking_argument_preparation_blocks_only_that_call() {
     let requests = provider.requests();
     let result = tool_result(&requests[1].messages, 2);
     assert!(result.is_error);
-    assert_eq!(result.content, "Tool renaming argument preparation panicked");
+    assert_eq!(
+        result.content,
+        "Not executed: preparing the arguments of \"renaming\" panicked."
+    );
 }
 
 #[tokio::test]

@@ -238,7 +238,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
-        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("Invalid arguments"))
+        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.starts_with("Not executed: the arguments of"))
     );
 }
 
@@ -505,7 +505,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 .contains("raw-tool-secret")
         );
         assert!(
-            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("withheld"))
+            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.starts_with("Withheld: "))
         );
     }
 }

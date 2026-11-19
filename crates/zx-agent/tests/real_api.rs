@@ -202,7 +202,7 @@ async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     let denied = runner.session().messages().into_iter().any(|message| {
-        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Approval denied"))
+        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Not executed: approval denied"))
     });
     assert!(denied, "the model saw a policy denial");
 }

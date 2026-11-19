@@ -547,7 +547,7 @@ async fn cancellation_skips_writes_and_reads() {
         panic!("tool result: {messages:?}");
     };
     assert!(
-        result.is_error && result.content.starts_with("Tool output withheld"),
+        result.is_error && result.content.starts_with("Withheld: "),
         "{result:?}"
     );
     assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
@@ -679,7 +679,7 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
     assert!(!result.is_error);
     assert!(result.content.starts_with(&"x".repeat(1000)));
     assert!(result.content.contains("cannot create output directory"));
-    assert!(!result.content.contains("Tool output withheld"));
+    assert!(!result.content.starts_with("Withheld: "));
 }
 
 #[test]

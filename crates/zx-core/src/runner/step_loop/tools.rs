@@ -30,10 +30,16 @@ impl StepLoop<'_> {
     async fn check<'c>(&mut self, call: &'c ToolCall) -> Checked<'c> {
         // Resolve and validate before running policy or asking the host.
         let Some((tool, effects)) = self.find_tool(&call.name) else {
-            return Checked::blocked(format!("Tool {} not found", call.name));
+            return Checked::blocked(not_executed(format_args!(
+                "there is no tool {:?}. Call one of the tools offered.",
+                call.name
+            )));
         };
         if !self.run.config.active_tools.is_active(&call.name) {
-            return Checked::blocked(format!("Tool {} is not active", call.name));
+            return Checked::blocked(not_executed(format_args!(
+                "the tool {:?} is not active now. Call one of the tools offered.",
+                call.name
+            )));
         }
         if let Some(error) = &call.arguments_error {
             return Checked::blocked(invalid_arguments(call, error));
@@ -44,7 +50,12 @@ impl StepLoop<'_> {
                 arguments,
                 ..call.clone()
             }),
-            Err(_) => return Checked::blocked(format!("Tool {} argument preparation panicked", call.name)),
+            Err(_) => {
+                return Checked::blocked(not_executed(format_args!(
+                    "preparing the arguments of {:?} panicked.",
+                    call.name
+                )));
+            }
         };
         if let Err(text) = self.validate_arguments(tool.as_ref(), &ran) {
             return Checked::blocked(text);
@@ -77,10 +88,10 @@ impl StepLoop<'_> {
         if seen.insert(&call.id) {
             return self.check(call).await;
         }
-        Checked::blocked(format!(
-            "Tool call {:?} was not executed: an earlier call of this answer has the same ID {:?}. Give every call an ID of its own.",
-            call.name, call.id
-        ))
+        Checked::blocked(not_executed(format_args!(
+            "an earlier call of this answer has the ID {:?} too. Give every call an ID of its own.",
+            call.id
+        )))
     }
 
     /// Check the arguments `call` runs with: a JSON object that fits the tool's declared
@@ -95,7 +106,10 @@ impl StepLoop<'_> {
         match std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments))) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(invalid_arguments(call, error)),
-            Err(_) => Err(format!("Tool {} argument validation panicked", call.name)),
+            Err(_) => Err(not_executed(format_args!(
+                "checking the arguments of {:?} panicked.",
+                call.name
+            ))),
         }
     }
 
@@ -122,7 +136,7 @@ impl StepLoop<'_> {
                     };
                     self.approval_resolved(call, remembered).await;
                 } else if let Err(denied) = self.ask(call, reason).await {
-                    return Err(format!("Approval denied: {denied}"));
+                    return Err(not_executed(format_args!("approval denied: {denied}")));
                 }
             }
         }
@@ -356,7 +370,7 @@ impl StepLoop<'_> {
         let output = match result {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => ToolOutput::error(error),
-            Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
+            Err(_) => ToolOutput::error(format!("Failed: the tool {:?} panicked.", tool.name())),
         };
         Ended::Output(CallOutput {
             output,
@@ -412,7 +426,9 @@ impl StepLoop<'_> {
             // Discard the raw output on every failure, including cancellation.
             Err(error) => {
                 let failure = self.report_hook_failure(error).await;
-                ToolOutput::error(format!("Tool output withheld: {failure}"))
+                ToolOutput::error(format!(
+                    "Withheld: the call ran, but its output did not pass the hooks: {failure}"
+                ))
             }
         };
         // Bounded here, after every hook, so that the event and the record carry the same.
@@ -429,9 +445,8 @@ impl StepLoop<'_> {
     pub(super) async fn reject_truncated_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         for call in calls {
             self.tool_start(call).await;
-            let blocked = CallOutput::blocked(format!(
-                "Tool call {:?} was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
-                call.name
+            let blocked = CallOutput::blocked(not_executed(
+                "the answer reached the output token limit, so its arguments may be cut short. Call the tool again with complete arguments.",
             ));
             let outcome = self.execute_checked(call, Checked::Blocked(blocked)).await;
             self.record_result(call, outcome).await?;
@@ -499,14 +514,21 @@ impl CallOutput {
     }
 }
 
+/// The result text of a call that did not run, and why. A result the kernel writes opens with
+/// what became of the call: it was not executed, it was interrupted, it failed, or its output
+/// was withheld.
+fn not_executed(why: impl Display) -> String {
+    format!("Not executed: {why}")
+}
+
 /// The result text of a call whose arguments are not valid for its tool.
 fn invalid_arguments(call: &ToolCall, reason: impl Display) -> String {
-    format!("Invalid arguments for tool {:?}: {reason}", call.name)
+    not_executed(format_args!("the arguments of {:?} are invalid: {reason}", call.name))
 }
 
 /// The result text of a call the policy denied.
 fn blocked_by_policy(reason: &str) -> String {
-    format!("Blocked by policy: {reason}")
+    not_executed(format_args!("a policy denied it: {reason}"))
 }
 
 /// How an approval ended, as its `approval_resolved` event reports it.
@@ -534,7 +556,7 @@ enum Ended {
 impl Ended {
     /// The end of a call that never started because the run was cancelled first.
     fn not_started() -> Self {
-        Self::Cancelled(CallOutput::blocked(NOT_STARTED))
+        Self::Cancelled(CallOutput::blocked(not_executed(CANCELLED_FIRST)))
     }
 }
 
@@ -566,8 +588,8 @@ fn details_fit(details: &Value) -> bool {
     serde_json::to_string(details).is_ok_and(|json| json.len() <= MAX_DETAILS_BYTES)
 }
 
-/// The result of a call that never started because the run was cancelled first.
-const NOT_STARTED: &str = "Not executed: the run was cancelled before this call started, so it had no effect.";
+/// Why a call never started when the run was cancelled first.
+const CANCELLED_FIRST: &str = "the run was cancelled before this call started, so it had no effect.";
 
 /// The result of a call that the cancellation interrupted. Like a call that a crash
 /// interrupted, one with side effects may have changed state before it stopped.

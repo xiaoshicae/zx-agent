@@ -336,7 +336,7 @@ async fn the_agents_permissions_ask_about_a_tool_the_host_adds() {
     ask(&app).await;
     // Asked about, with nobody to answer.
     let result = first_result(&server.requests()[1]);
-    assert!(result.starts_with("Approval denied"), "{result}");
+    assert!(result.starts_with("Not executed: approval denied"), "{result}");
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -379,7 +379,7 @@ async fn the_tools_of_an_extension_of_the_host_ask_as_those_of_mcp_servers_do() 
     assert_eq!(offered(&requests[0]), ["ext_probe"]);
     // Asked about, with nobody to answer.
     let result = first_result(&requests[1]);
-    assert!(result.starts_with("Approval denied"), "{result}");
+    assert!(result.starts_with("Not executed: approval denied"), "{result}");
 }
 
 /// Gives an application parts of the host's.

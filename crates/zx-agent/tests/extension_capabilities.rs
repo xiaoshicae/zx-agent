@@ -174,7 +174,10 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
 
     assert_eq!(tool_names(&provider, 0), ["echo"]);
     let context = summarize(&provider.requests()[1].messages);
-    assert_eq!(context[2], "tool:c1=Tool note is not active!");
+    assert_eq!(
+        context[2],
+        "tool:c1=Not executed: the tool \"note\" is not active now. Call one of the tools offered.!"
+    );
     assert_eq!(note_tool.calls.load(Ordering::SeqCst), 0, "an inactive tool never runs");
     assert_eq!(session.active_tools().names(), Some(vec!["echo".to_string()]));
 

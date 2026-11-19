@@ -850,7 +850,7 @@ async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     assert!(
         server.requests()[1].body["messages"]
             .to_string()
-            .contains("Blocked by policy")
+            .contains("Not executed: a policy denied it")
     );
 }
 
