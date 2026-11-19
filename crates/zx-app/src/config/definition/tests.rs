@@ -179,11 +179,11 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
         ("[permissions.allowOptions.Tool]\nlong = ['x']", "one lowercase word"),
         (
             "[permissions.allowOptions.tool]\nlong = ['--namespace']",
-            "without dashes",
+            "without leading dashes",
         ),
         (
             "[permissions.allowOptions.tool]\nlong = ['output=json']",
-            "without dashes",
+            "`=` or whitespace",
         ),
         ("[permissions.allowOptions.tool]\nshortFlags = ['-']", "letter or digit"),
         (
