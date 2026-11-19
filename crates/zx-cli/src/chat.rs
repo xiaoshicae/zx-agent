@@ -33,7 +33,7 @@ use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
 use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, connect, open_session, with_telemetry};
 use crate::render::visible;
 
 use commands::Command;
@@ -86,7 +86,7 @@ impl Chat {
         let approvals = Approvals::Person("shell commands require interactive approval");
         let agent = self.app.build(model, place, approvals)?;
         let session = match resume {
-            Some(id) => crate::process::resume(&agent, id).await?,
+            Some(id) => open_session(&agent, id).await?,
             None => agent.create(None).await?,
         };
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
@@ -139,7 +139,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
+    let app = connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
         .set_traces(traces);
     let mode = if std::io::stdin().is_terminal() {

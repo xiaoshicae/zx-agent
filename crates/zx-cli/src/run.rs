@@ -15,7 +15,10 @@ use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, eprint_line, exit_code, print_line, with_telemetry};
+use crate::process::{
+    EXIT_DENIED, JsonlEvents, cancel_on_signals, connect, eprint_line, exit_code, open_session, print_line,
+    with_telemetry,
+};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::session_file;
 
@@ -25,7 +28,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     let RunArgs {
         prompt,
         fail_on_denied,
-        session: session_file,
+        session: file,
         base,
         budget,
         output,
@@ -36,7 +39,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let file = session_file.as_deref().context("--continue needs --session")?;
+            let file = file.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
                 file.exists(),
                 "--continue needs an existing session file; {} does not exist",
@@ -46,10 +49,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         }
     };
     with_telemetry(async move |telemetry| {
-        let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Unattended)
+        let app = connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
             .set_traces(telemetry.map(run_traces));
-        let session = build_session(&app, session_file.as_deref()).await?;
+        let session = build_session(&app, file.as_deref()).await?;
         let cancel = CancellationToken::new();
         cancel_on_signals(cancel.clone());
         let run = match prompt {
@@ -57,7 +60,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
             None => session.continue_run()?,
         };
         let report = read_to_end(&session, run, &cancel, &Progress::of(output, deltas)).await;
-        print_report(&report, output, session_file.as_deref());
+        print_report(&report, output, file.as_deref());
         Ok(match report.outcome {
             RunOutcome::Completed if fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
             outcome => exit_code(outcome),
@@ -100,16 +103,16 @@ fn run_traces(telemetry: &Telemetry) -> TraceHook {
 }
 
 /// A session of the `unattended` agent, or of the user's file that replaces it, in which
-/// nobody answers approvals: `--session` continues the session its file holds, or starts
-/// the file; without it the session is kept in memory.
-async fn build_session(app: &Application, session: Option<&Path>) -> Result<Session> {
-    let (place, held) = match session {
+/// nobody answers approvals: `--session`'s `file` continues the session it holds, or starts;
+/// without it the session is kept in memory.
+async fn build_session(app: &Application, file: Option<&Path>) -> Result<Session> {
+    let (place, held) = match file {
         Some(path) => (SessionPlace::file(path), session_file::held(path, app.cwd()).await?),
         None => (SessionPlace::memory(), None),
     };
     let agent = app.build(app.model(), &place, Approvals::Nobody)?;
     match held {
-        Some(id) => crate::process::resume(&agent, &id).await,
+        Some(id) => open_session(&agent, &id).await,
         None => agent.create(None).await,
     }
 }
@@ -124,9 +127,9 @@ async fn read_to_end(session: &Session, mut run: Run, cancel: &CancellationToken
     run.wait().await
 }
 
-/// The answer on stdout and a summary line on stderr, which names `session`, the session
-/// file, when there is one.
-fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) {
+/// The answer on stdout and a summary line on stderr, which names `file`, the session file,
+/// when there is one.
+fn print_report(report: &RunReport, output: OutputMode, file: Option<&Path>) {
     match output {
         OutputMode::Text => {
             if !report.final_text.is_empty() {
@@ -141,7 +144,7 @@ fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) 
             let error = report
                 .error
                 .as_deref()
-                .map(|e| format!(" error={}", visible(e)))
+                .map(|error| format!(" error={}", visible(error)))
                 .unwrap_or_default();
             let denied = match report.denied_calls {
                 0 => String::new(),
@@ -151,8 +154,8 @@ fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) 
                 .total_cost
                 .map(|cost| format!(" cost={cost:.4}"))
                 .unwrap_or_default();
-            let session = session
-                .map(|file| format!(" session={}", file.display()))
+            let session = file
+                .map(|path| format!(" session={}", path.display()))
                 .unwrap_or_default();
             // Named as the `run_end` event names them.
             let outcome = match report.outcome {
@@ -190,14 +193,14 @@ impl Progress {
 
     fn emit(&self, event: &Event) {
         match self {
-            Self::Text => text_progress(event),
+            Self::Text => print_progress(event),
             Self::Jsonl(events) => events.emit(event),
         }
     }
 }
 
-/// The line that `event` adds to the progress on stderr, if it adds one.
-fn text_progress(event: &Event) {
+/// Print the line that `event` adds to the progress on stderr, if it adds one.
+fn print_progress(event: &Event) {
     if let EventKind::MessageEnd {
         message: Message::Assistant(message),
         ..

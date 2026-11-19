@@ -25,9 +25,9 @@ pub(super) struct Request {
     /// The request's ID in the run, which its answer names.
     pub(super) approval_id: String,
     pub(super) tool_call_id: String,
-    pub(super) tool: String,
+    pub(super) tool_name: String,
     /// The arguments the call would run with.
-    pub(super) arguments: Value,
+    pub(super) args: Value,
 }
 
 /// Ask the client to approve `request` of session `session_id`. The client's answer goes to
@@ -41,10 +41,10 @@ pub(super) fn ask(
     request: Request,
 ) -> Result<(), Error> {
     let fields = ToolCallUpdateFields::new()
-        .title(call_label(&request.tool, &request.arguments))
-        .kind(tool_kind(&request.tool))
+        .title(call_label(&request.tool_name, &request.args))
+        .kind(tool_kind(&request.tool_name))
         .status(ToolCallStatus::Pending)
-        .raw_input(request.arguments);
+        .raw_input(request.args);
     let options = vec![
         PermissionOption::new(ALLOW_ONCE, "Allow once", PermissionOptionKind::AllowOnce),
         PermissionOption::new(
@@ -59,15 +59,18 @@ pub(super) fn ask(
         ToolCallUpdate::new(ToolCallId::new(request.tool_call_id.as_str()), fields),
         options,
     );
-    let (asking, session, approval_id) = (cx.clone(), session.clone(), request.approval_id);
-    cx.spawn(async move {
-        let decision = match asking.send_request(permission).block_task().await {
-            Ok(response) => decision(&response.outcome),
-            Err(error) => ApprovalDecision::Deny(format!("the permission request failed: {error}")),
-        };
-        // The run may have stopped waiting: it timed out, or the turn was cancelled.
-        drop(session.resolve_approval(&approval_id, decision));
-        Ok(())
+    let (session, approval_id) = (session.clone(), request.approval_id);
+    cx.spawn({
+        let cx = cx.clone();
+        async move {
+            let decision = match cx.send_request(permission).block_task().await {
+                Ok(response) => decision(&response.outcome),
+                Err(error) => ApprovalDecision::Deny(format!("the permission request failed: {error}")),
+            };
+            // The run may have stopped waiting: it timed out, or the turn was cancelled.
+            drop(session.resolve_approval(&approval_id, decision));
+            Ok(())
+        }
     })
 }
 

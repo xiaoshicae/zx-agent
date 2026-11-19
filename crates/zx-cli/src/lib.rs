@@ -44,8 +44,8 @@ pub async fn main() -> ExitCode {
     };
     match result {
         Ok(code) => ExitCode::from(code),
-        Err(e) => {
-            process::eprint_line(&format!("zx-agent: {e:#}"));
+        Err(error) => {
+            process::eprint_line(&format!("zx-agent: {error:#}"));
             ExitCode::from(EXIT_USAGE)
         }
     }

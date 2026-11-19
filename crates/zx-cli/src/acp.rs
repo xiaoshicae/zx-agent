@@ -50,7 +50,7 @@ use zx_app::{Approvals, ConfiguredAgent, SessionPlace, resolve_cwd};
 
 use crate::cli::{self, AcpArgs};
 use crate::listing;
-use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
+use crate::process::{EXIT_COMPLETED, cancel_on_signals, connect, open_session, with_telemetry};
 
 use commands::Command;
 use updates::Updates;
@@ -59,7 +59,7 @@ struct Host {
     /// The agent of every session, which also holds the sessions the client has open: the
     /// client's approval is asked for its calls. With it, where the sessions are kept, which
     /// is the session files chat keeps too, or memory with `--no-session`.
-    agent: ConfiguredAgent,
+    configured: ConfiguredAgent,
     /// `--cwd`, the directory of a listing that names none; the current one without it.
     cwd: Option<PathBuf>,
     /// Cancelled when the process is told to stop: every turn then cancels its run.
@@ -73,19 +73,19 @@ struct Host {
 impl Host {
     /// The session `id` when the client has it open.
     fn session(&self, id: &SessionId) -> Option<Session> {
-        self.agent.agent().session(&id.0)
+        self.configured.agent().session(&id.0)
     }
 
     /// Whether sessions are kept as files, where a later request or process finds them
     /// again: not with `--no-session`.
     fn keeps_files(&self) -> bool {
-        self.agent.place().is_persistent()
+        self.configured.place().is_persistent()
     }
 
     /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
     /// It is kept among the session files, where `session/load` finds it again.
     async fn create(&self, cwd: &Path) -> Result<SessionId> {
-        let session = self.agent.create(Some(cwd)).await?;
+        let session = self.configured.create(Some(cwd)).await?;
         Ok(SessionId::new(session.id()))
     }
 
@@ -97,7 +97,7 @@ impl Host {
     /// session in it.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
         let open = self.session(id);
-        let (id, place) = (&*id.0, &self.agent.place());
+        let (id, place) = (&*id.0, &self.configured.place());
         let cwd = resolve_cwd(Some(cwd))?;
         let directory = place.location(&cwd);
         let unknown = || match &directory {
@@ -122,12 +122,12 @@ impl Host {
         if !kept_there {
             return Err(unknown().into());
         }
-        let session = crate::process::resume(&self.agent, id).await?;
+        let session = open_session(&self.configured, id).await?;
         // Two directories can share a directory name of sessions (`/a-b` and `/a/b`).
         if session.cwd() != cwd {
             // Started in another directory: not a session of this one, and not left open,
             // where the next request would find it whatever directory it names.
-            self.agent.agent().close_session(id);
+            self.configured.agent().close_session(id);
             return Err(unknown().into());
         }
         Ok(session)
@@ -170,7 +170,7 @@ impl Host {
         if !self.keeps_files() {
             return Ok(Vec::new());
         }
-        let kept = self.agent.place().started_in(&cwd).await?;
+        let kept = self.configured.place().started_in(&cwd).await?;
         Ok(kept.sessions.iter().map(session_info).collect())
     }
 
@@ -256,12 +256,15 @@ impl Host {
             return responder.respond_with_error(unknown_session(&request.session_id.0, why));
         };
         let text = prompt_text(&request.prompt);
-        let (connection, session_id) = (cx.clone(), request.session_id.clone());
+        let session_id = request.session_id.clone();
         let started = match commands::parse(&text) {
             Some(Command::Name(name)) => {
-                return cx.spawn(async move {
-                    let answer = commands::name(&session, name, &connection, &session_id).await;
-                    responder.respond_with_result(answer.map_err(protocol_error))
+                return cx.spawn({
+                    let cx = cx.clone();
+                    async move {
+                        let answer = commands::name(&session, name, &cx, &session_id).await;
+                        responder.respond_with_result(answer.map_err(protocol_error))
+                    }
                 });
             }
             Some(Command::Usage(usage)) => {
@@ -275,9 +278,9 @@ impl Host {
             Err(error) => return responder.respond_with_error(protocol_error(error.into())),
         };
         let turn = Turn {
-            updates: Updates::new(connection.clone(), session_id.clone(), session.cwd().to_path_buf()),
+            updates: Updates::new(cx.clone(), session_id.clone(), session.cwd().to_path_buf()),
             session,
-            cx: connection,
+            cx: cx.clone(),
             id: session_id,
             stop: self.stop.clone(),
         };
@@ -306,7 +309,7 @@ impl Host {
         request: &CloseSessionRequest,
         responder: Responder<CloseSessionResponse, V1>,
     ) -> Result<(), Error> {
-        self.agent.agent().close_session(&request.session_id.0);
+        self.configured.agent().close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
 }
@@ -338,7 +341,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before what remains of the traces is exported.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
+    let app = connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
         .set_traces(traces);
     let place = if args.no_session {
@@ -348,12 +351,12 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
-    let agent = app.build(app.model(), &place, approvals)?;
+    let configured = app.build(app.model(), &place, approvals)?;
     let stop = CancellationToken::new();
     cancel_on_signals(stop.clone());
     let (turns, mut turns_ended) = mpsc::channel::<()>(1);
-    let connection = connect(Arc::new(Host {
-        agent,
+    let connection = client_connection(Arc::new(Host {
+        configured,
         cwd: app.cwd().map(Path::to_path_buf),
         stop: stop.clone(),
         turns: turns.downgrade(),
@@ -376,7 +379,7 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
 
 /// The connection to the client on stdio, each request and notification handled by `host`,
 /// until the client closes it.
-async fn connect(host: Arc<Host>) -> Result<(), Error> {
+async fn client_connection(host: Arc<Host>) -> Result<(), Error> {
     let on_initialize = Arc::clone(&host);
     let on_new = Arc::clone(&host);
     let on_load = Arc::clone(&host);
@@ -398,22 +401,31 @@ async fn connect(host: Arc<Host>) -> Result<(), Error> {
         // session only once it has the answer.
         .on_receive_request(
             async move |request: NewSessionRequest, responder, cx| {
-                let (host, connection) = (Arc::clone(&on_new), cx.clone());
-                cx.spawn(async move { host.new_session(&request, responder, &connection).await })
+                let host = Arc::clone(&on_new);
+                cx.spawn({
+                    let cx = cx.clone();
+                    async move { host.new_session(&request, responder, &cx).await }
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx| {
-                let (host, connection) = (Arc::clone(&on_load), cx.clone());
-                cx.spawn(async move { host.load_session(&request, responder, &connection).await })
+                let host = Arc::clone(&on_load);
+                cx.spawn({
+                    let cx = cx.clone();
+                    async move { host.load_session(&request, responder, &cx).await }
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: ResumeSessionRequest, responder, cx| {
-                let (host, connection) = (Arc::clone(&on_resume), cx.clone());
-                cx.spawn(async move { host.resume_session(&request, responder, &connection).await })
+                let host = Arc::clone(&on_resume);
+                cx.spawn({
+                    let cx = cx.clone();
+                    async move { host.resume_session(&request, responder, &cx).await }
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -500,8 +512,8 @@ impl Turn {
                 let request = permissions::Request {
                     approval_id,
                     tool_call_id,
-                    tool: tool_name,
-                    arguments: args,
+                    tool_name,
+                    args,
                 };
                 permissions::ask(&self.cx, &self.id, &self.session, request)?;
             }

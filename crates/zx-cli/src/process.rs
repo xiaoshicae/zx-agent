@@ -58,7 +58,7 @@ fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
 
 /// The stored session `id` of `agent`, opened. A cut-short final record, which the next
 /// record replaces, is reported on stderr.
-pub(crate) async fn resume(agent: &ConfiguredAgent, id: &str) -> Result<Session> {
+pub(crate) async fn open_session(agent: &ConfiguredAgent, id: &str) -> Result<Session> {
     let session = agent.open(id).await?;
     let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
     if cut_off > 0 {
@@ -94,7 +94,7 @@ pub(crate) fn cancel_on_signals(cancel: CancellationToken) {
 }
 
 /// Print one JSON line on stdout.
-pub(crate) fn write_line(value: &impl serde::Serialize) {
+pub(crate) fn print_json_line(value: &impl serde::Serialize) {
     // Events and reports hold only strings, numbers, and `serde_json::Value`, which always serialize.
     let Ok(line) = serde_json::to_string(value) else {
         return;
@@ -129,7 +129,7 @@ impl JsonlEvents {
         if !self.deltas && matches!(event.event, EventKind::MessageUpdate { .. }) {
             return;
         }
-        write_line(event);
+        print_json_line(event);
     }
 }
 

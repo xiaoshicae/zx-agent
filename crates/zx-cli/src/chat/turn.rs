@@ -114,8 +114,8 @@ struct Ticket {
     number: u64,
     /// The request's ID in the run, which its answer names.
     approval_id: String,
-    tool: String,
-    arguments: Value,
+    tool_name: String,
+    args: Value,
     reason: String,
 }
 
@@ -212,8 +212,8 @@ fn observed(io: &mut TurnIo<'_>, pending: &mut Pending, event: &Event) {
             let ticket = Ticket {
                 number,
                 approval_id: approval_id.clone(),
-                tool: tool_name.clone(),
-                arguments: args.clone(),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
                 reason: reason.clone(),
             };
             show_approval(io.output, &ticket);
@@ -483,10 +483,10 @@ fn show_approval(output: &Output, ticket: &Ticket) {
         &format!(
             "{} {}",
             style.paint(Tone::Warn, &format!("[approval {}]", ticket.number)),
-            style.paint(Tone::Strong, &describe_call(&ticket.tool, &ticket.arguments))
+            style.paint(Tone::Strong, &describe_call(&ticket.tool_name, &ticket.args))
         ),
     );
-    for line in describe_arguments(&ticket.arguments) {
+    for line in describe_arguments(&ticket.args) {
         output.line(Tone::Plain, &format!("  {line}"));
     }
     output.line(Tone::Dim, &format!("  {}", visible(&ticket.reason)));

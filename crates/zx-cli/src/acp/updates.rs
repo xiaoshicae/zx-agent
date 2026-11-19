@@ -100,9 +100,12 @@ impl Updates {
                             }
                             MessageBlock::Text { .. } | MessageBlock::Thinking { .. } => {}
                             MessageBlock::ToolCall(MessageCall {
-                                id, name, arguments, ..
+                                id,
+                                name,
+                                arguments: args,
+                                ..
                             }) => {
-                                let call = self.recorded_call(id, name, arguments, &projection[index + 1..]);
+                                let call = self.recorded_call(id, name, args, &projection[index + 1..]);
                                 self.send(SessionUpdate::ToolCall(call));
                             }
                         }
@@ -114,15 +117,15 @@ impl Updates {
 
     /// A recorded call as one update: with its result when a later message holds one, else
     /// still pending, which the next run settles.
-    fn recorded_call(&self, id: &str, name: &str, arguments: &Value, later: &[ProjectedMessage]) -> ToolCall {
-        let call = self.call(id, name, arguments);
+    fn recorded_call(&self, id: &str, name: &str, args: &Value, later: &[ProjectedMessage]) -> ToolCall {
+        let call = self.call(id, name, args);
         let result = later.iter().find_map(|item| match &item.message {
             Message::ToolResult(result) if result.tool_call_id == id => Some(result),
             _ => None,
         });
         match result {
             Some(result) => {
-                let (status, content, raw_output) = self.result_fields(name, Some(arguments), result);
+                let (status, content, raw_output) = self.result_fields(name, Some(args), result);
                 call.status(status).content(content).raw_output(raw_output)
             }
             None => call.status(ToolCallStatus::Pending),

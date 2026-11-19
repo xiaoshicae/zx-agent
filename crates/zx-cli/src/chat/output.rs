@@ -13,7 +13,7 @@ use zx_util::sync::lock;
 use zx_util::text::clip;
 
 use crate::cli::{ColorArg, OutputMode};
-use crate::process::{JsonlEvents, write_line};
+use crate::process::{JsonlEvents, print_json_line};
 use crate::render::{Severity, answer_end_line, call_label, progress_line, visible};
 
 use super::term::{Style, Terminal, Tone, elapsed_text};
@@ -134,7 +134,7 @@ impl Output {
 
     pub(super) fn compact_report(&self, report: &compaction::Report) {
         match self.mode {
-            OutputMode::Jsonl => write_line(&serde_json::json!({"type":"compaction_report","report":report})),
+            OutputMode::Jsonl => print_json_line(&serde_json::json!({"type":"compaction_report","report":report})),
             OutputMode::Text => match report.outcome {
                 Outcome::Noop => self.line(Tone::Dim, "[compact] no eligible old messages to summarize"),
                 Outcome::Completed => self.line(
