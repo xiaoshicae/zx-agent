@@ -287,9 +287,9 @@ impl<'a> StepLoop<'a> {
     async fn handle_response(&mut self, step: u32, message: AssistantMessage) -> Result<StepResponse, Halt> {
         let stop = message.stop_reason;
         let calls = message.tool_calls();
-        // The response is kept twice: in the session, and for the decision or the failure.
+        // The event takes a copy of the response; this one stays for the decision or the failure.
         let entry_id = self
-            .record_finished_message(&Message::Assistant(message.clone()))
+            .record_finished_message(Message::Assistant(message.clone()))
             .await?;
         if matches!(stop, StopReason::Error | StopReason::Aborted) {
             self.end_step().await;

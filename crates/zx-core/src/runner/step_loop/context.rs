@@ -25,10 +25,10 @@ impl StepLoop<'_> {
     }
 
     /// Record a finished message, then report it. Returns its entry ID.
-    pub(super) async fn record_finished_message(&mut self, message: &Message) -> Result<String, Halt> {
-        let id = self.append_message(message, None).await?;
+    pub(super) async fn record_finished_message(&mut self, message: Message) -> Result<String, Halt> {
+        let id = self.append_message(&message, None).await?;
         self.emit(EventKind::MessageEnd {
-            message: message.clone(),
+            message,
             entry_id: id.clone(),
             custom: None,
         })
@@ -42,19 +42,19 @@ impl StepLoop<'_> {
     }
 
     /// Append `message`, which `actor` sent when it is a person's input, and which is the
-    /// message at the front of a queue if `queued` names one. It leaves the queue as soon as
-    /// it is recorded, before observers see it: a run dropped while they run cannot take the
-    /// same input again.
+    /// message at the front of a queue if `queued` names one, as the queue holds it. It
+    /// leaves the queue as soon as it is recorded, before observers see it: a run dropped
+    /// while they run cannot take the same input again.
     async fn append_from(
         &mut self,
         message: Message,
         actor: Option<String>,
-        queued: Option<(Queue, &Input)>,
+        queued: Option<(Queue, Input)>,
     ) -> Result<String, Halt> {
         self.emit(EventKind::MessageStart { role: message.role() }).await;
         let id = self.append_message(&message, actor).await?;
         if let Some((queue, original)) = queued {
-            self.scope.config.queues.remove_front(queue, original);
+            self.scope.config.queues.remove_front(queue, &original);
         }
         self.emit(EventKind::MessageEnd {
             message,
@@ -110,7 +110,7 @@ impl StepLoop<'_> {
             match edit {
                 ContextEdit::Append { message } => targets.push(self.append(message).await?),
                 ContextEdit::ReplaceText { index, text } => {
-                    let target = targets.get(index).cloned().ok_or_else(|| out_of_bounds(index))?;
+                    let target = targets.get(index).ok_or_else(|| out_of_bounds(index))?;
                     self.edit_entry(target, index, Some(text)).await?;
                 }
                 ContextEdit::Omit { index } => {
@@ -118,7 +118,7 @@ impl StepLoop<'_> {
                         return Err(out_of_bounds(index));
                     }
                     let target = targets.remove(index);
-                    self.edit_entry(target, index, None).await?;
+                    self.edit_entry(&target, index, None).await?;
                 }
             }
         }
@@ -127,11 +127,11 @@ impl StepLoop<'_> {
 
     /// Record an edit of the entry `target`, at `index` of the context the edit was planned
     /// over: its text replaced by `replacement`, or, with `None`, the message omitted.
-    async fn edit_entry(&mut self, target: String, index: usize, replacement: Option<String>) -> Result<(), Halt> {
+    async fn edit_entry(&mut self, target: &str, index: usize, replacement: Option<String>) -> Result<(), Halt> {
         let entry_id = self
             .scope
             .transcript
-            .append_context_edit(&target, replacement.clone())
+            .append_context_edit(target, replacement.clone())
             .await
             .context("cannot persist context edit")
             .map_err(Halt::Unrecorded)?;
@@ -179,21 +179,22 @@ impl StepLoop<'_> {
             }
             transformed => transformed,
         };
-        let queued = Input::User {
-            text: text.clone(),
-            actor: actor.clone(),
-        };
-        let id = self
-            .append_from(message, actor, queue.map(|queue| (queue, &queued)))
-            .await?;
+        let queued = queue.map(|queue| {
+            let original = Input::User {
+                text: text.clone(),
+                actor: actor.clone(),
+            };
+            (queue, original)
+        });
+        let id = self.append_from(message, actor, queued).await?;
         // The input is the last message of the projection now.
         let index = self.scope.transcript.messages().len() - 1;
         match transformed {
-            Ok(replacement) if replacement != text => self.edit_entry(id, index, Some(replacement)).await,
+            Ok(replacement) if replacement != text => self.edit_entry(&id, index, Some(replacement)).await,
             Ok(_) => Ok(()),
             Err(error) => {
                 // A rejected input remains in the audit log but is omitted from requests.
-                self.edit_entry(id, index, None).await?;
+                self.edit_entry(&id, index, None).await?;
                 Err(self.hook_failed(error).await)
             }
         }
