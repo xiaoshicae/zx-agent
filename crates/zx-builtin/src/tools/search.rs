@@ -244,6 +244,12 @@ fn failed(searched: &Searched) -> Option<String> {
     Some(truncate_head_noted(searched.stderr.trim(), "errors"))
 }
 
+/// The glob the model wrote as both programs take it: a leading `./` only names the search
+/// directory, and the paths ripgrep matches a glob against do not start with it.
+fn glob_of(raw: &str) -> &str {
+    raw.trim().trim_start_matches("./")
+}
+
 /// `raw`, or `.` when absent or blank, read as read_file reads a path.
 fn search_path(raw: Option<&str>) -> String {
     let raw = path_text(raw.unwrap_or_default());

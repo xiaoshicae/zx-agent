@@ -49,10 +49,6 @@ impl StepLoop<'_> {
         if let Err(text) = self.validate_arguments(tool.as_ref(), &ran) {
             return Checked::blocked(text);
         }
-        // A cancelled run asks no policy and no person about a call it will not start.
-        if self.run.target.trace.cancel().is_cancelled() {
-            return Checked::NotStarted;
-        }
         let authorized = self.authorize(&ran).await;
         // Cancelled while the policies ran or the call waited for approval: the call does not
         // start, whatever their answer came to, and nobody denied it.
@@ -72,8 +68,12 @@ impl StepLoop<'_> {
 
     /// Check `call` as the next call of an answer whose calls so far have the IDs `seen`.
     /// One that repeats an ID is blocked without being checked: its start record and its
-    /// result could not be told from the first call's.
+    /// result could not be told from the first call's. A cancelled run starts no call, and
+    /// asks no tool, no policy and no person about one.
     async fn check_next<'c>(&mut self, call: &'c ToolCall, seen: &mut HashSet<&'c str>) -> Checked<'c> {
+        if self.run.target.trace.cancel().is_cancelled() {
+            return Checked::NotStarted;
+        }
         if seen.insert(&call.id) {
             return self.check(call).await;
         }
@@ -204,7 +204,9 @@ impl StepLoop<'_> {
     /// it runs (invariant 10), and the two orders keep that true differently: in sequence,
     /// each call is checked, started and run before the next is checked; in parallel, every
     /// call is checked, approvals included, before any start is recorded, so that a crash
-    /// while one call waits for approval leaves no start for calls that never ran.
+    /// while one call waits for approval leaves no start for calls that never ran. Every call
+    /// gets its result here, in a cancelled run too: the calls it did not reach are recorded
+    /// as not started, so that only a run that died leaves calls for the next one to answer.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let sequential = calls
             .iter()
@@ -227,9 +229,6 @@ impl StepLoop<'_> {
             }
             let outcome = self.execute_checked(call, checked).await;
             batch.add(self.record_result(call, outcome).await?);
-            if self.run.target.trace.cancel().is_cancelled() {
-                break;
-            }
         }
         Ok(batch)
     }
@@ -243,9 +242,6 @@ impl StepLoop<'_> {
             self.tool_start(call).await;
             let checked = self.check_next(call, &mut seen).await;
             slots.push((call, checked));
-            if self.run.target.trace.cancel().is_cancelled() {
-                break;
-            }
         }
         // Record starts in call order before any call runs, so that recovery after a crash
         // can tell the calls that began from those that never did. A run cancelled during

@@ -214,6 +214,7 @@ pub struct Unreadable {
     /// Where the storage keeps it, in the storage's own terms: a file path, for session
     /// files.
     pub location: String,
+    /// Why it could not be read, naming the location: the whole message to report.
     pub error: String,
 }
 

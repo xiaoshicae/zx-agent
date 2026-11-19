@@ -49,10 +49,11 @@
 | D32 | `zx-builtin` 与内核同一规则（D29）：设置类型自己校验，文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键，并给出程序的默认值（如落盘目录）；执行器自己决定 shell，并为提示词描述自己；命令策略的程序清单宿主可以追加，续写的提示语可以替换，都不新增配置键。用法见 [LIBRARY.md](LIBRARY.md) |
 | D33 | IM 服务收到的每条消息先写入 backlog（`zx-im` 的 trait `Backlog`；程序用会话目录下的文件实现，不新增依赖），再确认投递，写入会话、已回复或有意丢弃之后才删除；去重也只由它做，处理完的消息仍被认出一段时间（文件实现为 24 小时）。消息的凭证与配额一起作为输入的 hold 交给内核（D28）：`Session::send` 也接收带 hold 的输入，写入会话后才释放。停止时还没写入会话的消息留到下次启动，不再回复；启动时先按到达顺序处理它们。崩溃或停止恰好落在写入会话与删除记录之间时重复处理一次，先接受，不为此改会话格式。多副本时 backlog 与会话存储、对话归属、状态记录一起换成数据库实现。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用三个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落），`set_*` 换掉唯一的那个（摘要器、对命令隐藏的变量、追踪导出），`register_*` 登记由配置按名字选用的实现；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。内置的实现也经 `register_*` 登记：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字；执行环境经 `register_executor`，`execution` 写它的名字，它声明是否隔离命令，`permissions.approveAll` 只能用于隔离的执行环境；IM 平台经程序 `zx-im` 的库中 `Program::register_platform`，`im.toml` 中服务自己的段以外，每个段配置以段名注册的平台。自建的 zx-im 程序经 `Program::customize` 用同样的动词给 `Application` 加部件，程序自己的部件在其后：平台的凭据与宿主隐藏的变量合并，不替换；追踪导出归程序。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
+| D35 | 被取消的运行为整批工具调用都写下结果：还没开始的记为未执行，执行中被打断的按工具有无副作用说明；只有运行没能写下结果时（崩溃、宿主丢弃 `Run`、会话写入失败）与失败或被取消的回答里的调用，才由下一次运行补写（不变量 10）。被取消打断的钩子回调不算钩子失败，不发 `hook_failed`。行为见 [REFERENCE.md](REFERENCE.md) 的“会话文件” |
 
 ## 4. 当前阶段
 
-P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D32。进行中：
+P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D32 与 D35。进行中：
 
 - P6 执行环境、P7 扩展与 MCP、P8 `acp`：已实现，待真实集群、IM 平台、MCP 服务器与 ACP 客户端（Zed 或 Wisp）上的验收，见第 5 节。
 - P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
@@ -79,7 +80,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。
-- 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（11 个中 9 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。
+- 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（14 个中 12 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。
 - 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过。
 - 落盘目录的符号链接检查与随后的打开之间有竞态：同时在跑的命令可以在两者之间换掉目录。要消除得从工作目录起按目录描述符逐级打开，未做。
 - 没有确定性测试的行为：chat 在会话自行关闭后重开（子进程中途写入失败无法确定性地构造，只测了从错误链认出会话已关闭）；尾记录修复在写线程上进行时，卷无响应不阻塞运行时（只测了修复本身）；MCP 放弃通知的 10 秒超时；`acp` 的建会话、载入、续接与列出在派发循环之外运行，慢的会话准备不挡其他请求。
@@ -115,4 +116,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.47 · 2026年11月
+ROADMAP.md · v0.48 · 2026年11月

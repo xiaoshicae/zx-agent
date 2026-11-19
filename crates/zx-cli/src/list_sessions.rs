@@ -20,11 +20,7 @@ pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
         print_line(&line);
     }
     for unreadable in &list.unreadable {
-        eprint_line(&format!(
-            "[sessions] cannot read {}: {}",
-            visible(&unreadable.location),
-            visible(&unreadable.error)
-        ));
+        eprint_line(&format!("[sessions] {}", visible(&unreadable.error)));
     }
     let directory = place.location(&cwd).unwrap_or_default();
     eprint_line(&format!(

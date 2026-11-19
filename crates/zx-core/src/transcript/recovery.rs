@@ -73,7 +73,13 @@ impl Transcript {
     /// that started on a branch the conversation left since is [`StartRecord::Present`]:
     /// going back does not undo what it did.
     pub fn interrupted_tool_calls(&self) -> Vec<InterruptedToolCall> {
-        let path = self.branch_path();
+        self.interrupted_tool_calls_at(self.leaf.as_deref())
+    }
+
+    /// [`interrupted_tool_calls`](Self::interrupted_tool_calls) of the branch that ends at
+    /// `leaf`.
+    pub(super) fn interrupted_tool_calls_at(&self, leaf: Option<&str>) -> Vec<InterruptedToolCall> {
+        let path = self.branch_path_from(leaf);
         // The last message that is not a tool result. A custom message is a message to the
         // model too: calls before it are answered or abandoned, not interrupted.
         let last_message = path.iter().rposition(|entry| match entry {
@@ -91,7 +97,7 @@ impl Transcript {
             return Vec::new();
         };
         let never_ran = matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted);
-        if !self.projection().iter().any(|item| item.entry_id == issuer.id) {
+        if !self.projection_at(leaf).iter().any(|item| item.entry_id == issuer.id) {
             // Omitted or summarized: the model no longer sees these calls.
             return Vec::new();
         }

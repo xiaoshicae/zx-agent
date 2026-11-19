@@ -150,9 +150,13 @@ impl EventTarget<'_> {
     }
 
     /// Report a hook failure as a `hook_failed` event, which the hooks observe like any
-    /// other. Returns its description.
+    /// other; nothing is reported for a hook that the run's cancellation stopped
+    /// ([`HookError::cancelled`]). Returns its description.
     pub(crate) async fn report_failure(self, error: HookError) -> String {
         let text = error.to_string();
+        if error.cancelled() {
+            return text;
+        }
         let report = EventKind::HookFailed {
             hook: error.hook,
             phase: error.phase,

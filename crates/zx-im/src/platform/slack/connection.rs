@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use futures::SinkExt;
 use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::{Bytes, Message};
+use tokio_tungstenite::tungstenite::{self, Bytes, Message};
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::{Keepalive, Next, Socket, keep, next_message, report};
+use crate::platform::{Halted, Keepalive, Next, Socket, keep, next_message, report};
 use crate::{ImError, Inbound, Inlet};
 
 use super::SlackChannel;
@@ -61,16 +61,10 @@ impl SlackChannel {
                 Envelope::Events(events) => events,
             };
             let delivery = keep(inlet, events, self.config.on_error.as_ref()).await;
-            if delivery.acknowledge
-                && let Err(ended) = acknowledge(&mut socket, &frame).await
-            {
-                return ended;
-            }
-            for event in delivery.events {
-                if !inlet.pass(event).await {
-                    // The server no longer reads: it is stopping.
-                    return Ended::Cancelled;
-                }
+            match delivery.finish(inlet, acknowledge(&mut socket, &frame)).await {
+                Ok(()) => {}
+                Err(Halted::ServerStopped) => return Ended::Cancelled,
+                Err(Halted::Unacknowledged) => return Ended::Lost,
             }
         }
     }
@@ -92,10 +86,10 @@ impl SlackChannel {
 
 /// Acknowledge the envelope of `frame`, if it has one. Slack redelivers what is not
 /// acknowledged in time, so this comes as soon as its message is kept, before any handling.
-async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
+async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), tungstenite::Error> {
     if let Some(id) = frame["envelope_id"].as_str() {
         let ack = json!({ "envelope_id": id }).to_string();
-        socket.send(Message::text(ack)).await.map_err(|_| Ended::Lost)?;
+        socket.send(Message::text(ack)).await?;
     }
     Ok(())
 }

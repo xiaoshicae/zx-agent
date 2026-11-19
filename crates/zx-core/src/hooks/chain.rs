@@ -281,11 +281,9 @@ impl HookChain {
             if let Err(error) = entry
                 .run(HookPhase::OnEvent, entry.hook.on_event(event, ctx), ctx)
                 .await
+                && !error.cancelled()
             {
-                // Cancellation is a normal shutdown, not an observer failure.
-                if error.failure != HookFailure::Stopped(Stopped::Cancelled) {
-                    errors.push(error);
-                }
+                errors.push(error);
             }
         }
         errors

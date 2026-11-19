@@ -353,6 +353,15 @@ pub(crate) struct HookError {
     pub(crate) failure: HookFailure,
 }
 
+impl HookError {
+    /// Whether the callback gave no value because the run was cancelled. That is a normal
+    /// shutdown: it ends what the hook was asked for, and nobody reports it as the hook's
+    /// failure.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.failure == HookFailure::Stopped(Stopped::Cancelled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -405,6 +405,11 @@ impl Transcript {
     /// that branch carry over. Returns how many entries were copied. Fails without writing
     /// when this session already has entries or `leaf` is not in `source`. A failed append
     /// stops writing, as any append does.
+    ///
+    /// A branch that ends with calls without results, as one that ends at the answer that
+    /// issued them does, gets a start record of its own for each call that `source` recorded
+    /// as started after `leaf`: the copy says of those calls what `source` says once it goes
+    /// back to `leaf`, that they began.
     pub async fn copy_branch(&mut self, source: &Self, leaf: &str) -> Result<usize> {
         if !self.entries.is_empty() {
             bail!("a branch can only be copied into an empty session");
@@ -415,6 +420,15 @@ impl Transcript {
         let path = source.branch_path_from(Some(leaf));
         for entry in &path {
             self.append((*entry).clone()).await?;
+        }
+        // The same calls in the same order, of the same entries: only what each session
+        // knows of their starts can differ.
+        let known = source.interrupted_tool_calls_at(Some(leaf));
+        for (known, copied) in known.into_iter().zip(self.interrupted_tool_calls()) {
+            if known.start == StartRecord::Present && copied.start == StartRecord::Absent {
+                self.append_tool_call_started(&known.tool_call_id, &known.tool_name)
+                    .await?;
+            }
         }
         Ok(path.len())
     }

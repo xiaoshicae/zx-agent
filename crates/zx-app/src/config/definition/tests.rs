@@ -14,10 +14,7 @@ fn load_agent(name: &str, front: &str, body: &str, config: &Config) -> Result<Ag
 
 /// The agent of the file at `path`, checked against `config`, as a user's agent is loaded.
 fn from_path(path: &Path, config: &Config) -> Result<AgentDefinition> {
-    let mut agent = AgentDefinition::from_file(path)?;
-    settle_token_trigger(&mut agent.compaction);
-    agent.validate(config, &HostTools::default())?;
-    Ok(agent)
+    AgentDefinition::from_file(path, config, &HostTools::default())
 }
 
 /// The file at `path` relative to the repository, two directories above this crate.
@@ -351,6 +348,27 @@ fn front_matter_errors_name_the_file() {
 }
 
 #[test]
+fn a_user_agent_that_fails_its_checks_names_its_file() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    std::fs::create_dir(&agents).unwrap();
+    std::fs::write(
+        agents.join("unattended.md"),
+        "+++\nextends = 'unattended'\ntools = ['bsah']\n+++\n",
+    )
+    .unwrap();
+    let loaded = AgentDefinition::load(
+        Builtin::Unattended,
+        Some(home.path()),
+        &Config::default(),
+        &HostTools::default(),
+    );
+    let error = format!("{:#}", loaded.unwrap_err());
+    assert!(error.contains("unattended.md"), "{error}");
+    assert!(error.contains("tools: unknown tool \"bsah\""), "{error}");
+}
+
+#[test]
 fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
     let home = tempfile::tempdir().unwrap();
     let agents = home.path().join("agents");
@@ -500,6 +518,39 @@ fn context_management_settings_overlay_individually_and_validate() {
 }
 
 #[test]
+fn compaction_errors_name_the_keys_of_the_agent_file() {
+    for (text, expected) in [
+        (
+            "[compaction]\nkeepRecentBytes = 0",
+            "compaction.keepRecentBytes must be greater than zero",
+        ),
+        (
+            "[compaction]\ntriggerTokens = 10\nkeepRecentBytes = 200",
+            "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes",
+        ),
+        (
+            "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
+            "compaction.triggerBytes must exceed compaction.keepRecentBytes (0 turns the byte trigger off)",
+        ),
+        (
+            "[compaction]\ntriggerBytes = 3000000",
+            "compaction.triggerBytes may exceed compaction.keepRecentBytes by at most 2097152 bytes",
+        ),
+        (
+            "[compaction]\nmaxSummaryTokens = 0",
+            "compaction.maxSummaryTokens must be 1..=16384",
+        ),
+        (
+            "[compaction]\ntimeoutSecs = 0",
+            "compaction.timeoutSecs must be greater than zero",
+        ),
+    ] {
+        let error = format!("{:#}", load_file(text).unwrap_err());
+        assert!(error.contains(expected), "{text}: {error}");
+    }
+}
+
+#[test]
 fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_is_on() {
     let trigger = |front: &str| load_file(front).unwrap().compaction.trigger_tokens;
     let window = |reserve_tokens| TokenTrigger::BelowWindow { reserve_tokens };
@@ -600,9 +651,10 @@ fn permissions_may_name_the_configured_mcp_tools_only() {
     let prom = config("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = ['query', 'range']");
     let agent = load_with("[permissions]\ndeny = ['prom__range']", &prom).unwrap();
     assert_eq!(agent.permissions.denied_tools(), ["prom__range"]);
-    let error = load_with("[permissions]\nask = ['prom__admin']", &prom)
-        .unwrap_err()
-        .to_string();
+    let error = format!(
+        "{:#}",
+        load_with("[permissions]\nask = ['prom__admin']", &prom).unwrap_err()
+    );
     assert!(
         error.contains("permissions.ask: unknown tool \"prom__admin\""),
         "{error}"

@@ -29,10 +29,24 @@ const FEISHU_SECRET_UNSET: &str = "FEISHU_APP_SECRET must hold";
 #[cfg(not(feature = "feishu"))]
 const FEISHU_SECRET_UNSET: &str = "this build of zx-im has no such platform";
 
+/// The default variables of the platforms' credentials, which `zx-im` reads besides the
+/// variables that [`program::command`] withholds.
+const PLATFORM_CREDENTIALS: [&str; 4] = [
+    "SLACK_APP_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "FEISHU_APP_ID",
+    "FEISHU_APP_SECRET",
+];
+
 /// The compiled `zx-im`, started in `cwd` with the zx-agent home `home` and apart from the
-/// developer's environment, as [`program::command`] starts a program.
+/// developer's environment, as [`program::command`] starts a program, and without the
+/// developer's platform credentials.
 fn zx_im_in(cwd: &Path, home: Home<'_>) -> Command {
-    program::command(Path::new(env!("CARGO_BIN_EXE_zx-im")), cwd, home)
+    let mut command = program::command(Path::new(env!("CARGO_BIN_EXE_zx-im")), cwd, home);
+    for name in PLATFORM_CREDENTIALS {
+        command.env_remove(name);
+    }
+    command
 }
 
 /// `zx-im` with `config`, in `dir`, against `model`; Slack tokens are set, and the zx-agent
@@ -47,8 +61,7 @@ fn im(dir: &Path, config: &Path, model: &str) -> Command {
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)
         .env("FEISHU_APP_ID", "cli_test")
-        .env("FEISHU_APP_SECRET", "secret-test")
-        .env_remove("ZX_SECRET_FILES");
+        .env("FEISHU_APP_SECRET", "secret-test");
     command
 }
 
@@ -508,7 +521,6 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
         .env(MCP_TOKEN_VAR, MCP_TOKEN)
         .env("SLACK_APP_TOKEN", "xapp-test")
         .env("SLACK_BOT_TOKEN", "xoxb-test")
-        .env_remove("ZX_SECRET_FILES")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

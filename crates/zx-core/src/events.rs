@@ -287,7 +287,8 @@ pub enum EventKind {
         /// The `context_edit` session entry.
         entry_id: String,
     },
-    /// A hook failure. Observer failures produce diagnostics without stopping the run.
+    /// A hook failure. Observer failures produce diagnostics without stopping the run. A hook
+    /// that the run's cancellation stopped did not fail, and is not reported.
     HookFailed {
         hook: String,
         /// Where the hook was called.

@@ -30,7 +30,7 @@ use zx_agent::transcript::Entry;
 use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
-use zx_testing::{EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
+use zx_testing::{Collect, Driven, EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -548,14 +548,9 @@ fn hook_failed(events: &[EventKind]) -> bool {
     events.iter().any(|event| matches!(event, EventKind::HookFailed { .. }))
 }
 
-#[tokio::test]
-async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
-    let act = Arc::new(EchoTool::new("act"));
-    let tools: Vec<Arc<dyn Tool>> = vec![act.clone(), Arc::new(EchoTool::new("ask"))];
-    let provider = Arc::new(FauxProvider::new([FauxStep::tool_calls(vec![
-        ("c1", "act", json!({})),
-        ("c2", "ask", json!({})),
-    ])]));
+/// A session with `tools` and one hook, whose policy asks a person about the tool `ask` and
+/// whose run is cancelled as soon as it asks: nobody answers.
+async fn cancelled_as_it_asks(provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> (Driven, Arc<Collect>) {
     let mut config = config(provider, tools);
     config.hooks.push("unchanged", Arc::new(Unchanged));
     let rules = vec![
@@ -570,14 +565,69 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
     ];
     config.policies.push("rules", Arc::new(RulePolicy::new(rules)));
     config.approvals = ApprovalMode::Wait(Duration::from_secs(60));
-    // Nobody answers: the run is cancelled as soon as it asks about the second call.
-    let (session, events) = RunnerSetup::new(config)
+    RunnerSetup::new(config)
         .build_with(|event, session| {
             if matches!(event.event, EventKind::ApprovalRequested { .. }) {
                 session.cancel();
             }
         })
-        .await;
+        .await
+}
+
+/// Cancels a run as it asks about the first of three calls, whose batch runs in `mode`, and
+/// returns the results the session holds. The calls after the first were not looked at yet.
+async fn results_of_a_batch_cancelled_at_its_first_call(mode: ExecutionMode) -> Vec<(String, String, bool)> {
+    let act = Counted::new("act", Effects::SideEffects);
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(EchoTool::new("ask")),
+        act.clone(),
+        probe_in("probe", Effects::ReadOnly, mode, Path::new("never-read")),
+    ];
+    let provider = Arc::new(FauxProvider::new([FauxStep::tool_calls(vec![
+        ("c1", "ask", json!({})),
+        ("c2", "act", json!({})),
+        ("c3", "probe", json!({})),
+    ])]));
+    let (session, events) = cancelled_as_it_asks(provider, tools).await;
+
+    let report = session.run("start").await;
+
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
+    assert_eq!(act.runs.load(Ordering::SeqCst), 0);
+    assert!(!hook_failed(&events.events()), "{:?}", events.events());
+    results(&session.session().messages())
+}
+
+/// Every call of the answer has a result that says the run was cancelled before it started.
+fn assert_none_started(results: &[(String, String, bool)]) {
+    let ids: Vec<&str> = results.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2", "c3"], "{results:?}");
+    for (_, content, is_error) in results {
+        assert!(content.starts_with("Not executed: the run was cancelled"), "{content}");
+        assert!(is_error);
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_run_records_a_result_for_every_call_of_a_parallel_batch() {
+    assert_none_started(&results_of_a_batch_cancelled_at_its_first_call(ExecutionMode::Parallel).await);
+}
+
+#[tokio::test]
+async fn a_cancelled_run_records_a_result_for_every_call_of_a_sequential_batch() {
+    assert_none_started(&results_of_a_batch_cancelled_at_its_first_call(ExecutionMode::Sequential).await);
+}
+
+#[tokio::test]
+async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
+    let act = Arc::new(EchoTool::new("act"));
+    let tools: Vec<Arc<dyn Tool>> = vec![act.clone(), Arc::new(EchoTool::new("ask"))];
+    let provider = Arc::new(FauxProvider::new([FauxStep::tool_calls(vec![
+        ("c1", "act", json!({})),
+        ("c2", "ask", json!({})),
+    ])]));
+    // Nobody answers: the run is cancelled as soon as it asks about the second call.
+    let (session, events) = cancelled_as_it_asks(provider, tools).await;
 
     let report = session.run("start").await;
 

@@ -11,7 +11,7 @@ mod compactor;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -22,7 +22,11 @@ use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without
 pub(crate) use compactor::Compactor;
 
 /// The most bytes of original records one compaction reads.
-const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+
+/// The most output tokens [`Config::max_summary_tokens`] may allow, which bounds what one
+/// summary costs.
+pub const MAX_SUMMARY_TOKENS: u32 = 16_384;
 
 /// Automatic trigger and summary request budgets. Default SDK configuration has no
 /// automatic trigger; manual compaction still uses the remaining bounded settings.
@@ -103,38 +107,65 @@ impl Config {
     }
 
     /// Reject budgets that cannot make progress or cannot bound external waiting.
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.keep_recent_bytes > 0,
-            "keep_recent_bytes must be greater than zero"
-        );
-        if let TokenTrigger::Above(tokens) = self.trigger_tokens {
-            ensure!(
-                tokens > 0,
-                "trigger_tokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)"
-            );
-            ensure!(
-                Self::leaves_room(tokens, self.keep_recent_bytes),
-                "trigger_tokens must exceed a quarter of keep_recent_bytes, the tokens the kept recent messages take"
-            );
+    pub fn validate(&self) -> Result<(), InvalidConfig> {
+        if self.keep_recent_bytes == 0 {
+            return Err(InvalidConfig::ZeroKeepRecentBytes);
         }
-        ensure!(
-            self.trigger_bytes.is_none_or(|bytes| bytes > self.keep_recent_bytes),
-            "trigger_bytes must exceed keep_recent_bytes (`None` disables the byte trigger)"
-        );
-        // The first summary reads about what precedes the kept recent messages.
-        ensure!(
-            self.trigger_bytes
-                .is_none_or(|bytes| bytes - self.keep_recent_bytes <= MAX_SOURCE_BYTES),
-            "trigger_bytes may exceed keep_recent_bytes by at most {MAX_SOURCE_BYTES} bytes, the most a summary reads"
-        );
-        ensure!(
-            self.max_summary_tokens > 0 && self.max_summary_tokens <= 16_384,
-            "max_summary_tokens must be 1..=16384"
-        );
-        ensure!(!self.timeout.is_zero(), "summary timeout must be greater than zero");
+        if let TokenTrigger::Above(tokens) = self.trigger_tokens {
+            if tokens == 0 {
+                return Err(InvalidConfig::ZeroTriggerTokens);
+            }
+            if !Self::leaves_room(tokens, self.keep_recent_bytes) {
+                return Err(InvalidConfig::TriggerTokensWithinKept);
+            }
+        }
+        if let Some(bytes) = self.trigger_bytes {
+            if bytes <= self.keep_recent_bytes {
+                return Err(InvalidConfig::TriggerBytesWithinKept);
+            }
+            // The first summary reads about what precedes the kept recent messages.
+            if bytes - self.keep_recent_bytes > MAX_SOURCE_BYTES {
+                return Err(InvalidConfig::TriggerBytesBeyondSource);
+            }
+        }
+        if !(1..=MAX_SUMMARY_TOKENS).contains(&self.max_summary_tokens) {
+            return Err(InvalidConfig::MaxSummaryTokens);
+        }
+        if self.timeout.is_zero() {
+            return Err(InvalidConfig::ZeroTimeout);
+        }
         Ok(())
     }
+}
+
+/// A setting of a compaction [`Config`] that cannot work. `Display` names the field as the
+/// struct does; a host that reads the settings from a file of its own matches the variant to
+/// name its own key.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidConfig {
+    /// `keep_recent_bytes` is zero.
+    #[error("keep_recent_bytes must be greater than zero")]
+    ZeroKeepRecentBytes,
+    /// `trigger_tokens` is `Above(0)`.
+    #[error("trigger_tokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)")]
+    ZeroTriggerTokens,
+    /// `trigger_tokens` lies within the recent messages a summary keeps, so a summary could
+    /// never bring the context under it.
+    #[error("trigger_tokens must exceed a quarter of keep_recent_bytes, the tokens the kept recent messages take")]
+    TriggerTokensWithinKept,
+    /// `trigger_bytes` does not exceed `keep_recent_bytes`.
+    #[error("trigger_bytes must exceed keep_recent_bytes (`None` disables the byte trigger)")]
+    TriggerBytesWithinKept,
+    /// `trigger_bytes` exceeds `keep_recent_bytes` by more than [`MAX_SOURCE_BYTES`], the most
+    /// a summary reads.
+    #[error("trigger_bytes may exceed keep_recent_bytes by at most {max} bytes, the most a summary reads", max = MAX_SOURCE_BYTES)]
+    TriggerBytesBeyondSource,
+    /// `max_summary_tokens` is zero or over [`MAX_SUMMARY_TOKENS`].
+    #[error("max_summary_tokens must be 1..={max}", max = MAX_SUMMARY_TOKENS)]
+    MaxSummaryTokens,
+    /// `timeout` is zero.
+    #[error("summary timeout must be greater than zero")]
+    ZeroTimeout,
 }
 
 /// Makes the summary of a compaction in place of the kernel's own request to the model. An

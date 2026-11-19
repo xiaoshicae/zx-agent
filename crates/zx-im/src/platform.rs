@@ -202,6 +202,37 @@ struct Delivery {
     acknowledge: bool,
 }
 
+/// Why a connection stops after a delivery.
+#[derive(Debug, PartialEq, Eq)]
+enum Halted {
+    /// The server no longer reads: it is stopping.
+    ServerStopped,
+    /// The acknowledgement could not be sent: the connection is lost.
+    Unacknowledged,
+}
+
+impl Delivery {
+    /// Finish the delivery: send its acknowledgement with `acknowledge`, unless it may not be
+    /// acknowledged, then pass its events on to the server. They are passed on also when the
+    /// acknowledgement cannot be sent: the platform then delivers the messages again, but
+    /// the backlog knows them by then, and nobody would pass them on.
+    async fn finish<E>(self, inlet: &Inlet, acknowledge: impl Future<Output = Result<(), E>>) -> Result<(), Halted> {
+        // Why it could not be sent does not matter here: the connection is lost either way,
+        // and its owner reconnects.
+        let acknowledged = !self.acknowledge || acknowledge.await.is_ok();
+        for event in self.events {
+            if !inlet.pass(event).await {
+                return Err(Halted::ServerStopped);
+            }
+        }
+        if acknowledged {
+            Ok(())
+        } else {
+            Err(Halted::Unacknowledged)
+        }
+    }
+}
+
 /// Keep the messages of one delivery, `events`, in the backlog of `inlet`, as a channel does
 /// before it acknowledges the delivery; a message that could not be kept is reported through
 /// `on_error`.
@@ -428,6 +459,7 @@ mod tests {
     use reqwest::header::{HeaderValue, RETRY_AFTER};
 
     use super::*;
+    use crate::{Addressee, ChatKind, ConversationId, Destination, MemoryBacklog, MessageId, UserId};
 
     #[test]
     fn the_first_part_is_there_even_for_empty_text() {
@@ -491,6 +523,60 @@ mod tests {
             Keepalive::new(Duration::MAX).silence(),
             Keepalive::MAX_INTERVAL * 2 + Keepalive::MARGIN
         );
+    }
+
+    /// A message `id` someone posted in a group chat, mentioning the bot.
+    fn message(id: &str) -> Inbound {
+        Inbound::Message {
+            id: MessageId(id.into()),
+            at: Destination {
+                conversation: ConversationId("C1".into()),
+                thread: None,
+            },
+            chat: ChatKind::Group,
+            addressee: Addressee::Bot,
+            sender: UserId("U1".into()),
+            text: "hello".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_message_is_passed_on_when_its_acknowledgement_cannot_be_sent() {
+        let (events, mut passed) = tokio::sync::mpsc::channel(4);
+        let inlet = Inlet::new("slack", events, Arc::new(MemoryBacklog::default()));
+
+        let delivery = keep(&inlet, vec![message("m1")], None).await;
+        let finished = delivery.finish(&inlet, async { Err::<(), ()>(()) }).await;
+
+        assert_eq!(finished, Err(Halted::Unacknowledged));
+        assert_eq!(passed.try_recv().ok(), Some(message("m1")));
+        // The platform delivers what was not acknowledged again: known by then, it is not
+        // passed on a second time, so the first delivery was its only way to the server.
+        let again = keep(&inlet, vec![message("m1")], None).await;
+        assert_eq!(again.finish(&inlet, async { Ok::<(), ()>(()) }).await, Ok(()));
+        assert!(passed.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_delivery_that_may_not_be_acknowledged_sends_no_acknowledgement() {
+        let (events, mut passed) = tokio::sync::mpsc::channel(4);
+        let inlet = Inlet::new("slack", events, Arc::new(MemoryBacklog::default()));
+        let delivery = Delivery {
+            events: vec![message("m1")],
+            acknowledge: false,
+        };
+
+        let acknowledged = std::cell::Cell::new(false);
+        let finished = delivery
+            .finish(&inlet, async {
+                acknowledged.set(true);
+                Ok::<(), ()>(())
+            })
+            .await;
+
+        assert_eq!(finished, Ok(()));
+        assert!(!acknowledged.get(), "an acknowledgement was sent");
+        assert_eq!(passed.try_recv().ok(), Some(message("m1")));
     }
 
     #[tokio::test]

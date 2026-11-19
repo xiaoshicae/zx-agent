@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_util::random::random_u64;
 
-use crate::platform::{Keepalive, Next, Socket, keep, next_message, report};
+use crate::platform::{Halted, Keepalive, Next, Socket, keep, next_message, report};
 use crate::{ImError, Inlet};
 
 use super::frame::Frame;
@@ -263,19 +263,14 @@ impl FeishuChannel {
         let delivery = keep(inlet, self.events(&payload), self.config.on_error.as_ref()).await;
         // Acknowledged before anything is handled: Feishu redelivers what is not acknowledged
         // in time.
-        if delivery.acknowledge {
-            link.socket
-                .send(Message::binary(acknowledge(&frame).encode()))
-                .await
-                .map_err(|_| Ended::Lost)?;
-        }
-        for event in delivery.events {
-            if !inlet.pass(event).await {
-                // The server no longer reads: it is stopping.
-                return Err(Ended::Cancelled);
-            }
-        }
-        Ok(())
+        let acknowledgement = link.socket.send(Message::binary(acknowledge(&frame).encode()));
+        delivery
+            .finish(inlet, acknowledgement)
+            .await
+            .map_err(|halted| match halted {
+                Halted::ServerStopped => Ended::Cancelled,
+                Halted::Unacknowledged => Ended::Lost,
+            })
     }
 }
 
