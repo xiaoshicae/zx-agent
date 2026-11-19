@@ -75,7 +75,7 @@ struct Built {
 /// What every conversation of this chat is built with.
 struct Chat {
     app: Application,
-    output: Arc<Output>,
+    output: Output,
 }
 
 impl Chat {
@@ -100,25 +100,6 @@ impl Chat {
             about,
             commands,
         })
-    }
-
-    /// Replace the conversation with a new one kept in `place`; when that fails, the current
-    /// one stays and `what` says what could not be done.
-    async fn switch(&self, built: &mut Built, model: &str, place: &SessionPlace, what: &str) -> bool {
-        match self.build(model, place, None).await {
-            Ok(next) => {
-                *built = next;
-                self.output.reset_totals();
-                true
-            }
-            Err(error) => {
-                self.output.line(
-                    Tone::Error,
-                    &format!("[chat] cannot {what}: {}", visible(&format!("{error:#}"))),
-                );
-                false
-            }
-        }
     }
 }
 
@@ -146,7 +127,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         InputMode::Script
     };
     let chat = Chat {
-        output: Arc::new(Output::new(output_mode, deltas, color)),
+        output: Output::new(output_mode, deltas, color),
         app,
     };
     let output = &chat.output;
@@ -291,7 +272,7 @@ struct Repl<'a> {
 impl Repl<'_> {
     /// Carry out `command` typed while no task runs.
     async fn command(&mut self, command: Command, terminal: &mut Terminal) -> Result<Flow> {
-        let output = &*self.chat.output;
+        let output = &self.chat.output;
         let session = &self.built.session;
         Ok(match command {
             Command::Prompt(text) => self.operate(Operation::Prompt(text), terminal).await?,
@@ -370,26 +351,33 @@ impl Repl<'_> {
         None
     }
 
-    /// /new: a new conversation where conversations are kept.
+    /// /new: a new conversation where conversations are kept. When it cannot be made, the
+    /// current one stays.
     async fn new_conversation(&mut self) {
         let beside = self.storage.beside();
         let place = beside.as_ref().unwrap_or(&self.storage.place);
-        if self
-            .chat
-            .switch(&mut self.built, &self.model, place, "create new conversation")
-            .await
-        {
-            self.keep_reasoning();
-            let file = self
-                .built
-                .about
-                .session
-                .as_deref()
-                .map(|path| format!("; session={}", path.display()))
-                .unwrap_or_default();
-            self.chat
-                .output
-                .line(Tone::Dim, &format!("[chat] new conversation{file}"));
+        let output = &self.chat.output;
+        match self.chat.build(&self.model, place, None).await {
+            Ok(next) => {
+                self.built = next;
+                output.reset_totals();
+                self.keep_reasoning();
+                let file = self
+                    .built
+                    .about
+                    .session
+                    .as_deref()
+                    .map(|path| format!("; session={}", path.display()))
+                    .unwrap_or_default();
+                output.line(Tone::Dim, &format!("[chat] new conversation{file}"));
+            }
+            Err(error) => output.line(
+                Tone::Error,
+                &format!(
+                    "[chat] cannot create a new conversation: {}",
+                    visible(&format!("{error:#}"))
+                ),
+            ),
         }
     }
 
@@ -397,7 +385,7 @@ impl Repl<'_> {
     /// written: say why, and open it again from where it is kept. A session kept in memory
     /// is forgotten once closed, so the chat ends then, and when opening it again fails.
     async fn reopen(&mut self, error: &anyhow::Error) -> Flow {
-        let output = &*self.chat.output;
+        let output = &self.chat.output;
         output.line(Tone::Error, &format!("[chat] {}", visible(&format!("{error:#}"))));
         if !self.built.place.is_persistent() {
             return Flow::Exit(EXIT_ERROR);
