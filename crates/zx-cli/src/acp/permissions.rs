@@ -81,7 +81,9 @@ fn decision(outcome: &RequestPermissionOutcome) -> ApprovalDecision {
         RequestPermissionOutcome::Selected(selected) => match &*selected.option_id.0 {
             ALLOW_ONCE => ApprovalDecision::AllowOnce,
             ALLOW_SESSION => ApprovalDecision::AllowSession,
-            _ => ApprovalDecision::Deny("rejected by the user".into()),
+            REJECT_ONCE => ApprovalDecision::Deny("rejected by the user".into()),
+            // An option the agent did not offer never authorizes a call either.
+            _ => ApprovalDecision::Deny("the client answered with an option it was not offered".into()),
         },
         // The protocol may add outcomes: the enum is non-exhaustive, and an unknown one
         // never authorizes a call.

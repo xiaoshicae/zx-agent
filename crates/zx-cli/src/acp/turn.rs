@@ -126,12 +126,11 @@ fn stop_reason(report: &RunReport) -> Result<StopReason> {
             ..
         } => Ok(StopReason::MaxTurnRequests),
         RunOutcome::Cancelled => Ok(StopReason::Cancelled),
-        RunOutcome::Failed | RunOutcome::TimedOut => Err(anyhow::Error::msg(
-            report
-                .error
-                .clone()
-                .unwrap_or_else(|| format!("the run ended with {:?}", report.outcome)),
-        )),
+        RunOutcome::Failed | RunOutcome::TimedOut => {
+            Err(anyhow::Error::msg(report.error.clone().unwrap_or_else(|| {
+                format!("the run ended with {}", report.outcome.name())
+            })))
+        }
     }
 }
 
@@ -198,7 +197,7 @@ mod tests {
         );
         assert_eq!(
             answer(&report(RunOutcome::TimedOut, None)),
-            Err("the run ended with TimedOut".to_string())
+            Err("the run ended with timed_out".to_string())
         );
     }
 

@@ -80,8 +80,7 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
     match value {
         Value::String(text) if text.contains('\n') || text.chars().count() > INLINE_CHARS => {
             let total = text.lines().count();
-            let plural = if total == 1 { "" } else { "s" };
-            lines.push(format!("{path} ({total} line{plural}):"));
+            lines.push(format!("{path} ({total} line(s)):"));
             for line in text.lines().take(BLOCK_LINES) {
                 lines.push(format!("    {}", visible(line)));
             }
@@ -132,12 +131,15 @@ pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, S
     if let Some(error) = &message.error_message {
         Some((
             Severity::Error,
-            format!("[model] {:?}: {}", message.stop_reason, visible(error)),
+            format!("[model] {}: {}", message.stop_reason.name(), visible(error)),
         ))
     } else if message.stop_reason == StopReason::Length {
         Some((
             Severity::Warn,
-            "[model] Length: the response hit the output token limit".to_string(),
+            format!(
+                "[model] {}: the response hit the output token limit",
+                StopReason::Length.name()
+            ),
         ))
     } else {
         None
@@ -362,7 +364,7 @@ mod tests {
         );
         assert_eq!(
             describe_arguments(&json!({"path": "notes.txt", "content": "one\ntwo\n"})),
-            ["content (2 lines):", "    one", "    two"]
+            ["content (2 line(s)):", "    one", "    two"]
         );
         assert_eq!(
             describe_arguments(&json!({"path": "a.rs", "edits": [{"oldText": "x", "newText": "y\u{1b}"}]})),
@@ -376,7 +378,7 @@ mod tests {
         let long = "x".repeat(INLINE_CHARS + 1);
         assert_eq!(
             describe_arguments(&json!({"note": long})),
-            ["note (1 line):".to_string(), format!("    {long}")]
+            ["note (1 line(s)):".to_string(), format!("    {long}")]
         );
         let tall = (0..BLOCK_LINES + 2)
             .map(|i| i.to_string())

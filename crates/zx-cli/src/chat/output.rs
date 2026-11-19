@@ -278,10 +278,8 @@ impl Output {
 /// The line that ends a turn: requests, retries, tokens when the provider reported any, and
 /// the time it took.
 fn turn_line(report: &RunReport, elapsed: Duration) -> String {
-    let requests = match report.model_requests {
-        1 => "1 request".to_string(),
-        n => format!("{n} requests"),
-    };
+    let requests = format!("{} request(s)", report.model_requests);
+    // `retry(s)` is not a word: the one count written by its number.
     let retries = match report.retries {
         0 => String::new(),
         1 => " · 1 retry".to_string(),
@@ -372,7 +370,7 @@ mod tests {
         };
         assert_eq!(
             turn_line(&report, Duration::from_millis(600)),
-            "[turn] 2 requests · 1 retry · 0.6s"
+            "[turn] 2 request(s) · 1 retry · 0.6s"
         );
         report.usage.input = 30;
         report.usage.output = 15;
@@ -381,7 +379,7 @@ mod tests {
         report.model_requests = 1;
         assert_eq!(
             turn_line(&report, Duration::from_secs(12)),
-            "[turn] 1 request · 30 in · 15 out · 10 cached · 12s"
+            "[turn] 1 request(s) · 30 in · 15 out · 10 cached · 12s"
         );
     }
 

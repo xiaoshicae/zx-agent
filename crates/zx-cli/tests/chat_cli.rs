@@ -73,7 +73,7 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "first answer\nsecond answer\n");
     assert_eq!(
-        stderr(&output).matches("[turn] 1 request · ").count(),
+        stderr(&output).matches("[turn] 1 request(s) · ").count(),
         2,
         "{}",
         stderr(&output)
@@ -541,7 +541,7 @@ async fn a_file_write_approval_shows_the_content_as_lines() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(
-        log.contains("[approval 1] write_file: notes.txt\n  content (2 lines):\n      one\n      two\n"),
+        log.contains("[approval 1] write_file: notes.txt\n  content (2 line(s)):\n      one\n      two\n"),
         "{log}"
     );
     assert!(log.contains("[tool] write_file: notes.txt -> ok"), "{log}");
@@ -653,7 +653,7 @@ async fn a_retried_error_is_named_once() {
     assert_eq!(log.matches("upstream exploded").count(), 1, "{log}");
     assert!(log.contains("[retry] 1/1 in "), "{log}");
     assert!(log.contains("ms (same error)\n"), "{log}");
-    assert!(log.contains("[turn] 2 requests · 1 retry · "), "{log}");
+    assert!(log.contains("[turn] 2 request(s) · 1 retry · "), "{log}");
 }
 
 #[tokio::test]
@@ -664,7 +664,7 @@ async fn a_turn_without_reported_usage_omits_the_token_counts() {
     let output = run(&server, dir.path(), &["--tools", ""], "go\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
-    assert!(log.contains("[turn] 1 request · "), "{log}");
+    assert!(log.contains("[turn] 1 request(s) · "), "{log}");
     assert!(!log.contains(" in · "), "{log}");
 }
 
@@ -1093,8 +1093,8 @@ async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
     assert_eq!(output.status.code(), Some(0));
     let log = stderr(&output);
     assert!(log.contains("[chat] run was cancelled"), "{log}");
-    assert!(!log.contains("[model] Aborted"), "{log}");
-    assert!(log.contains("[turn] 1 request · "), "{log}");
+    assert!(!log.contains("[model] aborted"), "{log}");
+    assert!(log.contains("[turn] 1 request(s) · "), "{log}");
 }
 
 #[cfg(unix)]
