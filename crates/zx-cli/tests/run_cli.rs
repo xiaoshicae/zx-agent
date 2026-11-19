@@ -591,9 +591,6 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
         .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", TOKEN)
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .output()
         .await
         .unwrap();
@@ -1053,9 +1050,6 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let output = run(&server, dir.path())
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("TRACEPARENT")
         .output()
         .await
         .unwrap();
@@ -1079,9 +1073,6 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let output = run(&server, dir.path())
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env("OTEL_SERVICE_NAME", "not-a-reason-to-export")
         .output()
         .await
@@ -1098,13 +1089,7 @@ async fn exported_trace(dir: &Path, resource: &[(&str, &str)]) -> Vec<u8> {
     let (endpoint, received) = collector().await;
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let mut command = run(&server, dir);
-    command
-        .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", format!("{endpoint}/v1/traces"))
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("TRACEPARENT")
-        .env_remove("OTEL_SERVICE_NAME")
-        .env_remove("OTEL_RESOURCE_ATTRIBUTES");
+    command.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", format!("{endpoint}/v1/traces"));
     for (name, value) in resource {
         command.env(name, value);
     }
@@ -1187,8 +1172,6 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let output = run(&server, dir.path())
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env("TRACEPARENT", format!("00-{TRACE_ID}-{PARENT_SPAN_ID}-01"))
         .output()
         .await
@@ -1213,8 +1196,6 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let output = run(&server, dir.path())
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env("TRACEPARENT", "not-a-traceparent")
         .output()
         .await

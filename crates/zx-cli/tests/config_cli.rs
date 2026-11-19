@@ -21,7 +21,6 @@ fn run(cwd: &Path, home: Home<'_>, args: &[&str]) -> Command {
         .args(["run", "--tools", ""])
         .args(args)
         .arg("go")
-        .env_remove("OPENAI_API_KEY")
         .stdin(Stdio::null());
     command
 }

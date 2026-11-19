@@ -71,8 +71,7 @@ fn run_bash_redacting(server: &MockServer, dir: &Path, secret_files: &[&Path]) -
     let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["run", "--model", "mock", "--tools", "bash", "go"])
-        .env("ZX_BASE_URL", &server.base_url)
-        .env_remove("ZX_SECRET_FILES");
+        .env("ZX_BASE_URL", &server.base_url);
     command
 }
 

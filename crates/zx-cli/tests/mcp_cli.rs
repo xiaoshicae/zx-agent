@@ -65,9 +65,7 @@ fn program(subcommand: &str, model: &MockServer, dir: &Path, home: &Path) -> Com
     command
         .args([subcommand, "--model", "mock"])
         .env("ZX_BASE_URL", &model.base_url)
-        .env(TOKEN_VAR, TOKEN)
-        .env_remove(KEY_VAR)
-        .env_remove("ZX_SECRET_FILES");
+        .env(TOKEN_VAR, TOKEN);
     command
 }
 

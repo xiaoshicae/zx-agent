@@ -6,25 +6,39 @@
 
 use std::path::{Path, PathBuf};
 
+/// The families of variables that a test's program inherits none of: zx-agent's own, and the
+/// OpenTelemetry exporter's, of which the SDK reads more than the programs name.
+const WITHHELD_PREFIXES: [&str; 2] = ["ZX_", "OTEL_"];
+
+/// The other variables the programs read that a test's program does not inherit: the default
+/// variables of the two providers' API keys, and the trace context a caller passes.
+const WITHHELD: [&str; 4] = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TRACEPARENT", "TRACESTATE"];
+
 /// `program`, a binary built for the test, started in `cwd` with the zx-agent home `home`,
 /// and killed when the test drops it. The caller adds the arguments, the model's address and
 /// the key.
 ///
-/// It runs without the variables a developer may have set for zx-agent, and finds its
-/// configuration only in `home`, so that no `config.toml`, agent or key of the developer's
-/// reaches a test.
+/// It inherits no variable of the developer's that the programs read: none of zx-agent's
+/// (`ZX_…`), the providers' default key variables, or those of the trace export (`OTEL_…`,
+/// `TRACEPARENT`, `TRACESTATE`); and it finds its configuration only in `home`. No
+/// `config.toml`, agent, key or trace collector of the developer's reaches a test.
 pub fn command(program: &Path, cwd: &Path, home: Home<'_>) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
-    command
-        .current_dir(cwd)
-        .kill_on_drop(true)
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
-        // The default variable of the API key: a developer's key must not reach a fake model.
-        .env_remove("OPENAI_API_KEY");
+    command.current_dir(cwd).kill_on_drop(true);
+    for name in WITHHELD {
+        command.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_str()
+            .is_some_and(|name| WITHHELD_PREFIXES.iter().any(|prefix| name.starts_with(prefix)))
+        {
+            command.env_remove(name);
+        }
+    }
     match home {
         Home::Agent(dir) => command.env("ZX_AGENT_HOME", dir),
-        Home::User(dir) => command.env("HOME", dir).env_remove("ZX_AGENT_HOME"),
+        Home::User(dir) => command.env("HOME", dir),
     };
     command
 }
@@ -166,4 +180,35 @@ pub async fn signal(child: &tokio::process::Child, name: &str) {
             .unwrap()
             .success()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    #[test]
+    fn a_program_inherits_no_setting_key_or_trace_export_of_the_developer() {
+        let here = Path::new(".");
+        let command = command(Path::new("true"), here, Home::User(here));
+        let removed: Vec<OsString> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_os_string())
+            .collect();
+        for name in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TRACEPARENT", "TRACESTATE"] {
+            assert!(removed.contains(&OsString::from(name)), "{name}: {removed:?}");
+        }
+        // Whichever variables of zx-agent's and of the trace exporter this process has.
+        for (name, _) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with("ZX_") || name.starts_with("OTEL_"))
+            {
+                assert!(removed.contains(&name), "{name:?}: {removed:?}");
+            }
+        }
+    }
 }
