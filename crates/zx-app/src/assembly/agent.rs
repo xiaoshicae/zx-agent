@@ -26,6 +26,7 @@ use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 use zx_util::env::env_value;
 
+use super::settings::BASE_URL_ENV;
 use super::setup::PerSession;
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
@@ -237,7 +238,9 @@ fn provider(config: &Config) -> Result<(OpenAiCompatible, Option<String>)> {
         api_key: api_key.clone().into(),
         ..config.provider.openai.clone()
     })
-    .context("invalid [provider] settings in config.toml")?;
+    .with_context(|| {
+        format!("invalid [provider] settings in config.toml, or {BASE_URL_ENV} in place of its baseUrl")
+    })?;
     Ok((provider, api_key))
 }
 

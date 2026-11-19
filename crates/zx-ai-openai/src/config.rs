@@ -32,7 +32,8 @@ pub(crate) const RESERVED_FIELDS: [&str; 7] = [
 /// Connection settings for an OpenAI-compatible server. Debug output redacts the API key.
 #[derive(Clone)]
 pub struct OpenAiConfig {
-    /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`.
+    /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`: an http or
+    /// https address that ends with its path, without a query or a fragment.
     pub base_url: String,
     /// The bearer token, fixed or asked for before each request. Local servers often need
     /// none.
@@ -73,9 +74,11 @@ impl Default for OpenAiConfig {
 }
 
 impl OpenAiConfig {
-    /// Check the settings. Errors: a byte budget or a timeout of zero, an extra field the
-    /// provider sets itself, and a header the client cannot send.
+    /// Check the settings. Errors: an address requests cannot go to, a byte budget or a
+    /// timeout of zero, an extra field the provider sets itself, and a header the client
+    /// cannot send.
     pub(crate) fn check(&self) -> anyhow::Result<()> {
+        check_base_url(&self.base_url)?;
         anyhow::ensure!(
             self.max_response_bytes > 0,
             "max_response_bytes must be greater than zero"
@@ -315,6 +318,22 @@ macro_rules! named_values {
 
 named_values!(ReasoningFormat, SystemUpdates, MaxTokensField);
 
+/// Refuse an address requests cannot go to: one that is not an http or https URL, and one
+/// with a query or a fragment, which the path of a request could not follow. The address may
+/// hold a credential, so no error repeats it.
+fn check_base_url(base_url: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(base_url).map_err(|error| anyhow::anyhow!("base_url is not a URL: {error}"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "base_url must be an http or https URL"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "base_url must end with its path, without a query or a fragment: the path of a request follows it"
+    );
+    Ok(())
+}
+
 /// Refuse headers the client cannot send: malformed ones, and `Authorization`, which the
 /// key sets.
 fn check_headers(headers: &[(String, String)]) -> anyhow::Result<()> {
@@ -365,6 +384,37 @@ mod tests {
             error.to_string().contains("timeout must be greater than zero"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_base_url_is_an_http_address_that_a_path_can_follow() {
+        for (base_url, expected) in [
+            ("gateway.example.com/v1", "is not a URL"),
+            ("localhost:8000/v1", "http or https"),
+            ("ftp://gateway.example.com/v1", "http or https"),
+            ("https://gateway.example.com/v1?version=1", "query"),
+            ("https://gateway.example.com/v1#part", "fragment"),
+        ] {
+            let config = OpenAiConfig {
+                base_url: base_url.into(),
+                ..OpenAiConfig::default()
+            };
+            let error = OpenAiCompatible::new(config).err().expect("the address is refused");
+            assert!(error.to_string().contains(expected), "{base_url}: {error}");
+            // The address may hold a credential, so the error does not repeat it.
+            assert!(!error.to_string().contains("gateway"), "{error}");
+        }
+        for base_url in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:8000",
+            "https://api.openai.com/v1/",
+        ] {
+            let config = OpenAiConfig {
+                base_url: base_url.into(),
+                ..OpenAiConfig::default()
+            };
+            assert!(OpenAiCompatible::new(config).is_ok(), "{base_url}");
+        }
     }
 
     #[test]

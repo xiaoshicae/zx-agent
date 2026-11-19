@@ -108,6 +108,13 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
         if edit.old_text.is_empty() {
             return Err(format!("{} has an empty oldText in {path}", which(index, total)));
         }
+        // Empty in the form texts are compared in: it would match everywhere and nowhere.
+        if tolerant(&edit.old_text).is_empty() {
+            return Err(format!(
+                "{} has an oldText of only spaces in {path}; include the text beside them, which says where to edit",
+                which(index, total)
+            ));
+        }
     }
     let tolerant_content = tolerant(content);
     let needs_tolerance = edits
@@ -448,6 +455,16 @@ mod tests {
         for (edits, expected) in cases {
             let error = apply_edits(content, &edits, "f").unwrap_err();
             assert!(error.contains(expected), "{expected:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_old_text_of_spaces_alone_is_refused() {
+        // In the form texts are compared in it is empty, which is everywhere and nowhere,
+        // also in a file that is empty.
+        for content in ["", "  ", "one\ntwo\n"] {
+            let error = apply_edits(content, &[edit(" \t", "x")], "f").unwrap_err();
+            assert!(error.contains("only spaces"), "{content:?}: {error}");
         }
     }
 

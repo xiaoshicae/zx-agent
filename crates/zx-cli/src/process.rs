@@ -39,7 +39,7 @@ pub(crate) async fn connect(overrides: Overrides, builtin: Builtin) -> Result<Ap
         .await
         .map_err(with_model_hint)?;
     for notice in app.notices() {
-        eprintln!("{notice}");
+        eprint_line(notice);
     }
     Ok(app)
 }
@@ -62,9 +62,9 @@ pub(crate) async fn resume(agent: &ConfiguredAgent, id: &str) -> Result<Session>
     let session = agent.open(id).await?;
     let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
     if cut_off > 0 {
-        eprintln!(
+        eprint_line(&format!(
             "[session] recovered incomplete final record; its {cut_off} bytes are cut off before the next record"
-        );
+        ));
     }
     Ok(session)
 }
@@ -89,7 +89,7 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
 /// for, the subcommand goes on, still bounded by its own limits, and says so on stderr.
 pub(crate) fn cancel_on_signals(cancel: CancellationToken) {
     if let Err(error) = spawn_signal_handler(cancel) {
-        eprintln!("zx-agent: cannot listen for shutdown signals: {error}");
+        eprint_line(&format!("zx-agent: cannot listen for shutdown signals: {error}"));
     }
 }
 
@@ -109,6 +109,14 @@ pub(crate) fn print_line(text: &str) {
     // A closed stdout (for example a consumer that exited) leaves nobody to report to; the run
     // continues and the exit code still tells the scheduler how it ended.
     let _ = writeln!(out, "{text}").and_then(|()| out.flush());
+}
+
+/// Print `text` and a newline on stderr, unlike `eprintln!` without panicking when stderr is
+/// closed.
+pub(crate) fn eprint_line(text: &str) {
+    // A closed stderr leaves nobody to tell; the subcommand goes on, and its exit code says
+    // how it ended.
+    let _ = writeln!(std::io::stderr().lock(), "{text}");
 }
 
 /// Writes every event as one JSON line on stdout.
@@ -136,16 +144,19 @@ where
 {
     let (code, end) = shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| {
         if telemetry.is_some() {
-            eprintln!("[otel] exporting traces over OTLP/HTTP");
+            eprint_line("[otel] exporting traces over OTLP/HTTP");
         }
         body(telemetry).await
     })
     .await?;
     if end.dropped > 0 {
-        eprintln!("[otel] {} event(s) were not exported: the queue was full", end.dropped);
+        eprint_line(&format!(
+            "[otel] {} event(s) were not exported: the queue was full",
+            end.dropped
+        ));
     }
     if let Some(error) = end.error {
-        eprintln!("[otel] {error:#}");
+        eprint_line(&format!("[otel] {error:#}"));
     }
     code
 }

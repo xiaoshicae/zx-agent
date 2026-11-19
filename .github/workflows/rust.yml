@@ -90,6 +90,14 @@ jobs:
         run: cargo +stable build --locked --all-targets
       - name: Run local tests and doctests
         run: cargo +stable test --locked
+      # The tests that exist only without a default feature run in no build of the whole
+      # workspace, where every feature is on.
+      - name: Test the kernel without its default features
+        run: cargo +stable test --locked -p zx-core --no-default-features
+      - name: Test zx-builtin without its default features
+        run: cargo +stable test --locked -p zx-builtin --no-default-features
+      - name: Test zx-im without its default features
+        run: cargo +stable test --locked -p zx-im --no-default-features
       - name: Run container tests against Docker
         if: runner.os == 'Linux'
         env:

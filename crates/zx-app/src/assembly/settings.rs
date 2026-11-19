@@ -19,7 +19,7 @@ use zx_util::env::env_value;
 /// The variable that names the model under the host's and over config.toml's.
 const MODEL_ENV: &str = "ZX_MODEL";
 /// The variable that names the provider's address over config.toml.
-const BASE_URL_ENV: &str = "ZX_BASE_URL";
+pub(super) const BASE_URL_ENV: &str = "ZX_BASE_URL";
 /// Comma-separated secret files to redact, added to `secretFiles` of config.toml; deployments
 /// set it, for example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";

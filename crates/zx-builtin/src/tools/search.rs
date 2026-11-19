@@ -70,9 +70,11 @@ pub(crate) fn quote(text: &str) -> String {
 /// The filter that keeps one line more than `shown`, so that a result over the limit is
 /// noticed, and cuts every line to one byte more than is shown, so that a cut is noticed too.
 /// [`MAX_LINES`] lines of this length stay under what the executor keeps of a command's
-/// output, which keeps the end; the start, which a search shows, is never dropped.
+/// output, which keeps the end; the start, which a search shows, is never dropped. `cut`
+/// counts bytes in the C locale: where it counts characters, it stops at the first line that
+/// is not text in the user's encoding, and every line after it would be lost.
 fn first_lines(shown: usize) -> String {
-    format!("head -n {} | cut -c 1-{}", shown + 1, MAX_LINE_BYTES + 1)
+    format!("head -n {} | LC_ALL=C cut -c 1-{}", shown + 1, MAX_LINE_BYTES + 1)
 }
 
 /// The script that searches with `rg` when ripgrep is installed and with `fallback`, the
@@ -323,6 +325,19 @@ mod tests {
         let tool = grep_with(b"zx-engine=grep\n\xff");
         let output = tool.execute(json!({"pattern": "hit"}), &ctx()).await.unwrap();
         assert_eq!(output.details.unwrap()["engine"], "grep", "{}", output.content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_line_filter_keeps_the_lines_after_one_that_is_not_utf8() {
+        // Where `cut` counts characters, it stops at such a line unless it is told to count bytes.
+        let script = format!("printf 'one\\n\\351two\\nthree\\n' | {}", first_lines(10));
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("LC_ALL", "en_US.UTF-8")
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"one\n\xe9two\nthree\n", "{output:?}");
     }
 
     #[tokio::test]
