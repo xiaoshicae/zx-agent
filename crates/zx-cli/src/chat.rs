@@ -141,7 +141,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     } = args;
     let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
-        .with_traces(traces);
+        .set_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {

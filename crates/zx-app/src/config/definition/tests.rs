@@ -16,7 +16,7 @@ fn load_agent(name: &str, front: &str, body: &str, config: &Config) -> Result<Ag
 fn from_path(path: &Path, config: &Config) -> Result<AgentDefinition> {
     let mut agent = AgentDefinition::from_file(path)?;
     settle_token_trigger(&mut agent.compaction);
-    agent.validate(config)?;
+    agent.validate(config, &HostTools::default())?;
     Ok(agent)
 }
 
@@ -49,7 +49,7 @@ const BUILTINS: [Builtin; 2] = [Builtin::Unattended, Builtin::Assistant];
 
 /// The built-in agent `builtin`, without a zx-agent home.
 fn load(builtin: Builtin) -> AgentDefinition {
-    AgentDefinition::load(builtin, None, &Config::default()).unwrap()
+    AgentDefinition::load(builtin, None, &Config::default(), &HostTools::default()).unwrap()
 }
 
 /// The configuration of a `config.toml` holding `text`.
@@ -290,7 +290,13 @@ fn an_agent_without_extends_starts_from_nothing_and_needs_instructions() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir(home.path().join("agents")).unwrap();
     std::fs::write(home.path().join("agents/unattended.md"), "+++\n+++\nOnly this.\n").unwrap();
-    let in_run = AgentDefinition::load(Builtin::Unattended, Some(home.path()), &Config::default()).unwrap();
+    let in_run = AgentDefinition::load(
+        Builtin::Unattended,
+        Some(home.path()),
+        &Config::default(),
+        &HostTools::default(),
+    )
+    .unwrap();
     assert!(in_run.tools.is_empty() && in_run.limits.max_model_requests.is_none());
 
     let error = format!(
@@ -356,7 +362,8 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
     .unwrap();
     // Not the name of a built-in agent: never read, even though it is broken.
     std::fs::write(agents.join("ops.md"), "not an agent").unwrap();
-    let load_in = |builtin| AgentDefinition::load(builtin, Some(home.path()), &Config::default());
+    let load_in =
+        |builtin| AgentDefinition::load(builtin, Some(home.path()), &Config::default(), &HostTools::default());
     let assistant = load_in(Builtin::Assistant).unwrap();
     assert_eq!(assistant.name, "assistant");
     assert_eq!((assistant.instructions.as_str(), assistant.tools.len()), ("Mine.\n", 0));

@@ -53,6 +53,9 @@ pub(super) struct PerSession {
 const ENVIRONMENT: &str = "environment";
 const PROJECT_CONTEXT: &str = "project_context";
 const AVAILABLE_SKILLS: &str = "available_skills";
+/// The hook that stores a session's long tool results, named like the hooks every session
+/// shares (`agent::hooks`).
+pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
 
 #[async_trait]
 impl SessionSetup for PerSession {
@@ -92,8 +95,7 @@ impl SessionSetup for PerSession {
             // again.
             let paging = [READ_OUTPUT, READ_SKILL, tools::READ_FILE];
             let (spill, reader) = SpillOutputs::with_reader(store, paging.map(String::from).to_vec());
-            // Named like the hooks every session shares (`agent::hooks`).
-            hooks.push("spill_outputs", Arc::new(spill));
+            hooks.push(SPILL_OUTPUTS, Arc::new(spill));
             host.push(Arc::new(reader));
         }
         if self.execution == Execution::Container {

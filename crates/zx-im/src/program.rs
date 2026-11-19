@@ -135,9 +135,9 @@ pub(crate) async fn run(args: Args) -> Result<u8> {
             // Once for the process: every conversation's session shares the connections.
             let app = connect(overrides)
                 .await?
-                .with_hidden_env(hidden_env)
-                .with_traces(telemetry.map(Telemetry::hook))
-                .with_prompt_section(CONVERSATION_SECTION, CONVERSATION);
+                .set_hidden_env(hidden_env)
+                .set_traces(telemetry.map(Telemetry::hook))
+                .add_prompt_section(CONVERSATION_SECTION, CONVERSATION);
             let agent = conversations_agent(&app, &dir).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,

@@ -1,6 +1,7 @@
 //! Agents made from their configuration: config.toml, the agent file and what a host says over
-//! them when it starts ([`Overrides`]). Every host builds its agents here, through
-//! [`Application`], and none of this knows a command line, a terminal or a protocol.
+//! them when it starts ([`Overrides`]), with the parts the host adds of its own. Every host
+//! builds its agents here, through [`Application`], and none of this knows a command line, a
+//! terminal or a protocol.
 //!
 //! - `settings`: config.toml with the host's model and the variables over it, and the secret
 //!   files to redact
@@ -30,6 +31,11 @@ use crate::otel::TraceHook;
 use zx_agent::ai::Reasoning;
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, short_secret_files};
 use zx_agent::builtin::tools::FileMutationQueue;
+use zx_agent::compaction::Summarizer;
+use zx_agent::extensions::Extension;
+use zx_agent::hooks::Hook;
+use zx_agent::policy::ToolPolicy;
+use zx_agent::tools::Tool;
 
 pub use agent::{Approvals, ConfiguredAgent};
 pub use place::SessionPlace;
@@ -41,7 +47,13 @@ use settings::{Settings, checked_secret_files, secret_files};
 /// What the agents of a process share, read and connected once: the settings with what the
 /// host says over them, the MCP servers, the secret files to redact, the variables commands
 /// must not see and the trace export. It builds a [`ConfiguredAgent`] for each place sessions
-/// are kept in; no session is opened at startup.
+/// are kept in, the host's own storage among them ([`SessionPlace::from_storage`]); no
+/// session is opened at startup.
+///
+/// A host gives its own parts with two verbs: `add_*` adds one beside the assembly's (tools,
+/// hooks, policies, extensions, prompt sections), `set_*` replaces the one there is (the
+/// summarizer, the hidden variables, the trace export). They are treated as the built-in
+/// ones are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
     settings: Settings,
     /// What the host says over the agent: the working directory, the tools and the budgets.
@@ -60,6 +72,15 @@ pub struct Application {
     traces: Option<TraceHook>,
     /// The prompt sections the host adds to every session, as `(name, content)`.
     host_sections: Vec<(String, String)>,
+    /// The host's own tools, offered where the agent enables them, as the built-in ones are.
+    tools: Vec<Arc<dyn Tool>>,
+    /// The host's own hooks and policies, by name, after the assembly's.
+    hooks: Vec<(String, Arc<dyn Hook>)>,
+    policies: Vec<(String, Arc<dyn ToolPolicy>)>,
+    /// The host's own extensions, after the MCP servers and treated as they are.
+    extensions: Vec<Arc<dyn Extension>>,
+    /// What makes the summaries in place of the agent's model, when the host gives it.
+    summarizer: Option<Arc<dyn Summarizer>>,
     /// The queue of changes to each file, which the file tools of every session wait in, so
     /// that two sessions never overwrite each other's edit.
     file_queue: Arc<FileMutationQueue>,
@@ -125,13 +146,18 @@ impl Application {
             hidden_env: Vec::new(),
             traces: None,
             host_sections: Vec::new(),
+            tools: Vec::new(),
+            hooks: Vec::new(),
+            policies: Vec::new(),
+            extensions: Vec::new(),
+            summarizer: None,
             file_queue: Arc::default(),
         })
     }
 
     /// Hide `names` from commands and redact their values: credentials besides the API key,
     /// such as the tokens of an IM service's platforms.
-    pub fn with_hidden_env(mut self, names: Vec<String>) -> Self {
+    pub fn set_hidden_env(mut self, names: Vec<String>) -> Self {
         self.hidden_env = names;
         self
     }
@@ -139,7 +165,7 @@ impl Application {
     /// Export the runs of every session through `traces`, the host's trace hook, when it
     /// exports them. The host starts and finishes the export
     /// ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here installs it.
-    pub fn with_traces(mut self, traces: Option<TraceHook>) -> Self {
+    pub fn set_traces(mut self, traces: Option<TraceHook>) -> Self {
         self.traces = traces;
         self
     }
@@ -147,8 +173,45 @@ impl Application {
     /// Add the section `name` to the prompt of every session, after those the assembly
     /// gives: what the model should know of the host itself, such as how its answers reach
     /// people. The agent's instructions name no host, so that one agent serves them all.
-    pub fn with_prompt_section(mut self, name: &str, content: &str) -> Self {
+    pub fn add_prompt_section(mut self, name: &str, content: &str) -> Self {
         self.host_sections.push((name.into(), content.into()));
+        self
+    }
+
+    /// Add `tool`, offered where the agent's `tools` enables it and asked about where its
+    /// `permissions.ask` names it, as a built-in tool is. Like one, it must bound its own
+    /// output and stop when its call is cancelled; redaction applies to what it returns, and
+    /// so does the store of long results where the agent enables read_output.
+    pub fn add_tool(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
+    /// Add `hook` as `name`, after the assembly's hooks of the stage it declares. Redaction
+    /// runs after every hook of the default stage, so a hook cannot bring a secret back.
+    pub fn add_hook(mut self, name: &str, hook: Arc<dyn Hook>) -> Self {
+        self.hooks.push((name.into(), hook));
+        self
+    }
+
+    /// Add `policy` as `name`. The strictest verdict of all policies stands, so a policy can
+    /// tighten what the agent's permissions allow but never loosen it.
+    pub fn add_policy(mut self, name: &str, policy: Arc<dyn ToolPolicy>) -> Self {
+        self.policies.push((name.into(), policy));
+        self
+    }
+
+    /// Add `extension` after the MCP servers, which are extensions too, and treated as they
+    /// are: its tools are offered to every agent and ask unless `permissions.allow` names
+    /// them.
+    pub fn add_extension(mut self, extension: Arc<dyn Extension>) -> Self {
+        self.extensions.push(extension);
+        self
+    }
+
+    /// Make the summaries with `summarizer` in place of the agent's model.
+    pub fn set_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = Some(summarizer);
         self
     }
 
@@ -157,7 +220,8 @@ impl Application {
     /// reads; each session gets its executor when it is created or opened.
     ///
     /// Fails on an agent file or a tool setting that cannot be used, a cost budget without
-    /// prices, and invalid provider settings.
+    /// prices, invalid provider settings, and a part of the host's whose name another part
+    /// goes by already.
     pub fn build(&self, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
         ConfiguredAgent::build(self, model, place, approvals)
     }

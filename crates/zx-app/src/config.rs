@@ -28,7 +28,7 @@ use anyhow::{Result, ensure};
 
 pub(crate) use agent_file::cost_budget;
 pub use definition::Builtin;
-pub(crate) use definition::{AgentDefinition, ProjectContext};
+pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
 pub use environment::{Config, ContainerSettings, Execution, McpServer, ProviderSettings};
 pub(crate) use skills::{READ_SKILL, Skill, validate_skills};
 
