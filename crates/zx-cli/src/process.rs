@@ -111,7 +111,7 @@ where
     .await?;
     if end.dropped > 0 {
         eprint_line(&format!(
-            "[otel] {} event(s) were not exported: the queue was full",
+            "[otel] {} event(s) were not exported: the queue was full, or the export had stopped",
             end.dropped
         ));
     }

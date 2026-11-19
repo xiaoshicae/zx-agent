@@ -347,8 +347,8 @@ mod tests {
         assert_eq!(long, format!("bash: {}...", "x".repeat(LABEL_CHARS - "bash: ".len())));
     }
 
-    // Fields keep the order they were sent in: serde_json's `preserve_order` is on for the
-    // whole workspace since the ACP SDK enables it.
+    // Fields keep the order they were sent in: the root `Cargo.toml` turns on serde_json's
+    // `preserve_order`.
     #[test]
     fn arguments_left_out_of_the_label_are_listed_readably() {
         assert_eq!(

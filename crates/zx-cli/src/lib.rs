@@ -32,9 +32,10 @@ use clap::Parser;
 use cli::{Cli, Command};
 use process::EXIT_USAGE;
 
-/// Run the command line the process was started with, and return its exit code. A
-/// configuration problem found before the subcommand started is written to stderr and
-/// exits with the code of a usage error.
+/// Run the command line the process was started with, and return its exit code. An error
+/// that ends a subcommand, such as a configuration problem found before it started or an
+/// ACP connection that failed, is written to stderr and exits with the code of a usage
+/// error.
 pub async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
