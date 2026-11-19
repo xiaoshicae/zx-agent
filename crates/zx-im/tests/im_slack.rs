@@ -673,6 +673,55 @@ async fn a_thread_reply_also_sent_to_the_channel_is_passed_on() {
 }
 
 #[tokio::test]
+async fn another_bots_reply_in_a_thread_is_heard_and_starts_nothing() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    let by_bot = |ts: &str, extra: Value| {
+        let mut message = json!({"type": "message", "channel_type": "channel", "channel": "C1", "ts": ts});
+        if let (Value::Object(message), Value::Object(extra)) = (&mut message, extra) {
+            message.extend(extra);
+        }
+        event(&message)
+    };
+    let frames = [
+        // An integration's post has no user, and may name the bot: it is heard, not answered.
+        by_bot(
+            "9.1",
+            json!({"subtype": "bot_message", "bot_id": "B9", "text": "<@UBOT> resolved", "thread_ts": "9.0"}),
+        ),
+        // The bot's own posts, as Slack sends them back, with and without its user.
+        by_bot(
+            "9.2",
+            json!({"subtype": "bot_message", "bot_id": "BBOT", "text": "mine", "thread_ts": "9.0"}),
+        ),
+        by_bot(
+            "9.3",
+            json!({"user": "UBOT", "bot_id": "BBOT", "text": "mine too", "thread_ts": "9.0"}),
+        ),
+        // Outside a thread a bot starts no conversation, even by a mention, nor in a direct chat.
+        event(
+            &json!({"type": "app_mention", "user": "UB9", "bot_id": "B9", "text": "<@UBOT> wake up", "ts": "9.4", "channel": "C1"}),
+        ),
+        direct("9.5", json!({"bot_id": "B9"})),
+        channel_message("9.6", Some("9.0"), "anyone?"),
+    ];
+    for (n, frame) in frames.iter().enumerate() {
+        socket.send(envelope(&format!("e{n}"), "events_api", frame)).await;
+    }
+    let at = in_thread("C1", Some("9.0"));
+    assert_eq!(
+        running.next().await,
+        said("9.1", at.clone(), ChatKind::Group, Addressee::Others, "resolved", "B9")
+    );
+    assert_eq!(
+        running.next().await,
+        said("9.6", at, ChatKind::Group, Addressee::Nobody, "anyone?", "U1")
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_mention_that_arrives_as_both_events_is_passed_on_once() {
     let mut slack = FakeSlack::start().await;
     let mut running = run_channel(channel(&slack), WAIT);
@@ -735,6 +784,51 @@ async fn a_thread_is_read_without_the_messages_of_bots_or_edits() {
     );
     assert_eq!(calls[0].arg("cursor"), None);
     assert_eq!(calls[0].authorization, format!("Bearer {BOT_TOKEN}"));
+}
+
+#[tokio::test]
+async fn a_thread_is_read_with_what_other_bots_said_once_the_bot_knows_itself() {
+    let mut slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.replies",
+        vec![Answer::Json(json!({"ok": true, "messages": [
+            // An alert as integrations post it: no text of its own, what it says attached.
+            {"type": "message", "subtype": "bot_message", "bot_id": "B9", "text": "", "ts": "8.0", "thread_ts": "8.0",
+             "attachments": [
+                {"fallback": "[FIRING:1] DiskFull | http://alerts", "title": "[FIRING:1] DiskFull", "text": "node-3 at 97% &amp; rising"},
+                {"fallback": "silence it at http://alerts/silence"},
+             ]},
+            {"type": "message", "subtype": "bot_message", "bot_id": "BBOT", "text": "Working…", "ts": "8.1"},
+            {"type": "message", "user": "UBOT", "bot_id": "BBOT", "text": "an earlier answer", "ts": "8.2"},
+            {"type": "message", "user": "UB7", "bot_id": "B7", "text": "deploy 42 finished", "ts": "8.3"},
+            {"type": "message", "user": "U2", "text": "what is this?", "ts": "8.4"},
+        ]}))],
+    );
+    let channel = channel(&slack);
+    // Connected, the channel has asked Slack who it is.
+    let running = run_channel(channel.clone(), WAIT);
+    let _socket = slack.socket().await;
+
+    let read = channel.thread_history(&in_thread("C1", Some("8.0")), 50).await.unwrap();
+
+    let earlier = |ts: &str, sender: &str, text: &str| Said {
+        id: MessageId(ts.into()),
+        sender: UserId(sender.into()),
+        text: text.into(),
+    };
+    assert_eq!(
+        read,
+        [
+            earlier(
+                "8.0",
+                "B9",
+                "[FIRING:1] DiskFull\nnode-3 at 97% & rising\nsilence it at http://alerts/silence"
+            ),
+            earlier("8.3", "UB7", "deploy 42 finished"),
+            earlier("8.4", "U2", "what is this?"),
+        ]
+    );
+    running.stop().await.unwrap();
 }
 
 /// One page of `conversations.replies`: messages of U1 with these timestamps, oldest first
@@ -838,6 +932,24 @@ async fn a_name_is_the_display_name_or_else_the_real_name() {
     // The fake's own answer has no name at all.
     assert_eq!(channel.display_name(&nameless).await.unwrap(), None);
     assert_eq!(slack.calls("users.info")[0].arg("user"), Some("U1"));
+}
+
+#[tokio::test]
+async fn an_integration_without_a_user_is_named_by_its_bot_record() {
+    let slack = FakeSlack::start().await;
+    slack.script("users.info", vec![Answer::Error("user_not_found")]);
+    slack.script(
+        "bots.info",
+        vec![Answer::Json(
+            json!({"ok": true, "bot": {"id": "B9", "deleted": false, "name": "alerts"}}),
+        )],
+    );
+    let channel = channel(&slack);
+
+    let name = channel.display_name(&UserId("B9".into())).await.unwrap();
+
+    assert_eq!(name.as_deref(), Some("alerts"));
+    assert_eq!(slack.calls("bots.info")[0].arg("bot"), Some("B9"));
 }
 
 #[tokio::test]
