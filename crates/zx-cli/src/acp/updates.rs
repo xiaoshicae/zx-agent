@@ -31,11 +31,6 @@ pub(super) struct Updates {
     cx: ConnectionTo<Client>,
     session_id: SessionId,
     cwd: PathBuf,
-    state: UpdateState,
-}
-
-#[derive(Default)]
-struct UpdateState {
     /// The answer in progress streamed text, so its end need not repeat it.
     wrote_text: bool,
     /// Arguments of the tool calls in progress, by call ID, for their results.
@@ -48,7 +43,8 @@ impl Updates {
             cx,
             session_id,
             cwd,
-            state: UpdateState::default(),
+            wrote_text: false,
+            calls: HashMap::new(),
         }
     }
 
@@ -220,31 +216,22 @@ impl Updates {
 
     /// Streamed answer text, which the answer's end then need not repeat.
     fn text_streamed(&mut self, text: &str) {
-        self.state.wrote_text = true;
+        self.wrote_text = true;
         self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(text)));
     }
 
-    /// The answer ended: its text when none was streamed, and the arguments of its calls
-    /// kept for their results.
-    fn answer_ended(&mut self, message: &AssistantMessage) {
+    /// The answer ended: its text, when none was streamed. Its calls are kept as each starts,
+    /// which every call of the run does before its result.
+    fn answer_ended(&self, message: &AssistantMessage) {
         let text = message.text();
-        let wrote_text = {
-            let state = &mut self.state;
-            for block in &message.content {
-                if let MessageBlock::ToolCall(MessageCall { id, arguments, .. }) = block {
-                    state.calls.insert(id.clone(), arguments.clone());
-                }
-            }
-            state.wrote_text
-        };
-        if !wrote_text && !text.is_empty() {
+        if !self.wrote_text && !text.is_empty() {
             self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(&text)));
         }
     }
 
     /// A call starts: the client lists it as pending.
     fn tool_started(&mut self, tool_call_id: &str, tool_name: &str, args: &Value) {
-        self.state.calls.insert(tool_call_id.to_string(), args.clone());
+        self.calls.insert(tool_call_id.to_string(), args.clone());
         self.send(SessionUpdate::ToolCall(
             self.call(tool_call_id, tool_name, args).status(ToolCallStatus::Pending),
         ));
@@ -252,7 +239,7 @@ impl Updates {
 
     /// A call ended: its status, what it shows and the raw output.
     fn tool_ended(&mut self, result: &ToolResultMessage) {
-        let args = self.state.calls.remove(&result.tool_call_id);
+        let args = self.calls.remove(&result.tool_call_id);
         let (status, content, raw_output) = self.result_fields(&result.tool_name, args.as_ref(), result);
         self.tool_update(
             &result.tool_call_id,
@@ -300,7 +287,7 @@ impl Updates {
     /// Send what `event` of a run means to the client.
     pub(super) fn emit(&mut self, event: &Event) {
         match &event.event {
-            EventKind::MessageStart { role: "assistant" } => self.state.wrote_text = false,
+            EventKind::MessageStart { role: "assistant" } => self.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => self.text_streamed(text),
