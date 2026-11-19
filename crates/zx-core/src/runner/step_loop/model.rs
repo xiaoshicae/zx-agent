@@ -62,15 +62,15 @@ impl StepLoop<'_> {
         .await;
         self.accounting.model_requests = self.accounting.model_requests.saturating_add(1);
         let model = request.model.clone();
-        let mut message = self.stream(request).await;
+        let mut message = self.stream(request, &model).await;
         message.usage.price(&config.models, &model);
         self.accounting.usage.add(&message.usage);
         Ok(message)
     }
 
-    /// Stream one response, reporting its start and its deltas. The caller records the
-    /// response and reports its end.
-    async fn stream(&self, request: Request) -> AssistantMessage {
+    /// Stream the response to `request`, which asks `model`, reporting its start and its
+    /// deltas. The caller records the response and reports its end.
+    async fn stream(&self, request: Request, model: &str) -> AssistantMessage {
         let config = self.scope.config;
         let mut events = config.provider.stream(request, self.scope.cancel().clone());
         let mut started = false;
@@ -95,7 +95,7 @@ impl StepLoop<'_> {
         }
         AssistantMessage::failure(
             config.provider.name(),
-            &config.model,
+            model,
             stop,
             "provider stream ended without a final event",
         )

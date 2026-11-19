@@ -17,6 +17,7 @@ use zx_agent::ai::{
     ToolCall, ToolDef, Usage,
 };
 use zx_agent::events::{Budget, EventKind, RunOutcome};
+use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
@@ -638,6 +639,37 @@ async fn a_stream_without_a_final_event_is_an_error() {
         answer.error_message.as_deref(),
         Some("provider stream ended without a final event")
     );
+}
+
+/// Sends every task request to `0` instead of the configured model.
+struct UseModel(&'static str);
+
+#[async_trait]
+impl Hook for UseModel {
+    async fn prepare_request(
+        &self,
+        _plan: &RequestPlan<'_>,
+        _ctx: &HookContext,
+    ) -> HookResult<Option<RequestSettings>> {
+        Ok(Some(RequestSettings {
+            model: self.0.into(),
+            reasoning: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_stream_without_a_final_event_fails_for_the_model_it_asked() {
+    let mut config = config(Arc::new(SilentProvider), vec![]);
+    config.hooks.push("use_model", Arc::new(UseModel("other-model")));
+    let mut context = Vec::new();
+
+    run_prompt(config, &mut context, "go").await;
+
+    let Some(Message::Assistant(answer)) = context.last() else {
+        panic!("the failure is recorded as an assistant message: {context:?}");
+    };
+    assert_eq!(answer.model, "other-model");
 }
 
 // ---------------------------------------------------------------------------
