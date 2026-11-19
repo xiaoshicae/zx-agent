@@ -1,8 +1,12 @@
 //! The ACP agent: an editor or a terminal client drives sessions over stdio with the Agent
 //! Client Protocol (JSON-RPC, one message per line). The client renders everything, so this
-//! module only maps between the protocol and `Session`: prompts become runs, run events
-//! become session updates (`updates`), approvals become permission requests (`permissions`),
-//! and a prompt that starts with one of the agent's slash commands runs it (`commands`).
+//! module only maps between the protocol and `Session`; it answers the requests:
+//!
+//! - `sessions`: the sessions a client creates, loads, resumes and lists
+//! - `turn`: a prompt's turn: the run it starts, read to its end
+//! - `updates`: run events as session updates, and the replay of a loaded session
+//! - `permissions`: approvals as permission requests
+//! - `commands`: the agent's slash commands, which a prompt that starts with one runs
 //!
 //! Sessions are kept as files, one per session in the directory chat uses for the same
 //! working directory, so that a client can list them and load one again in a later process:
@@ -19,42 +23,37 @@
 
 mod commands;
 mod permissions;
+mod sessions;
+mod turn;
 mod updates;
 
-use std::borrow::Cow;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, Implementation,
+    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionInfo,
-    SessionListCapabilities, SessionResumeCapabilities, StopReason, ToolKind,
+    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities,
+    SessionResumeCapabilities, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::Session;
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
-use zx_agent::compaction::{self, Outcome};
-use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
-use zx_agent::transcript::SessionInfo as StoredSession;
-use zx_agent::{Run, Session};
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
-use zx_app::shutdown::next_event;
-use zx_app::{Approvals, ConfiguredAgent, SessionPlace, resolve_cwd};
+use zx_app::{Approvals, ConfiguredAgent, SessionPlace};
 
-use crate::application::{connect, open_session};
+use crate::application::connect;
 use crate::cli::{self, AcpArgs};
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
-use crate::render::preview_text;
 
 use commands::Command;
-use updates::Updates;
+use turn::{Running, Turn, prompt_text};
 
 struct Host {
     /// The agent of every session, which also holds the sessions the client has open: the
@@ -81,95 +80,6 @@ impl Host {
         self.configured.place().is_persistent()
     }
 
-    /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
-    /// It is kept among the session files, where `session/load` finds it again.
-    async fn create(&self, cwd: &Path) -> Result<SessionId> {
-        let session = self.configured.create(Some(cwd)).await?;
-        Ok(SessionId::new(session.id()))
-    }
-
-    /// The session `id` for `cwd`: the one this process has open, or the one kept among the
-    /// session files, opened, when it was started in `cwd`.
-    ///
-    /// A kept session is asked for by its ID: its file must be among the sessions of `cwd`
-    /// before it is opened, which sets it up. A listing of the directory would read every
-    /// session in it.
-    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
-        let open = self.session(id);
-        let (id, place) = (&*id.0, self.configured.place());
-        let cwd = resolve_cwd(Some(cwd))?;
-        let directory = place.location(&cwd);
-        let unknown = || {
-            let searched = directory.as_deref().unwrap_or(&cwd);
-            unknown_session(id, &format!("no such session in {}", searched.display()))
-        };
-        if let Some(session) = open {
-            // Open in this process, it is still only a session of the directory it works in.
-            return if session.cwd() == cwd {
-                Ok(session)
-            } else {
-                Err(unknown().into())
-            };
-        }
-        let Some(kept) = directory.as_deref() else {
-            return Err(unknown_session(id, "the agent keeps no session files (--no-session)").into());
-        };
-        let kept_there = place.path_of(id).await?.is_some_and(|path| path.parent() == Some(kept));
-        if !kept_there {
-            return Err(unknown().into());
-        }
-        let session = open_session(&self.configured, id).await?;
-        // Two directories can share a directory name of sessions (`/a-b` and `/a/b`).
-        if session.cwd() != cwd {
-            // Started in another directory: not a session of this one, and not left open,
-            // where the next request would find it whatever directory it names.
-            self.configured.agent().close_session(id);
-            return Err(unknown().into());
-        }
-        Ok(session)
-    }
-
-    /// Load the session `request` names from the session directory of its `cwd`, replaying
-    /// the conversation to the client first.
-    ///
-    /// A session this process has open already is replayed as it is, without opening its
-    /// file again.
-    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId> {
-        let id = &request.session_id;
-        let session = self.locate(id, &request.cwd).await?;
-        let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
-        session
-            .with_transcript(|transcript| updates.replay(transcript))
-            .with_context(|| format!("cannot replay session {}", id.0))?;
-        Ok(id.clone())
-    }
-
-    /// Continue the session `request` names without replaying it (`session/resume`): the
-    /// client keeps what it shows, and the conversation goes on from the file.
-    async fn resume(&self, request: &ResumeSessionRequest) -> Result<SessionId> {
-        self.locate(&request.session_id, &request.cwd).await?;
-        Ok(request.session_id.clone())
-    }
-
-    /// The sessions kept that were started in `request.cwd`, or in `--cwd`'s directory when
-    /// the request names none, most recently active first; none with `--no-session`, which
-    /// keeps none. A listing is one page, so a cursor is never one of ours.
-    async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>> {
-        if let Some(cursor) = &request.cursor {
-            return Err(Error::new(
-                ErrorCode::INVALID_PARAMS,
-                format!("unknown cursor {cursor:?}: a listing is one page"),
-            )
-            .into());
-        }
-        let cwd = self.configured.new_session_cwd(request.cwd.as_deref())?;
-        if !self.keeps_files() {
-            return Ok(Vec::new());
-        }
-        let kept = self.configured.place().started_in(&cwd).await?;
-        Ok(kept.sessions.iter().map(session_info).collect())
-    }
-
     /// `initialize`: what the agent can do; sessions can be loaded, listed and resumed when
     /// they are kept as files.
     fn initialize(
@@ -191,7 +101,7 @@ impl Host {
         responder: Responder<NewSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let result = self.create(&request.cwd).await;
+        let result = sessions::create(&self.configured, &request.cwd).await;
         opened(responder, cx, result, NewSessionResponse::new)
     }
 
@@ -202,7 +112,7 @@ impl Host {
         responder: Responder<LoadSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let result = self.load(cx, request).await;
+        let result = sessions::load(&self.configured, cx, request).await;
         opened(responder, cx, result, |_| LoadSessionResponse::new())
     }
 
@@ -213,7 +123,7 @@ impl Host {
         responder: Responder<ResumeSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let result = self.resume(request).await;
+        let result = sessions::resume(&self.configured, request).await;
         opened(responder, cx, result, |_| ResumeSessionResponse::new())
     }
 
@@ -223,7 +133,7 @@ impl Host {
         request: &ListSessionsRequest,
         responder: Responder<ListSessionsResponse, V1>,
     ) -> Result<(), Error> {
-        let result = self.list(request).await;
+        let result = sessions::list(&self.configured, request).await;
         responder.respond_with_result(result.map(ListSessionsResponse::new).map_err(protocol_error))
     }
 
@@ -249,7 +159,7 @@ impl Host {
             } else {
                 "it is not open, and nothing is kept of a closed session (--no-session)"
             };
-            return responder.respond_with_error(unknown_session(&request.session_id.0, why));
+            return responder.respond_with_error(sessions::unknown_session(&request.session_id.0, why));
         };
         let text = prompt_text(&request.prompt);
         let session_id = request.session_id.clone();
@@ -273,13 +183,7 @@ impl Host {
             Ok(running) => running,
             Err(error) => return responder.respond_with_error(protocol_error(error.into())),
         };
-        let turn = Turn {
-            updates: Updates::new(cx.clone(), session_id.clone(), session.cwd().to_path_buf()),
-            session,
-            cx: cx.clone(),
-            id: session_id,
-            stop: self.stop.clone(),
-        };
+        let turn = Turn::new(session, cx.clone(), session_id, self.stop.clone());
         // None once the stop has waited for the turns: this one then ends with the process.
         let in_progress = self.turns.upgrade();
         cx.spawn(async move {
@@ -308,22 +212,6 @@ impl Host {
         self.configured.agent().close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
-}
-
-/// What a turn runs: the task a prompt starts, or the compaction `/compact` starts.
-enum Running {
-    Task(Run),
-    Compaction(Run<compaction::Report>),
-}
-
-/// One turn of a session: the conversation, and the client it reports to and asks.
-struct Turn {
-    session: Session,
-    updates: Updates,
-    cx: ConnectionTo<Client>,
-    id: SessionId,
-    /// Cancelled when the process is told to stop.
-    stop: CancellationToken,
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
@@ -468,55 +356,6 @@ fn opened<T: JsonRpcResponse>(
     }
 }
 
-impl Turn {
-    /// The response to `session/prompt` once `running`, the turn, has ended: its stop reason,
-    /// or its error. A compaction that found nothing old enough to summarize says so, since
-    /// nothing else would show that it ran.
-    async fn answer(mut self, running: Running) -> Result<PromptResponse> {
-        let reason = match running {
-            Running::Task(mut run) => {
-                self.read(&mut run).await?;
-                stop_reason(&run.wait().await)?
-            }
-            Running::Compaction(mut run) => {
-                self.read(&mut run).await?;
-                let report = run.wait().await;
-                if report.outcome == Outcome::Noop {
-                    self.updates.nothing_to_compact();
-                }
-                compaction_stop(&report)?
-            }
-        };
-        Ok(PromptResponse::new(reason))
-    }
-
-    /// Read `run` to its end: its events go to the client as session updates, and a call
-    /// that waits for approval becomes a permission request. A process that is told to stop
-    /// cancels the run, which is still read to its end.
-    async fn read<T>(&mut self, run: &mut Run<T>) -> Result<()> {
-        while let Some(event) = next_event(run, &self.session, &self.stop).await {
-            self.updates.emit(&event);
-            if let EventKind::ApprovalRequested {
-                approval_id,
-                tool_call_id,
-                tool_name,
-                args,
-                ..
-            } = event.event
-            {
-                let request = permissions::Request {
-                    approval_id,
-                    tool_call_id,
-                    tool_name,
-                    args,
-                };
-                permissions::ask(&self.cx, &self.id, &self.session, request)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// The error a failed request answers with. An error the protocol defines, such as an
 /// unknown session, keeps its code; anything else is an internal error whose message is the
 /// whole chain of causes. Clients show the message: the SDK's own conversion from `anyhow`
@@ -525,11 +364,6 @@ fn protocol_error(error: anyhow::Error) -> Error {
     error
         .downcast::<Error>()
         .unwrap_or_else(|error| Error::new(ErrorCode::INTERNAL_ERROR, format!("{error:#}")))
-}
-
-/// The error for a session the agent does not have, with the reason.
-fn unknown_session(id: &str, why: &str) -> Error {
-    Error::new(ErrorCode::INVALID_PARAMS, format!("unknown session {id}: {why}"))
 }
 
 /// What the agent offers: closing sessions, which frees them also in memory, and loading,
@@ -546,76 +380,6 @@ fn agent_capabilities(kept: bool) -> AgentCapabilities {
         .session_capabilities(sessions)
 }
 
-/// A listed session as the client shows it: its name, else its first prompt, as the title,
-/// and its last activity as the time.
-fn session_info(session: &StoredSession) -> SessionInfo {
-    // A time past the year 292 million is not one a session file records; the entry then
-    // has no time rather than a wrong one.
-    let updated_at = i64::try_from(session.last_activity_ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
-        .title(session.title().map(preview_text))
-        .updated_at(updated_at)
-}
-
-/// The text of a prompt: its text blocks, one per line, and a line naming each resource
-/// link, which the protocol has every agent take. The agent advertises no image, audio or
-/// embedded-context capability, so clients send nothing else.
-fn prompt_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(Cow::Borrowed(text.text.as_str())),
-            ContentBlock::ResourceLink(link) => Some(Cow::Owned(format!("[resource {} ({})]", link.uri, link.name))),
-            // The protocol may add block kinds: the enum is non-exhaustive.
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// How a finished run answers `session/prompt`. Limits that end a turn have a stop reason;
-/// a failed or timed-out run is a request error, with the run's message.
-fn stop_reason(report: &RunReport) -> Result<StopReason> {
-    match report.outcome {
-        RunOutcome::Completed => Ok(StopReason::EndTurn),
-        // The protocol has no reason for a cost limit; tokens are what a cost is paid for.
-        RunOutcome::Truncated
-        | RunOutcome::BudgetExhausted {
-            budget: Budget::Tokens | Budget::Cost,
-            ..
-        } => Ok(StopReason::MaxTokens),
-        RunOutcome::BudgetExhausted {
-            budget: Budget::ModelRequests,
-            ..
-        } => Ok(StopReason::MaxTurnRequests),
-        RunOutcome::Cancelled => Ok(StopReason::Cancelled),
-        RunOutcome::Failed | RunOutcome::TimedOut => Err(anyhow::Error::msg(
-            report
-                .error
-                .clone()
-                .unwrap_or_else(|| format!("the run ended with {:?}", report.outcome)),
-        )),
-    }
-}
-
-/// How a finished compaction answers the `/compact` that asked for it; a failed one is a
-/// request error, with its message.
-fn compaction_stop(report: &compaction::Report) -> Result<StopReason> {
-    match report.outcome {
-        Outcome::Completed | Outcome::Noop => Ok(StopReason::EndTurn),
-        Outcome::Cancelled => Ok(StopReason::Cancelled),
-        Outcome::Failed => Err(anyhow::Error::msg(
-            report
-                .error
-                .clone()
-                .unwrap_or_else(|| "the compaction failed".to_string()),
-        )),
-    }
-}
-
 /// The protocol's kinds for the built-in tools; everything else, MCP tools included, is
 /// `Other`, which clients show without an icon.
 fn tool_kind(name: &str) -> ToolKind {
@@ -630,99 +394,7 @@ fn tool_kind(name: &str) -> ToolKind {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::v1::schema::{ResourceLink, TextContent};
-    use zx_agent::ai::Usage;
-
     use super::*;
-
-    fn report(outcome: RunOutcome, error: Option<&str>) -> RunReport {
-        RunReport {
-            outcome,
-            final_text: String::new(),
-            model_requests: 1,
-            retries: 0,
-            usage: Usage::default(),
-            tool_usage: std::collections::BTreeMap::new(),
-            denied_calls: 0,
-            error: error.map(str::to_string),
-            session_id: "session".into(),
-        }
-    }
-
-    /// The stop reason, or the message of the request error as the client gets it.
-    fn answer(report: &RunReport) -> Result<StopReason, String> {
-        stop_reason(report).map_err(|error| protocol_error(error).message)
-    }
-
-    #[test]
-    fn outcomes_map_to_stop_reasons_and_failures_to_request_errors() {
-        assert_eq!(answer(&report(RunOutcome::Completed, None)), Ok(StopReason::EndTurn));
-        assert_eq!(answer(&report(RunOutcome::Truncated, None)), Ok(StopReason::MaxTokens));
-        let exhausted = |budget, truncated| RunOutcome::BudgetExhausted { budget, truncated };
-        assert_eq!(
-            answer(&report(exhausted(Budget::Tokens, false), None)),
-            Ok(StopReason::MaxTokens)
-        );
-        // Which budget stopped the turn decides, not whether its last answer was cut off.
-        assert_eq!(
-            answer(&report(exhausted(Budget::ModelRequests, true), None)),
-            Ok(StopReason::MaxTurnRequests)
-        );
-        assert_eq!(answer(&report(RunOutcome::Cancelled, None)), Ok(StopReason::Cancelled));
-        assert_eq!(
-            answer(&report(RunOutcome::Failed, Some("boom"))),
-            Err("boom".to_string())
-        );
-        assert_eq!(
-            answer(&report(RunOutcome::TimedOut, None)),
-            Err("the run ended with TimedOut".to_string())
-        );
-    }
-
-    #[test]
-    fn a_compaction_ends_its_turn_and_a_failed_one_is_a_request_error() {
-        let ended = |outcome, error: Option<&str>| {
-            let report = compaction::Report {
-                outcome,
-                requests: 0,
-                usage: Usage::default(),
-                input_bytes: 0,
-                output_bytes: 0,
-                entry_id: None,
-                error: error.map(str::to_string),
-            };
-            compaction_stop(&report).map_err(|error| error.to_string())
-        };
-        assert_eq!(ended(Outcome::Completed, None), Ok(StopReason::EndTurn));
-        assert_eq!(ended(Outcome::Noop, None), Ok(StopReason::EndTurn));
-        assert_eq!(ended(Outcome::Cancelled, Some("cancelled")), Ok(StopReason::Cancelled));
-        assert_eq!(
-            ended(Outcome::Failed, Some("invalid summary JSON")),
-            Err("invalid summary JSON".to_string())
-        );
-    }
-
-    #[test]
-    fn a_prompt_is_the_text_of_its_text_blocks() {
-        let blocks = vec![
-            ContentBlock::Text(TextContent::new("one")),
-            ContentBlock::Text(TextContent::new("two")),
-        ];
-        assert_eq!(prompt_text(&blocks), "one\ntwo");
-        assert_eq!(prompt_text(&[]), "");
-    }
-
-    #[test]
-    fn a_resource_link_in_a_prompt_reaches_the_model_as_a_line_naming_it() {
-        let blocks = vec![
-            ContentBlock::Text(TextContent::new("review this")),
-            ContentBlock::ResourceLink(ResourceLink::new("main.rs", "file:///work/src/main.rs")),
-        ];
-        assert_eq!(
-            prompt_text(&blocks),
-            "review this\n[resource file:///work/src/main.rs (main.rs)]"
-        );
-    }
 
     #[test]
     fn built_in_tools_have_protocol_kinds() {
