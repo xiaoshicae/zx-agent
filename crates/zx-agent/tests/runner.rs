@@ -852,6 +852,7 @@ async fn a_run_stops_at_the_time_limit() {
     let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::TimedOut);
+    assert_eq!(report.error.as_deref(), Some("run exceeded the 150ms time limit"));
 }
 
 #[tokio::test]

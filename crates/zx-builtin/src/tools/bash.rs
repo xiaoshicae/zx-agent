@@ -107,10 +107,7 @@ fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
         CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
         CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
         CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
-        CommandEnd::TimedOut => (
-            format!("[timed out after {}s; process group killed]", limit.as_secs()),
-            true,
-        ),
+        CommandEnd::TimedOut => (format!("[timed out after {limit:?}; process group killed]"), true),
         CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
     }
 }

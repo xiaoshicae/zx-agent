@@ -552,7 +552,7 @@ impl Shared {
 }
 
 /// `operation` within `timeout`. The error says what could not be done: `cannot <act>:
-/// <error>`, or `cannot <act>: took longer than <n> s`.
+/// <error>`, or `cannot <act>: took longer than <timeout>`.
 async fn timed<T, E: Display>(
     timeout: Duration,
     act: &str,
@@ -561,7 +561,7 @@ async fn timed<T, E: Display>(
     match tokio::time::timeout(timeout, operation).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(format!("cannot {act}: {error}")),
-        Err(_) => Err(format!("cannot {act}: took longer than {} s", timeout.as_secs())),
+        Err(_) => Err(format!("cannot {act}: took longer than {timeout:?}")),
     }
 }
 

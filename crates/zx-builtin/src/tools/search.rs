@@ -121,8 +121,7 @@ async fn search(executor: &dyn Executor, script: &str, ctx: &ToolContext) -> Res
         CommandEnd::Exited(_) => {}
         CommandEnd::TimedOut => {
             return Err(format!(
-                "the search took longer than {}s and was stopped; narrow the path or the pattern",
-                TIMEOUT.as_secs()
+                "the search took longer than {TIMEOUT:?} and was stopped; narrow the path or the pattern"
             ));
         }
         CommandEnd::Cancelled => return Err("the search was cancelled".into()),

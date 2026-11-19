@@ -22,8 +22,8 @@ impl SlackChannel {
             Ok(Ok((socket, _))) => return Some(socket),
             Ok(Err(error)) => format!("slack: cannot open the Socket Mode connection: {error}"),
             Err(_) => format!(
-                "slack: opening the Socket Mode connection took longer than {} s",
-                self.config.request_timeout.as_secs()
+                "slack: opening the Socket Mode connection took longer than {:?}",
+                self.config.request_timeout
             ),
         };
         report(self.config.on_error.as_ref(), &ImError::Transport(failure));

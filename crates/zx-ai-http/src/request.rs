@@ -17,7 +17,7 @@ pub async fn api_key(api_key: &ApiKey, idle_timeout: Duration) -> Result<Option<
         .map_err(|_| {
             Failure::error(
                 ProviderErrorKind::ApiKey,
-                format!("the API key source did not answer within {}s", idle_timeout.as_secs()),
+                format!("the API key source did not answer within {idle_timeout:?}"),
             )
         })?
         .map_err(|error| Failure::error(ProviderErrorKind::ApiKey, format!("cannot get an API key: {error}")))
@@ -30,10 +30,7 @@ pub async fn send(request: reqwest::RequestBuilder, idle_timeout: Duration) -> R
         .map_err(|_| {
             Failure::error(
                 ProviderErrorKind::Timeout,
-                format!(
-                    "request timed out after {}s waiting for response headers",
-                    idle_timeout.as_secs()
-                ),
+                format!("request timed out after {idle_timeout:?} waiting for response headers"),
             )
         })?
         .map_err(|error| transport_failure("request failed", &error))

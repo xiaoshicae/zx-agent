@@ -12,9 +12,7 @@ use super::{
     Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, Trigger,
     context_bytes, estimated_tokens, message_bytes,
 };
-use crate::ai::{
-    AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, duration_ms, now_ms,
-};
+use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, now_ms};
 use crate::events::{Emit, EventKind, RequestKind};
 use crate::guard::{CancelSignal, Priority, Stopped, bounded};
 use crate::transcript::{
@@ -456,7 +454,7 @@ impl Compactor<'_> {
         };
         match tokio::time::timeout(self.compaction.timeout, wait).await {
             Ok(result) => result,
-            Err(_) => bail!("summary timed out after {}ms", duration_ms(self.compaction.timeout)),
+            Err(_) => bail!("summary timed out after {:?}", self.compaction.timeout),
         }
     }
 

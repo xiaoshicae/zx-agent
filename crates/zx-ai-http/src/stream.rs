@@ -61,7 +61,7 @@ impl Events {
                 .map_err(|_| {
                     Failure::error(
                         ProviderErrorKind::Timeout,
-                        format!("stream stalled: no data for {}s", idle.as_secs()),
+                        format!("stream stalled: no data for {idle:?}"),
                     )
                 })?
                 .map_err(|error| transport_failure("stream read failed", &error))?;

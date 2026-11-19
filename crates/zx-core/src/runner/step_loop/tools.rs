@@ -172,10 +172,7 @@ impl StepLoop<'_> {
             Answer::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
             Answer::TimedOut(timeout) => (
                 ApprovalResult::TimedOut,
-                Some(format!(
-                    "nobody answered the approval request within {}s",
-                    timeout.as_secs()
-                )),
+                Some(format!("nobody answered the approval request within {timeout:?}")),
             ),
             Answer::Cancelled => (
                 ApprovalResult::Cancelled,

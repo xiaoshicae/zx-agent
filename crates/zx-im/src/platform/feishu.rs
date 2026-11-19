@@ -239,7 +239,7 @@ impl ImChannel for FeishuChannel {
                         // Spread reconnections out, as the server asks.
                         Ended::Lost => connection::jitter(config.nonce),
                         Ended::Silent(silence) => {
-                            let silent = format!("{PREFIX}: silent for {} s; opening it again", silence.as_secs());
+                            let silent = format!("{PREFIX}: silent for {silence:?}; opening it again");
                             report(self.config.on_error.as_ref(), &ImError::Transport(silent));
                             connection::jitter(config.nonce)
                         }

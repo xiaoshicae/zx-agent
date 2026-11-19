@@ -237,10 +237,7 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
     match tokio::time::timeout(config.connect_timeout, connecting).await {
         Ok(Ok(connected)) => Ok(connected),
         Ok(Err(error)) => Err(fault(server, error)),
-        Err(_) => Err(fault(
-            server,
-            format!("no answer within {} s", config.connect_timeout.as_secs()),
-        )),
+        Err(_) => Err(fault(server, format!("no answer within {:?}", config.connect_timeout))),
     }
 }
 
@@ -389,7 +386,7 @@ impl McpTool {
     fn no_answer_within(&self, bound: Duration) -> String {
         fault(
             &self.server,
-            format_args!("{} did not answer within {} s", self.remote, bound.as_secs()),
+            format_args!("{} did not answer within {bound:?}", self.remote),
         )
     }
 

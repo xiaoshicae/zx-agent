@@ -251,8 +251,7 @@ impl ImChannel for SlackChannel {
                     report(
                         self.config.on_error.as_ref(),
                         &ImError::Transport(format!(
-                            "slack: the Socket Mode connection was silent for {} s; opening it again",
-                            silence.as_secs()
+                            "slack: the Socket Mode connection was silent for {silence:?}; opening it again"
                         )),
                     );
                     backoff.reset();

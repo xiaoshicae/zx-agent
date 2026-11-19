@@ -61,7 +61,7 @@ pub(crate) enum Stopped {
 impl fmt::Display for Stopped {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TimedOut(timeout) => write!(formatter, "timed out after {}ms", timeout.as_millis()),
+            Self::TimedOut(timeout) => write!(formatter, "timed out after {timeout:?}"),
             Self::Panicked => formatter.write_str("panicked"),
             Self::Cancelled => formatter.write_str("was cancelled"),
         }

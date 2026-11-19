@@ -364,7 +364,7 @@ impl Running<'_> {
                     .expect("a timeout ends a run only when a time limit is configured");
                 (
                     RunOutcome::TimedOut,
-                    Some(format!("run exceeded the {}s time limit", limit.as_secs())),
+                    Some(format!("run exceeded the {limit:?} time limit")),
                 )
             }
             Ending::Cancelled => (RunOutcome::Cancelled, Some("run was cancelled".to_string())),

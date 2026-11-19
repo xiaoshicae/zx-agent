@@ -182,8 +182,7 @@ impl ContainerExecutor {
             };
             ensure!(
                 started.elapsed() < START_TIMEOUT,
-                "container {name} did not accept commands within {}s: {reason}",
-                START_TIMEOUT.as_secs()
+                "container {name} did not accept commands within {START_TIMEOUT:?}: {reason}"
             );
             tokio::time::sleep(START_POLL).await;
         };
@@ -256,10 +255,10 @@ where
     };
     tokio::time::timeout(operation.timeout, script).await.map_err(|_| {
         format!(
-            "{} {} in the container took longer than {}s",
+            "{} {} in the container took longer than {:?}",
             operation.doing,
             path.display(),
-            operation.timeout.as_secs()
+            operation.timeout
         )
     })?
 }
@@ -496,10 +495,7 @@ async fn probe(target: &Target, config: &ContainerConfig, workspace: &Path) -> P
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Probe::NotReady(format!("cannot run docker exec: {e}")),
         Err(_) => {
-            return Probe::NotReady(format!(
-                "docker exec did not answer within {}s",
-                PROBE_TIMEOUT.as_secs()
-            ));
+            return Probe::NotReady(format!("docker exec did not answer within {PROBE_TIMEOUT:?}"));
         }
     };
     match output.status.code() {

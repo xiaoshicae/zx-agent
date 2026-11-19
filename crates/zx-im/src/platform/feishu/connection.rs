@@ -202,8 +202,8 @@ impl FeishuChannel {
             }
             Ok(Err(error)) => Ok(later(format!("cannot connect: {error}"))),
             Err(_) => Ok(later(format!(
-                "connecting took longer than {} s",
-                self.config.request_timeout.as_secs()
+                "connecting took longer than {:?}",
+                self.config.request_timeout
             ))),
         }
     }
