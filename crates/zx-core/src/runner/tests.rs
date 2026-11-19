@@ -3,8 +3,9 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use super::*;
-use crate::ai::Message;
 use crate::ai::faux::{FauxProvider, FauxStep};
+use crate::ai::{Message, ProviderErrorKind};
+use crate::hooks::{Hook, HookContext, HookResult};
 use crate::tools::{Tool, Toolbox};
 use crate::transcript::{FailingWriter, SessionHeader};
 
@@ -274,8 +275,8 @@ async fn a_recovery_write_failure_fails_the_run_before_any_request() {
 async fn a_context_edit_write_failure_prevents_the_request() {
     struct Rewrite;
     #[async_trait]
-    impl crate::hooks::Hook for Rewrite {
-        async fn on_input(&self, _text: String, _ctx: &crate::hooks::HookContext) -> crate::hooks::HookResult<String> {
+    impl Hook for Rewrite {
+        async fn on_input(&self, _text: String, _ctx: &HookContext) -> HookResult<String> {
             Ok("rewritten".into())
         }
     }
@@ -293,4 +294,36 @@ async fn a_context_edit_write_failure_prevents_the_request() {
     assert!(provider.requests().is_empty());
     assert_eq!(runner.transcript().messages().len(), 1);
     assert!(matches!(&runner.transcript().messages()[0], Message::User { content, .. } if content == "original"));
+}
+
+/// Queues extension state as an attempt ends, after its last step recorded what was queued.
+struct NoteAtTheEnd;
+
+#[async_trait]
+impl Hook for NoteAtTheEnd {
+    async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
+        if matches!(event.event, EventKind::AttemptEnd { .. }) {
+            ctx.queues.append_custom_entry("note", serde_json::json!({})).unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_failed_run_whose_last_entry_cannot_be_recorded_reports_both_failures() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::fail(
+        ProviderErrorKind::Other,
+        "bad request",
+    )]));
+    let mut config = config(&provider, vec![]);
+    config.hooks.push("note", Arc::new(NoteAtTheEnd));
+    let transcript = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry("custom"));
+    let mut runner = runner(config, transcript);
+
+    let report = run(&mut runner, "go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("bad request"), "{error}");
+    assert!(error.contains("disk full on custom"), "{error}");
 }

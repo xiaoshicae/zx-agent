@@ -284,10 +284,12 @@ impl Running<'_> {
     /// and the answer it added.
     async fn close(mut self, stop: RunStop) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
-        // reported, so a host reading the session afterwards finds it.
-        let stop = match self.scope.record_pending_entries().await {
-            Ok(()) => stop,
-            Err(error) => RunStop::Failed(format!("{error:#}")),
+        // reported, so a host reading the session afterwards finds it. Failing to record it
+        // fails the run, after any failure it had already.
+        let stop = match (self.scope.record_pending_entries().await, stop) {
+            (Ok(()), stop) => stop,
+            (Err(error), RunStop::Failed(reason)) => RunStop::Failed(format!("{reason}; then {error:#}")),
+            (Err(error), RunStop::Ended(_)) => RunStop::Failed(format!("{error:#}")),
         };
         let transcript = &self.scope.transcript;
         let added = transcript.messages_since(self.scope.run_start);
