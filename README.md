@@ -5,13 +5,13 @@
 当前版本为 v0.1.0，已实现：
 
 - 两个程序：`zx-agent` 的子命令有无人值守的 `run`，终端对话 `chat`（应急与脚本化入口），ACP agent `acp`（交互式界面由 ACP 客户端提供），列出会话的 `sessions`；`zx-im` 是 IM 服务。
-- OpenAI 兼容的流式 provider，带错误分类、自动重试与响应大小上限。
+- 流式 provider：OpenAI 兼容服务与 Anthropic Messages API，带错误分类、自动重试与响应大小上限；由 `config.toml` 的 `provider.api` 按名字选用，嵌入方可注册自己的。
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
 - 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
 
-尚未实现：OpenAI 兼容以外的 provider（如 Anthropic），见[路线图](docs/ROADMAP.md)。
+尚未完成的部分见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -23,7 +23,7 @@ export OPENAI_API_KEY=...
 ./target/release/zx-agent run --model <模型 ID> "检查本机磁盘与内存使用情况，找出资源占用最高的进程"
 ```
 
-本地或私有部署的 OpenAI 兼容服务（vLLM、Ollama、llama.cpp server 等）用 `ZX_BASE_URL` 指定地址；找不到 API key 时请求不带认证头：
+本地或私有部署的 OpenAI 兼容服务（vLLM、Ollama、llama.cpp server 等）用 `ZX_BASE_URL` 指定地址；找不到 API key 时请求不带认证头。Anthropic 的 API 在 `config.toml` 中写 `provider.api = "anthropic"`，key 默认取 `ANTHROPIC_API_KEY`（见[配置说明](docs/CONFIGURATION.md#provider-示例anthropic)）：
 
 ```bash
 ZX_BASE_URL=http://127.0.0.1:11434/v1 ./target/release/zx-agent run --model <模型名> "排查 nginx 返回 502 的原因"
@@ -111,17 +111,18 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 
 ## 架构
 
-一个 Cargo workspace，10 个 crate，依赖只能自上而下，由编译器保证：
+一个 Cargo workspace，11 个 crate，依赖只能自上而下，由编译器保证：
 
 ```
 zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、sessions）
 zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分派的服务、Slack 与 ⚑ D:5/CHINA FLAG: 飞书平台（feature feishu）
   ├─ zx-app    crates/zx-app    应用层，两个程序共用：config.toml 与 agent、装配 agent、OpenTelemetry 导出与收尾（依赖 zx-agent）
-  └─ zx-agent  crates/zx-agent  SDK：把下面四个 crate 再导出成一个库，没有自己的代码
+  └─ zx-agent  crates/zx-agent  SDK：把下面五个 crate 再导出成一个库，没有自己的代码
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   内核：Agent、会话与运行，循环，会话记录，摘要，工具、策略、钩子与扩展的接口
        │    └─ zx-ai  crates/zx-ai   消息类型、系统提示词、流式事件协议、provider 契约
-       └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai 与 zx-util）
+       ├─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai 与 zx-util）
+       └─ zx-ai-anthropic  crates/zx-ai-anthropic  Anthropic Messages API provider（同上）
 
 zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数、判断默认值、读环境变量），在最底层，不属于 API
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
@@ -161,7 +162,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 10 个 crate；加 `-p <crate>` 只处理一个。集成测试放在被测的 crate 里，每个文件在哪、覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 11 个 crate；加 `-p <crate>` 只处理一个。集成测试放在被测的 crate 里，每个文件在哪、覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `crates/zx-agent/tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 

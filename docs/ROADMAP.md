@@ -38,7 +38,7 @@
 | D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型 |
 | D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`）；任务请求叫 task（`kind: task`） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，并写明是哪一项预算，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript |
-| D24 | 库与接入方式分开：SDK `zx-agent` 只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-builtin` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行 `zx-cli`（可执行文件仍叫 `zx-agent`）、IM 服务 `zx-im` 与新的接入方式（如 Web 服务）是建在库上的独立 crate，要共用 `config.toml`、agent 文件、追踪导出与收尾的经应用层 `zx-app`，它不依赖命令行解析、ACP 与 IM。没有业务含义的共用小工具在 `zx-util`，不属于 API；测试设施在只作测试依赖的 `zx-testing`，测试替身经 feature 打开、不进生产 API（见 [TESTS.md](TESTS.md)）。各 crate 的职责见 [README](../README.md#架构) |
+| D24 | 库与接入方式分开：SDK `zx-agent` 只把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic` 与 `zx-builtin` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行 `zx-cli`（可执行文件仍叫 `zx-agent`）、IM 服务 `zx-im` 与新的接入方式（如 Web 服务）是建在库上的独立 crate，要共用 `config.toml`、agent 文件、追踪导出与收尾的经应用层 `zx-app`，它不依赖命令行解析、ACP 与 IM。没有业务含义的共用小工具在 `zx-util`，不属于 API；测试设施在只作测试依赖的 `zx-testing`，测试替身经 feature 打开、不进生产 API（见 [TESTS.md](TESTS.md)）。各 crate 的职责见 [README](../README.md#架构) |
 | D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具按路径排队修改（边界见 [SECURITY.md](SECURITY.md#工具)），队列由宿主传入，一个进程的所有会话共用一个；取消调用不提前让出 |
 | D26 | 预算与计数按整次运行累计，重试与溢出恢复共用；续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
 | D27 | IM 的路由只分派消息；运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话留给下一次运行；第一次为线程建会话前先读线程历史。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
@@ -48,14 +48,14 @@
 | D31 | 模型请求的失败由 provider 归类：模型层 `zx-ai` 只定义中立的种类（`ProviderErrorKind`），重试与上下文溢出恢复只看种类，没有种类的失败不重试；HTTP 状态、错误码、`finish_reason` 与措辞属于哪一类，是协议与厂商的知识，只写在 provider 的 crate 里。种类与处理见 [REFERENCE.md](REFERENCE.md#模型请求失败) |
 | D32 | `zx-builtin` 与内核同一规则（D29）：设置类型自己校验，文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键，并给出程序的默认值（如落盘目录）；执行器自己决定 shell，并为提示词描述自己；命令策略的程序清单宿主可以追加，续写的提示语可以替换，都不新增配置键。用法见 [LIBRARY.md](LIBRARY.md) |
 | D33 | IM 服务收到的每条消息先写入 backlog（`zx-im` 的 trait `Backlog`；程序用会话目录下的文件实现，不新增依赖），再确认投递，写入会话、已回复或有意丢弃之后才删除；去重也只由它做，处理完的消息仍被认出一段时间（文件实现为 24 小时）。消息的凭证与配额一起作为输入的 hold 交给内核（D28）：`Session::send` 也接收带 hold 的输入，写入会话后才释放。停止时还没写入会话的消息留到下次启动，不再回复；启动时先按到达顺序处理它们。崩溃或停止恰好落在写入会话与删除记录之间时重复处理一次，先接受，不为此改会话格式。多副本时 backlog 与会话存储、对话归属、状态记录一起换成数据库实现。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
-| D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用两个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落），`set_*` 换掉唯一的那个（摘要器、对命令隐藏的变量、追踪导出）；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。由配置按名字选实现的 `register_*`（provider、执行环境、IM 平台）还没有做，随第二个 provider 一起做。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
+| D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用两个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落），`set_*` 换掉唯一的那个（摘要器、对命令隐藏的变量、追踪导出）；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。由配置按名字选用的实现经 `register_*` 注册：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字，内置的 `openai` 与 `anthropic` 也这样注册；执行环境与 IM 平台的还没有做。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
 
 ## 4. 当前阶段
 
 P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D32。进行中：
 
 - P6 执行环境、P7 扩展与 MCP、P8 `acp`：已实现，待真实集群、IM 平台、MCP 服务器与 ACP 客户端（Zed 或 Wisp）上的验收，见第 5 节。
-- P9 可选增强：剩更多 provider（如 Anthropic Messages API），未开始；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
+- P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：补上后会读取该平台上的话题历史与用户名称] Subject to Legal/Export Compliance approval。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
 
 ## 5. 待办与已知缺口
@@ -96,6 +96,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 | 2026-11-02 | `run` 经 ⚑ D:5/CHINA FLAG: `https://api.deepseek.com` 调用 `deepseek-flash`，附加请求字段取默认、关闭思考、`reasoning_effort="low"` | 均以 0 退出；关闭思考时输入 token 不同，字段生效 |
 | 2026-11-02 | 摘要评测，两个模型各三次 | ⚑ D:5/CHINA FLAG: `deepseek-chat` 三次通过；⚑ D:5/CHINA FLAG: `deepseek-flash` 因推理用满默认 2048 token 的输出预算而失败，调高预算后尚未运行 |
 | — | `provider.systemUpdates = "inline"` | 只在一个服务上验证过 |
+| — | `provider.api = "anthropic"` | 只对模拟服务（`crates/zx-agent/tests/anthropic_mock.rs`）测试过，没有调用真实 API |
 | — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`crates/zx-cli/tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
 | 2026-11-01 | `deploy/kubernetes/` 在本机 Docker Desktop 的 Kubernetes v1.36.1（2 个 arm64 节点，local-path ext4），假模型 | 镜像、只读账号、run、chat 审批、`operator.yaml` 的每项写操作、定时巡检、脱敏、会话文件锁与清理均符合预期；多集群由同一集群扮演远端，新增集群约 1 分钟后生效。读 agent 自身 `/proc/<pid>/environ` 被拒一项在 agent 不再设为不可 dump 后不成立，未重测 |
 | — | IM 组件（当时名为 `serve`，此后改为子命令 `im`、再拆为程序 `zx-im`，都未重测），Slack 指向不可达地址 | 启动、`/proc/1/environ` 中没有 API key、重试日志不含凭据、SIGTERM 后退出码 0、孤儿进程被回收、与 `multicluster` 组件共存 |
@@ -114,4 +115,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.44 · 2026年11月
+ROADMAP.md · v0.45 · 2026年11月

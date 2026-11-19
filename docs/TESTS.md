@@ -16,6 +16,7 @@
 | `crates/zx-agent/tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话；事件的编号与信封 |
 | `crates/zx-agent/tests/session.rs` | 共享会话：Busy、取消、`Run`（事件顺序、读才推进、丢弃即取消、多个句柄）、提问的 hold 在写入会话后才释放、插话与后续消息、`take_queued`、经会话回答审批（按事件给出的审批编号；超时后迟到的回答落空）、模型与推理强度切换、起名、记录写不进去时自行关闭 |
 | `crates/zx-agent/tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、失败的归类与重试、超时、取消、错误正文；请求头与 API key 的来源、缓存键与输出上限的字段 |
+| `crates/zx-agent/tests/anthropic_mock.rs` | 真实 HTTP 下的 Anthropic provider：带思考与签名的工具往返、请求头与请求体、含缓存的用量；思考块属于另一段对话时去掉它重发一次；过载与拒绝的归类 |
 | `crates/zx-agent/tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `crates/zx-agent/tests/continue_run.rs` | 不加新输入的续跑 |
 | `crates/zx-agent/tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
@@ -47,7 +48,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 选用宿主注册的或内置的 provider，名字未注册或重复时 `build` 报错 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -80,4 +81,4 @@
 
 ---
 
-TESTS.md · v0.19 · 2026年11月
+TESTS.md · v0.20 · 2026年11月

@@ -142,7 +142,7 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 摘要 | 每次重新读取原始记录，不输入上一份摘要；每条事实引用来源条目。宿主要自己做摘要时实现独立的接口 `Summarizer`，钩子不提供摘要 |
 | 续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 |
 | `prepare_request` | 只能替换模型与推理强度，不能改上下文 |
-| 推理写法 | 由 `provider.reasoningFormat` 在三种中显式选择 |
+| 推理写法 | OpenAI 兼容服务由 `provider.reasoningFormat` 在三种中显式选择；Anthropic 写成自适应思考加 `output_config.effort` |
 | 模型元数据 | 只有 `[[models]]` 给出的上下文窗口与单价，没有内置模型表 |
 | 界面 | 没有 TUI，交互界面交给 ACP 客户端 |
 
@@ -156,11 +156,11 @@ provider 判断每次失败的种类，记在失败回答的 `providerError` 里
 | `unavailable` | 服务过载、出错或暂时不可用：HTTP 5xx 或相应的错误码、措辞 | 重试 |
 | `transport` | 连接失败或中途断开 | 重试 |
 | `timeout` | 连接、等待响应头或流中下一段数据超时（后两者的时限为 `provider.idleTimeoutSecs`），或 HTTP 408 与相应的错误码 | 重试 |
-| `context_overflow` | 上下文过长：HTTP 413、相应的错误码、通用措辞，或指明上下文过长的 `finish_reason` | 开启自动摘要时摘要一次再试，否则失败 |
+| `context_overflow` | 上下文过长：HTTP 413、相应的错误码、通用措辞，或指明上下文过长的结束原因（如 `model_context_window_exceeded`） | 开启自动摘要时摘要一次再试，否则失败 |
 | `access_denied` | 凭据、权限或配额被拒：HTTP 401、403 或相应的错误码、措辞 | 失败 |
 | `api_key` | 取不到 API key，请求没有发出 | 失败 |
-| `refused` | 服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束回答，`code` 为该取值 | 失败 |
-| `protocol` | 响应不合协议，如无法解析的数据、流结束时没有 `finish_reason` | 失败 |
+| `refused` | 服务端以正常结束、截断与调用工具以外的原因结束回答（OpenAI 兼容服务的 `finish_reason` 如 `content_filter`，Anthropic 的 `stop_reason` 如 `refusal`），`code` 为该取值 | 失败 |
+| `protocol` | 响应不合协议，如无法解析的数据、流结束时没有结束原因 | 失败 |
 | `resource_limit` | 超出流式响应的上限：每次请求 16 MiB、每个 SSE 事件 1 MiB | 失败 |
 | `other` | 其他失败，如 HTTP 400 | 失败 |
 
@@ -224,4 +224,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.13 · 2026年11月
+REFERENCE.md · v0.14 · 2026年11月

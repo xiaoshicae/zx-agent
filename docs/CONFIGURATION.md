@@ -42,28 +42,50 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
-| `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段（请求的路径接在它后面）；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
-| `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认 `OPENAI_API_KEY`；变量没有值时请求不带认证头 |
-| `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的 system 消息；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
-| `provider.reasoningFormat` | `reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
-| `provider.maxTokensField` | 输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
-| `provider.fillMissingReasoning` | `true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
-| `provider.promptCacheKey` | `true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
-| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 ⚑ D:5/CHINA FLAG: DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，打开 `promptCacheKey` 时的 `prompt_cache_key`，以及设了 `reasoning` 时按 `reasoningFormat` 写入的字段 |
-| `provider.headers` | 每个请求都发送的请求头，如网关的路由头；`Authorization` 被拒绝 |
+| `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKeyEnv`、`maxRetries` 以外的键 |
+| `provider.baseUrl` | 服务的地址，请求的路径接在它后面：`openai` 不含 `/chat/completions`，默认 `https://api.openai.com/v1`；`anthropic` 不含 `/v1/messages`，默认 `https://api.anthropic.com`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
+| `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认为 provider 自己的：`openai` 是 `OPENAI_API_KEY`，`anthropic` 是 `ANTHROPIC_API_KEY`；变量没有值时请求不带认证头 |
+| `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的系统提示词；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
+| `provider.reasoningFormat` | 仅 `openai`。`reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
+| `provider.maxTokensField` | 仅 `openai`。输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
+| `provider.fillMissingReasoning` | 仅 `openai`。`true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
+| `provider.promptCacheKey` | 仅 `openai`。`true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
+| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 ⚑ D:5/CHINA FLAG: DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking` 与 `output_config.effort`） |
+| `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`，`anthropic` 的 `x-api-key`） |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
 | `execution` | `local`（默认）或 `container`，见下文“容器执行” |
 | `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价：`input`、`output` 必填，`cacheRead`、`cacheWrite` 默认 0；都不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
 
-`reasoning`、`maxTokens` 与 provider 中决定请求体写法的键（`systemUpdates`、`reasoningFormat`、`maxTokensField`、`fillMissingReasoning`、`promptCacheKey`、`requestFields`）随请求记入会话；服务地址、`headers` 与 API key 不记录。
+`reasoning`、`maxTokens` 与 provider 中决定请求体写法的键（`systemUpdates`、`reasoningFormat`、`maxTokensField`、`fillMissingReasoning`、`promptCacheKey`、`requestFields`）随请求记入会话；服务地址、`headers` 与 API key 不记录。宿主注册的 provider 记录什么由它自己决定。
+
+### provider 示例：Anthropic
+
+`api = "anthropic"` 经 [Messages API](https://platform.claude.com/docs/en/api/messages/create) 访问 Claude 模型：
+
+```toml
+model = "claude-opus-5-5"
+reasoning = "high"
+
+[provider]
+api = "anthropic"                  # API key 默认取 ANTHROPIC_API_KEY
+# 经网关时：
+# baseUrl = "https://llm-gateway.example.com/anthropic"
+```
+
+- 请求带 `anthropic-version: 2026-10-21`；`headers` 中的 `anthropic-version` 替换它，`anthropic-beta` 等其他请求头原样发送。
+- 不设 `maxTokens` 时每次请求的输出上限为 64000 token（这个 API 要求每次请求给出上限）；模型允许的输出上限更低时设 `maxTokens`。
+- `reasoning` 写成自适应思考（`thinking` 为 `{ type = "adaptive", display = "summarized" }`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking = { type = "disabled" }`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
+- 思考块连同签名记入会话，只回传给产生它的 provider 名与模型；换了模型之后，较早回答中的思考不再发送。
+- 系统提示词、工具定义与对话末尾标为缓存断点（`cache_control`），以便下一次请求读取这一次写入的缓存；回答的输入 token 包括读写缓存的部分，与 `[[models]]` 的 `cacheRead`、`cacheWrite` 单价对应。`collapse` 下系统提示词有变化时，开头的缓存失效。
+- 服务以“思考块属于另一段对话”拒绝请求时（请求的开头与产生思考时不同，如 `collapse` 下系统提示词变了），provider 去掉报错指出的消息及其后的思考块，重发一次。
 
 ### provider 示例：⚑ D:5/CHINA FLAG: DeepSeek
 
 ⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
 
-⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用现有的 provider 即可：
+⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用默认的 `openai` provider 即可：
 
 ```toml
 # ⚑ D:5/CHINA FLAG: DeepSeek
@@ -281,4 +303,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.26 · 2026年11月
+CONFIGURATION.md · v0.27 · 2026年11月
