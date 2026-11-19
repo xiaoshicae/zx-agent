@@ -1,7 +1,7 @@
 //! `zx-agent run`: one task to completion without a person; the exit code reports the outcome.
 
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
@@ -25,37 +25,26 @@ use crate::session_file;
 pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     let RunArgs {
         prompt,
+        continue_session,
         fail_on_denied,
-        session: file,
+        session,
         base,
         budget,
         output,
         deltas,
-        ..
     } = args;
-    let prompt = match &prompt {
-        Some(prompt) => Some(read_prompt(prompt)?),
-        None => {
-            // Checked before anything starts: continuing a new session has nothing to answer.
-            let file = file.as_deref().context("--continue needs --session")?;
-            anyhow::ensure!(
-                file.exists(),
-                "--continue needs an existing session file; {} does not exist",
-                file.display()
-            );
-            None
-        }
-    };
+    let task = Task::of(prompt, continue_session, session)?;
     with_telemetry(async move |telemetry| {
         let app = connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
             .set_traces(telemetry.map(run_traces));
+        let file = task.file().map(Path::to_path_buf);
         let session = build_session(&app, file.as_deref()).await?;
         let cancel = CancellationToken::new();
         cancel_on_signals(cancel.clone());
-        let run = match prompt {
-            Some(prompt) => session.send(prompt)?,
-            None => session.continue_run()?,
+        let run = match task {
+            Task::Prompt { prompt, .. } => session.send(prompt)?,
+            Task::Continue { .. } => session.continue_run()?,
         };
         let report = read_to_end(&session, run, &cancel, &Progress::of(output, deltas)).await;
         print_report(&report, output, file.as_deref());
@@ -65,6 +54,46 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         })
     })
     .await
+}
+
+/// What a run answers, and the session file it keeps the conversation in.
+enum Task {
+    /// A prompt, in `--session`'s file when one is given, else in memory.
+    Prompt { prompt: String, file: Option<PathBuf> },
+    /// `--continue`: what the conversation in `--session`'s file ends with.
+    Continue { file: PathBuf },
+}
+
+impl Task {
+    /// The task that `prompt`, `--continue` and `--session`'s `file` describe, its prompt read.
+    /// The parser takes a prompt or `--continue`, not both, and `--continue` only with
+    /// `--session`; the last error is for what it refuses.
+    fn of(prompt: Option<String>, continue_session: bool, file: Option<PathBuf>) -> Result<Self> {
+        match (prompt, continue_session, file) {
+            (Some(prompt), false, file) => Ok(Self::Prompt {
+                prompt: read_prompt(&prompt)?,
+                file,
+            }),
+            (None, true, Some(file)) => {
+                // Checked before anything starts: continuing a new session has nothing to answer.
+                anyhow::ensure!(
+                    file.exists(),
+                    "--continue needs an existing session file; {} does not exist",
+                    file.display()
+                );
+                Ok(Self::Continue { file })
+            }
+            _ => anyhow::bail!("give a prompt, or --continue with --session"),
+        }
+    }
+
+    /// `--session`'s file, when one is given.
+    fn file(&self) -> Option<&Path> {
+        match self {
+            Self::Prompt { file, .. } => file.as_deref(),
+            Self::Continue { file } => Some(file),
+        }
+    }
 }
 
 fn read_prompt(arg: &str) -> Result<String> {
