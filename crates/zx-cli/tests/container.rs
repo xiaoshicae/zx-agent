@@ -12,7 +12,7 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -30,7 +30,7 @@ use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home};
-use zx_testing::{RunnerSetup, config, stderr};
+use zx_testing::{RunnerSetup, config, read_session_file, stderr};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -964,22 +964,30 @@ async fn real_dropping_the_executor_removes_the_container() {
     let (_dir, workspace) = real_workspace();
     let executor = start_real(&image, &workspace).await;
     let name = executor.name().to_string();
-    let exists = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &format!("name=^{name}$")])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    assert!(exists());
+    let filter = format!("name=^{name}$");
+    assert!(docker_lists(&filter));
 
     drop(executor);
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while exists() {
-        assert!(Instant::now() < deadline, "container {name} outlived its executor");
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        eventually(Duration::from_secs(15), || !docker_lists(&filter)).await,
+        "container {name} outlived its executor"
+    );
+}
+
+/// Whether `docker ps` lists a container, running or not, that `filter` selects.
+fn docker_lists(filter: &str) -> bool {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "--all", "--quiet", "--filter", filter])
+        .output()
+        .unwrap();
+    !output.stdout.is_empty()
+}
+
+/// The `docker ps` filter of the containers that the session of the file `session` started.
+fn session_containers(session: &Path) -> String {
+    let id = read_session_file(session).unwrap().header().id.clone();
+    format!("label=zx-agent.session={id}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,21 +1306,11 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
         "{}",
         tool_result(&server, 1)
     );
-    let header: Value =
-        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
-    let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
-    let left = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &label])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while left() {
-        assert!(Instant::now() < deadline, "the container outlived zx-agent");
-        tokio::task::yield_now().await;
-    }
+    let label = session_containers(&session);
+    assert!(
+        eventually(Duration::from_secs(15), || !docker_lists(&label)).await,
+        "the container outlived zx-agent"
+    );
 }
 
 /// Guards the behavior, not one mechanism: the Docker clients run in their own process group,
@@ -1404,24 +1402,14 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
         .unwrap();
     // The model's request comes after start-up, so the container is running.
     server.wait_for_requests(1).await;
-    let header: Value =
-        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
-    let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
-    let exists = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &label])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    assert!(exists());
+    let label = session_containers(&session);
+    assert!(docker_lists(&label));
 
     // SIGKILL: zx-agent runs no cleanup; only the closed stdin of its docker client remains.
     agent.kill().await.unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while exists() {
-        assert!(Instant::now() < deadline, "the container outlived a killed zx-agent");
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        eventually(Duration::from_secs(20), || !docker_lists(&label)).await,
+        "the container outlived a killed zx-agent"
+    );
 }
