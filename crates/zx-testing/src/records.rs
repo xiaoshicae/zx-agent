@@ -8,15 +8,6 @@ use serde_json::{Value, json};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, Usage};
 use zx_agent::transcript::{Entry, Transcript};
 
-/// An answer by `provider` and `model` with `content`, ended for `stop` without an error.
-pub fn finished_answer(provider: &str, model: &str, stop: StopReason, content: Vec<ContentBlock>) -> AssistantMessage {
-    AssistantMessage {
-        content,
-        error_message: None,
-        ..AssistantMessage::failure(provider, model, stop, "")
-    }
-}
-
 /// The call `id` of `tool` with `arguments`, as an answer holds it.
 pub fn tool_call_block(id: &str, tool: &str, arguments: Value) -> ContentBlock {
     ContentBlock::ToolCall(ToolCall {
@@ -30,7 +21,7 @@ pub fn tool_call_block(id: &str, tool: &str, arguments: Value) -> ContentBlock {
 /// An answer by `provider` and `model` that asked for `tool` with `arguments`, as the call
 /// `c1`, and was cut off before the call ran: the shape a crash leaves in a session file.
 pub fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
-    Message::Assistant(finished_answer(
+    Message::Assistant(AssistantMessage::new(
         provider,
         model,
         StopReason::ToolUse,
@@ -48,7 +39,7 @@ pub fn answer_reporting(input: u64) -> Message {
             total_tokens: input + 10,
             ..Usage::default()
         },
-        ..finished_answer(
+        ..AssistantMessage::new(
             "p",
             "m",
             StopReason::Stop,

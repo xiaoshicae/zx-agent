@@ -300,20 +300,29 @@ pub struct AssistantMessage {
 }
 
 impl AssistantMessage {
-    /// A message for a request that failed before or during generation.
-    pub fn failure(provider: &str, model: &str, stop_reason: StopReason, error: impl Into<String>) -> Self {
+    /// An answer of `model`, through `provider`, that stopped for `stop_reason` with
+    /// `content`: no error, and no usage or timing yet.
+    pub fn new(provider: &str, model: &str, stop_reason: StopReason, content: Vec<ContentBlock>) -> Self {
         Self {
-            content: Vec::new(),
+            content,
             provider: provider.to_string(),
             model: model.to_string(),
             usage: Usage::default(),
             stop_reason,
-            error_message: Some(error.into()),
+            error_message: None,
             provider_error: None,
             timestamp: now_ms(),
             duration_ms: None,
             response_id: None,
             response_model: None,
+        }
+    }
+
+    /// A message for a request that failed before or during generation.
+    pub fn failure(provider: &str, model: &str, stop_reason: StopReason, error: impl Into<String>) -> Self {
+        Self {
+            error_message: Some(error.into()),
+            ..Self::new(provider, model, stop_reason, Vec::new())
         }
     }
 

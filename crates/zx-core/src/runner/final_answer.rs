@@ -74,9 +74,12 @@ mod tests {
     #[test]
     fn a_final_answer_joins_marked_continuations_across_system_messages() {
         let answer = |text: &str| {
-            let mut message = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-            message.error_message = None;
-            message.content = vec![ContentBlock::Text { text: text.into() }];
+            let message = AssistantMessage::new(
+                "p",
+                "m",
+                StopReason::Stop,
+                vec![ContentBlock::Text { text: text.into() }],
+            );
             Message::Assistant(message)
         };
         let update = Message::System(SystemMessage {

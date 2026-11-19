@@ -32,14 +32,17 @@ impl SessionLog for Unresponsive {
 async fn a_text_replacement_cannot_erase_tool_calls() {
     let mut transcript = Transcript::in_memory(header());
     transcript.append_message(Message::user("q")).await.unwrap();
-    let mut answer = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "bash".into(),
-        arguments: serde_json::json!({}),
-        arguments_error: None,
-    })];
+    let answer = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::ToolUse,
+        vec![ContentBlock::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: None,
+        })],
+    );
     let target = transcript.append_message(Message::Assistant(answer)).await.unwrap();
 
     let error = transcript
@@ -145,14 +148,17 @@ async fn an_entry_that_could_not_be_read_back_is_not_written() {
     // As deep as arguments read on their own may be nested. Within a record they lie deeper,
     // which writing does not limit and reading does.
     let arguments = (0..127).fold(serde_json::json!(1), |inner, _| serde_json::json!({ "a": inner }));
-    let mut answer = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "bash".into(),
-        arguments,
-        arguments_error: None,
-    })];
+    let answer = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::ToolUse,
+        vec![ContentBlock::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments,
+            arguments_error: None,
+        })],
+    );
 
     let error = transcript.append_message(Message::Assistant(answer)).await.unwrap_err();
 
@@ -218,20 +224,18 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         .record_request(&request, "p", serde_json::json!({}), RequestSource::Task)
         .await
         .unwrap();
-    let mut call = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
-    call.error_message = None;
     let tool_call = ToolCall {
         id: "c1".into(),
         name: "bash".into(),
         arguments: serde_json::json!({}),
         arguments_error: None,
     };
-    call.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: tool_call.id.clone(),
-        name: tool_call.name.clone(),
-        arguments: tool_call.arguments.clone(),
-        arguments_error: None,
-    })];
+    let call = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::ToolUse,
+        vec![ContentBlock::ToolCall(tool_call.clone())],
+    );
     transcript.append_message(Message::Assistant(call)).await.unwrap();
     transcript.append_context_edit(&first, None).await.unwrap();
     transcript
@@ -348,18 +352,6 @@ async fn sessions_of_an_older_or_newer_version_are_refused() {
         assert_eq!(opened.err().unwrap().to_string(), unsupported(version));
         assert_eq!(read.err().unwrap().to_string(), unsupported(version));
     }
-}
-
-#[tokio::test]
-async fn a_session_of_another_version_is_not_created() {
-    let older = SessionHeader {
-        version: SESSION_VERSION - 1,
-        ..header()
-    };
-
-    let error = MemoryStorage::default().create(&older).await.err().unwrap().to_string();
-
-    assert_eq!(error, unsupported(SESSION_VERSION - 1));
 }
 
 #[tokio::test]

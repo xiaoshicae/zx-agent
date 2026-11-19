@@ -297,9 +297,12 @@ mod tests {
 
     /// An answer that reported `input` prompt tokens and 10 output tokens.
     fn answer_reporting(input: u64) -> Message {
-        let mut answer = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-        answer.error_message = None;
-        answer.content = vec![ContentBlock::Text { text: "noted".into() }];
+        let mut answer = AssistantMessage::new(
+            "p",
+            "m",
+            StopReason::Stop,
+            vec![ContentBlock::Text { text: "noted".into() }],
+        );
         answer.usage = Usage {
             input,
             output: 10,

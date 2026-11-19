@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::ai::{Message, Reasoning, StopReason, ToolCall, Usage};
+use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 use zx_agent::hooks::{ContextEdit, FinishedStep, HookContext, RequestSettings, StepDecision, StepDisposition};
 use zx_agent::policy::{ApprovalDecision, PolicyDecision};
 use zx_agent::tools::ToolOutput;
@@ -189,7 +189,7 @@ fn the_hook_context_names_the_labels_and_the_actor_when_it_has_them() {
 
 #[test]
 fn a_step_summary_serializes_for_hook_processes() {
-    let response = zx_testing::finished_answer("p", "m", StopReason::Stop, Vec::new());
+    let response = AssistantMessage::new("p", "m", StopReason::Stop, Vec::new());
     let messages = vec![Message::user("go")];
     let summary = FinishedStep {
         response: &response,

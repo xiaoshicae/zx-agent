@@ -367,7 +367,7 @@ async fn the_context_estimate_starts_from_the_last_reported_usage() {
             total_tokens: 120,
             ..Usage::default()
         },
-        ..zx_testing::finished_answer("p", "m", StopReason::Stop, Vec::new())
+        ..AssistantMessage::new("p", "m", StopReason::Stop, Vec::new())
     };
     let messages = vec![
         Message::user("a".repeat(400)),

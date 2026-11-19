@@ -204,19 +204,22 @@ mod tests {
     }
 
     fn answer(stop_reason: StopReason, calls: &[(&str, &str)]) -> Message {
-        let mut answer = AssistantMessage::failure("p", "m", stop_reason, "");
-        answer.error_message = None;
-        answer.content = calls
-            .iter()
-            .map(|(id, name)| {
-                ContentBlock::ToolCall(ToolCall {
-                    id: (*id).into(),
-                    name: (*name).into(),
-                    arguments: json!({}),
-                    arguments_error: None,
+        let answer = AssistantMessage::new(
+            "p",
+            "m",
+            stop_reason,
+            calls
+                .iter()
+                .map(|(id, name)| {
+                    ContentBlock::ToolCall(ToolCall {
+                        id: (*id).into(),
+                        name: (*name).into(),
+                        arguments: json!({}),
+                        arguments_error: None,
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        );
         Message::Assistant(answer)
     }
 

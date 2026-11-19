@@ -11,9 +11,12 @@ pub(super) fn header() -> SessionHeader {
 }
 
 pub(super) fn assistant(text: &str) -> Message {
-    let mut message = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    message.error_message = None;
-    message.content = vec![ContentBlock::Text { text: text.into() }];
+    let message = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::Stop,
+        vec![ContentBlock::Text { text: text.into() }],
+    );
     Message::Assistant(message)
 }
 

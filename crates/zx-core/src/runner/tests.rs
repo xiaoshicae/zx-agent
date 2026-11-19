@@ -254,14 +254,17 @@ async fn a_recovery_write_failure_fails_the_run_before_any_request() {
         RejectWrites::containing("\"role\":\"toolResult\"", "a tool result"),
     );
     transcript.append_message(Message::user("go")).await.unwrap();
-    let mut answer = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
-        id: "c1".into(),
-        name: "counted".into(),
-        arguments: serde_json::json!({}),
-        arguments_error: None,
-    })];
+    let answer = crate::ai::AssistantMessage::new(
+        "p",
+        "m",
+        crate::ai::StopReason::ToolUse,
+        vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
+            id: "c1".into(),
+            name: "counted".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: None,
+        })],
+    );
     transcript.append_message(Message::Assistant(answer)).await.unwrap();
     transcript.append_tool_call_started("c1", "counted").await.unwrap();
     let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));

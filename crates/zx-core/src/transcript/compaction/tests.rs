@@ -384,14 +384,17 @@ async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
 
 /// An answer that calls `read_file` as `id`, and that call's result.
 fn exchange(id: &str) -> [Message; 2] {
-    let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    assistant.error_message = None;
-    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: id.into(),
-        name: "read_file".into(),
-        arguments: json!({"path": "x"}),
-        arguments_error: None,
-    })];
+    let assistant = AssistantMessage::new(
+        "faux",
+        "m",
+        StopReason::ToolUse,
+        vec![ContentBlock::ToolCall(ToolCall {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: json!({"path": "x"}),
+            arguments_error: None,
+        })],
+    );
     let result = ToolResultMessage {
         tool_call_id: id.into(),
         tool_name: "read_file".into(),
@@ -448,17 +451,11 @@ async fn a_compaction_inside_a_run_keeps_the_input_of_that_run_before_its_summar
         .await
         .unwrap();
 
-    let texts: Vec<String> = transcript
-        .messages()
-        .iter()
-        .map(|message| match message {
-            Message::User { content, .. } => content.lines().next().unwrap_or_default().to_string(),
-            Message::Assistant(answer) => format!("calls {}", answer.tool_calls()[0].id),
-            Message::ToolResult(result) => result.content.clone(),
-            Message::System(_) => "system".to_string(),
-        })
-        .collect();
-    assert_eq!(texts, ["the task", "<context_summary>", "calls c2", "value of c2"]);
+    let messages = summarize(&transcript.messages());
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(messages[0], "user:the task");
+    assert!(messages[1].starts_with("user:<context_summary>"), "{messages:?}");
+    assert_eq!(messages[2..], ["assistant:calls[c2]", "tool:c2=value of c2"]);
     let lines: Vec<serde_json::Value> = transcript
         .entries()
         .iter()
@@ -472,28 +469,9 @@ async fn a_compaction_inside_a_run_keeps_the_input_of_that_run_before_its_summar
 async fn the_kept_tail_never_splits_an_assistant_tool_result_exchange() {
     let mut transcript = Transcript::in_memory(header());
     let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
-    let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    assistant.error_message = None;
-    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c".into(),
-        name: "read_file".into(),
-        arguments: json!({"path":"x"}),
-        arguments_error: None,
-    })];
-    let call = transcript.append_message(Message::Assistant(assistant)).await.unwrap();
-    let result = transcript
-        .append_message(Message::ToolResult(ToolResultMessage {
-            tool_call_id: "c".into(),
-            tool_name: "read_file".into(),
-            content: "value".into(),
-            is_error: false,
-            timestamp: 0,
-            duration_ms: None,
-            details: None,
-            usage: None,
-        }))
-        .await
-        .unwrap();
+    let [call, result] = exchange("c");
+    let call = transcript.append_message(call).await.unwrap();
+    let result = transcript.append_message(result).await.unwrap();
     assert!(
         transcript
             .append_compaction_started(plan(&transcript, &result))

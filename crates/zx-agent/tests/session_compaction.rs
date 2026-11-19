@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, Usage, now_ms};
+use zx_agent::ai::{AssistantMessage, Message, Usage, now_ms};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::transcript::{
@@ -58,7 +58,7 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
 /// An answer that calls `read_file` as `id`, and that call's result.
 fn exchange(id: &str) -> [Message; 2] {
     use zx_agent::ai::{StopReason, ToolResultMessage};
-    let assistant = zx_testing::finished_answer(
+    let assistant = AssistantMessage::new(
         "faux",
         "m",
         StopReason::ToolUse,

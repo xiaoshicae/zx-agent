@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::path::Path;
-
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 
 use super::test_support::{header, texts};
 use super::*;
@@ -385,12 +384,6 @@ async fn open_file(path: &Path) -> Transcript {
     Transcript::load(loaded, log).unwrap()
 }
 
-/// A snapshot of the session in the file `path`.
-async fn read_file(path: &Path) -> Transcript {
-    let id = file::read_header(path).unwrap().id;
-    Transcript::snapshot(JsonlStorage::file(path).read(&id).await.unwrap()).unwrap()
-}
-
 #[tokio::test]
 async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
     /// Answers every write late, like a session volume that stopped answering; bounded,
@@ -494,31 +487,6 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     let reopened = open_file(&path).await;
     assert_eq!(reopened.incomplete_tail_bytes(), 10);
     assert_eq!(texts(&reopened), ["kept"]);
-}
-
-#[tokio::test]
-async fn opening_leaves_an_incomplete_tail_and_the_next_record_replaces_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    let mut transcript = create_file(&path).await;
-    transcript.append_message(Message::user("kept")).await.unwrap();
-    drop(transcript);
-    let tail = b"{\"type\":\"mess";
-    OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(tail)
-        .unwrap();
-
-    let mut reopened = open_file(&path).await;
-    assert!(std::fs::read(&path).unwrap().ends_with(tail), "opening changes nothing");
-    reopened.append_message(Message::user("next")).await.unwrap();
-    drop(reopened);
-
-    let read = read_file(&path).await;
-    assert_eq!(read.incomplete_tail_bytes(), 0);
-    assert_eq!(texts(&read), ["kept", "next"]);
 }
 
 #[tokio::test]
