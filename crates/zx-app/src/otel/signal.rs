@@ -256,24 +256,12 @@ impl Signal {
     }
 }
 
-/// An event of the run the tests use, at `at_ms`, in session `s1`.
-#[cfg(test)]
-pub(super) fn event(at_ms: u64, event: EventKind) -> Event {
-    Event {
-        schema_version: zx_agent::events::EVENT_SCHEMA_VERSION,
-        seq: at_ms,
-        at_ms,
-        session_id: "s1".into(),
-        run_id: "6f1c2c4e-0000-4000-8000-000000000001".into(),
-        event,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use zx_agent::ai::Role;
 
     use super::*;
+    use crate::otel::test_support::event;
 
     #[test]
     fn the_hook_drops_events_beyond_its_queue_and_counts_them() {

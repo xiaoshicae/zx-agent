@@ -6,12 +6,11 @@ use serde_json::json;
 
 use super::*;
 use crate::otel::TraceParent;
-use crate::otel::signal::event;
+use crate::otel::test_support::{RUN, event};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
 use zx_agent::events::{EventKind, RunReport};
 use zx_agent::policy::PolicyDecision;
 
-const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 /// Spans built synchronously into an in-memory exporter; the provider must stay alive.

@@ -10,10 +10,13 @@
 //! texts, which may quote them.
 //!
 //! A hook observes the events of every run and turns them into signals (`signal`), which
-//! one task turns into spans (`spans`).
+//! one task turns into spans (`spans`). What their tests share is in `test_support`, compiled
+//! for tests only.
 
 mod signal;
 mod spans;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -150,8 +153,8 @@ impl Telemetry {
         Ok(Some(Self::with_provider(tracer_provider)))
     }
 
-    /// Export traces through `provider`, such as one with an exporter that the host set up.
-    /// Needs a Tokio runtime.
+    /// Export traces through `tracer_provider`, such as one with an exporter that the host set
+    /// up. Needs a Tokio runtime.
     pub fn with_provider(tracer_provider: SdkTracerProvider) -> Self {
         let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
         let stop = CancellationToken::new();
