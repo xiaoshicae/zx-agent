@@ -203,10 +203,7 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
 #[tokio::test]
 async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_trigger() {
     let mut store = Seed::in_memory(header()).await;
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    let old = store.append_old_observation().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
@@ -282,10 +279,7 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
     // An old message worth summarizing, then an answer that reported a context above the
     // trigger and is recent enough for the summary to keep.
     let mut store = Seed::in_memory(header()).await;
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    let old = store.append_old_observation().await;
     store.append_message(answer_reporting(5_000)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
@@ -335,10 +329,7 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
     // The last answer reported a context above the trigger. A hook then trims the message
     // that made it large, and what is left is too recent to compact.
     let mut store = Seed::in_memory(header()).await;
-    store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    store.append_old_observation().await;
     store.append_message(answer_reporting(5_000)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, Request, Usage};
+use zx_agent::ai::{Message, Usage};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::events::ApprovalResult;
@@ -32,7 +32,7 @@ use zx_im::{
     Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
     ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_testing::{EchoTool, config, fast_retry, summarize, summary_json, test_limits};
+use zx_testing::{EchoTool, config, fast_retry, summarize, test_limits};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -1002,22 +1002,13 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     h.stop().await.unwrap();
 }
 
-/// A summary of what a summary request read, citing the first record it read.
-fn summary_of_the_source(request: &Request) -> FauxStep {
-    let Some(Message::User { content, .. }) = request.messages.last() else {
-        panic!("a summary request ends with its input");
-    };
-    let records: Vec<Value> = serde_json::from_str(content).unwrap();
-    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
-}
-
 #[tokio::test]
 async fn compact_summarizes_the_earlier_talk_as_work_of_its_own() {
     let mut h = start(Setup {
         steps: vec![
             FauxStep::text("first"),
             FauxStep::text("second"),
-            FauxStep::compute(summary_of_the_source),
+            FauxStep::compute(|request| FauxStep::text(zx_testing::summary_of_the_source(request))),
             FauxStep::text("third"),
         ],
         // Everything before the latest prompt is old enough to summarize.

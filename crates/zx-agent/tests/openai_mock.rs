@@ -436,15 +436,7 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         Reply::text("answer"),
     ])
     .await;
-    let mut session = Seed::in_memory(zx_testing::header()).await;
-    session
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    session
-        .append_message(Message::user("most recent input"))
-        .await
-        .unwrap();
+    let (session, _) = zx_testing::seeded_session().await;
     let compaction = Config {
         trigger_bytes: Some(100_000),
         keep_recent_bytes: 1,

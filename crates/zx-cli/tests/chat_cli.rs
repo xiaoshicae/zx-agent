@@ -13,7 +13,7 @@ use common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, ended, ended_output, write_agent, write_config};
-use zx_testing::{json_lines, signal, stderr, stdout, tool_call_answer};
+use zx_testing::{json_lines, signal, stderr, stdout, summary_json, tool_call_answer};
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
@@ -63,10 +63,6 @@ async fn seed_context(dir: &Path, bytes: usize) -> String {
     let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
     store.append_message(Message::user("recent input")).await.unwrap();
     id
-}
-
-fn summary_json(id: &str) -> String {
-    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":["Continue"]}).to_string()
 }
 
 #[tokio::test]

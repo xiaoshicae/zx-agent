@@ -63,6 +63,16 @@ pub fn summary_json(id: &str) -> String {
         .to_string()
 }
 
+/// A summary of what the summary request `request` read, citing the first record it read, as
+/// [`summary_json`].
+pub fn summary_of_the_source(request: &Request) -> String {
+    let Some(Message::User { content, .. }) = request.messages.last() else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    summary_json(records[0]["entryId"].as_str().unwrap())
+}
+
 /// Every request of the session, rebuilt from its checkpoints, in order.
 pub fn replayed_requests(store: &Transcript) -> Vec<Request> {
     store

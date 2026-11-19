@@ -6,7 +6,8 @@
 //! The modules whose helpers are re-exported here, under the names the tests use. A module
 //! uses only modules listed before it, named in brackets where it uses any:
 //! - `records`: messages a test writes ([`finished_answer`], [`tool_call_block`],
-//!   [`tool_call_answer`], [`answer_reporting`], [`summary_json`]) and what it reads back:
+//!   [`tool_call_answer`], [`answer_reporting`], [`summary_json`], [`summary_of_the_source`])
+//!   and what it reads back:
 //!   [`summarize`], [`replayed_requests`], [`json_lines`], [`read_lines`]
 //! - `stand_ins`: in place of the real thing, [`EchoTool`], [`NotifyingProvider`], which says
 //!   when a request starts, and [`hook_context`], to call a hook directly
@@ -61,7 +62,7 @@ pub use program::signal;
 pub use program::{stderr, stdout};
 pub use records::{
     answer_reporting, finished_answer, json_lines, read_lines, replayed_requests, summarize, summary_json,
-    tool_call_answer, tool_call_block,
+    summary_of_the_source, tool_call_answer, tool_call_block,
 };
 pub use runner::{
     Approver, Asked, Collect, Driven, RunnerSetup, config, fast_retry, refusal, run_approved, run_prompt,

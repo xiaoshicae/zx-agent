@@ -252,10 +252,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
 #[tokio::test]
 async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
     let mut store = Seed::in_memory(header()).await;
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    let old = store.append_old_observation().await;
     let call = zx_testing::tool_call_answer("faux", "m", "echo", json!({}));
     store.append_message(call).await.unwrap();
     let mut result = ToolResultMessage {
@@ -916,15 +913,6 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     ));
 }
 
-/// A summary of what a summary request read, citing the first record it read.
-fn summary_of_the_source(request: &Request) -> FauxStep {
-    let Some(Message::User { content, .. }) = request.messages.last() else {
-        panic!("a summary request ends with its input");
-    };
-    let records: Vec<Value> = serde_json::from_str(content).unwrap();
-    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
-}
-
 #[tokio::test]
 async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_turn_and_goes_on() {
     let text = "x".repeat(300);
@@ -932,7 +920,7 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
         FauxStep::tool_call("c1", "echo", json!({"text": text})),
         FauxStep::tool_call("c2", "echo", json!({"text": text})),
         // The second result takes the context over the trigger: the summary comes first.
-        FauxStep::compute(summary_of_the_source),
+        FauxStep::compute(|request| FauxStep::text(zx_testing::summary_of_the_source(request))),
         FauxStep::text("done"),
     ]));
     let (runner, events) = RunnerSetup {

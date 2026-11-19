@@ -142,10 +142,7 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    let old = store.append_old_observation().await;
     store.append_message(Message::user("most recent input")).await.unwrap();
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string();
@@ -190,10 +187,7 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let mut session = zx_testing::create_session_file(&path, header()).await.unwrap();
-    let old = session
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
+    let old = session.append_old_observation().await;
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":["Continue"]});
     let provider = Arc::new(FauxProvider::new([
