@@ -19,10 +19,10 @@ use crate::guard::{Priority, Stopped, bounded};
 use crate::tools::ToolOutput;
 
 /// One guarded call of a registered hook. A failure names the call by `name` and `phase`.
-pub(crate) struct HookCall<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) phase: HookPhase,
-    pub(crate) timeout: Duration,
+struct HookCall<'a> {
+    name: &'a str,
+    phase: HookPhase,
+    timeout: Duration,
 }
 
 impl HookCall<'_> {
@@ -36,7 +36,7 @@ impl HookCall<'_> {
 
     /// Wait for `future`, bounded by the timeout and by `cancel`; a rejection, a panic, a
     /// timeout and a cancellation each become a failure of their own kind.
-    pub(crate) async fn run<T>(
+    async fn run<T>(
         &self,
         future: impl Future<Output = HookResult<T>>,
         cancel: &CancellationToken,
@@ -287,5 +287,174 @@ impl HookChain {
             }
         }
         errors
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use super::*;
+    use crate::ai::{AssistantMessage, StopReason};
+    use crate::hooks::StepDisposition;
+
+    fn context() -> HookContext {
+        HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
+    }
+
+    fn call() -> ToolCall {
+        ToolCall {
+            id: "c".into(),
+            name: "echo".into(),
+            arguments: json!({}),
+            arguments_error: None,
+        }
+    }
+
+    struct Suffix(&'static str);
+    #[async_trait]
+    impl Hook for Suffix {
+        async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
+            Ok(text + self.0)
+        }
+        async fn after_tool(
+            &self,
+            _call: &ToolCall,
+            mut output: ToolOutput,
+            _ctx: &HookContext,
+        ) -> HookResult<ToolOutput> {
+            output.content.push_str(self.0);
+            Ok(output)
+        }
+        async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+            let Message::User { content, .. } = &messages[0] else {
+                panic!("user input")
+            };
+            Ok(vec![ContextEdit::ReplaceText {
+                index: 0,
+                text: content.clone() + self.0,
+            }])
+        }
+    }
+
+    /// A chain of `hooks`, registered in order, each named after its position.
+    fn chain_of(hooks: Vec<Arc<dyn Hook>>) -> HookChain {
+        let mut chain = HookChain::new();
+        for (index, hook) in hooks.into_iter().enumerate() {
+            chain.push(format!("hook{index}"), hook);
+        }
+        chain
+    }
+
+    #[tokio::test]
+    async fn input_hooks_compose_in_registration_order_including_empty_unicode_input() {
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
+        assert_eq!(chain.on_input(String::new(), &context()).await.unwrap(), "甲乙");
+    }
+
+    #[tokio::test]
+    async fn output_hooks_receive_the_preceding_hooks_result() {
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
+        let output = chain.after_tool(&call(), ToolOutput::ok(""), &context()).await.unwrap();
+        assert_eq!(output.content, "甲乙");
+    }
+
+    #[tokio::test]
+    async fn context_hooks_see_the_projection_after_preceding_edits() {
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
+        let original = vec![Message::user("")];
+        let edits = chain.transform_context(&original, &context()).await.unwrap();
+        let mut projected = original.clone();
+        for edit in edits {
+            edit.apply(&mut projected).unwrap();
+        }
+        assert!(matches!(&projected[0], Message::User { content, .. } if content == "甲乙"));
+        assert!(matches!(&original[0], Message::User { content, .. } if content.is_empty()));
+    }
+
+    struct Finish(StepDecision);
+    #[async_trait]
+    impl Hook for Finish {
+        async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_stop_dominates_and_otherwise_first_request_wins() {
+        let response = AssistantMessage::failure("p", "m", StopReason::Stop, "unused");
+        let step = FinishedStep {
+            response: &response,
+            messages: &[],
+            step: 1,
+            answer_continuations: 0,
+            remaining_model_requests: None,
+            disposition: StepDisposition::Stop,
+        };
+        let first = StepDecision::ContinueAnswer("first".into());
+        let mut chain = chain_of(vec![
+            Arc::new(Finish(first.clone())),
+            Arc::new(Finish(StepDecision::FollowUp("second".into()))),
+        ]);
+        assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), first);
+        chain.push("stop", Arc::new(Finish(StepDecision::Stop)));
+        assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), StepDecision::Stop);
+    }
+
+    fn guard() -> HookCall<'static> {
+        HookCall {
+            name: "test",
+            phase: HookPhase::AfterTool,
+            timeout: Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_errors_preserve_the_hook_and_phase() {
+        let error = guard()
+            .run(async { Err::<(), _>("rejected".into()) }, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            HookError {
+                hook: "test".into(),
+                phase: HookPhase::AfterTool,
+                failure: HookFailure::Rejected("rejected".into())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_panics_are_caught() {
+        let error = guard()
+            .run::<()>(async { panic!("callback bug") }, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Panicked));
+    }
+
+    #[tokio::test]
+    async fn pending_callbacks_are_bounded_by_their_timeout() {
+        let error = guard()
+            .run::<()>(std::future::pending(), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::TimedOut(Duration::ZERO)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_callbacks_before_their_timeout() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let guard = HookCall {
+            timeout: Duration::from_secs(60),
+            ..guard()
+        };
+        let error = guard.run::<()>(std::future::pending(), &cancel).await.unwrap_err();
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Cancelled));
     }
 }
