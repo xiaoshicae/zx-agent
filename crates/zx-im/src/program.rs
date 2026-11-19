@@ -28,7 +28,7 @@ use crate::backlog::BacklogFiles;
 #[cfg(feature = "feishu")]
 use crate::platform::FeishuSection;
 use crate::platform::SlackSection;
-use crate::server::StatusFiles;
+use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
 use crate::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionKey, UserId,
@@ -136,7 +136,8 @@ pub(crate) async fn run(args: Args) -> Result<u8> {
             let app = connect(overrides)
                 .await?
                 .with_hidden_env(hidden_env)
-                .with_traces(telemetry.map(Telemetry::hook));
+                .with_traces(telemetry.map(Telemetry::hook))
+                .with_prompt_section(CONVERSATION_SECTION, CONVERSATION);
             let agent = conversations_agent(&app, &dir).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
