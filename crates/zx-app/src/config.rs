@@ -34,6 +34,7 @@ pub(crate) use context::ProjectContext;
 pub use definition::Builtin;
 pub(crate) use definition::{AgentDefinition, HostTools, known_tool};
 pub use environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
+pub(crate) use permissions::Permissions;
 pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use provider::{anthropic_config, openai_config};
 pub(crate) use skills::{READ_SKILL, Skill};

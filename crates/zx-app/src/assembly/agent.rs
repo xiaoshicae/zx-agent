@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::config::{AgentDefinition, HostTools, ModelRequestLimit, READ_SKILL, RawLimits, known_tool};
+use crate::config::{
+    AgentDefinition, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
+};
 use crate::otel;
 use zx_agent::ai::{PREAMBLE, Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
@@ -87,76 +89,71 @@ impl ConfiguredAgent {
         let config = &settings.config;
         let host = host_tools(app);
         check_names(app, &host)?;
-        let mut agent = load_agent(app, &host)?;
+        let AgentDefinition {
+            name,
+            instructions,
+            tools: enabled,
+            permissions,
+            limits,
+            continue_on_length,
+            context,
+            skills,
+            compaction,
+        } = load_agent(app, &host)?;
         let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
-            agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
+            limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
             "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
         );
-        let executor_factory = executor_factory(app, &agent)?;
-        let factory = app
-            .providers
-            .get(&config.provider.api)
-            .map_err(|error| anyhow::anyhow!("provider.api: {error}"))?;
-        let key_env = config.provider.api_key_env.as_deref().unwrap_or(factory.api_key_env());
-        // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
-        let api_key = env_value(key_env);
-        let BuiltProvider {
-            provider,
-            session_cache_key,
-        } = factory.build(ProviderInput {
-            options: &config.provider.options,
-            // Provider authentication and output filtering each need an owned copy of the key.
-            api_key: api_key.clone(),
-            reasoning: config.reasoning,
-        })?;
-        let skills = skills_tool(&mut agent);
-        let (policies, approvals) = policies(app, &mut agent, &host, approvals);
+        let executor_factory = executor_factory(app, &permissions)?;
+        let (built, key_env) = provider(app)?;
+        let hidden_env = hidden_env(app, key_env);
+        let (policies, approvals) = policies(app, &permissions, &host, approvals);
+        let hooks = hooks(app, continue_on_length, &hidden_env);
+        let skills = skills_tool(skills, &enabled);
         // The host's tools that the agent enables, as it enables the built-in ones.
         let tools = app
             .tools
             .iter()
-            .filter(|tool| agent.tools.iter().any(|name| name == tool.name()))
+            .filter(|tool| enabled.iter().any(|name| name == tool.name()))
             .cloned()
             .collect();
-        let name = std::mem::take(&mut agent.name);
-        let auto_approve_commands = agent.permissions.allowed_commands();
         let role = AgentConfig {
-            system_prompt: SystemPrompt::new(&agent.instructions),
+            system_prompt: SystemPrompt::new(&instructions),
             tools,
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
-            hooks: hooks(app, &agent, api_key),
+            hooks,
             policies,
             approvals,
             extensions: app.mcp.servers.iter().chain(&app.extensions).cloned().collect(),
             models,
-            session_cache_key,
-            limits: agent.limits,
+            session_cache_key: built.session_cache_key,
+            limits,
             retry: config.provider.retry.clone(),
-            compaction: agent.compaction,
+            compaction,
             summarizer: app.summarizer.clone(),
             storage: place.storage(),
             session_setup: Some(Arc::new(PerSession {
-                tools: agent.tools,
-                context: agent.context,
+                tools: enabled,
+                context,
                 skills,
                 executor_factory,
-                hidden_env: hidden_env(app, key_env),
+                hidden_env,
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
                 file_queue: Arc::clone(&app.file_queue),
                 host_sections: app.host_sections.clone(),
             })),
-            ..AgentConfig::new(provider.clone(), model)
+            ..AgentConfig::new(Arc::clone(&built.provider), model)
         };
         Ok(Self {
             agent: Agent::new(role)?,
-            provider,
+            provider: built.provider,
             name,
-            auto_approve_commands,
+            auto_approve_commands: permissions.allowed_commands(),
             place: place.clone(),
             cwd: app.overrides.cwd.clone(),
         })
@@ -281,18 +278,37 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
 }
 
 /// The factory of the executor config.toml names in `execution`. Fails when there is none,
-/// and when `agent` approves every call but the factory does not isolate commands.
-fn executor_factory(app: &Application, agent: &AgentDefinition) -> Result<Arc<dyn ExecutorFactory>> {
+/// and when the agent's `permissions` approve every call but the factory does not isolate
+/// commands.
+fn executor_factory(app: &Application, permissions: &Permissions) -> Result<Arc<dyn ExecutorFactory>> {
     let name = &app.settings.config.execution;
     let factory = app
         .executors
         .get(name)
         .map_err(|error| anyhow::anyhow!("execution: {error}"))?;
     anyhow::ensure!(
-        !agent.permissions.approve_all || factory.isolates(),
+        !permissions.approve_all || factory.isolates(),
         "permissions.approveAll needs execution = \"container\" in config.toml, or another executor that isolates commands: without a sandbox, every command would run on this machine unasked"
     );
     Ok(Arc::clone(factory))
+}
+
+/// The provider of config.toml, built by the factory registered for its `provider.api`, and
+/// the variable that holds its API key.
+fn provider(app: &Application) -> Result<(BuiltProvider, &str)> {
+    let config = &app.settings.config;
+    let factory = app
+        .providers
+        .get(&config.provider.api)
+        .map_err(|error| anyhow::anyhow!("provider.api: {error}"))?;
+    let key_env = config.provider.api_key_env.as_deref().unwrap_or(factory.api_key_env());
+    let built = factory.build(ProviderInput {
+        options: &config.provider.options,
+        // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
+        api_key: env_value(key_env),
+        reasoning: config.reasoning,
+    })?;
+    Ok((built, key_env))
 }
 
 /// The agent `app` runs, with the host's tools and budgets over it, validated: explicit
@@ -324,37 +340,37 @@ fn budgets(overrides: &Overrides) -> RawLimits {
     }
 }
 
-/// read_skill with the catalog of its skills for the prompt, when the agent enables it and
-/// has skills.
-fn skills_tool(agent: &mut AgentDefinition) -> Option<(Arc<dyn Tool>, String)> {
-    if agent.skills.is_empty() || !agent.tools.iter().any(|name| name == READ_SKILL) {
+/// read_skill with the catalog of its `skills` for the prompt, when the agent has skills and
+/// its `enabled` tools include it.
+fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>, String)> {
+    if skills.is_empty() || !enabled.iter().any(|name| name == READ_SKILL) {
         return None;
     }
-    let tool = ReadSkillTool::new(std::mem::take(&mut agent.skills));
+    let tool = ReadSkillTool::new(skills);
     let catalog = tool.catalog();
     Some((Arc::new(tool), catalog))
 }
 
 /// The policies every session of the agent asks, in this order: the command policy, the
-/// policy of the agent's permissions with the tools of MCP servers and of the `host`'s
-/// extensions that it does not allow, the host's own, and, where a person answers, the one
+/// policy of the agent's `permissions` with the tools of MCP servers and of the `host`'s
+/// extensions that they do not allow, the host's own, and, where a person answers, the one
 /// that asks before bash commands. With them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest decision of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
 fn policies(
     app: &Application,
-    agent: &mut AgentDefinition,
+    permissions: &Permissions,
     host: &HostTools,
     approvals: Approvals<'_>,
 ) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
-    let commands = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
+    let commands = CommandPolicy::new().deny_also(permissions.denied_commands());
     policies.push(COMMAND_POLICY, Arc::new(commands));
-    let auto_approve = agent.permissions.auto_approval();
+    let auto_approve = permissions.auto_approval();
     let extension_tools: Vec<String> = app.mcp.names.iter().chain(&host.extensions).cloned().collect();
-    let asking = asking_tools(agent, &extension_tools);
-    if let Some(rules) = rules_policy(agent, &asking, auto_approve.clone()) {
+    let asking = asking_tools(permissions, &extension_tools);
+    if let Some(rules) = rules_policy(permissions, &asking, auto_approve.clone()) {
         policies.push(AGENT_PERMISSIONS, Arc::new(rules));
     }
     for (name, policy) in &app.policies {
@@ -364,7 +380,7 @@ fn policies(
         Approvals::Nobody => return (policies, ApprovalMode::Deny),
         Approvals::Person(reason) => reason,
     };
-    if !agent.permissions.approve_all {
+    if !permissions.approve_all {
         let bash = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
@@ -381,21 +397,20 @@ fn policies(
     (policies, ApprovalMode::Wait(app.settings.approval_timeout))
 }
 
-/// The hooks every session of the agent shares: continuation, redaction of the API key
-/// `api_key` and the other credentials, the trace export, and the host's own.
+/// The hooks every session of the agent shares: continuation of up to `continue_on_length`
+/// cut responses, redaction of the values of the `hidden` variables and of the secret files,
+/// the trace export, and the host's own.
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
 /// `[hook]` lines show, is no extension's: [`check_names`] refuses one named so.
-fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
+fn hooks(app: &Application, continue_on_length: u32, hidden: &[String]) -> HookChain {
     let mut hooks = HookChain::new();
-    hooks.push(
-        CONTINUE_ON_LENGTH,
-        Arc::new(ContinueOnLength::new(agent.continue_on_length)),
-    );
-    // The hook reads the secret files again before every use.
-    let redaction =
-        RedactSecrets::new(api_key.into_iter().chain(hidden_values(app))).with_secret_files(app.secret_files.clone());
+    hooks.push(CONTINUE_ON_LENGTH, Arc::new(ContinueOnLength::new(continue_on_length)));
+    // An unset or empty variable holds nothing to redact. The hook reads the secret files
+    // again before every use.
+    let values = hidden.iter().map(String::as_str).filter_map(env_value);
+    let redaction = RedactSecrets::new(values).with_secret_files(app.secret_files.clone());
     hooks.push(REDACT_SECRETS, Arc::new(redaction));
     // Observes every run of every session, whoever reads its events.
     if let Some(traces) = &app.traces {
@@ -407,9 +422,9 @@ fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) ->
     hooks
 }
 
-/// Variables commands must not inherit: the API key, the other credentials and the headers
-/// that authenticate to a trace collector. `env` would put them into the session file and
-/// the context.
+/// Variables commands must not inherit, whose values are redacted: the API key's `key_env`,
+/// the other credentials and the headers that authenticate to a trace collector. `env` would
+/// put them into the session file and the context.
 fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
     std::iter::once(key_env.to_string())
         .chain(app.hidden_env.iter().cloned())
@@ -418,41 +433,26 @@ fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
         .collect()
 }
 
-/// The values to redact of the hidden variables besides the key, the trace collector's headers
-/// among them; an unset or empty variable holds nothing.
-fn hidden_values(app: &Application) -> impl Iterator<Item = String> + '_ {
-    app.hidden_env
-        .iter()
-        .chain(&app.mcp.token_env)
-        .map(String::as_str)
-        .chain(otel::HEADER_ENVS)
-        .filter_map(env_value)
-}
-
 /// The tools of `names`, those of MCP servers and of the host's extensions, that ask a person:
-/// those not in the agent's `permissions.allow`, and none when the agent approves every call,
-/// since the container is the sandbox.
-fn asking_tools(agent: &AgentDefinition, names: &[String]) -> Vec<String> {
-    if agent.permissions.approve_all {
+/// those not in `permissions.allow`, and none when the agent approves every call, since the
+/// container is the sandbox.
+fn asking_tools(permissions: &Permissions, names: &[String]) -> Vec<String> {
+    if permissions.approve_all {
         return Vec::new();
     }
-    let allowed = agent.permissions.allowed_tools();
+    let allowed = permissions.allowed_tools();
     names.iter().filter(|name| !allowed.contains(name)).cloned().collect()
 }
 
-/// The agent's denied and asking tools and the tools of extensions that ask, MCP servers
-/// among them, as one policy that allows the rest; none without any of them.
-fn rules_policy(
-    agent: &mut AgentDefinition,
-    extension_ask: &[String],
-    auto_approve: AutoApprove,
-) -> Option<RulePolicy> {
-    let denied = agent.permissions.denied_tools().into_iter().map(|tool| Rule {
+/// The denied and asking tools of the agent's `permissions` and the tools of extensions that
+/// ask, MCP servers among them, as one policy that allows the rest; none without any of them.
+fn rules_policy(permissions: &Permissions, extension_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
+    let denied = permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
         decision: PolicyDecision::Deny("tool denied by the agent".into()),
     });
-    let asked = std::mem::take(&mut agent.permissions.ask).into_iter().map(|tool| Rule {
-        matcher: RuleMatcher::Tool(tool),
+    let asked = permissions.ask.iter().map(|tool| Rule {
+        matcher: RuleMatcher::Tool(tool.clone()),
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });
     // An MCP server's tools ask unless permissions.allow lists them: annotations are hints.
