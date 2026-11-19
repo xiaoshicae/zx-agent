@@ -139,6 +139,7 @@ impl Host {
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
     /// permission answers keep arriving; the response is sent when the turn ends. A prompt
+    /// without text is refused, as `run` refuses one. A prompt
     /// that is one of the agent's commands runs the command instead; `/compact` is a turn of
     /// its own, taken and cancelled as a prompt's is.
     ///
@@ -162,6 +163,10 @@ impl Host {
             return responder.respond_with_error(sessions::unknown_session(&request.session_id.0, why));
         };
         let text = prompt_text(&request.prompt);
+        // The kernel takes any input; an empty one would reach the model as a message.
+        if text.trim().is_empty() {
+            return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, "the prompt is empty"));
+        }
         let session_id = request.session_id.clone();
         let started = match commands::parse(&text) {
             Some(Command::Name(name)) => {

@@ -898,6 +898,21 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
 }
 
 #[tokio::test]
+async fn a_prompt_without_text_is_refused_before_any_request() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("unused")]).await;
+    let mut acp = Acp::start(&server, &cwd, &[]).await;
+    let id = acp.session(&cwd).await;
+
+    let response = acp.prompt(&id, " \n ").await;
+
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert!(server.requests().is_empty());
+    acp.finish().await;
+}
+
+#[tokio::test]
 async fn a_listing_names_the_session_files_it_cannot_read_on_stderr() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
