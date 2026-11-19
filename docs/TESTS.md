@@ -73,11 +73,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-im/tests/im_server.rs` | IM 服务：会话划分与接话、`/new` 与 `/cancel`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答 |
-| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递 |
+| `crates/zx-im/tests/im_server.rs` | IM 服务：会话划分与接话、`/new`、`/cancel` 与 `/compact`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答 |
+| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递；其他机器人的消息只听不答，自己的不听 |
 | ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台；存不进 backlog 的消息不确认投递 |
-| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程、被 SIGKILL 结束后再启动时回答它没处理完的消息（仅 Unix） |
+| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程、提示词中说明对话怎样送达的一段、被 SIGKILL 结束后再启动时回答它没处理完的消息（仅 Unix） |
 
 ---
 
-TESTS.md · v0.17 · 2026年11月
+TESTS.md · v0.18 · 2026年11月
