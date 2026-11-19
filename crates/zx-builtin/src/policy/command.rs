@@ -229,11 +229,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::policy::test_support::call;
-
-    fn denied(decision: &PolicyDecision) -> bool {
-        matches!(decision, PolicyDecision::Deny(_))
-    }
+    use crate::policy::test_support::{call, denied};
 
     #[test]
     fn denied_patterns_apply_and_other_commands_run() {

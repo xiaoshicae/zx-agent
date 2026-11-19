@@ -150,17 +150,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::test_support::tool_call;
 
     const LONG: Duration = Duration::from_secs(60);
-
-    fn call(arguments: Value) -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "bash".into(),
-            arguments,
-            arguments_error: None,
-        }
-    }
 
     #[tokio::test]
     async fn an_answer_reaches_the_request_it_names_once() {
@@ -207,14 +199,14 @@ mod tests {
     #[test]
     fn a_session_grant_covers_the_exact_call_only() {
         let gate = ApprovalGate::default();
-        let allowed = call(json!({"command": "ls"}));
+        let allowed = tool_call("bash", json!({"command": "ls"}));
         assert!(!gate.allows(&allowed));
 
         gate.remember(&allowed);
         gate.remember(&allowed);
 
         assert!(gate.allows(&allowed));
-        assert!(!gate.allows(&call(json!({"command": "ls -l"}))));
+        assert!(!gate.allows(&tool_call("bash", json!({"command": "ls -l"}))));
         assert!(!gate.allows(&ToolCall {
             name: "other".into(),
             ..allowed.clone()

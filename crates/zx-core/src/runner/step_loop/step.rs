@@ -43,7 +43,10 @@ impl StepLoop<'_> {
             return Ok(NextInput::FollowUps);
         }
         let requested = requested_input(decision, disposition, self.accounting.exhausted())?;
-        if requested.as_ref().is_some_and(continues_answer) {
+        if requested
+            .as_ref()
+            .is_some_and(|message| message.user_kind() == Some(UserMessageKind::ContinueAnswer))
+        {
             self.accounting.answer_continuations = self.accounting.answer_continuations.saturating_add(1);
         }
         match requested {
@@ -103,17 +106,6 @@ fn requested_input(
         Some(exhausted) => Err(Halt::Ended(Ending::BudgetExhausted(exhausted))),
         None => Ok(Some(message)),
     }
-}
-
-/// Whether `message` continues the preceding answer rather than starting a new one.
-fn continues_answer(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::User {
-            kind: UserMessageKind::ContinueAnswer,
-            ..
-        }
-    )
 }
 
 fn completed(stop: StopReason) -> Ending {

@@ -379,6 +379,7 @@ impl EventKind {
             Self::MessageStart { .. } => "message_start",
             Self::MessageUpdate { .. } => "message_update",
             Self::MessageEnd { .. } => "message_end",
+            Self::CustomEntry { .. } => "custom_entry",
             Self::ToolExecutionStart { .. } => "tool_execution_start",
             Self::ToolExecutionUpdate { .. } => "tool_execution_update",
             Self::ToolDecision { .. } => "tool_decision",
@@ -395,7 +396,6 @@ impl EventKind {
             Self::CompactionEnd { .. } => "compaction_end",
             Self::CompactionFailed { .. } => "compaction_failed",
             Self::ToolCallRecovered { .. } => "tool_call_recovered",
-            Self::CustomEntry { .. } => "custom_entry",
         }
     }
 }

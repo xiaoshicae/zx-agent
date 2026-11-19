@@ -95,11 +95,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::policy::test_support::call;
-
-    fn denied(decision: &PolicyDecision) -> bool {
-        matches!(decision, PolicyDecision::Deny(_))
-    }
+    use crate::policy::test_support::{call, denied};
 
     #[test]
     fn rule_priority_is_deny_then_ask_then_allow_regardless_of_registration() {

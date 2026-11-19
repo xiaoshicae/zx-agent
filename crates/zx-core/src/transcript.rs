@@ -94,13 +94,7 @@ enum WritesStopped {
 /// Whether `message` is a prompt: what a person sent, or what a hook asked for in a
 /// person's place.
 fn is_prompt(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::User {
-            kind: UserMessageKind::Prompt,
-            ..
-        }
-    )
+    message.user_kind() == Some(UserMessageKind::Prompt)
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].

@@ -455,6 +455,14 @@ impl Message {
             Message::ToolResult(_) => Role::ToolResult,
         }
     }
+
+    /// Which kind of user message this is; `None` for a message of another role.
+    pub fn user_kind(&self) -> Option<UserMessageKind> {
+        match self {
+            Message::User { kind, .. } => Some(*kind),
+            Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => None,
+        }
+    }
 }
 
 /// Who a [`Message`] is from, serialized as its `role`: `system`, `user`, `assistant` or

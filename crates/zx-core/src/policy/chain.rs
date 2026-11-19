@@ -90,18 +90,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::test_support::tool_call;
 
     fn context() -> PolicyContext {
         PolicyContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
-    }
-
-    fn call() -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "echo".into(),
-            arguments: json!({}),
-            arguments_error: None,
-        }
     }
 
     struct Decides {
@@ -157,7 +149,7 @@ mod tests {
                     }),
                 );
             }
-            assert_eq!(chain.check(&call(), &context()).await, expected);
+            assert_eq!(chain.check(&tool_call("echo", json!({})), &context()).await, expected);
             assert_eq!(*seen.lock().unwrap(), visited);
         }
     }
@@ -165,7 +157,10 @@ mod tests {
     #[tokio::test]
     async fn no_policy_allows_every_call() {
         let chain = PolicyChain::new();
-        assert_eq!(chain.check(&call(), &context()).await, PolicyDecision::Allow);
+        assert_eq!(
+            chain.check(&tool_call("echo", json!({})), &context()).await,
+            PolicyDecision::Allow
+        );
     }
 
     struct Never;
@@ -182,7 +177,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push_with_timeout("slow", Arc::new(Never), Duration::from_millis(1));
         assert_eq!(
-            chain.check(&call(), &context()).await,
+            chain.check(&tool_call("echo", json!({})), &context()).await,
             PolicyDecision::Deny("policy slow timed out after 1ms".into())
         );
     }
@@ -201,7 +196,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push("broken", Arc::new(Panics));
         assert_eq!(
-            chain.check(&call(), &context()).await,
+            chain.check(&tool_call("echo", json!({})), &context()).await,
             PolicyDecision::Deny("policy broken panicked".into())
         );
     }
@@ -214,7 +209,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push("waiting", Arc::new(Never));
         assert_eq!(
-            chain.check(&call(), &ctx).await,
+            chain.check(&tool_call("echo", json!({})), &ctx).await,
             PolicyDecision::Deny("policy waiting was cancelled".into())
         );
     }

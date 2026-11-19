@@ -115,7 +115,7 @@ impl ContextEdit {
                                 system messages; add other context instead"
                         .into());
                 }
-                if is_summary(message) {
+                if message.user_kind() == Some(UserMessageKind::Summary) {
                     return Err("only the session creates context summaries".into());
                 }
                 messages.push(message.clone());
@@ -139,7 +139,7 @@ fn editable<'m>(
     replacement: Option<&str>,
 ) -> Result<&'m mut Message, String> {
     let message = messages.get_mut(index).ok_or_else(|| out_of_bounds(index))?;
-    if is_summary(message) {
+    if message.user_kind() == Some(UserMessageKind::Summary) {
         return Err("a context summary cannot be edited or omitted; edit its source messages instead".into());
     }
     match context_edit_refusal(message, replacement) {
@@ -151,16 +151,6 @@ fn editable<'m>(
 /// Why an edit of the context at `index` cannot be made: the context has no such message.
 pub(crate) fn out_of_bounds(index: usize) -> String {
     format!("context index {index} is out of bounds")
-}
-
-fn is_summary(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::User {
-            kind: UserMessageKind::Summary,
-            ..
-        }
-    )
 }
 
 /// The settings of one task request that [`Hook::prepare_request`] may change: the model,

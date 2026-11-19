@@ -29,6 +29,7 @@
 //!   prompt, continuation or compaction returns: its events and its result
 //! - [`agent`] (all of the above): the role every session plays, the host's setup of what
 //!   belongs to one session, and the sessions that are open
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 //!
 //! # Where each feature lives
 //!
@@ -107,6 +108,8 @@ pub mod input;
 pub mod policy;
 mod runner;
 pub mod session;
+#[cfg(test)]
+mod test_support;
 pub mod tools;
 pub mod transcript;
 

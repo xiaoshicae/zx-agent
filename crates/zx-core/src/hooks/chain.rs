@@ -300,18 +300,10 @@ mod tests {
     use super::*;
     use crate::ai::{AssistantMessage, StopReason};
     use crate::hooks::StepDisposition;
+    use crate::test_support::tool_call;
 
     fn context() -> HookContext {
         HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
-    }
-
-    fn call() -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "echo".into(),
-            arguments: json!({}),
-            arguments_error: None,
-        }
     }
 
     struct Suffix(&'static str);
@@ -358,7 +350,10 @@ mod tests {
     #[tokio::test]
     async fn output_hooks_receive_the_preceding_hooks_result() {
         let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
-        let output = chain.after_tool(&call(), ToolOutput::ok(""), &context()).await.unwrap();
+        let output = chain
+            .after_tool(&tool_call("echo", json!({})), ToolOutput::ok(""), &context())
+            .await
+            .unwrap();
         assert_eq!(output.content, "甲乙");
     }
 

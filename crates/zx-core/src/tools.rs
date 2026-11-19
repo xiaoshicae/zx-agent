@@ -311,20 +311,24 @@ impl ToolOutput {
 pub trait Tool: Send + Sync {
     /// Name the model calls the tool by. Must match `definition().name`.
     fn name(&self) -> &str;
+
     /// Declaration sent to the model with every request, and whose parameter schema the
     /// arguments of a call are checked against. A session asks for it when it is made and
     /// keeps the answer.
     fn definition(&self) -> ToolDef;
+
     /// Defaults to `Parallel`.
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }
+
     /// Defaults to `SideEffects`. The session records that a call with side effects
     /// started before it runs, so recovery never assumes that an interrupted call did
     /// nothing. Return `ReadOnly` only when the tool cannot change any state.
     fn effects(&self) -> Effects {
         Effects::SideEffects
     }
+
     /// Rewrite the model's arguments before they are checked, to tolerate a mistake models
     /// commonly make, such as a JSON string where an array belongs or a field at the wrong
     /// level (pi: `prepareEditArguments`). Return `None` to keep them as they are, which the
@@ -338,12 +342,14 @@ pub trait Tool: Send + Sync {
     fn prepare_arguments(&self, _args: &Value) -> Option<Value> {
         None
     }
+
     /// Validate before policy and approval, after the declared JSON Schema has been checked.
     /// Override for semantic checks; `execute` must still validate direct SDK calls. The
     /// default adds no checks.
     fn validate_arguments(&self, _args: &Value) -> Result<(), String> {
         Ok(())
     }
+
     /// Run the tool. Must honor `ctx.cancel` if it can take long, and bound its output.
     ///
     /// When the run is cancelled, the loop stops waiting at once and drops this future, so
