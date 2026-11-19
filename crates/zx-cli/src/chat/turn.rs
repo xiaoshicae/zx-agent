@@ -27,7 +27,7 @@ use super::{APPROVAL_MENU, Flow, InputMode, rejected, run_extension_command};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
 use crate::render::{describe_arguments, describe_call, visible};
 
-const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
+const APPROVAL_PROMPT: &str = "[approval] choose 1, 2, 3 or 4:";
 
 pub(super) struct TurnIo<'a> {
     pub(super) input: &'a mut input::Lines,
@@ -51,7 +51,7 @@ pub(super) enum Operation {
 /// The run of an operation: a task, or a compaction.
 enum Running {
     Task(Run),
-    Compact(Run<compaction::Report>),
+    Compaction(Run<compaction::Report>),
 }
 
 impl Running {
@@ -61,7 +61,7 @@ impl Running {
             Operation::Prompt(text) => Self::Task(session.send(text)?),
             Operation::Message(message) => Self::Task(session.send(message)?),
             Operation::Continue => Self::Task(session.continue_run()?),
-            Operation::Compact => Self::Compact(session.compact()?),
+            Operation::Compact => Self::Compaction(session.compact()?),
         })
     }
 
@@ -69,7 +69,7 @@ impl Running {
     async fn next(&mut self) -> Option<Event> {
         match self {
             Self::Task(run) => run.next().await,
-            Self::Compact(run) => run.next().await,
+            Self::Compaction(run) => run.next().await,
         }
     }
 
@@ -80,21 +80,21 @@ impl Running {
         }
         match self {
             Self::Task(run) => Report::Task(run.wait().await),
-            Self::Compact(run) => Report::Compact(run.wait().await),
+            Self::Compaction(run) => Report::Compaction(run.wait().await),
         }
     }
 }
 
 enum Report {
     Task(RunReport),
-    Compact(compaction::Report),
+    Compaction(compaction::Report),
 }
 
 impl Report {
     fn print(&self, output: &Output, elapsed: Duration) {
         match self {
             Self::Task(report) => output.report(report, elapsed),
-            Self::Compact(report) => output.compact_report(report),
+            Self::Compaction(report) => output.compaction_report(report),
         }
     }
 }
@@ -157,23 +157,32 @@ fn approval_choice(text: &str) -> Option<Choice> {
     }
 }
 
-/// What one operation keeps while it runs: the approval a call waits for, the input typed
-/// during a compaction, and when it started.
+/// Where a prompt typed while the operation runs goes.
+enum Typed {
+    /// To the task, as steering it reads before its next request.
+    Steering,
+    /// After the compaction, as the next prompt: one at most, held here.
+    AfterCompaction(Option<String>),
+}
+
+/// What one operation keeps while it runs: the approval a call waits for, where typed
+/// prompts go, and when it started.
 struct TurnState {
-    compact: bool,
     started: Instant,
     pending: Pending,
-    queued_prompt: Option<String>,
+    typed: Typed,
 }
 
 /// Run `operation` on `session` while the terminal takes steering input, approvals and
 /// signals. Returns what the REPL does next.
 pub(super) async fn drive_turn(session: &Session, operation: Operation, io: &mut TurnIo<'_>) -> Result<Flow> {
     let mut state = TurnState {
-        compact: matches!(operation, Operation::Compact),
         started: Instant::now(),
         pending: Pending::None,
-        queued_prompt: None,
+        typed: match &operation {
+            Operation::Compact => Typed::AfterCompaction(None),
+            Operation::Prompt(_) | Operation::Message(_) | Operation::Continue => Typed::Steering,
+        },
     };
     let mut run = Running::start(session, operation)?;
     loop {
@@ -198,45 +207,41 @@ pub(super) async fn drive_turn(session: &Session, operation: Operation, io: &mut
 /// An event of the operation: show it, and follow the approval it announces or ends.
 fn observed(io: &mut TurnIo<'_>, pending: &mut Pending, event: &Event) {
     io.output.emit(event);
-    match &event.event {
-        EventKind::ApprovalRequested {
-            approval_id,
-            tool_name,
-            args,
-            reason,
-            ..
-        } => {
-            let number = *io.next_approval;
-            *io.next_approval = number.saturating_add(1);
-            let ticket = Ticket {
-                number,
-                approval_id: approval_id.clone(),
-                tool_name: tool_name.clone(),
-                args: args.clone(),
-                reason: reason.clone(),
-            };
-            show_approval(io.output, &ticket);
-            *pending = Pending::Choosing(ticket);
-        }
-        EventKind::ApprovalResolved {
-            approval_id: Some(ended),
-            approval: ApprovalResult::TimedOut | ApprovalResult::Cancelled,
-            ..
-        } => {
-            // The run stopped waiting before the person answered.
-            if pending.ticket().is_some_and(|ticket| &ticket.approval_id == ended)
-                && let Some(ticket) = pending.take()
-            {
-                io.output.line(
-                    Tone::Warn,
-                    &format!(
-                        "[approval] request {} expired; the task goes on without the call",
-                        ticket.number
-                    ),
-                );
-            }
-        }
-        _ => {}
+    if let EventKind::ApprovalRequested {
+        approval_id,
+        tool_name,
+        args,
+        reason,
+        ..
+    } = &event.event
+    {
+        let number = *io.next_approval;
+        *io.next_approval = number.saturating_add(1);
+        let ticket = Ticket {
+            number,
+            approval_id: approval_id.clone(),
+            tool_name: tool_name.clone(),
+            args: args.clone(),
+            reason: reason.clone(),
+        };
+        show_approval(io.output, &ticket);
+        *pending = Pending::Choosing(ticket);
+    } else if let EventKind::ApprovalResolved {
+        approval_id: Some(ended),
+        approval: ApprovalResult::TimedOut | ApprovalResult::Cancelled,
+        ..
+    } = &event.event
+        // The run stopped waiting before the person answered.
+        && pending.ticket().is_some_and(|ticket| &ticket.approval_id == ended)
+        && let Some(ticket) = pending.take()
+    {
+        io.output.line(
+            Tone::Warn,
+            &format!(
+                "[approval] request {} expired; the task goes on without the call",
+                ticket.number
+            ),
+        );
     }
 }
 
@@ -251,7 +256,7 @@ async fn interrupted(
 ) -> Result<Flow> {
     drop(state.pending.take());
     settle(session, run, io.output, state.started).await;
-    if state.queued_prompt.is_some() {
+    if matches!(state.typed, Typed::AfterCompaction(Some(_))) {
         io.output.line(Tone::Dim, "[chat] queued input cleared by cancellation");
     }
     // Steering meant for the cancelled task must not reach the next one.
@@ -287,7 +292,10 @@ fn finished(session: &Session, report: &Report, io: &TurnIo<'_>, state: TurnStat
     }
     // The person's text becomes the next prompt; a message an extension queued goes back to
     // the queue, which the next run takes before its first request.
-    let mut next: Vec<String> = state.queued_prompt.into_iter().collect();
+    let mut next: Vec<String> = match state.typed {
+        Typed::AfterCompaction(Some(prompt)) => vec![prompt],
+        Typed::AfterCompaction(None) | Typed::Steering => Vec::new(),
+    };
     for message in late {
         match message {
             Input::User { text, .. } => next.push(text),
@@ -349,22 +357,21 @@ async fn typed(
 async fn busy(session: &Session, io: &TurnIo<'_>, state: &mut TurnState, command: Command) {
     let output = io.output;
     match command {
-        Command::Prompt(text) if state.compact => {
-            if state.queued_prompt.is_none() {
-                state.queued_prompt = Some(text);
+        // A line typed while a call waits for approval answers it: none reaches here then.
+        Command::Prompt(text) => match &mut state.typed {
+            Typed::AfterCompaction(queued @ None) => {
+                *queued = Some(text);
                 output.line(Tone::Dim, "[chat] input queued after compaction");
-            } else {
-                output.line(
-                    Tone::Warn,
-                    "[chat] one input is already queued; wait for compaction or cancel it",
-                );
             }
-        }
-        Command::Prompt(text) if !state.pending.waiting() => {
-            session.queues().steer(text);
-            output.line(Tone::Dim, "[chat] steering input queued");
-        }
-        Command::Prompt(_) => unreachable!("pending approval input is handled above"),
+            Typed::AfterCompaction(Some(_)) => output.line(
+                Tone::Warn,
+                "[chat] one input is already queued; wait for compaction or cancel it",
+            ),
+            Typed::Steering => {
+                session.queues().steer(text);
+                output.line(Tone::Dim, "[chat] steering input queued");
+            }
+        },
         Command::Quit | Command::New => unreachable!("quit and new end the operation above"),
         Command::Model(_) => output.line(
             Tone::Warn,
@@ -427,7 +434,7 @@ fn answer_approval(session: &Session, output: &Output, pending: &mut Pending, te
             Some(Choice::Discuss) => {
                 output.line(
                     Tone::Warn,
-                    "[approval] What would you like to discuss? The call will not run.",
+                    "[approval] what would you like to discuss? The call will not run.",
                 );
                 *pending = Pending::Discussing(ticket);
             }
@@ -451,7 +458,7 @@ fn deny(session: &Session, output: &Output, ticket: &Ticket, reason: &str) {
     answer(session, output, ticket, ApprovalDecision::Deny(reason.into()));
 }
 
-/// Input that `steer` queued and no run read; a task only reads it between turns.
+/// Input that `steer` queued and no run read; a task only reads it between steps.
 fn unread_input(session: &Session, output: &Output) -> Vec<Input> {
     match session.take_queued() {
         Ok(queued) => queued.into_iter().map(PendingInput::into_input).collect(),

@@ -131,7 +131,7 @@ impl Output {
         }
     }
 
-    pub(super) fn compact_report(&self, report: &compaction::Report) {
+    pub(super) fn compaction_report(&self, report: &compaction::Report) {
         match self.mode {
             OutputMode::Jsonl => print_json_line(&serde_json::json!({"type":"compaction_report","report":report})),
             OutputMode::Text => match report.outcome {

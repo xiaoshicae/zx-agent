@@ -42,7 +42,7 @@ use commands::Command;
 use info::{About, banner, help, status};
 use input::Line;
 use output::Output;
-use storage::{Storage, opening};
+use storage::{Keeping, Storage, opening};
 use term::Tone;
 use turn::{Operation, TurnIo, drive_turn};
 
@@ -135,8 +135,8 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     let output = &chat.output;
     let model = chat.app.model().to_string();
-    let resume = resume.as_ref().map(Option::as_deref);
-    let (storage, first) = opening(no_session, session, resume, chat.app.cwd()).await?;
+    let keeping = Keeping::of(no_session, session, resume.as_ref());
+    let (storage, first) = opening(keeping, chat.app.cwd()).await?;
     let built = chat.build(&model, &storage.place, first.id()).await?;
     let mut terminal = TerminalInput {
         signals: Signals::new().context("cannot register chat signal handlers")?,

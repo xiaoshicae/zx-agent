@@ -692,7 +692,7 @@ async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
     let mut stdin = child.stdin.take().unwrap();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"go\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     assert!(!dir.path().join("marker").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
@@ -714,7 +714,7 @@ async fn a_file_write_waits_for_an_approval_by_default() {
     let mut stdin = child.stdin.take().unwrap();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"go\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     assert!(!dir.path().join("notes.txt").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
@@ -740,7 +740,7 @@ async fn discussing_an_approval_sends_user_input_without_executing_the_call() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!dir.path().join("marker").exists());
     assert!(stderr(&output).contains("4 discuss"));
-    assert!(stderr(&output).contains("What would you like to discuss?"));
+    assert!(stderr(&output).contains("what would you like to discuss?"));
     assert!(
         server.requests()[1].body["messages"]
             .to_string()
@@ -1162,7 +1162,7 @@ async fn cancelling_an_approval_drops_its_reply_and_allows_a_new_prompt() {
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     signal(&child, "-INT").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["outcome"], "cancelled");
@@ -1295,7 +1295,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     let resolved = read_event_until(&mut events, |event| event["type"] == "approval_resolved").await;
     assert_eq!(resolved["approval"], "timed_out");
     // The task goes on without the call, so a line written now is the next question.
@@ -1356,7 +1356,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["outcome"], "timed_out");
     stdin.write_all(b"/approve 1 once\nsecond\n/quit\n").await.unwrap();
@@ -1381,7 +1381,7 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     terminal.write_all(b"first\n").await.unwrap();
     terminal.flush().await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
     assert_eq!(ended(&mut child).await.code(), Some(0));
