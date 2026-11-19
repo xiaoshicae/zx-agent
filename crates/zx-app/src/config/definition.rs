@@ -1,15 +1,16 @@
 //! An agent: what it does and may do. A host runs one of the built-in agents, which a file of
 //! the same name in the `agents/` directory of the zx-agent home replaces.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::agent_file::{AgentFile, compaction_error, settle_token_trigger};
+use super::context::ProjectContext;
 use super::permissions::Permissions;
 use super::skills::{READ_SKILL, Skill, validate_skills};
-use super::{Config, context, read_text};
+use super::{Config, read_text};
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
 use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
@@ -54,23 +55,6 @@ impl Builtin {
 pub(crate) struct HostTools {
     pub(crate) own: Vec<String>,
     pub(crate) extensions: Vec<String>,
-}
-
-/// Which project instructions a session reads when it is set up. Explicit paths are
-/// absolute after load.
-#[derive(Debug)]
-pub(crate) struct ProjectContext {
-    /// Discover root-to-cwd AGENTS.md files, bounded by the nearest Git root.
-    pub(crate) discover: bool,
-    /// Extra instruction files, resolved relative to the agent file at load time.
-    pub(crate) files: Vec<PathBuf>,
-}
-
-impl ProjectContext {
-    /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
-    pub(crate) fn section(&self, cwd: &Path) -> Result<String> {
-        context::load(cwd, self)
-    }
 }
 
 /// A resolved agent: its file over the built-in agent it extends. The assembly lays what a

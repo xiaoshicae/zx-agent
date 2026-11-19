@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, ensure};
 
 pub(crate) use agent_file::{ModelRequestLimit, RawLimits, cost_budget};
+pub(crate) use context::ProjectContext;
 pub use definition::Builtin;
-pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
+pub(crate) use definition::{AgentDefinition, HostTools, known_tool};
 pub use environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
 pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use provider::{anthropic_config, openai_config};
