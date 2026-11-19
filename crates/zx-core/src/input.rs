@@ -137,13 +137,16 @@ impl InputQueues {
     /// Queue a message for the next step of the current task: the person's text, any
     /// [`Input`], or input with a hold of the host's ([`PendingInput::held`]).
     pub fn steer(&self, message: impl Into<PendingInput>) {
-        lock(&self.steering).push_back(message.into());
+        // The conversion is host code: it runs before the queue is locked.
+        let message = message.into();
+        lock(&self.steering).push_back(message);
     }
 
     /// Queue a message for after the current task finishes, as [`steer`](Self::steer) takes
     /// it.
     pub fn follow_up(&self, message: impl Into<PendingInput>) {
-        lock(&self.follow_up).push_back(message.into());
+        let message = message.into();
+        lock(&self.follow_up).push_back(message);
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
