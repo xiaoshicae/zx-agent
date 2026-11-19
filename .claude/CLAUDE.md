@@ -29,7 +29,7 @@
 - **环境、角色与项目分开**（D17）：主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml` 决定环境，agent 文件决定角色，命令行只选模型、工作目录、工具集、预算、会话与输出，不设环境与权限。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
 - **`Agent` 是唯一入口**（D21）：`AgentConfig` 是所有会话共用的角色，属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 给出。`Session` 的 `send`、`continue_run`、`compact` 返回 `Run`，读它才推进；事件只从 `Run` 读出，观察所有运行用 `Hook::on_event`。
 - **审批由内核等待，不是接口**：策略询问时，默认（`ApprovalMode::Deny`）立即拒绝，`Wait` 时调用在内核里等宿主经 `Session::resolve_approval` 回答；审批不写入会话。
-- **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
+- **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore`、`Backlog` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
 - **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和命令行；同层模块互不引用（规则 08）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13）：`chat` 只作应急与脚本化入口，不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
 
@@ -96,4 +96,4 @@
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer` | `crates/zx-agent/tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
-| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），用 `platform.rs` 的共用件：去重 `Seen`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的函数都在这个模块里；可选的平台放在 cargo feature 后 | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |
+| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的函数都在这个模块里；可选的平台放在 cargo feature 后 | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |
