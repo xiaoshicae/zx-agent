@@ -277,6 +277,11 @@ impl Updates {
 }
 
 /// Send `update` about `session_id` to the client.
+///
+/// The SDK queues it without a bound and without waiting (`send_notification` puts it on
+/// an unbounded channel): a client that stops reading stdout lets streamed updates pile up
+/// in memory, though the run's own events are bounded. A bound needs a send that can wait,
+/// which the SDK does not offer.
 pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
     if let Err(error) = cx.send_notification(SessionNotification::new(session_id.clone(), update)) {
         // The connection is going away; what was underway still ends, and its response says how.

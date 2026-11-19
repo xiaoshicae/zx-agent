@@ -76,9 +76,12 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 每开一个会话，`Agent::assemble` 都重建所有会话共用的部分：复制钩子、策略、模型元数据与系统提示词，并在 `Toolbox::new` 里为全部工具重新编译参数的 JSON Schema。开销没有测过；IM 的会话多起来时，再把共用的部分只建一次，会话只加自己的工具（2026-11-19 的评审提出）。
 - 两个 HTTP provider 发请求与读事件流的流程仍大体相同，`SystemUpdates` 各定义一份；再下沉到 `zx-ai-http` 涉及 D24 的分层，单独设计（2026-11-19 定为不在 e10a914 评审的修复中做）。
 - ACP 在运行中不显示扩展要求显示的消息，回放时显示：zx-agent 里没有部件会在运行中发出这种消息，所以没有端到端测试可写；`acp/updates.rs` 的单元测试要能构造 ACP 连接。
+- ACP 不提供 chat 有的三样：扩展注册的斜杠命令（`Session::commands`、`run_command` 只有 chat 调用）、工具的进度更新（`tool_execution_update`），以及扩展记下的状态与恢复时补写的调用结果（`run` 与 chat 各打一行）。扩展点在唯一的界面协议上只通了一部分，做 P7、P8 的验收时一起决定。
+- ACP 的通知队列无界：SDK（agent-client-protocol 5.0.0）的 `send_notification` 不等待，放进无界通道；客户端不读 stdout 时，流式更新积在内存里，而内核的事件通道是有界的。要有界得等 SDK 提供可以等待的发送。
 - 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）。
 - 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；FauxProvider 响应增量之间的取消；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
+- 待用户决定：`run -` 从 stdin 读提问不设上限（chat 每行至多 1 MiB）；调度器误把大文件接到 stdin 时，会整个读进内存、记入会话再发给模型。上限取多少待定。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（IM 服务丢消息已由 D33 的 backlog 解决）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
@@ -121,4 +124,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.52 · 2026年11月
+ROADMAP.md · v0.53 · 2026年11月
