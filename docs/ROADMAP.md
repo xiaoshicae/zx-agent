@@ -48,7 +48,7 @@
 | D31 | 模型请求的失败由 provider 归类：模型层 `zx-ai` 只定义中立的种类（`ProviderErrorKind`），重试与上下文溢出恢复只看种类，没有种类的失败不重试；HTTP 状态、错误码、`finish_reason` 与措辞属于哪一类，是协议与厂商的知识，只写在 provider 的 crate 里。种类与处理见 [REFERENCE.md](REFERENCE.md#模型请求失败) |
 | D32 | `zx-builtin` 与内核同一规则（D29）：设置类型自己校验，文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键，并给出程序的默认值（如落盘目录）；执行器自己决定 shell，并为提示词描述自己；命令策略的程序清单宿主可以追加，续写的提示语可以替换，都不新增配置键。用法见 [LIBRARY.md](LIBRARY.md) |
 | D33 | IM 服务收到的每条消息先写入 backlog（`zx-im` 的 trait `Backlog`；程序用会话目录下的文件实现，不新增依赖），再确认投递，写入会话、已回复或有意丢弃之后才删除；去重也只由它做，处理完的消息仍被认出一段时间（文件实现为 24 小时）。消息的凭证与配额一起作为输入的 hold 交给内核（D28）：`Session::send` 也接收带 hold 的输入，写入会话后才释放。停止时还没写入会话的消息留到下次启动，不再回复；启动时先按到达顺序处理它们。崩溃或停止恰好落在写入会话与删除记录之间时重复处理一次，先接受，不为此改会话格式。多副本时 backlog 与会话存储、对话归属、状态记录一起换成数据库实现。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
-| D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用三个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落），`set_*` 换掉唯一的那个（摘要器、对命令隐藏的变量、追踪导出），`register_*` 登记由配置按名字选用的实现；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。内置的实现也经 `register_*` 登记：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字；执行环境经 `register_executor`，`execution` 写它的名字，它声明是否隔离命令，`permissions.approveAll` 只能用于隔离的执行环境；IM 平台经程序 `zx-im` 的库中 `Program::register_platform`，`im.toml` 中服务自己的段以外，每个段配置以段名注册的平台。自建的 zx-im 程序经 `Program::customize` 用同样的动词给 `Application` 加部件，程序自己的部件在其后：平台的凭据与宿主隐藏的变量合并，不替换；追踪导出归程序。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
+| D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用三个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落、对命令隐藏的变量），`set_*` 换掉唯一的那个（摘要器、追踪导出），`register_*` 登记由配置按名字选用的实现；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。内置的实现也经 `register_*` 登记：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字；执行环境经 `register_executor`，`execution` 写它的名字，它声明是否隔离命令，`permissions.approveAll` 只能用于隔离的执行环境；IM 平台经程序 `zx-im` 的库中 `Program::register_platform`，`im.toml` 中服务自己的段以外，每个段配置以段名注册的平台。自建的 zx-im 程序经 `Program::customize` 用同样的动词给 `Application` 加部件，程序自己的部件在其后：平台的凭据与宿主隐藏的变量合并，不替换；追踪导出归程序。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
 | D35 | 被取消的运行为整批工具调用都写下结果：还没开始的记为未执行，执行中被打断的按工具有无副作用说明；只有运行没能写下结果时（崩溃、宿主丢弃 `Run`、会话写入失败）与失败或被取消的回答里的调用，才由下一次运行补写（不变量 10）。被取消打断的钩子回调不算钩子失败，不发 `hook_failed`。行为见 [REFERENCE.md](REFERENCE.md) 的“会话文件” |
 
 ## 4. 当前阶段
@@ -98,6 +98,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 | 2026-11-02 | 摘要评测，两个模型各三次 | ⚑ D:5/CHINA FLAG: `deepseek-chat` 三次通过；⚑ D:5/CHINA FLAG: `deepseek-flash` 因推理用满默认 2048 token 的输出预算而失败，调高预算后尚未运行 |
 | — | `provider.systemUpdates = "inline"` | 只在一个服务上验证过 |
 | — | `provider.api = "anthropic"` | 只对模拟服务（`crates/zx-agent/tests/anthropic_mock.rs`）测试过，没有调用真实 API |
+| 2026-11-19 | 经 Anthropic provider 向 `claude-haiku-5-5` 验证 `thinking.block_binding`（计划三次请求：产生思考，再以 `"error"` 与 `"drop_block"` 各重放一次改过开头的对话） | 未能进行：第一个请求返回 400 “credit balance is too low”，没有产生用量，其余两次没有发出；这项配置仍只经单元测试与加载检查 |
 | — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`crates/zx-cli/tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
 | 2026-11-01 | `deploy/kubernetes/` 在本机 Docker Desktop 的 Kubernetes v1.36.1（2 个 arm64 节点，local-path ext4），假模型 | 镜像、只读账号、run、chat 审批、`operator.yaml` 的每项写操作、定时巡检、脱敏、会话文件锁与清理均符合预期；多集群由同一集群扮演远端，新增集群约 1 分钟后生效。读 agent 自身 `/proc/<pid>/environ` 被拒一项在 agent 不再设为不可 dump 后不成立，未重测 |
 | — | IM 组件（当时名为 `serve`，此后改为子命令 `im`、再拆为程序 `zx-im`，都未重测），Slack 指向不可达地址 | 启动、`/proc/1/environ` 中没有 API key、重试日志不含凭据、SIGTERM 后退出码 0、孤儿进程被回收、与 `multicluster` 组件共存 |
@@ -116,4 +117,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.48 · 2026年11月
+ROADMAP.md · v0.49 · 2026年11月
