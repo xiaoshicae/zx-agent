@@ -7,8 +7,8 @@
 //!
 //! A [`SessionStorage`] keeps the sessions, and the [`SessionLog`] it hands out keeps one
 //! session's entries: memory ([`MemoryStorage`]), session files (`JsonlStorage` of the
-//! zx-builtin crate), or a backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
-//! written.
+//! zx-builtin crate), or a backend of the host's choice. Only the current format,
+//! [`SESSION_VERSION`], is read and written.
 //!
 //! - `entry`: the header and the entries of the tree
 //! - `storage` and `log`: the interfaces of where sessions are kept: a storage of sessions,
@@ -309,9 +309,10 @@ impl Transcript {
 
     /// The rules every record follows, when it is appended and when a session is loaded.
     fn validate_entry(&self, entry: &Entry) -> Result<()> {
+        ensure!(!entry.id().is_empty(), "an entry has an empty ID");
         ensure!(
-            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
-            "duplicate or empty entry ID {:?}",
+            !self.index.contains_key(entry.id()),
+            "duplicate entry ID {:?}",
             entry.id()
         );
         if let Some(parent) = entry.parent_id() {
@@ -495,12 +496,15 @@ impl Transcript {
     }
 
     fn insert(&mut self, entry: Entry) {
-        let request_config = match &entry {
-            Entry::RequestConfig(_) => Some(self.entries.len()),
-            _ => entry
+        // A request configuration is in force from its own entry; any other entry inherits
+        // its parent's.
+        let request_config = if matches!(entry, Entry::RequestConfig(_)) {
+            Some(self.entries.len())
+        } else {
+            entry
                 .parent_id()
                 .and_then(|id| self.index.get(id))
-                .and_then(|&parent| self.request_configs[parent]),
+                .and_then(|&parent| self.request_configs[parent])
         };
         self.request_configs.push(request_config);
         let id = entry.id().to_string();

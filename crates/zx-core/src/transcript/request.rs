@@ -69,8 +69,8 @@ pub struct RequestStartedEntry {
 }
 
 impl Transcript {
-    /// Persist configuration changes and a dispatch checkpoint before a model call; any
-    /// failure prevents dispatch. The checkpoint records how to rebuild the messages, not the
+    /// Persist configuration changes and a request checkpoint before a model call; any
+    /// failure prevents the request. The checkpoint records how to rebuild the messages, not the
     /// messages: the caller sends the ones `source` names, as of the current leaf.
     pub(crate) async fn record_request(
         &mut self,
@@ -173,21 +173,21 @@ impl Transcript {
         // Check only what can fail: a projection can always be built, and building one for
         // every request record would clone the branch's messages once per record.
         if let RequestSource::Summary { compaction_id, .. } = &started.source {
-            let (_, compaction) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
-            Self::summary_instructions(compaction)?;
+            let (_, start) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+            Self::summary_instructions(start)?;
         }
         Ok(())
     }
 
-    /// The instructions of the request that makes the summary of `compaction`. An error when
-    /// a summarizer of the host makes it: the session then holds no request for it.
-    fn summary_instructions(compaction: &CompactionStartedEntry) -> Result<&str> {
-        match &compaction.by {
+    /// The instructions of the request that makes the summary of the compaction `start`
+    /// began. An error when a summarizer of the host makes it: the session then holds no
+    /// request for it.
+    fn summary_instructions(start: &CompactionStartedEntry) -> Result<&str> {
+        match &start.by {
             SummarizedBy::Request(request) => Ok(&request.instructions),
-            SummarizedBy::Summarizer(name) => bail!(
-                "compaction {} is summarized by {name:?}, not by a request",
-                compaction.id
-            ),
+            SummarizedBy::Summarizer(name) => {
+                bail!("compaction {} is summarized by {name:?}, not by a request", start.id)
+            }
         }
     }
 
@@ -203,12 +203,12 @@ impl Transcript {
                 system_timestamp,
                 user_timestamp,
             } => {
-                let (_, started) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+                let (_, start) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
                 let source = self
-                    .compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)
+                    .compaction_source(start.parent_id.as_deref(), &start.first_kept_entry_id)
                     .with_context(|| format!("compaction {compaction_id}"))?;
                 Ok(summary_messages(
-                    Self::summary_instructions(started)?,
+                    Self::summary_instructions(start)?,
                     summary_input(&source)?,
                     *system_timestamp,
                     *user_timestamp,

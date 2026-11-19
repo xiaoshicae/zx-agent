@@ -330,7 +330,10 @@ mod tests {
         assert_eq!(usage.map(|usage| usage.input), Some(900));
         assert_eq!(rest, [latest]);
 
-        let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+        let started = transcript
+            .append_compaction_started(plan(&transcript, &kept))
+            .await
+            .unwrap();
         transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await
@@ -346,7 +349,10 @@ mod tests {
     async fn an_answer_recorded_after_a_compaction_measures_the_compacted_context() {
         let mut transcript = Transcript::in_memory(header());
         let (old, kept) = seeded(&mut transcript).await;
-        let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+        let started = transcript
+            .append_compaction_started(plan(&transcript, &kept))
+            .await
+            .unwrap();
         transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await

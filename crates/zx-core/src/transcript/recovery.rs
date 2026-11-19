@@ -82,10 +82,10 @@ impl Transcript {
         let path = self.branch_path_from(leaf);
         // The last message that is not a tool result. A custom message is a message to the
         // model too: calls before it are answered or abandoned, not interrupted.
-        let last_message = path.iter().rposition(|entry| match entry {
-            Entry::Message(entry) => !matches!(entry.message, Message::ToolResult(_)),
-            Entry::CustomMessage(_) => true,
-            _ => false,
+        let last_message = path.iter().rposition(|entry| {
+            entry
+                .projected()
+                .is_some_and(|message| !matches!(*message, Message::ToolResult(_)))
         });
         let Some(position) = last_message else {
             return Vec::new();

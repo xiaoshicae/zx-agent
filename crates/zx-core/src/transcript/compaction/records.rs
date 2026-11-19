@@ -13,7 +13,7 @@ use crate::transcript::{Entry, Transcript};
 impl Transcript {
     /// Persist the start, with who makes the summary, before the summary is asked for.
     /// Fails without writing anything if the plan does not match the branch.
-    pub(crate) async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
+    pub(crate) async fn append_compaction_started(&mut self, plan: CompactionPlan) -> Result<String> {
         self.append(Entry::CompactionStarted(CompactionStartedEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
@@ -50,7 +50,7 @@ impl Transcript {
     }
 
     /// Record a failed summary without replacing the current projection.
-    pub(crate) async fn fail_compaction(
+    pub(crate) async fn append_compaction_failed(
         &mut self,
         compaction_id: &str,
         error: String,
@@ -109,40 +109,40 @@ impl Transcript {
 
     /// The rules the start of a compaction follows when it is recorded: it says who makes
     /// the summary, and its plan matches the branch.
-    pub(in crate::transcript) fn validate_compaction_start(&self, entry: &CompactionStartedEntry) -> Result<()> {
-        match &entry.by {
+    pub(in crate::transcript) fn validate_compaction_start(&self, start: &CompactionStartedEntry) -> Result<()> {
+        match &start.by {
             SummarizedBy::Request(request) => {
                 ensure!(
                     request.max_tokens > 0,
                     "compaction {}: maxTokens must be greater than zero",
-                    entry.id
+                    start.id
                 );
                 ensure!(
                     !request.model.trim().is_empty(),
                     "compaction {}: the model is empty",
-                    entry.id
+                    start.id
                 );
             }
             SummarizedBy::Summarizer(name) => ensure!(
                 !name.trim().is_empty(),
                 "compaction {}: the summarizer has no name",
-                entry.id
+                start.id
             ),
         }
         let source = self
-            .compaction_source(entry.parent_id.as_deref(), &entry.first_kept_entry_id)
-            .with_context(|| format!("compaction {}", entry.id))?;
+            .compaction_source(start.parent_id.as_deref(), &start.first_kept_entry_id)
+            .with_context(|| format!("compaction {}", start.id))?;
         ensure!(
             source.iter().any(|item| !matches!(item.message, Message::System(_))),
             "compaction {}: no old messages to compact",
-            entry.id
+            start.id
         );
         ensure!(
-            source.iter().map(|item| &item.entry_id).eq(&entry.source_entry_ids),
+            source.iter().map(|item| &item.entry_id).eq(&start.source_entry_ids),
             "compaction {}: its sources are not the records before its boundary",
-            entry.id
+            start.id
         );
-        if let Some(kept) = &entry.kept_input_entry_id {
+        if let Some(kept) = &start.kept_input_entry_id {
             let latest = source
                 .iter()
                 .rev()
@@ -150,7 +150,7 @@ impl Transcript {
             ensure!(
                 latest.is_some_and(|item| item.entry_id == *kept),
                 "compaction {}: the input it keeps, {kept}, is not the latest input before its boundary",
-                entry.id
+                start.id
             );
         }
         Ok(())

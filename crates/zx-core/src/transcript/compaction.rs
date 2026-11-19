@@ -132,7 +132,7 @@ impl CompactionSummary {
 /// What a summary request was sent with, besides the records it read: enough to rebuild the
 /// request from the session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct SummaryRequest {
     pub provider: String,
     pub model: String,
@@ -201,7 +201,7 @@ pub struct CompactionFailedEntry {
     pub compaction_id: String,
     pub error: String,
     pub usage: Usage,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<AssistantMessage>,
 }
 

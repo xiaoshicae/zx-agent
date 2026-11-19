@@ -56,7 +56,10 @@ async fn a_compaction_replaces_only_the_old_prefix_and_preserves_all_system_upda
     transcript.append_message(second_system.clone()).await.unwrap();
     let kept = transcript.append_message(Message::user("latest input")).await.unwrap();
     let raw = transcript.raw_projection();
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     let done = transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -83,10 +86,13 @@ async fn unfinished_and_failed_compactions_do_not_change_the_context() {
     let mut transcript = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut transcript).await;
     let before = transcript.messages();
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     assert_eq!(transcript.messages(), before);
     transcript
-        .fail_compaction(&started, "cancelled".into(), Usage::default(), None)
+        .append_compaction_failed(&started, "cancelled".into(), Usage::default(), None)
         .await
         .unwrap();
     assert_eq!(transcript.messages(), before);
@@ -104,7 +110,10 @@ async fn unfinished_and_failed_compactions_do_not_change_the_context() {
 async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -116,7 +125,7 @@ async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() 
         .await
         .unwrap_err();
     let failed = transcript
-        .fail_compaction(&started, "late".into(), Usage::default(), None)
+        .append_compaction_failed(&started, "late".into(), Usage::default(), None)
         .await
         .unwrap_err();
 
@@ -129,7 +138,10 @@ async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() 
 async fn compactions_are_branch_local_and_references_to_other_branches_are_rejected() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     let done = transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -151,7 +163,7 @@ async fn compactions_are_branch_local_and_references_to_other_branches_are_rejec
     );
     let mut invalid = plan(&transcript, &other);
     invalid.first_kept_entry_id = kept;
-    assert!(transcript.begin_compaction(invalid).await.is_err());
+    assert!(transcript.append_compaction_started(invalid).await.is_err());
     transcript.branch(&done).unwrap();
     assert_eq!(transcript.messages(), compacted);
 }
@@ -160,7 +172,10 @@ async fn compactions_are_branch_local_and_references_to_other_branches_are_rejec
 async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -180,7 +195,10 @@ async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_appli
 async fn omitting_the_first_kept_message_keeps_the_summary_in_place_of_the_old_prefix() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -199,7 +217,10 @@ async fn omitting_the_first_kept_message_keeps_the_summary_in_place_of_the_old_p
 async fn a_compaction_cannot_finish_after_its_source_was_edited_during_the_summary_request() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     transcript
         .append_context_edit(&old, Some("corrected observation".into()))
         .await
@@ -217,7 +238,10 @@ async fn a_compaction_cannot_finish_after_its_source_was_edited_during_the_summa
 async fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
     let mut transcript = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     let count = transcript.entries().len();
     for invalid in [
         summary("unknown"),
@@ -243,7 +267,7 @@ async fn an_invalid_plan_writes_nothing() {
     let (_, kept) = seeded(&mut transcript).await;
     let mut invalid = plan(&transcript, &kept);
     invalid.source_entry_ids.push("invented".into());
-    assert!(transcript.begin_compaction(invalid).await.is_err());
+    assert!(transcript.append_compaction_started(invalid).await.is_err());
     assert_eq!(transcript.entries().len(), 2);
 }
 
@@ -251,7 +275,10 @@ async fn an_invalid_plan_writes_nothing() {
 async fn serialized_compaction_records_use_camel_case_fields_and_snake_case_tags() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
-    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
     transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
@@ -272,16 +299,16 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
     let by_model = plan(&transcript, &kept);
-    let asked = transcript.begin_compaction(by_model).await.unwrap();
+    let asked = transcript.append_compaction_started(by_model).await.unwrap();
     transcript
-        .fail_compaction(&asked, "invalid".into(), Usage::default(), None)
+        .append_compaction_failed(&asked, "invalid".into(), Usage::default(), None)
         .await
         .unwrap();
     let by_summarizer = CompactionPlan {
         by: SummarizedBy::Summarizer("notes".into()),
         ..plan(&transcript, &kept)
     };
-    let made = transcript.begin_compaction(by_summarizer).await.unwrap();
+    let made = transcript.append_compaction_started(by_summarizer).await.unwrap();
     transcript
         .append_compaction(&made, summary(&old), Usage::default())
         .await
@@ -324,14 +351,14 @@ async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
         by: SummarizedBy::Summarizer(" ".into()),
         ..plan(&transcript, &kept)
     };
-    let error = transcript.begin_compaction(nameless).await.unwrap_err();
+    let error = transcript.append_compaction_started(nameless).await.unwrap_err();
     assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
 
     let named = CompactionPlan {
         by: SummarizedBy::Summarizer("notes".into()),
         ..plan(&transcript, &kept)
     };
-    let started = transcript.begin_compaction(named).await.unwrap();
+    let started = transcript.append_compaction_started(named).await.unwrap();
     let request = Request {
         model: "m".into(),
         messages: Vec::new(),
@@ -405,7 +432,7 @@ async fn a_compaction_inside_a_run_keeps_the_input_of_that_run_before_its_summar
         kept_input_entry_id: Some(earlier.clone()),
         ..plan(&transcript, &kept)
     };
-    let error = transcript.begin_compaction(wrong).await.unwrap_err();
+    let error = transcript.append_compaction_started(wrong).await.unwrap_err();
     assert!(
         format!("{error:#}").contains("is not the latest input before its boundary"),
         "{error:#}"
@@ -415,7 +442,7 @@ async fn a_compaction_inside_a_run_keeps_the_input_of_that_run_before_its_summar
         kept_input_entry_id: Some(task.clone()),
         ..plan(&transcript, &kept)
     };
-    let started = transcript.begin_compaction(inside).await.unwrap();
+    let started = transcript.append_compaction_started(inside).await.unwrap();
     transcript
         .append_compaction(&started, summary(&first_call), Usage::default())
         .await
@@ -467,8 +494,16 @@ async fn the_kept_tail_never_splits_an_assistant_tool_result_exchange() {
         }))
         .await
         .unwrap();
-    assert!(transcript.begin_compaction(plan(&transcript, &result)).await.is_err());
-    let started = transcript.begin_compaction(plan(&transcript, &call)).await.unwrap();
+    assert!(
+        transcript
+            .append_compaction_started(plan(&transcript, &result))
+            .await
+            .is_err()
+    );
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &call))
+        .await
+        .unwrap();
     transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await

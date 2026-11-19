@@ -337,7 +337,7 @@ impl<'a> Compactor<'a> {
         };
         let id = self
             .transcript
-            .begin_compaction(plan)
+            .append_compaction_started(plan)
             .await
             .context("cannot persist compaction start")?;
         let ask = match candidate.source {
@@ -558,7 +558,7 @@ impl<'a> Compactor<'a> {
         };
         if let Err(write_error) = self
             .transcript
-            .fail_compaction(&open.id, error.clone(), usage.clone(), response)
+            .append_compaction_failed(&open.id, error.clone(), usage.clone(), response)
             .await
         {
             error = format!("cannot persist compaction failure: {write_error:#}; {error}");

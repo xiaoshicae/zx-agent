@@ -59,7 +59,10 @@ impl ResponseBytes {
                 ContentBlock::ToolCall(ToolCall {
                     id, name, arguments, ..
                 }) => {
-                    let call = id.len() + name.len() + arguments.to_string().len();
+                    let call = id
+                        .len()
+                        .saturating_add(name.len())
+                        .saturating_add(arguments.to_string().len());
                     bytes.answer = bytes.answer.saturating_add(call);
                 }
                 ContentBlock::Thinking { thinking, .. } => {

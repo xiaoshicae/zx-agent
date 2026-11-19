@@ -146,11 +146,11 @@ pub(super) fn texts(transcript: &Transcript) -> Vec<String> {
     transcript
         .messages()
         .iter()
-        .map(|m| match m {
+        .map(|message| match message {
             Message::System(system) => format!("system:{}", system.sections.len()),
             Message::User { content, .. } => content.clone(),
-            Message::Assistant(a) => a.text(),
-            Message::ToolResult(r) => r.content.clone(),
+            Message::Assistant(answer) => answer.text(),
+            Message::ToolResult(result) => result.content.clone(),
         })
         .collect()
 }

@@ -188,12 +188,12 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         }),
         input_bytes: 1,
     };
-    let started = transcript.begin_compaction(plan()).await.unwrap();
+    let started = transcript.append_compaction_started(plan()).await.unwrap();
     transcript
-        .fail_compaction(&started, "invalid".into(), Usage::default(), None)
+        .append_compaction_failed(&started, "invalid".into(), Usage::default(), None)
         .await
         .unwrap();
-    let started = transcript.begin_compaction(plan()).await.unwrap();
+    let started = transcript.append_compaction_started(plan()).await.unwrap();
     let summary = CompactionSummary {
         facts: vec![SummaryFact {
             text: "fact".into(),
@@ -432,20 +432,20 @@ async fn context_edits_cannot_target_system_messages() {
 #[tokio::test]
 async fn branches_select_a_path_and_edits_are_branch_local() {
     let mut transcript = Transcript::in_memory(header());
-    let q = transcript.append_message(Message::user("q")).await.unwrap();
-    let a = transcript.append_message(assistant("a")).await.unwrap();
-    transcript.append_context_edit(&a, None).await.unwrap();
+    let question = transcript.append_message(Message::user("q")).await.unwrap();
+    let answer = transcript.append_message(assistant("a")).await.unwrap();
+    transcript.append_context_edit(&answer, None).await.unwrap();
     transcript.append_message(Message::user("old branch")).await.unwrap();
     assert_eq!(texts(&transcript), ["q", "old branch"]);
 
-    transcript.branch(&a).unwrap();
+    transcript.branch(&answer).unwrap();
     transcript.append_message(Message::user("new branch")).await.unwrap();
-    // The edit lives on the old branch, so `a` is visible again here.
+    // The edit lives on the old branch, so the answer is visible again here.
     assert_eq!(texts(&transcript), ["q", "a", "new branch"]);
     assert!(transcript.append_context_edit("missing", None).await.is_err());
-    transcript.branch(&q).unwrap();
+    transcript.branch(&question).unwrap();
     assert!(
-        transcript.append_context_edit(&a, None).await.is_err(),
+        transcript.append_context_edit(&answer, None).await.is_err(),
         "target not on the current branch"
     );
 }

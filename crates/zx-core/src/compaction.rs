@@ -100,7 +100,10 @@ impl Config {
     /// Whether a token trigger lies above the recent messages a summary keeps, as
     /// `trigger_bytes` must: a summary could otherwise never bring the context under it.
     fn leaves_room(trigger_tokens: u64, keep_recent_bytes: usize) -> bool {
-        trigger_tokens.saturating_mul(BYTES_PER_TOKEN as u64) > keep_recent_bytes as u64
+        // Tokens beyond `usize` take more bytes than any budget holds.
+        usize::try_from(trigger_tokens).map_or(true, |tokens| {
+            tokens.saturating_mul(BYTES_PER_TOKEN) > keep_recent_bytes
+        })
     }
 
     /// Reject budgets that cannot make progress or cannot bound external waiting.
@@ -342,7 +345,8 @@ pub(crate) enum End {
     },
     /// The compaction failed, for this reason, and left the context as it was.
     Failed(String),
-    /// The run was cancelled before the compaction completed; the text says where.
+    /// The run was cancelled before the compaction completed: the text is `compaction
+    /// cancelled`, or the failure that came with the cancellation.
     Cancelled(String),
     /// The session could not record a step of the compaction, so a run must stop: what it
     /// does next could not be recorded either.
@@ -406,7 +410,8 @@ pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
 /// The tokens `bytes` of serialized context are estimated to hold when no answer measures
 /// them, such as right after a compaction ([`context_tokens`]).
 fn estimated_tokens(bytes: usize) -> u64 {
-    bytes.div_ceil(BYTES_PER_TOKEN) as u64
+    // A `usize` fits in a `u64` on every target Rust supports; otherwise the count saturates.
+    u64::try_from(bytes.div_ceil(BYTES_PER_TOKEN)).unwrap_or(u64::MAX)
 }
 
 /// Bytes of one message as a model may see it.

@@ -27,6 +27,7 @@ impl SessionName {
         (!name.is_empty()).then(|| Self(name.to_string()))
     }
 
+    /// The name as text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -34,8 +35,8 @@ impl SessionName {
 
 /// Control characters, line breaks among them, and the Unicode line and paragraph
 /// separators, which are not control characters but end a line all the same.
-fn breaks_line(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+fn breaks_line(character: char) -> bool {
+    character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
 }
 
 impl TryFrom<String> for SessionName {

@@ -49,9 +49,7 @@ impl SessionHeader {
             labels: BTreeMap::new(),
         }
     }
-}
 
-impl SessionHeader {
     /// Fails for a session of another format than [`SESSION_VERSION`], which is neither read
     /// nor written: a storage refuses to create one, and loading refuses to read one.
     pub fn check_version(&self) -> Result<()> {
@@ -164,9 +162,9 @@ impl Entry {
         match self {
             Self::Message(entry) => &entry.id,
             Self::ContextEdit(entry) => &entry.id,
-            Self::CompactionFailed(entry) => &entry.id,
-            Self::Compaction(entry) => &entry.id,
             Self::CompactionStarted(entry) => &entry.id,
+            Self::Compaction(entry) => &entry.id,
+            Self::CompactionFailed(entry) => &entry.id,
             Self::RequestConfig(entry) => &entry.id,
             Self::RequestStarted(entry) => &entry.id,
             Self::ToolCallStarted(entry) => &entry.id,
@@ -181,9 +179,9 @@ impl Entry {
         match self {
             Self::Message(entry) => entry.parent_id.as_deref(),
             Self::ContextEdit(entry) => entry.parent_id.as_deref(),
-            Self::CompactionFailed(entry) => entry.parent_id.as_deref(),
-            Self::Compaction(entry) => entry.parent_id.as_deref(),
             Self::CompactionStarted(entry) => entry.parent_id.as_deref(),
+            Self::Compaction(entry) => entry.parent_id.as_deref(),
+            Self::CompactionFailed(entry) => entry.parent_id.as_deref(),
             Self::RequestConfig(entry) => entry.parent_id.as_deref(),
             Self::RequestStarted(entry) => entry.parent_id.as_deref(),
             Self::ToolCallStarted(entry) => entry.parent_id.as_deref(),
@@ -234,9 +232,9 @@ impl Entry {
         match self {
             Self::Message(entry) => entry.timestamp,
             Self::ContextEdit(entry) => entry.timestamp,
-            Self::CompactionFailed(entry) => entry.timestamp,
-            Self::Compaction(entry) => entry.timestamp,
             Self::CompactionStarted(entry) => entry.timestamp,
+            Self::Compaction(entry) => entry.timestamp,
+            Self::CompactionFailed(entry) => entry.timestamp,
             Self::RequestConfig(entry) => entry.timestamp,
             Self::RequestStarted(entry) => entry.timestamp,
             Self::ToolCallStarted(entry) => entry.timestamp,
