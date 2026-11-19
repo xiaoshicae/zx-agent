@@ -13,7 +13,8 @@
 //! - `system_prompt`: the system prompt as named sections, recorded in the conversation
 //!
 //! and the modules a reader names by path:
-//! - [`provider`]: the provider contract and the bounded channel of a response's events
+//! - [`provider`]: the provider contract, the bounded channel of a response's events, and the
+//!   API key a provider authenticates with ([`ApiKey`])
 //! - [`retry`]: whether to try a failed request again, and how long to wait
 //! - `faux`: the scripted provider of tests, compiled only for this crate's tests and with
 //!   the feature `testing`, which the tests of the crates built on this one turn on
@@ -25,6 +26,6 @@ pub mod retry;
 mod system_prompt;
 mod types;
 
-pub use provider::{EventReceiver, Provider};
+pub use provider::{ApiKey, ApiKeySource, EventReceiver, Provider};
 pub use system_prompt::{PREAMBLE, SectionChange, SystemMessage, SystemPrompt};
 pub use types::*;

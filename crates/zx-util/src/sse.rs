@@ -1,10 +1,11 @@
-//! Minimal Server-Sent Events parser: yields the `data` payload of each event.
+//! Server-Sent Events: the `data` payload of each event of a stream, read incrementally with a
+//! byte limit per event. The providers of the model layer read their responses with it.
 
 /// Default maximum bytes in one SSE event, including its framing.
-pub(crate) const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 /// Incremental parser with a byte limit per event. Discard it after a parsing error.
-pub(crate) struct SseParser {
+pub struct SseParser {
     buffer: Vec<u8>,
     data: Vec<String>,
     event_bytes: usize,
@@ -19,7 +20,7 @@ impl Default for SseParser {
 
 impl SseParser {
     /// Limit each event, including unterminated lines and multi-line data fields.
-    pub(crate) fn new(max_event_bytes: usize) -> Self {
+    pub fn new(max_event_bytes: usize) -> Self {
         Self {
             buffer: Vec::new(),
             data: Vec::new(),
@@ -28,11 +29,12 @@ impl SseParser {
         }
     }
 
-    /// Feed raw bytes; returns the payloads of events completed by them.
+    /// Feed raw bytes; returns the payloads of events completed by them. Fails when an event
+    /// exceeds the byte limit, after which the parser is discarded.
     ///
     /// Only whole lines are decoded, and a newline byte never occurs inside a
     /// multi-byte UTF-8 sequence, so characters split across chunks stay intact.
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
         let mut events = Vec::new();
         // Scan each incoming byte once; only a partial line is carried across calls.
         for part in bytes.split_inclusive(|&byte| byte == b'\n') {
@@ -57,7 +59,7 @@ impl SseParser {
     }
 
     /// Flush an event left unterminated at end of stream.
-    pub(crate) fn finish(&mut self) -> Option<String> {
+    pub fn finish(&mut self) -> Option<String> {
         let tail = std::mem::take(&mut self.buffer);
         self.event_bytes = 0;
         keep_data(&mut self.data, &String::from_utf8_lossy(&tail));

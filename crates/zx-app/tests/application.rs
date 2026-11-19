@@ -2,12 +2,14 @@
 //! agent parts of its own.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 use zx_agent::ai::ToolCall;
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -15,9 +17,13 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::{SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
-use zx_app::{Application, Approvals, Overrides, SessionPlace};
+use zx_app::{
+    Application, Approvals, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
+    SessionPlace,
+};
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
+use zx_util::sync::lock;
 
 /// The value of a secret file of the configuration, which tool results must not show.
 const SECRET: &str = "s3cret-value-of-the-host";
@@ -27,8 +33,11 @@ fn configured() -> Config {
         model: Some("configured-model".into()),
         ..Config::default()
     };
-    config.provider.openai.base_url = "http://127.0.0.1:1/v1".into();
-    config.provider.api_key_env = "ZX_APPLICATION_TEST_UNUSED_KEY".into();
+    config
+        .provider
+        .options
+        .insert("baseUrl".into(), "http://127.0.0.1:1/v1".into());
+    config.provider.api_key_env = Some("ZX_APPLICATION_TEST_UNUSED_KEY".into());
     config
 }
 
@@ -55,7 +64,10 @@ async fn host(dir: &Path, front: &str, server: &MockServer) -> Application {
     let secret = dir.join("secret.txt");
     std::fs::write(&secret, SECRET).unwrap();
     let mut config = configured();
-    config.provider.openai.base_url = server.base_url.clone();
+    config
+        .provider
+        .options
+        .insert("baseUrl".into(), server.base_url.clone().into());
     config.secret_files.push(secret);
     let overrides = Overrides {
         cwd: Some(dir.to_path_buf()),
@@ -443,4 +455,200 @@ async fn the_summarizer_a_host_sets_is_the_agents() {
         .unwrap();
     // The kernel refuses it as it makes the agent: it is the one the agent was given.
     assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
+}
+
+/// A provider a host registers: a scripted model that answers with the `answer` of its keys.
+struct Scripted;
+
+impl ProviderFactory for Scripted {
+    fn api_key_env(&self) -> &str {
+        "ZX_APPLICATION_TEST_SCRIPTED_KEY"
+    }
+
+    fn build(&self, input: ProviderInput<'_>) -> anyhow::Result<BuiltProvider> {
+        let answer = input.options["answer"].as_str().unwrap_or_default();
+        Ok(BuiltProvider {
+            provider: Arc::new(FauxProvider::new(vec![FauxStep::text(answer)])),
+            session_cache_key: false,
+        })
+    }
+}
+
+/// `configured()` whose provider is `api`, with the keys of `text`.
+fn with_provider(api: &str, text: &str) -> Config {
+    let mut config = configured();
+    config.provider.api = api.into();
+    config.provider.options = toml::from_str(text).unwrap();
+    config
+}
+
+/// The answer of the agent of `app` to one prompt.
+async fn answer_of(app: Application) -> String {
+    let agent = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    let session = agent.create(None).await.unwrap();
+    session.send("hi").unwrap().wait().await.final_text
+}
+
+#[tokio::test]
+async fn config_toml_names_the_provider_a_host_registers_and_gives_it_its_keys() {
+    let config = with_provider("scripted", "answer = 'scripted hello'");
+    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_provider("scripted", Arc::new(Scripted));
+    assert_eq!(answer_of(app).await, "scripted hello");
+}
+
+#[tokio::test]
+async fn the_anthropic_provider_is_built_in() {
+    let server = MockServer::start(vec![Reply::Sse(vec![
+        json!({"type": "message_start", "message": {"id": "m", "model": "configured-model", "usage": {"input_tokens": 3}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "from claude"}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+        json!({"type": "message_stop"}),
+    ])])
+    .await;
+    let root = server.base_url.trim_end_matches("/v1");
+    let config = with_provider("anthropic", &format!("baseUrl = '{root}'"));
+    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap();
+    assert_eq!(answer_of(app).await, "from claude");
+    let request = &server.requests()[0];
+    assert_eq!(request.headers.lines().next(), Some("post /v1/messages"));
+    assert_eq!(request.body["model"], json!("configured-model"));
+}
+
+/// An executor a host registers: commands run on this machine, as with `local`, and each
+/// session it starts for is noted with the variables its commands must not see. It isolates
+/// commands when it says so.
+#[derive(Default)]
+struct Noting {
+    isolates: bool,
+    started: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+#[async_trait]
+impl ExecutorFactory for Noting {
+    fn isolates(&self) -> bool {
+        self.isolates
+    }
+
+    async fn start(&self, session: ExecutorSession<'_>) -> anyhow::Result<Arc<dyn Executor>> {
+        lock(&self.started).push((session.id.to_string(), session.hidden_env.to_vec()));
+        Ok(Arc::new(LocalExecutor {
+            hidden_env: session.hidden_env.to_vec(),
+        }))
+    }
+}
+
+/// `configured()` whose commands run where the executor registered under `name` says.
+fn executing(name: &str) -> Config {
+    Config {
+        execution: name.into(),
+        ..configured()
+    }
+}
+
+#[tokio::test]
+async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_session() {
+    let noting = Arc::new(Noting::default());
+    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_executor("noting", noting.clone());
+    let agent = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    let session = agent.create(None).await.unwrap();
+    let started = lock(&noting.started).clone();
+    assert_eq!(started.len(), 1, "{started:?}");
+    let (id, hidden_env) = &started[0];
+    assert_eq!(*id, session.id());
+    // Its commands must not see the API key, wherever they run.
+    assert!(
+        hidden_env.contains(&"ZX_APPLICATION_TEST_UNUSED_KEY".to_string()),
+        "{hidden_env:?}"
+    );
+}
+
+#[tokio::test]
+async fn approving_every_call_needs_an_executor_that_isolates_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    agent_in(dir.path(), "[permissions]\napproveAll = true\nask = []");
+    for (name, isolates, built) in [
+        ("local", false, false),
+        ("plain", false, false),
+        ("sandbox", true, true),
+    ] {
+        let mut app = Application::from_config(
+            executing(name),
+            Some(dir.path().to_path_buf()),
+            Overrides::default(),
+            Builtin::Unattended,
+        )
+        .await
+        .unwrap();
+        if name != "local" {
+            app = app.register_executor(
+                name,
+                Arc::new(Noting {
+                    isolates,
+                    ..Noting::default()
+                }),
+            );
+        }
+        let result = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+        match result {
+            Ok(_) => assert!(built, "{name}"),
+            Err(error) => {
+                assert!(!built, "{name}: {error:#}");
+                assert!(
+                    format!("{error:#}").contains("permissions.approveAll needs execution = \"container\""),
+                    "{name}: {error:#}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_name_no_factory_is_registered_under_or_two_are_fails_the_build() {
+    type Registering = fn(Application) -> Application;
+    let cases: [(Config, Registering, &str); 4] = [
+        (
+            with_provider("nowhere", ""),
+            |app| app,
+            "provider.api: no provider is registered under the name \"nowhere\"; use one of openai, anthropic",
+        ),
+        (
+            executing("kubernetes"),
+            |app| app,
+            "execution: no executor is registered under the name \"kubernetes\"; use one of local, container",
+        ),
+        (
+            configured(),
+            |app| app.register_provider("openai", Arc::new(Scripted)),
+            "more than one provider is registered under the name \"openai\"",
+        ),
+        (
+            configured(),
+            |app| app.register_executor("container", Arc::new(Noting::default())),
+            "more than one executor is registered under the name \"container\"",
+        ),
+    ];
+    for (config, register, expected) in cases {
+        let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+            .await
+            .unwrap();
+        let app = register(app);
+        let error = app
+            .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }

@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use serde_json::Value;
 use zx_ai::{ProviderError, ProviderErrorKind};
+use zx_util::error::with_causes;
 use zx_util::text::clip;
 
 use crate::config::OpenAiConfig;
@@ -159,23 +160,6 @@ async fn read_error_body(response: reqwest::Response, max_bytes: usize) -> Resul
         }
     }
     Ok(bytes)
-}
-
-/// `error` followed by its causes. reqwest's own message omits the cause, such as
-/// "Connection refused", which is what an unattended run needs for diagnosis. A cause whose
-/// text is already included is skipped.
-fn with_causes(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let cause_text = cause.to_string();
-        if !text.contains(&cause_text) {
-            text.push_str(": ");
-            text.push_str(&cause_text);
-        }
-        source = cause.source();
-    }
-    text
 }
 
 /// The wait a server asks for, in milliseconds: `retry-after-ms` in milliseconds, else

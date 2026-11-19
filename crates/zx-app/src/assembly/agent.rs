@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::config::{AgentDefinition, Config, HostTools, READ_SKILL, cost_budget, known_tool};
+use crate::config::{AgentDefinition, HostTools, READ_SKILL, cost_budget, known_tool};
 use crate::otel;
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::{Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
@@ -27,7 +26,8 @@ use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 use zx_util::env::env_value;
 
-use super::settings::BASE_URL_ENV;
+use super::execution::ExecutorFactory;
+use super::provider::{BuiltProvider, ProviderInput};
 use super::setup::{PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
@@ -81,8 +81,9 @@ impl ConfiguredAgent {
     /// `app` read and connected. Startup reads; no session exists yet.
     ///
     /// Configuration errors are reported here: an agent file or a tool setting that cannot
-    /// be used, a cost budget without prices, invalid provider settings, and a part of the
-    /// host's whose name another part goes by.
+    /// be used, a cost budget without prices, invalid provider settings, a provider or an
+    /// executor that no factory is registered for, approving every call where commands run
+    /// on this machine, and a part of the host's whose name another part goes by.
     pub(super) fn build(
         app: &Application,
         model: &str,
@@ -100,8 +101,23 @@ impl ConfiguredAgent {
             agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
             "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
         );
-        let (provider, api_key) = provider(config)?;
-        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let executor = executor(app, &agent)?;
+        let factory = app
+            .providers
+            .get(&config.provider.api)
+            .map_err(|error| anyhow::anyhow!("provider.api: {error}"))?;
+        let key_env = config.provider.api_key_env.as_deref().unwrap_or(factory.api_key_env());
+        // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
+        let api_key = env_value(key_env);
+        let BuiltProvider {
+            provider,
+            session_cache_key,
+        } = factory.build(ProviderInput {
+            options: &config.provider.options,
+            // Provider authentication and output filtering each need an owned copy of the key.
+            api_key: api_key.clone(),
+            reasoning: config.reasoning,
+        })?;
         let skills = skills_tool(&mut agent)?;
         let (policies, approvals) = policies(app, &mut agent, &host, approvals);
         // The host's tools that the agent enables, as it enables the built-in ones.
@@ -123,7 +139,7 @@ impl ConfiguredAgent {
             approvals,
             extensions: app.mcp.servers.iter().chain(&app.extensions).cloned().collect(),
             models,
-            session_cache_key: config.provider.openai.body.prompt_cache_key,
+            session_cache_key,
             limits: agent.limits,
             retry: config.provider.retry.clone(),
             compaction: agent.compaction,
@@ -133,9 +149,8 @@ impl ConfiguredAgent {
                 tools: agent.tools,
                 context: agent.context,
                 skills,
-                execution: config.execution,
-                container: config.container.clone(),
-                hidden_env: hidden_env(app),
+                executor,
+                hidden_env: hidden_env(app, key_env),
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
@@ -208,23 +223,6 @@ impl ConfiguredAgent {
 
 /// Refuse request fields that the reasoning level would also set: which one the server gets
 /// would not be clear from the configuration.
-fn check_reasoning_fields(config: &Config) -> Result<()> {
-    let body = &config.provider.openai.body;
-    if config.reasoning.is_some()
-        && let Some(field) = body
-            .reasoning_format
-            .fields()
-            .iter()
-            .find(|field| body.extra_fields.contains_key(**field))
-    {
-        anyhow::bail!(
-            "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
-            body.reasoning_format
-        );
-    }
-    Ok(())
-}
-
 /// The names of the host's own tools and of its extensions' tools, which the agent may name.
 fn host_tools(app: &Application) -> HostTools {
     HostTools {
@@ -238,13 +236,16 @@ fn host_tools(app: &Application) -> HostTools {
     }
 }
 
-/// Refuse a part of the host's whose name another part goes by already. A tool of the host
+/// Refuse a part of the host's whose name another part goes by already: a provider registered
+/// under a taken name, and the following. A tool of the host
 /// or of its extensions may not be named like a built-in tool, which a session gets only when
 /// it is made; tools that share a name otherwise, and extensions that do, the kernel refuses
 /// as the agent is made. Extensions name their own hooks and policies, so the host's hooks
 /// and policies may not be named like a built-in hook or policy, an extension, or another of
 /// the host's.
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
+    app.providers.check_names().map_err(anyhow::Error::msg)?;
+    app.executors.check_names().map_err(anyhow::Error::msg)?;
     for name in host.own.iter().chain(&host.extensions) {
         anyhow::ensure!(
             !known_tool(name),
@@ -267,6 +268,21 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The factory of the executor config.toml names in `execution`. Fails when there is none,
+/// and when `agent` approves every call but the factory does not isolate commands.
+fn executor(app: &Application, agent: &AgentDefinition) -> Result<Arc<dyn ExecutorFactory>> {
+    let name = &app.settings.config.execution;
+    let factory = app
+        .executors
+        .get(name)
+        .map_err(|error| anyhow::anyhow!("execution: {error}"))?;
+    anyhow::ensure!(
+        !agent.permissions.approve_all || factory.isolates(),
+        "permissions.approveAll needs execution = \"container\" in config.toml, or another executor that isolates commands: without a sandbox, every command would run on this machine unasked"
+    );
+    Ok(Arc::clone(factory))
 }
 
 /// The agent `app` runs, with the host's tools and budgets over it, validated: explicit
@@ -304,22 +320,6 @@ fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) -> Result<()> 
         agent.limits.cost_budget = cost_budget(amount)?;
     }
     Ok(())
-}
-
-/// The provider of config.toml, and the API key it authenticates with.
-fn provider(config: &Config) -> Result<(OpenAiCompatible, Option<String>)> {
-    // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
-    let api_key = env_value(&config.provider.api_key_env);
-    check_reasoning_fields(config)?;
-    // Provider authentication and output filtering each need an owned copy of the key.
-    let provider = OpenAiCompatible::new(OpenAiConfig {
-        api_key: api_key.clone().into(),
-        ..config.provider.openai.clone()
-    })
-    .with_context(|| {
-        format!("invalid [provider] settings in config.toml, or {BASE_URL_ENV} in place of its baseUrl")
-    })?;
-    Ok((provider, api_key))
 }
 
 /// read_skill with the catalog of its skills for the prompt, when the agent enables it and
@@ -410,8 +410,8 @@ fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) ->
 /// Variables commands must not inherit: the API key, the other credentials and the headers
 /// that authenticate to a trace collector. `env` would put them into the session file and
 /// the context.
-fn hidden_env(app: &Application) -> Vec<String> {
-    std::iter::once(app.settings.config.provider.api_key_env.clone())
+fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
+    std::iter::once(key_env.to_string())
         .chain(app.hidden_env.iter().cloned())
         .chain(app.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
@@ -470,36 +470,4 @@ fn rules_policy(
         decision: PolicyDecision::Allow,
     });
     Some(RulePolicy::new(rules).auto_approve(auto_approve))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config(text: &str) -> Config {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, text).unwrap();
-        Config::load(&path).unwrap()
-    }
-
-    #[test]
-    fn request_fields_that_the_reasoning_level_sets_are_refused() {
-        for (text, expected) in [
-            (
-                "reasoning = 'low'\n[provider]\nrequestFields = { reasoning_effort = 'high' }",
-                "provider.requestFields.reasoning_effort conflicts with reasoning",
-            ),
-            (
-                "reasoning = 'low'\n[provider]\nreasoningFormat = 'thinking'\n\
-                 requestFields = { thinking = { type = 'enabled' } }",
-                "provider.requestFields.thinking conflicts with reasoning",
-            ),
-        ] {
-            let error = format!("{:#}", check_reasoning_fields(&config(text)).unwrap_err());
-            assert!(error.contains(expected), "{text}: {error}");
-        }
-        // Without a reasoning level, the field is the only one that sets it.
-        check_reasoning_fields(&config("[provider]\nrequestFields = { reasoning_effort = 'high' }")).unwrap();
-    }
 }

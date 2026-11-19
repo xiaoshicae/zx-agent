@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::config::{ContainerSettings, Execution, ProjectContext, READ_SKILL};
+use crate::config::{ProjectContext, READ_SKILL};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, SpillOutputs};
 use zx_agent::builtin::tools::{self, EXECUTOR_TOOL_NAMES, FileMutationQueue, READ_OUTPUT};
@@ -18,7 +18,7 @@ use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 
 use super::SessionPlace;
-use super::execution::{check_session_outside, executor};
+use super::execution::{ExecutorFactory, ExecutorSession};
 
 /// What each session of an agent gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
@@ -33,14 +33,14 @@ pub(super) struct PerSession {
     /// The sessions share the tool; it is listed with each session's own, which keeps its
     /// place among them.
     pub(super) skills: Option<(Arc<dyn Tool>, String)>,
-    pub(super) execution: Execution,
-    pub(super) container: ContainerSettings,
-    /// Variables that commands on this machine must not inherit.
+    /// What starts each session's executor: the one config.toml names in `execution`.
+    pub(super) executor: Arc<dyn ExecutorFactory>,
+    /// Variables that commands must not see.
     pub(super) hidden_env: Vec<String>,
     pub(super) tool_timeout: Duration,
     /// Where long tool results go when the agent enables read_output.
     pub(super) tool_output: OutputStoreConfig,
-    /// Where the sessions are kept, which a container must not be able to read.
+    /// Where the sessions are kept, which a sandbox must not be able to read.
     pub(super) place: SessionPlace,
     /// The queue of changes to each file, shared by every session of the process.
     pub(super) file_queue: Arc<FileMutationQueue>,
@@ -68,8 +68,7 @@ impl SessionSetup for PerSession {
             .collect()
     }
 
-    /// Startup reads, and in container mode starting the container. Configuration errors
-    /// are reported before the container starts.
+    /// Startup reads, then the start of the session's executor, such as its container.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts> {
         let cwd = Path::new(&header.cwd);
         // A new session's directory was just resolved; one that is opened again may have
@@ -98,17 +97,16 @@ impl SessionSetup for PerSession {
             hooks.push(SPILL_OUTPUTS, Arc::new(spill));
             host.push(Arc::new(reader));
         }
-        if self.execution == Execution::Container {
-            check_session_outside(self.place.location(cwd).as_deref(), cwd)?;
-        }
-        let executor = executor(
-            self.execution,
-            &self.container,
-            cwd,
-            &header.id,
-            self.hidden_env.clone(),
-        )
-        .await?;
+        let records = self.place.location(cwd);
+        let executor = self
+            .executor
+            .start(ExecutorSession {
+                cwd,
+                id: &header.id,
+                records: records.as_deref(),
+                hidden_env: &self.hidden_env,
+            })
+            .await?;
         let environment = executor.environment_section(cwd);
         // The agent's tools were checked when it was loaded: the others are those of `host`.
         let on_executor: Vec<String> = self

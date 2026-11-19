@@ -15,6 +15,7 @@ publish = false
 [workspace.dependencies]
 zx-agent = { path = "crates/zx-agent" }
 zx-ai = { path = "crates/zx-ai" }
+zx-ai-anthropic = { path = "crates/zx-ai-anthropic" }
 zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-app = { path = "crates/zx-app" }
 zx-builtin = { path = "crates/zx-builtin" }

@@ -4,9 +4,14 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use zx_util::text::prefix_noted;
 
 use super::system_prompt::SystemMessage;
+
+/// The most of an invalid argument text that its error keeps: enough for the model to see
+/// what it sent, bounded so the session and the next request do not grow with it.
+const MAX_RECEIVED_ARGUMENTS: usize = 2048;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
@@ -164,6 +169,32 @@ pub struct ToolCall {
     /// Set when the streamed arguments were not valid JSON (pi: `ToolCall.argumentsError`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments_error: Option<String>,
+}
+
+impl ToolCall {
+    /// The call `id` to the tool `name` whose arguments streamed as the JSON text `raw`, for
+    /// providers: no text is an empty object, and text that does not parse is an empty object
+    /// with an `arguments_error` the model reads, quoting what it sent.
+    pub fn streamed(id: String, name: String, raw: &str) -> Self {
+        let (arguments, arguments_error) = if raw.trim().is_empty() {
+            (json!({}), None)
+        } else {
+            match serde_json::from_str::<Value>(raw) {
+                Ok(value) => (value, None),
+                Err(error) => {
+                    let received = prefix_noted(raw, MAX_RECEIVED_ARGUMENTS, |_, _| "…".to_string());
+                    let error = format!("arguments are not valid JSON: {error}\n\nReceived arguments:\n{received}");
+                    (json!({}), Some(error))
+                }
+            }
+        };
+        Self {
+            id,
+            name,
+            arguments,
+            arguments_error,
+        }
+    }
 }
 
 /// Why a model request failed, as its provider reports it: the kind of failure, from which

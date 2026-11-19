@@ -2,16 +2,14 @@
 //! it is: what it leaves out keeps the built-in default. What a host and the environment
 //! variables say over it is laid on by the assembly (`crate::assembly`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-use super::read_text;
-use zx_agent::ai::openai::OpenAiConfig;
-use zx_agent::ai::retry::RetryPolicy;
+use super::provider::ProviderSettings;
+use super::{parsed, read_text};
 use zx_agent::ai::{ModelCost, ModelMeta, Reasoning};
 use zx_agent::builtin::executor::{Access, ContainerConfig, InvalidContainerConfig};
 use zx_agent::builtin::mcp::ServerConfig;
@@ -19,25 +17,19 @@ use zx_agent::builtin::output_store::{
     InvalidOutputStoreConfig, MAX_FILE_BYTES, MIN_THRESHOLD_BYTES, OutputStoreConfig,
 };
 
-/// The variable holding the API key when config.toml names none.
-const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
-
 /// Where long tool results are stored unless `toolOutput.directory` says otherwise: relative
 /// to the working directory of each session.
 const DEFAULT_TOOL_OUTPUT_DIRECTORY: &str = ".zx-agent/outputs";
 
-/// Where bash and read_file run.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Execution {
-    /// On this machine, as the agent's user.
-    #[default]
-    Local,
-    /// In an isolated Docker container; see [`ContainerSettings`].
-    Container,
-}
+/// The built-in executor that runs commands on this machine, as the agent's user: the one
+/// config.toml means unless `execution` names another.
+pub const LOCAL: &str = "local";
 
-/// Container settings for `Execution::Container`, the `[container]` table; unset values use
+/// The built-in executor that runs commands in a Docker container started for each session,
+/// with the settings of [`ContainerSettings`].
+pub const CONTAINER: &str = "container";
+
+/// Container settings for `execution = "container"`, the `[container]` table; unset values use
 /// the executor defaults.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -81,29 +73,6 @@ pub struct McpServer {
     pub timeout_secs: Option<u64>,
 }
 
-/// The `[provider]` table over the built-in defaults, the provider's own: how the model is
-/// reached.
-#[derive(Clone, Debug)]
-pub struct ProviderSettings {
-    /// Where requests go and how they are written; the API key is not here: the assembly
-    /// reads it from the variable `api_key_env` names.
-    pub openai: OpenAiConfig,
-    /// Name of the variable holding the API key.
-    pub api_key_env: String,
-    /// How transient provider errors are retried; the file sets only the count.
-    pub retry: RetryPolicy,
-}
-
-impl Default for ProviderSettings {
-    fn default() -> Self {
-        Self {
-            openai: OpenAiConfig::default(),
-            api_key_env: DEFAULT_API_KEY_ENV.to_string(),
-            retry: RetryPolicy::default(),
-        }
-    }
-}
-
 /// `config.toml`, checked: the environment every agent of this user runs in.
 #[derive(Debug)]
 pub struct Config {
@@ -127,9 +96,11 @@ pub struct Config {
     pub secret_files: Vec<PathBuf>,
     /// How the model is reached.
     pub provider: ProviderSettings,
-    /// Where bash and read_file run.
-    pub execution: Execution,
-    /// Used when `execution` is `Container`.
+    /// Where the tools that run commands and touch files run: the executor, by the name it is
+    /// registered under: [`LOCAL`], [`CONTAINER`], or one a host registers
+    /// ([`Application::register_executor`](crate::Application::register_executor)).
+    pub execution: String,
+    /// Used when `execution` is [`CONTAINER`].
     pub container: ContainerSettings,
     /// Where long tool results are saved when read_output is enabled.
     pub tool_output: OutputStoreConfig,
@@ -151,7 +122,7 @@ impl Default for Config {
             approval_timeout_secs: None,
             secret_files: Vec::new(),
             provider: ProviderSettings::default(),
-            execution: Execution::default(),
+            execution: LOCAL.to_string(),
             container: ContainerSettings::default(),
             tool_output: OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY),
             models: HashMap::new(),
@@ -169,29 +140,13 @@ struct RawConfig {
     tool_timeout_secs: Option<u64>,
     approval_timeout_secs: Option<u64>,
     secret_files: Vec<PathBuf>,
-    provider: RawProvider,
-    // Unknown backends fail to deserialize instead of being ignored.
-    execution: Option<Execution>,
+    /// The provider's table, which the provider reads but for the keys zx-app takes out.
+    provider: toml::Table,
+    execution: Option<String>,
     container: ContainerSettings,
     tool_output: RawToolOutput,
     models: Vec<RawModel>,
     mcp: Vec<McpServer>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawProvider {
-    base_url: Option<String>,
-    api_key_env: Option<String>,
-    system_updates: Option<String>,
-    reasoning_format: Option<String>,
-    max_tokens_field: Option<String>,
-    fill_missing_reasoning: bool,
-    prompt_cache_key: bool,
-    request_fields: serde_json::Map<String, serde_json::Value>,
-    headers: BTreeMap<String, String>,
-    idle_timeout_secs: Option<u64>,
-    max_retries: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -269,13 +224,14 @@ impl Config {
         ] {
             ensure!(value != Some(0), "{key} must be at least 1");
         }
+        ensure!(!self.execution.trim().is_empty(), "execution must not be empty");
         self.provider.validate()?;
         for (id, meta) in &self.models {
             check_model(id, meta)?;
         }
         self.tool_output.validate().map_err(|error| tool_output_error(&error))?;
         // Without an image no container starts, and the rest of [container] is not used.
-        if self.execution == Execution::Container || self.container.image.is_some() {
+        if self.execution == CONTAINER || self.container.image.is_some() {
             self.container.container_config()?;
         }
         self.mcp_tool_names()?;
@@ -358,8 +314,8 @@ impl RawConfig {
             tool_timeout_secs: self.tool_timeout_secs,
             approval_timeout_secs: self.approval_timeout_secs,
             secret_files: secret_files(self.secret_files, parent)?,
-            provider: self.provider.into_settings()?,
-            execution: self.execution.unwrap_or_default(),
+            provider: ProviderSettings::from_table(self.provider)?,
+            execution: self.execution.unwrap_or_else(|| LOCAL.to_string()),
             container: self.container,
             tool_output: self.tool_output.into_config(parent)?,
             models: HashMap::new(),
@@ -380,74 +336,6 @@ impl RawConfig {
             );
         }
         Ok(config)
-    }
-}
-
-impl RawProvider {
-    /// The settings over the defaults, checked.
-    fn into_settings(self) -> Result<ProviderSettings> {
-        let mut settings = ProviderSettings::default();
-        let ProviderSettings {
-            openai,
-            api_key_env,
-            retry,
-        } = &mut settings;
-        if let Some(url) = self.base_url {
-            openai.base_url = url;
-        }
-        if let Some(env) = self.api_key_env {
-            *api_key_env = env;
-        }
-        if let Some(updates) = parsed("provider.systemUpdates", self.system_updates)? {
-            openai.body.system_updates = updates;
-        }
-        if let Some(format) = parsed("provider.reasoningFormat", self.reasoning_format)? {
-            openai.body.reasoning_format = format;
-        }
-        if let Some(field) = parsed("provider.maxTokensField", self.max_tokens_field)? {
-            openai.body.max_tokens_field = field;
-        }
-        openai.body.fill_missing_reasoning = self.fill_missing_reasoning;
-        openai.body.prompt_cache_key = self.prompt_cache_key;
-        openai.body.extra_fields = self.request_fields;
-        openai.headers = self.headers.into_iter().collect();
-        if let Some(secs) = self.idle_timeout_secs {
-            openai.idle_timeout = Duration::from_secs(secs);
-        }
-        if let Some(retries) = self.max_retries {
-            retry.max_retries = retries;
-        }
-        Ok(settings)
-    }
-}
-
-impl ProviderSettings {
-    /// Check the provider's values: an address and a key variable that are not empty, a
-    /// positive idle timeout, request fields and headers with names, and no `Authorization`
-    /// header, which comes from the API key.
-    fn validate(&self) -> Result<()> {
-        let openai = &self.openai;
-        ensure!(!openai.base_url.trim().is_empty(), "provider.baseUrl must not be empty");
-        ensure!(
-            !self.api_key_env.trim().is_empty(),
-            "provider.apiKeyEnv must not be empty"
-        );
-        ensure!(
-            !openai.idle_timeout.is_zero(),
-            "provider.idleTimeoutSecs must be at least 1"
-        );
-        ensure!(
-            openai.body.extra_fields.keys().all(|field| !field.trim().is_empty()),
-            "provider.requestFields: a field has no name"
-        );
-        for (name, _) in &openai.headers {
-            ensure!(!name.trim().is_empty(), "provider.headers: a header has no name");
-            ensure!(
-                !name.trim().eq_ignore_ascii_case("authorization"),
-                "provider.headers: Authorization comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
-            );
-        }
-        Ok(())
     }
 }
 
@@ -479,13 +367,6 @@ fn secret_files(paths: Vec<PathBuf>, parent: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths.into_iter().map(|path| parent.join(path)).collect())
 }
 
-/// `value` parsed by its type, with `key` naming it in the error.
-fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) -> Result<Option<T>> {
-    value
-        .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
-        .transpose()
-}
-
 impl RawToolOutput {
     /// The settings over the defaults: [`DEFAULT_TOOL_OUTPUT_DIRECTORY`] in each session's
     /// working directory, or an explicit directory, relative to `parent`; a zero threshold
@@ -509,9 +390,12 @@ impl RawToolOutput {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use zx_agent::ai::openai::{MaxTokensField, ReasoningFormat, SystemUpdates};
 
     use super::*;
+    use crate::config::provider::{OPENAI, openai_config};
 
     fn load_text(text: &str) -> Result<Config> {
         let dir = tempfile::tempdir().unwrap();
@@ -531,10 +415,10 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.path.as_deref(), Some(path.as_path()));
         assert_eq!(config.model, None);
-        assert_eq!(config.provider.openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(config.provider.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.provider.api, OPENAI);
+        assert_eq!(config.provider.api_key_env, None);
         assert_eq!(config.provider.retry.max_retries, 3);
-        assert_eq!(config.execution, Execution::Local);
+        assert_eq!(config.execution, LOCAL);
         assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
         // In each session's working directory.
         assert_eq!(config.tool_output.directory, Path::new(".zx-agent/outputs"));
@@ -560,9 +444,9 @@ mod tests {
         fields.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
         fields.insert("top_k".into(), serde_json::json!(5));
         let provider = &config.provider;
-        let openai = &provider.openai;
+        let openai = openai_config(&provider.options).unwrap();
         assert_eq!(openai.base_url, "http://localhost:8000/v1");
-        assert_eq!(provider.api_key_env, "LOCAL_KEY");
+        assert_eq!(provider.api_key_env.as_deref(), Some("LOCAL_KEY"));
         assert_eq!(openai.body.system_updates, SystemUpdates::Inline);
         assert_eq!(openai.body.reasoning_format, ReasoningFormat::Thinking);
         assert_eq!(openai.body.max_tokens_field, MaxTokensField::MaxCompletionTokens);
@@ -635,7 +519,7 @@ mod tests {
                 "provider.maxTokensField",
             ),
             ("[provider]\nbaseUrl = ''", "provider.baseUrl must not be empty"),
-            ("execution = 'kubernetes'", "unknown variant"),
+            ("execution = ' '", "execution must not be empty"),
         ] {
             let error = error(text);
             assert!(error.contains(expected), "{text}: {error}");
@@ -650,7 +534,7 @@ mod tests {
              pidsLimit = 64\nnetwork = 'none'\nworkspace = 'readOnly'\nroot = 'readOnly'",
         )
         .unwrap();
-        assert_eq!(config.execution, Execution::Container);
+        assert_eq!(config.execution, CONTAINER);
         assert_eq!(
             config.container,
             ContainerSettings {

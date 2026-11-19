@@ -20,7 +20,8 @@
 //!   and what a run takes and gives is in [`input`], [`events`] and [`session`], its limits in
 //!   [`agent::RunLimits`].
 //! - [`ai`]: message types, the streaming event protocol and the provider contract of
-//!   `zx-ai` (pi: packages/ai), with the provider of `zx-ai-openai` as `ai::openai`
+//!   `zx-ai` (pi: packages/ai), with the providers of `zx-ai-openai` as `ai::openai` and of
+//!   `zx-ai-anthropic` as `ai::anthropic`
 //! - [`builtin`]: the implementations of `zx-builtin`: the built-in tools (`builtin::tools`),
 //!   where they run commands (`builtin::executor`), the policies (`builtin::policy`), the
 //!   hooks that continue a cut-off answer, redact known secrets and save long results
@@ -31,12 +32,14 @@
 //! configuration the programs share with other hosts (`zx-app`), the command line (`zx-cli`,
 //! the program `zx-agent`) and the IM service with its chat platforms (`zx-im`, the program
 //! `zx-im`). An embedder that needs only part of the library can depend on `zx-core`,
-//! `zx-ai`, `zx-ai-openai` or `zx-builtin` directly.
+//! `zx-ai`, a provider crate (`zx-ai-openai`, `zx-ai-anthropic`) or `zx-builtin` directly.
 
-/// The model layer: the types and the provider contract of `zx-ai`, and the OpenAI-compatible
-/// provider of `zx-ai-openai` as `openai`.
+/// The model layer: the types and the provider contract of `zx-ai`, the OpenAI-compatible
+/// provider of `zx-ai-openai` as `openai`, and the Messages API provider of
+/// `zx-ai-anthropic` as `anthropic`.
 pub mod ai {
     pub use zx_ai::*;
+    pub use zx_ai_anthropic as anthropic;
     pub use zx_ai_openai as openai;
 }
 /// The implementations that ship with zx-agent: the `zx-builtin` crate.

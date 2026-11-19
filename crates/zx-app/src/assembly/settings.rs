@@ -3,7 +3,7 @@
 //!
 //! Where the environment is read, the model is the host's, else `ZX_MODEL`'s, else
 //! config.toml's; the provider's address `ZX_BASE_URL`'s, else config.toml's, else the
-//! provider's default (`OpenAiConfig::default()`); and the files of `ZX_SECRET_FILES` are
+//! provider's own default; and the files of `ZX_SECRET_FILES` are
 //! redacted besides those of config.toml. A host that gives the configuration itself reads none
 //! of these variables. Every other setting comes from config.toml or its built-in default.
 
@@ -91,7 +91,10 @@ impl Settings {
         };
         anyhow::ensure!(!model.trim().is_empty(), "the model is empty");
         if let Some(url) = base_url {
-            config.provider.openai.base_url = url;
+            config
+                .provider
+                .options
+                .insert("baseUrl".into(), toml::Value::String(url));
         }
         let seconds = |value: Option<u64>, default| Duration::from_secs(value.unwrap_or(default));
         Ok(Self {
@@ -144,9 +147,9 @@ pub(super) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<Pat
 #[cfg(test)]
 mod tests {
     use zx_agent::ai::Reasoning;
-    use zx_agent::ai::openai::{ReasoningFormat, SystemUpdates};
 
     use super::*;
+    use crate::config::OPENAI;
 
     /// A config.toml that sets every key with a built-in default.
     fn file() -> Config {
@@ -160,13 +163,8 @@ mod tests {
             ..Config::default()
         };
         let provider = &mut config.provider;
-        provider.openai.base_url = "http://file/v1".into();
-        provider.api_key_env = "FILE_KEY".into();
-        provider.openai.body.system_updates = SystemUpdates::Inline;
-        provider.openai.body.reasoning_format = ReasoningFormat::Thinking;
-        provider.openai.body.fill_missing_reasoning = true;
-        provider.openai.body.prompt_cache_key = true;
-        provider.openai.idle_timeout = Duration::from_secs(15);
+        provider.options = toml::from_str("baseUrl = 'http://file/v1'\nsystemUpdates = 'inline'").unwrap();
+        provider.api_key_env = Some("FILE_KEY".into());
         provider.retry.max_retries = 0;
         config
     }
@@ -175,7 +173,9 @@ mod tests {
     fn the_hosts_model_and_the_variable_win_over_config_toml() {
         let settings = Settings::over(Some("host-model".into()), Some("http://env/v1".into()), file(), None).unwrap();
         assert_eq!(settings.model, "host-model");
-        assert_eq!(settings.config.provider.openai.base_url, "http://env/v1");
+        let options = &settings.config.provider.options;
+        assert_eq!(options["baseUrl"].as_str(), Some("http://env/v1"));
+        assert_eq!(options["systemUpdates"].as_str(), Some("inline"));
     }
 
     #[test]
@@ -183,15 +183,11 @@ mod tests {
         let settings = Settings::over(None, None, file(), None).unwrap();
         assert_eq!(settings.model, "file-model");
         let provider = &settings.config.provider;
-        assert_eq!(provider.openai.base_url, "http://file/v1");
-        assert_eq!(provider.api_key_env, "FILE_KEY");
-        assert_eq!(provider.openai.body.system_updates, SystemUpdates::Inline);
+        assert_eq!(provider.options["baseUrl"].as_str(), Some("http://file/v1"));
+        assert_eq!(provider.api_key_env.as_deref(), Some("FILE_KEY"));
         assert_eq!(settings.config.reasoning, Some(Reasoning::Low));
-        assert_eq!(provider.openai.body.reasoning_format, ReasoningFormat::Thinking);
-        assert!(provider.openai.body.fill_missing_reasoning && provider.openai.body.prompt_cache_key);
         assert_eq!(settings.config.max_tokens, Some(512));
         assert_eq!(settings.tool_timeout, Duration::from_secs(30));
-        assert_eq!(provider.openai.idle_timeout, Duration::from_secs(15));
         assert_eq!(provider.retry.max_retries, 0);
         assert_eq!(settings.approval_timeout, Duration::from_secs(60));
     }
@@ -200,15 +196,11 @@ mod tests {
     fn without_either_the_built_in_defaults_apply() {
         let settings = Settings::over(Some("m".into()), None, Config::default(), None).unwrap();
         let provider = &settings.config.provider;
-        assert_eq!(provider.openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
-        assert_eq!(provider.openai.body.system_updates, SystemUpdates::Collapse);
+        assert_eq!(provider.api, OPENAI);
+        assert!(provider.options.is_empty() && provider.api_key_env.is_none());
         assert_eq!(settings.config.reasoning, None);
-        assert_eq!(provider.openai.body.reasoning_format, ReasoningFormat::Effort);
-        assert!(!provider.openai.body.fill_missing_reasoning && !provider.openai.body.prompt_cache_key);
         assert_eq!(settings.config.max_tokens, None);
         assert_eq!(settings.tool_timeout, Duration::from_secs(120));
-        assert_eq!(provider.openai.idle_timeout, Duration::from_secs(120));
         assert_eq!(provider.retry.max_retries, 3);
         assert_eq!(settings.approval_timeout, Duration::from_secs(600));
     }

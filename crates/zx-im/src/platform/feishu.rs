@@ -31,7 +31,10 @@ use crate::{
     Replacement,
 };
 
-use super::{Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, http_client, pause, report, secret, split_text};
+use super::{
+    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput, http_client,
+    pause, report, secret, split_text,
+};
 use api::CallError;
 use connection::{ClientConfig, Connection, Ended, PREFIX};
 use events::{button, card, markdown, resolution, text_content, without_fences, without_mentions};
@@ -41,7 +44,7 @@ const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
 /// The tenant token endpoint the documentation recommends; the older
 /// `/open-apis/auth/v3/tenant_access_token/internal` is marked as a historical version.
 const DEFAULT_TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
-const PLATFORM: &str = "feishu";
+pub(super) const PLATFORM: &str = "feishu";
 /// The variables that hold the credentials, unless the `[feishu]` section of im.toml names
 /// others.
 const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
@@ -91,7 +94,7 @@ impl FeishuConfig {
 /// its APIs are.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct FeishuSection {
+struct FeishuSection {
     /// Variable holding the App ID of the self-built app.
     #[serde(default = "default_app_id_env")]
     app_id_env: String,
@@ -112,30 +115,32 @@ fn default_app_secret_env() -> String {
     DEFAULT_APP_SECRET_ENV.into()
 }
 
-impl FeishuSection {
-    /// The channel this section configures, with `labels` on its cards and what it goes on
-    /// after reported to the callback `log` gives for its platform name, and the variable
-    /// holding its secret, which commands must not see: the App ID is not one. Fails when a
-    /// variable does not hold its credential, and when the channel cannot be built.
-    pub(crate) fn channel(
-        &self,
-        labels: &CardLabels,
-        log: fn(&'static str) -> ErrorReport,
-    ) -> anyhow::Result<(Arc<dyn ImChannel>, Vec<String>)> {
+/// Feishu, configured by the `[feishu]` section of im.toml.
+pub(super) struct Feishu;
+
+impl PlatformFactory for Feishu {
+    /// The variable holding the App Secret is the one commands must not see: the App ID is
+    /// not a secret. Fails when a variable does not hold its credential, and when the channel
+    /// cannot be built.
+    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+        let section: FeishuSection = toml::Value::Table(input.section.clone()).try_into()?;
         let mut config = FeishuConfig::new(
-            secret(&self.app_id_env, "the Feishu App ID")?,
-            secret(&self.app_secret_env, "the Feishu App Secret")?,
+            secret(&section.app_id_env, "the Feishu App ID")?,
+            secret(&section.app_secret_env, "the Feishu App Secret")?,
         );
-        if let Some(base) = &self.api_base {
-            config.api_base.clone_from(base);
+        if let Some(base) = section.api_base {
+            config.api_base = base;
         }
-        if let Some(url) = &self.token_url {
-            config.token_url.clone_from(url);
+        if let Some(url) = section.token_url {
+            config.token_url = url;
         }
-        config.labels.clone_from(labels);
-        config.on_error = Some(log(PLATFORM));
+        config.labels.clone_from(input.labels);
+        config.on_error = Some(input.on_error);
         let channel = FeishuChannel::new(config).map_err(anyhow::Error::msg)?;
-        Ok((Arc::new(channel), vec![self.app_secret_env.clone()]))
+        Ok(BuiltChannel {
+            channel: Arc::new(channel),
+            hidden_env: vec![section.app_secret_env],
+        })
     }
 }
 
