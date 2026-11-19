@@ -38,7 +38,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 |---|---|
 | `model` | 模型 ID |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
-| `maxTokens` | 每次回复的输出 token 上限，不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
+| `maxTokens` | 每次回复的输出 token 上限，大于零；不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
@@ -311,4 +311,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.28 · 2026年11月
+CONFIGURATION.md · v0.29 · 2026年11月
