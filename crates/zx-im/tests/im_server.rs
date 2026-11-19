@@ -9,29 +9,30 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
-use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::{Message, Request, Usage};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
+use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::events::ApprovalResult;
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{
-    Entry, LoadedSession, MemoryStorage, SessionHeader, SessionList, SessionLog, SessionQuery, SessionStorage,
-    Transcript,
+    CompactionSummary, Entry, LoadedSession, MemoryStorage, SessionHeader, SessionList, SessionLog, SessionQuery,
+    SessionStorage, SummaryFact, Transcript,
 };
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, Backlog, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError,
     Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
     ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_testing::{EchoTool, config, fast_retry, summarize, test_limits};
+use zx_testing::{EchoTool, config, fast_retry, summarize, summary_json, test_limits};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -278,6 +279,31 @@ impl Gate {
     }
 }
 
+/// A summarizer that waits at its gate, then gives a summary citing the first record it read.
+struct Held(Arc<Gate>);
+
+#[async_trait]
+impl Summarizer for Held {
+    fn name(&self) -> &str {
+        "held"
+    }
+
+    async fn summarize(&self, source: &SummarySource<'_>) -> Result<Summarized, String> {
+        self.0.pass().await;
+        Ok(Summarized {
+            summary: CompactionSummary {
+                facts: vec![SummaryFact {
+                    text: "Old observation".into(),
+                    source_entry_ids: vec![source.records[0].entry_id.clone()],
+                }],
+                inferences: Vec::new(),
+                plans: Vec::new(),
+            },
+            usage: Usage::default(),
+        })
+    }
+}
+
 /// What the tests know of the sessions the server opens: the scripted model, the `echo`
 /// tool, the storage that keeps them in memory, how often a session was set up, and how
 /// often the server read the storage's headers or listed sessions. It is the agent's session
@@ -317,10 +343,23 @@ impl Sessions {
     }
 
     /// The agent of every conversation: its `echo` tool asks for approval, which waits
-    /// `approval_timeout`; everything else is allowed.
-    fn agent(self: &Arc<Self>, approval_timeout: Duration) -> Agent {
+    /// `approval_timeout`; everything else is allowed. A summary leaves the latest
+    /// `keep_recent_bytes` of the talk as they are, the agent's default without a number,
+    /// and with `summary_gate` is made by a summarizer that waits there, not by the model.
+    fn agent(
+        self: &Arc<Self>,
+        approval_timeout: Duration,
+        keep_recent_bytes: Option<usize>,
+        summary_gate: Option<Arc<Gate>>,
+    ) -> Agent {
         let tools: Vec<Arc<dyn Tool>> = vec![self.echo.clone()];
         let mut config = config(self.provider.clone(), tools);
+        if let Some(bytes) = keep_recent_bytes {
+            config.compaction.keep_recent_bytes = bytes;
+        }
+        if let Some(gate) = summary_gate {
+            config.summarizer = Some(Arc::new(Held(gate)));
+        }
         config.approvals = ApprovalMode::Wait(approval_timeout);
         config.policies.push(
             "echo_approval",
@@ -417,6 +456,11 @@ struct Setup {
     updates: Updates,
     history: Vec<Said>,
     names: HashMap<String, String>,
+    /// How much of the latest talk `/compact` leaves as it is; the agent's default without.
+    keep_recent_bytes: Option<usize>,
+    /// Where a summarizer of the host waits before it summarizes; the model summarizes
+    /// without one.
+    summary_gate: Option<Arc<Gate>>,
 }
 
 impl Default for Setup {
@@ -444,6 +488,8 @@ impl Default for Setup {
             updates: Updates::default(),
             history: Vec::new(),
             names: HashMap::new(),
+            keep_recent_bytes: None,
+            summary_gate: None,
         }
     }
 }
@@ -473,7 +519,7 @@ fn start(setup: Setup) -> Harness {
         setup_gate: setup.setup_gate,
         forgotten: Mutex::default(),
     });
-    let agent = sessions.agent(setup.approval_timeout);
+    let agent = sessions.agent(setup.approval_timeout, setup.keep_recent_bytes, setup.summary_gate);
     let (inject, events_in) = mpsc::channel(16);
     let (sent_to, sent) = mpsc::unbounded_channel();
     let statuses = setup.statuses.map(|left| {
@@ -953,6 +999,158 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     h.updated(&status, text(&h.replies.cancelled.clone())).await;
     assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 0);
     assert_eq!(h.requests().len(), 1);
+    h.stop().await.unwrap();
+}
+
+/// A summary of what a summary request read, citing the first record it read.
+fn summary_of_the_source(request: &Request) -> FauxStep {
+    let Some(Message::User { content, .. }) = request.messages.last() else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
+}
+
+#[tokio::test]
+async fn compact_summarizes_the_earlier_talk_as_work_of_its_own() {
+    let mut h = start(Setup {
+        steps: vec![
+            FauxStep::text("first"),
+            FauxStep::text("second"),
+            FauxStep::compute(summary_of_the_source),
+            FauxStep::text("third"),
+        ],
+        // Everything before the latest prompt is old enough to summarize.
+        keep_recent_bytes: Some(1),
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    for (id, prompt, answer) in [("d1", "one", "first"), ("d2", "two", "second")] {
+        h.say_directly(id, prompt).await;
+        let status = h.posted(&direct(), working.clone()).await;
+        h.updated(&status, text(answer)).await;
+    }
+
+    h.say_directly("d3", " /compact ").await;
+
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text(&h.replies.compacted.clone())).await;
+    h.say_directly("d4", "three").await;
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("third")).await;
+    // The command went to no model as a prompt, and the next answer read the summary in
+    // place of the first turn.
+    let requests = h.requests();
+    assert_eq!(requests.len(), 4);
+    let read = requests[3].join("\n");
+    assert!(!read.contains("user:one") && !read.contains("/compact"), "{read}");
+    assert!(read.contains("user:two") && read.contains("Old observation"), "{read}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn compact_says_when_there_is_nothing_to_summarize() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first")],
+        ..Setup::default()
+    });
+    let nothing: Post = text(&h.replies.nothing_to_compact.clone());
+    // A conversation without a session gets none for the command.
+    h.say("m1", None, "/compact").await;
+    h.posted(&thread("m1"), nothing).await;
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
+    let working: Post = text(&h.replies.working.clone());
+    h.say_directly("d1", "one").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("first")).await;
+
+    h.say_directly("d2", "/compact").await;
+
+    // One turn is the latest talk, which a summary leaves as it is: no request is made.
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text(&h.replies.nothing_to_compact.clone())).await;
+    assert_eq!(h.requests().len(), 1);
+    h.stop().await.unwrap();
+}
+
+/// A direct chat of two turns whose `/compact` waits at `gate` for its summary: the server,
+/// and the status of the compaction under way.
+async fn compacting(gate: &Arc<Gate>, more: Vec<FauxStep>) -> (Harness, MessageRef) {
+    let mut steps = vec![FauxStep::text("first"), FauxStep::text("second")];
+    steps.extend(more);
+    let mut h = start(Setup {
+        steps,
+        keep_recent_bytes: Some(1),
+        summary_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    for (id, prompt, answer) in [("d1", "one", "first"), ("d2", "two", "second")] {
+        h.say_directly(id, prompt).await;
+        let status = h.posted(&direct(), working.clone()).await;
+        h.updated(&status, text(answer)).await;
+    }
+    h.say_directly("d3", "/compact").await;
+    let status = h.posted(&direct(), working).await;
+    gate.entered.notified().await;
+    (h, status)
+}
+
+#[tokio::test]
+async fn cancel_stops_a_compaction_like_a_run() {
+    let gate = Gate::new();
+    let (mut h, status) = compacting(&gate, Vec::new()).await;
+
+    h.say_directly("d4", "/cancel").await;
+
+    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    // Nothing was summarized: the next answer reads the talk as it was.
+    assert_eq!(h.requests().len(), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_sent_during_a_compaction_is_answered_after_it() {
+    let gate = Gate::new();
+    let (mut h, status) = compacting(&gate, vec![FauxStep::text("third")]).await;
+
+    h.say_directly("d4", "three").await;
+
+    h.acknowledged(&direct(), "d4").await;
+    gate.release.cancel();
+    h.updated(&status, text(&h.replies.compacted.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("third")).await;
+    let read = h.requests()[2].join("\n");
+    assert!(read.contains("user:three") && !read.contains("user:one"), "{read}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn compact_during_a_run_says_that_the_conversation_is_busy() {
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("unused")],
+        ..Setup::default()
+    });
+    h.say("m1", None, "run echo").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let (_, _card) = h.card(&thread("m1")).await;
+
+    h.say("m2", Some("m1"), "/compact").await;
+
+    h.posted(&thread("m1"), text(&h.replies.busy.clone())).await;
+    // The run goes on as it was: it still ends by `/cancel`.
+    h.say("m3", Some("m1"), "/cancel").await;
+    loop {
+        match h.next().await {
+            Sent::Update { posted, message } if posted == status => {
+                assert_eq!(message, text(&h.replies.cancelled.clone()));
+                break;
+            }
+            Sent::Update { .. } => {}
+            other => panic!("expected the run to be cancelled, got {other:?}"),
+        }
+    }
     h.stop().await.unwrap();
 }
 

@@ -6,7 +6,7 @@ use zx_agent::input::Input;
 use crate::Addressee;
 use crate::server::outlet::{Asked, said};
 
-use super::{AfterRun, CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
+use super::{AfterRun, CANCEL_COMMAND, COMPACT_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -32,6 +32,7 @@ impl Worker {
             match incoming.text.trim() {
                 CANCEL_COMMAND => return self.cancel().await,
                 NEW_COMMAND => return self.renew().await,
+                COMPACT_COMMAND => return self.compact().await,
                 _ => {}
             }
         }
