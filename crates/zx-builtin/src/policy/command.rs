@@ -130,10 +130,11 @@ impl CommandPolicy {
         }
     }
 
-    /// Add substrings to reject in every command.
+    /// Add substrings to reject in every command, compared like the default ones, lowercased
+    /// and with each run of whitespace as one space; empty ones are ignored, since every
+    /// command holds the empty text.
     pub fn deny_also(mut self, patterns: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        self.denied_patterns
-            .extend(patterns.into_iter().map(|pattern| normalize(pattern.as_ref())));
+        self.denied_patterns.extend(non_empty(patterns, normalize));
         self
     }
 
@@ -240,6 +241,12 @@ mod tests {
         assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
         assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
         assert!(denied(&policy.evaluate("systemctl reboot")));
+    }
+
+    #[test]
+    fn an_empty_denied_pattern_denies_nothing() {
+        let policy = CommandPolicy::new().deny_also(["", "  "]);
+        assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
     }
 
     #[test]
