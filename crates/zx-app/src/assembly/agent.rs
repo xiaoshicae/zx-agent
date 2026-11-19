@@ -39,17 +39,11 @@ const TRACE_EXPORT: &str = "trace_export";
 const COMMAND_POLICY: &str = "command_policy";
 const AGENT_PERMISSIONS: &str = "agent_permissions";
 const BASH_APPROVAL: &str = "bash_approval";
-/// Those names, and the one each session's store of long results goes by: a host's hook or
-/// policy may not take them.
-const BUILT_IN_NAMES: [&str; 7] = [
-    CONTINUE_ON_LENGTH,
-    REDACT_SECRETS,
-    TRACE_EXPORT,
-    SPILL_OUTPUTS,
-    COMMAND_POLICY,
-    AGENT_PERMISSIONS,
-    BASH_APPROVAL,
-];
+/// The names of the assembly's hooks, the one each session's store of long results among
+/// them: a host's hook may not take them.
+const BUILT_IN_HOOKS: [&str; 4] = [CONTINUE_ON_LENGTH, REDACT_SECRETS, TRACE_EXPORT, SPILL_OUTPUTS];
+/// The names of the assembly's policies: a host's policy may not take them.
+const BUILT_IN_POLICIES: [&str; 3] = [COMMAND_POLICY, AGENT_PERMISSIONS, BASH_APPROVAL];
 
 /// Who answers when a tool call of the agent's sessions needs approval.
 #[derive(Clone, Copy)]
@@ -238,8 +232,9 @@ fn host_tools(app: &Application) -> HostTools {
 /// extensions may not be named like a built-in tool, which a session gets only when it is
 /// made; tools that share a name otherwise, and extensions that do, the kernel refuses as the
 /// agent is made. Extensions name their own hooks and policies, so an extension may not be
-/// named like a built-in hook or policy, and the host's hooks and policies may not be named
-/// like one, an extension, or another of the host's. The host's prompt sections are added
+/// named like a built-in hook or policy; a host's hook may not be named like a built-in hook,
+/// an extension or another of its hooks, and a policy likewise among policies: the kernel's
+/// chains name hooks and policies apart. The host's prompt sections are added
 /// beside the assembly's, so none may be named like one of those, the agent's instructions
 /// or another of the host's.
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
@@ -251,20 +246,28 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
             "the host's tool {name:?} has the name of a built-in tool"
         );
     }
-    let mut taken: HashSet<&str> = BUILT_IN_NAMES.into();
+    let mut hooks: HashSet<&str> = BUILT_IN_HOOKS.into();
+    let mut policies: HashSet<&str> = BUILT_IN_POLICIES.into();
     for extension in app.mcp.servers.iter().chain(&app.extensions) {
         let name = extension.name();
         anyhow::ensure!(
-            !BUILT_IN_NAMES.contains(&name),
+            !BUILT_IN_HOOKS.contains(&name) && !BUILT_IN_POLICIES.contains(&name),
             "the extension {name:?} has the name of a built-in hook or policy"
         );
-        taken.insert(name);
+        // An extension's hooks and policies go by its name.
+        hooks.insert(name);
+        policies.insert(name);
     }
-    let hooks = app.hooks.iter().map(|(name, _)| name);
-    for name in hooks.chain(app.policies.iter().map(|(name, _)| name)) {
+    for (name, _) in &app.hooks {
         anyhow::ensure!(
-            taken.insert(name),
-            "the host's hook or policy {name:?} has a name that a built-in hook or policy, an extension or another of the host's goes by"
+            hooks.insert(name),
+            "the host's hook {name:?} has a name that a built-in hook, an extension or another of the host's hooks goes by"
+        );
+    }
+    for (name, _) in &app.policies {
+        anyhow::ensure!(
+            policies.insert(name),
+            "the host's policy {name:?} has a name that a built-in policy, an extension or another of the host's policies goes by"
         );
     }
     let mut sections: HashSet<&str> = setup::SECTION_NAMES.into_iter().chain([PREAMBLE]).collect();

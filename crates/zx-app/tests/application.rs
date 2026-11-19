@@ -402,7 +402,7 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     agent_in(&home, "tools = [\"probe\"]");
-    let cases: [(Adding, &str); 10] = [
+    let cases: [(Adding, &str); 9] = [
         (
             |app| app.add_tool(Arc::new(EchoTool::new("bash"))),
             "the host's tool \"bash\" has the name of a built-in tool",
@@ -413,21 +413,14 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
         ),
         (
             |app| app.add_hook("redact_secrets", Arc::new(Leaky)),
-            "the host's hook or policy \"redact_secrets\" has a name",
-        ),
-        (
-            |app| {
-                app.add_hook("audit", Arc::new(Leaky))
-                    .add_policy("audit", Arc::new(ProbeOff))
-            },
-            "the host's hook or policy \"audit\" has a name",
+            "the host's hook \"redact_secrets\" has a name",
         ),
         (
             |app| {
                 app.add_extension(Arc::new(Probes("ext_probe")))
                     .add_policy("probes", Arc::new(ProbeOff))
             },
-            "the host's hook or policy \"probes\" has a name",
+            "the host's policy \"probes\" has a name",
         ),
         (
             |app| {
@@ -472,6 +465,19 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
             .unwrap();
         assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
     }
+}
+
+#[tokio::test]
+async fn a_hook_and_a_policy_of_the_host_may_share_a_name() {
+    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .add_hook("audit", Arc::new(Leaky))
+        .add_policy("audit", Arc::new(ProbeOff));
+
+    let built = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+
+    assert!(built.is_ok(), "{:#}", built.err().unwrap());
 }
 
 #[tokio::test]
@@ -672,8 +678,7 @@ async fn approving_every_call_needs_an_executor_that_isolates_commands() {
 
 #[tokio::test]
 async fn a_name_no_factory_is_registered_under_or_two_are_fails_the_build() {
-    type Registering = fn(Application) -> Application;
-    let cases: [(Config, Registering, &str); 4] = [
+    let cases: [(Config, Adding, &str); 4] = [
         (
             with_provider("nowhere", ""),
             |app| app,
