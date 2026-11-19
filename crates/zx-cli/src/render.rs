@@ -1,5 +1,5 @@
-//! Text about calls and events for a terminal or a log, shared by run, chat, acp and the
-//! session listing. Names, arguments and errors come from models, tools and servers, so
+//! Text about calls, events and sessions for a terminal, a log or a client, shared by run,
+//! chat, acp and the session listing. Names, arguments and errors come from models, tools and servers, so
 //! nothing printed here can drive the terminal.
 
 use serde_json::Value;
@@ -21,6 +21,8 @@ const PROGRESS_ARGS_CHARS: usize = 300;
 /// Characters of a call's label on a progress or result line, or as a client's title;
 /// approvals show everything.
 const LABEL_CHARS: usize = 80;
+/// Characters of a session's name or first prompt shown in a listing or as a client's title.
+const PROMPT_PREVIEW_CHARS: usize = 60;
 
 /// [`describe_call`] cut to [`LABEL_CHARS`], for a line that lists the call.
 pub(crate) fn call_label(name: &str, args: &Value) -> String {
@@ -248,6 +250,17 @@ pub(crate) fn local_time(ms: u64, format: &str) -> Option<String> {
         .ok()
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|utc| utc.with_timezone(&chrono::Local).format(format).to_string())
+}
+
+/// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an
+/// ellipsis for what is left out and control characters made visible.
+pub(crate) fn preview_text(text: &str) -> String {
+    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let mut shown: String = line.chars().take(PROMPT_PREVIEW_CHARS).collect();
+    if line.chars().count() > PROMPT_PREVIEW_CHARS || text.trim().lines().count() > 1 {
+        shown.push('…');
+    }
+    visible(&shown)
 }
 
 /// Escape control characters, including bidirectional overrides, so that text from models,

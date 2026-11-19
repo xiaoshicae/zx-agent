@@ -1,20 +1,45 @@
-//! How a listing shows sessions: one line each, with a short ID and a preview.
+//! `zx-agent sessions`: the sessions kept for a working directory, chat's and acp's, one
+//! line each, most recent first.
+
+use anyhow::Result;
 
 use zx_agent::transcript::{SessionInfo, SessionList};
+use zx_app::{SessionPlace, resolve_cwd};
 
-use crate::render::{local_time, visible};
+use crate::cli::SessionsArgs;
+use crate::process::{EXIT_COMPLETED, eprint_line, print_line};
+use crate::render::{local_time, preview_text, visible};
 
-/// Characters of a first prompt shown in a listing.
-const PROMPT_PREVIEW_CHARS: usize = 60;
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
 /// `--resume` accepts as a prefix.
 const SHORT_ID_CHARS: usize = 8;
 /// How a listing shows when a session was last active.
 const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
+/// List the sessions started in the working directory on stdout, newest first; their
+/// directory and the files in it that could not be read go to stderr.
+pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
+    let cwd = resolve_cwd(args.cwd.as_deref())?;
+    let place = SessionPlace::home()?;
+    let list = place.started_in(&cwd).await?;
+    for line in lines(&list) {
+        print_line(&line);
+    }
+    for unreadable in &list.unreadable {
+        eprint_line(&format!("[sessions] {}", visible(&unreadable.error)));
+    }
+    let directory = place.location(&cwd).unwrap_or_default();
+    eprint_line(&format!(
+        "[sessions] {} session(s) in {}",
+        list.sessions.len(),
+        visible(&directory.display().to_string())
+    ));
+    Ok(EXIT_COMPLETED)
+}
+
 /// One line per session: short ID, last activity in local time, message count and the
 /// session's name, else its first prompt.
-pub(crate) fn lines(list: &SessionList) -> Vec<String> {
+fn lines(list: &SessionList) -> Vec<String> {
     list.sessions
         .iter()
         .map(|session| {
@@ -39,17 +64,6 @@ fn preview(session: &SessionInfo) -> String {
         Some(title) => preview_text(title),
         None => "(no prompt)".to_string(),
     }
-}
-
-/// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an
-/// ellipsis for what is left out and control characters made visible.
-pub(crate) fn preview_text(text: &str) -> String {
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
-    let mut shown: String = line.chars().take(PROMPT_PREVIEW_CHARS).collect();
-    if line.chars().count() > PROMPT_PREVIEW_CHARS || text.trim().lines().count() > 1 {
-        shown.push('…');
-    }
-    visible(&shown)
 }
 
 #[cfg(test)]

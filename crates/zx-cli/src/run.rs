@@ -14,11 +14,9 @@ use zx_app::otel::{Telemetry, TraceHook, TraceParent};
 use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 
+use crate::application::{connect, open_session};
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{
-    EXIT_DENIED, JsonlEvents, cancel_on_signals, connect, eprint_line, exit_code, open_session, print_line,
-    with_telemetry,
-};
+use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, eprint_line, exit_code, print_line, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::session_file;
 

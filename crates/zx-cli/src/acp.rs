@@ -48,9 +48,10 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::next_event;
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace, resolve_cwd};
 
+use crate::application::{connect, open_session};
 use crate::cli::{self, AcpArgs};
-use crate::listing;
-use crate::process::{EXIT_COMPLETED, cancel_on_signals, connect, open_session, with_telemetry};
+use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
+use crate::render::preview_text;
 
 use commands::Command;
 use updates::Updates;
@@ -561,7 +562,7 @@ fn session_info(session: &StoredSession) -> SessionInfo {
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
-        .title(session.title().map(listing::preview_text))
+        .title(session.title().map(preview_text))
         .updated_at(updated_at)
 }
 

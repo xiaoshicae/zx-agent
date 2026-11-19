@@ -7,23 +7,23 @@
 //! `sessions` uses it only to find the session directory. The subcommands do not refer to
 //! each other:
 //!
-//! - `run`, `chat`, `acp`, `list_sessions`: the subcommands
+//! - `run`, `chat`, `acp`, `sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands
+//! - `application`: the application a subcommand runs on, and the sessions of its agents
 //! - `session_file`: `--session`'s file, whose session run and chat continue
-//! - `listing`: how a listing shows sessions
 //! - `process`: exit codes, and what every subcommand writes to its outputs, about signals and
 //!   the trace export too
-//! - `render`: how calls, results and times are shown
+//! - `render`: how calls, results, times and sessions are shown
 
 mod acp;
+mod application;
 mod chat;
 mod cli;
-mod list_sessions;
-mod listing;
 mod process;
 mod render;
 mod run;
 mod session_file;
+mod sessions;
 
 use std::process::ExitCode;
 
@@ -39,7 +39,7 @@ pub async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
-        Command::Sessions(args) => list_sessions::run(args).await,
+        Command::Sessions(args) => sessions::run(args).await,
         Command::Acp(args) => acp::run(args).await,
     };
     match result {

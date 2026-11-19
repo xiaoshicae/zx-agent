@@ -15,7 +15,7 @@ use zx_agent::Session;
 use zx_agent::transcript::SessionName;
 
 use super::updates;
-use crate::listing::preview_text;
+use crate::render::preview_text;
 
 /// The command that names the session, without its slash.
 const NAME: &str = "name";

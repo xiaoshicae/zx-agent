@@ -32,8 +32,9 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
+use crate::application::{connect, open_session};
 use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, connect, open_session, with_telemetry};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
 use crate::render::visible;
 
 use commands::Command;
