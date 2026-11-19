@@ -47,7 +47,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -80,4 +80,4 @@
 
 ---
 
-TESTS.md · v0.18 · 2026年11月
+TESTS.md · v0.19 · 2026年11月
