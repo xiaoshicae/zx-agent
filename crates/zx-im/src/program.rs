@@ -24,6 +24,7 @@ use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
 
+use crate::backlog::BacklogFiles;
 #[cfg(feature = "feishu")]
 use crate::platform::FeishuSection;
 use crate::platform::SlackSection;
@@ -43,9 +44,11 @@ const EXIT_ERROR: u8 = 1;
 pub(crate) const EXIT_USAGE: u8 = 2;
 /// The traces' `service.name` when the environment names no service: the program's name.
 const SERVICE_NAME: &str = "zx-im";
-/// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
-/// keeps it apart from the platform directories, whose encoded names never contain one.
+/// Under the session directory: the statuses of runs in progress (`StatusFiles`), and the
+/// messages received and not handled yet (`BacklogFiles`). The dot keeps them apart from the
+/// platform directories, whose encoded names never contain one.
 const RUNNING_DIR: &str = ".running";
+const BACKLOG_DIR: &str = ".backlog";
 
 type Conversations = Vec<(String, ConversationId)>;
 type Approvers = Vec<(String, UserId)>;
@@ -126,6 +129,9 @@ pub(crate) async fn run(args: Args) -> Result<u8> {
             }
             let dir = file.sessions.dir;
             let running = create_session_dirs(&dir)?;
+            let backlog_dir = dir.join(BACKLOG_DIR);
+            let backlog = BacklogFiles::open(&backlog_dir)
+                .with_context(|| format!("cannot create the backlog {}", backlog_dir.display()))?;
             // Once for the process: every conversation's session shares the connections.
             let app = connect(overrides)
                 .await?
@@ -134,6 +140,7 @@ pub(crate) async fn run(args: Args) -> Result<u8> {
             let agent = conversations_agent(&app, &dir).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
+                backlog: Arc::new(backlog),
                 ..server_config(&file.limits, file.replies, running, conversations, approvers)
             };
             Ok(serve(config, &agent, channels, &dir).await)

@@ -31,6 +31,7 @@ use crate::{Addressee, ApprovalCard, ApprovalId, Choice, ImChannel, MessageRef, 
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Opened, Outlet};
+use super::received::Receipt;
 use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
 
 /// Sent alone, cancels the conversation's run.
@@ -48,6 +49,8 @@ pub(super) struct Incoming {
     pub(super) addressee: Addressee,
     pub(super) text: String,
     pub(super) permit: Option<InputPermit>,
+    /// Its place in the backlog, kept with it until it is handled.
+    pub(super) receipt: Receipt,
 }
 
 pub(super) enum WorkerInput {
@@ -79,9 +82,9 @@ pub(super) struct WorkerSetup {
 /// Run one conversation until the router drops its inbox.
 ///
 /// A run in progress is cancelled by the stop, and its status then says so
-/// ([`Replies::stopped`]). Input does not run once the server stops; the worker reads its
-/// inbox to the end and posts [`Replies::stopping`] in a thread with messages it will not
-/// run.
+/// ([`Replies::stopped`]). Input does not run once the server stops, nor is it written into
+/// the session: the worker reads its inbox to the end, and every message it has not handled
+/// stays in the backlog, for the next start.
 pub(super) async fn run(setup: WorkerSetup) {
     let mut worker = Worker::new(setup);
     let mut lifecycle = Lifecycle::Serving;
@@ -95,7 +98,9 @@ pub(super) async fn run(setup: WorkerSetup) {
             Some(update) = worker.updated.recv() => worker.approval(update).await,
             () = worker.stop.cancelled(), if !lifecycle.closing() => {
                 lifecycle = Lifecycle::Stopping;
-                worker.stopping();
+                // Input waiting for a slot will not run. A run stops through its token and
+                // ends as usual.
+                worker.stop_waiting();
             }
             input = worker.inbox.recv(), if lifecycle.inbox_open() => match input {
                 Some(input) => {
@@ -103,9 +108,9 @@ pub(super) async fn run(setup: WorkerSetup) {
                     if lifecycle == Lifecycle::Retiring {
                         lifecycle = Lifecycle::Serving;
                     }
-                    if lifecycle.closing() {
-                        worker.refuse(input);
-                    } else {
+                    // Input that arrives while the server stops does not run: a message stays
+                    // in the backlog, and a click finds its approval ended by the stop.
+                    if !lifecycle.closing() {
                         worker.input(input).await;
                     }
                 }
@@ -120,7 +125,6 @@ pub(super) async fn run(setup: WorkerSetup) {
             },
         }
     }
-    worker.answer_unanswered().await;
 }
 
 /// Where the conversation is in its life, as the router and the server see it.
@@ -263,8 +267,6 @@ struct Worker {
     updated: mpsc::Receiver<ApprovalUpdate>,
     phase: Phase,
     pending: Vec<Pending>,
-    /// Messages that will not run because the server is stopping.
-    unanswered: usize,
     /// The person whose message the bot took last, as long as nobody else spoke since: their
     /// next message is meant for the bot even without a mention.
     answering: Option<UserId>,
@@ -300,7 +302,6 @@ impl Worker {
             updated,
             phase: Phase::idle(None),
             pending: Vec::new(),
-            unanswered: 0,
             answering: None,
             heard: Vec::new(),
         }
@@ -377,7 +378,8 @@ impl Worker {
             Some(open) => open,
             None => {
                 let opened = tokio::select! {
-                    () = self.stop.cancelled() => { self.unanswered += asked.len(); return; },
+                    // What was asked and heard stays in the backlog.
+                    () = self.stop.cancelled() => return,
                     opened = self.out.open(trigger) => opened,
                 };
                 match opened {
@@ -456,7 +458,7 @@ impl Worker {
     /// Post the answer and record what was heard meanwhile, then run what was asked as the run
     /// ended. The run gives up its slot first, so that the next run waits its turn like any
     /// other. After `/new` that input runs in the new session, after `/cancel` it is dropped,
-    /// and while the server stops it is unanswered.
+    /// and while the server stops it stays in the backlog, with what was heard.
     async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
         let (status, open, after, asked) = match self.take_phase() {
             Phase::Running {
@@ -480,11 +482,8 @@ impl Worker {
         self.out.answer(ended, status, closing).await;
         let leftover = self.leftover(open);
         if closing {
-            // A stopping server opens nothing: what was heard goes only into a session held.
-            if matches!(self.phase, Phase::Idle { open: Some(_), .. }) {
-                self.record_heard().await;
-            }
-            self.unanswered += leftover.len() + asked.len();
+            // A stopping server writes nothing more: what was asked or heard and not written
+            // stays in the backlog, for the next start.
             return;
         }
         let leftover = match after {
@@ -575,26 +574,6 @@ impl Worker {
         }
     }
 
-    /// The server is stopping: input waiting for a slot will not run. A run stops through
-    /// its token and ends as usual.
-    fn stopping(&mut self) {
-        if let Some(asked) = self.stop_waiting() {
-            self.unanswered += asked.len();
-        }
-    }
-
-    /// Input that arrives while the server stops does not run. Only a message the bot would
-    /// have answered counts as unanswered.
-    fn refuse(&mut self, input: WorkerInput) {
-        match input {
-            WorkerInput::Message(incoming) if self.answers(&incoming) && !is_command(&incoming.text) => {
-                self.unanswered += 1;
-            }
-            // The stop cancels the run already, approvals included, and drops what waits.
-            WorkerInput::Message(_) | WorkerInput::Decision { .. } => {}
-        }
-    }
-
     /// Release the session and tell the router, which ends the conversation unless a message
     /// is on its way: the conversation retires, or stops when the router no longer reads.
     async fn retire(&mut self) -> Lifecycle {
@@ -608,19 +587,6 @@ impl Worker {
             // The router no longer reads: the server is stopping.
             Err(_) => Lifecycle::Stopping,
         }
-    }
-
-    /// Tell the thread that its remaining messages will not run. Called as the conversation
-    /// ends, so it follows how the run ended.
-    async fn answer_unanswered(self) {
-        if self.unanswered == 0 {
-            return;
-        }
-        self.out.post(self.out.replies().stopping.clone()).await;
-        self.out.failed(format!(
-            "{} message(s) were not answered: the server is stopping",
-            self.unanswered
-        ));
     }
 
     async fn cancel(&mut self) {

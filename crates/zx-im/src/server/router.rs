@@ -1,5 +1,5 @@
 //! The router: access control, one worker per conversation, replies to chats not served,
-//! and the stop.
+//! the messages an earlier process left pending, and the stop.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -9,11 +9,12 @@ use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
-    ThreadId,
+    Addressee, Backlog, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, MessageId,
+    MessageKey, MessageRef, Post, ThreadId,
 };
 
 use super::admission::InputBudget;
+use super::received::Receipts;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{SessionKey, Shared};
 
@@ -50,10 +51,12 @@ fn conversation(
     })
 }
 
-/// Run one channel, tagging what it receives with its index for the router.
+/// Run one channel, which keeps its messages in `backlog`, tagging what it receives with its
+/// index for the router.
 async fn receive(
     index: usize,
     channel: Arc<dyn ImChannel>,
+    backlog: Arc<dyn Backlog>,
     tagged: mpsc::Sender<(usize, Inbound)>,
     stop: CancellationToken,
 ) -> (usize, Result<(), ImError>) {
@@ -66,7 +69,8 @@ async fn receive(
             }
         }
     };
-    let (result, ()) = tokio::join!(channel.run(sender, &stop), forward);
+    let inlet = Inlet::new(channel.platform(), sender, backlog);
+    let (result, ()) = tokio::join!(channel.run(inlet, &stop), forward);
     (index, result)
 }
 
@@ -132,21 +136,32 @@ pub(super) struct Router {
     refusals: JoinSet<()>,
     /// Replaces the statuses an earlier process left behind.
     replacing: JoinHandle<()>,
+    /// Makes the receipt each message carries until it is handled.
+    receipts: Receipts,
 }
 
 impl Router {
-    /// Start receiving from `channels`; nothing is routed before [`run`](Self::run).
+    /// Start receiving from `channels`, which keep their messages in `backlog`; nothing is
+    /// routed before [`replay`](Self::replay) or [`run`](Self::run).
     pub(super) fn new(
         channels: Vec<Arc<dyn ImChannel>>,
         allowed: HashMap<String, HashSet<ConversationId>>,
         shared: Arc<Shared>,
         stop: CancellationToken,
         replacing: JoinHandle<()>,
+        receipts: Receipts,
+        backlog: &Arc<dyn Backlog>,
     ) -> Self {
         let (tagged, inbound) = mpsc::channel(INBOUND_CAPACITY);
         let mut channel_tasks = JoinSet::new();
         for (index, channel) in channels.iter().enumerate() {
-            channel_tasks.spawn(receive(index, Arc::clone(channel), tagged.clone(), stop.clone()));
+            channel_tasks.spawn(receive(
+                index,
+                Arc::clone(channel),
+                Arc::clone(backlog),
+                tagged.clone(),
+                stop.clone(),
+            ));
         }
         let (retire, retired) = mpsc::channel(RETIRE_CAPACITY);
         Self {
@@ -163,6 +178,22 @@ impl Router {
             conversations: HashMap::new(),
             refusals: JoinSet::new(),
             replacing,
+            receipts,
+        }
+    }
+
+    /// Route what an earlier process left pending in the backlog, in the order kept, as if it
+    /// arrived now: before anything this process receives. A message from a platform no
+    /// channel serves now is reported, and stays pending.
+    pub(super) fn replay(&mut self, pending: Vec<(String, Inbound)>) {
+        for (platform, event) in pending {
+            match self.channels.iter().position(|channel| channel.platform() == platform) {
+                Some(index) => self.route(index, event),
+                None => self.shared.failed(
+                    None,
+                    format!("a message from {platform:?} stays in the backlog: no channel is named so"),
+                ),
+            }
         }
     }
 
@@ -232,6 +263,12 @@ impl Router {
                 sender,
                 text,
             } => {
+                // Dropped with the message wherever the message ends here, which handles it.
+                let receipt = self.receipts.receipt(MessageKey {
+                    platform: platform.clone(),
+                    conversation: at.conversation.clone(),
+                    message: id.clone(),
+                });
                 let Some(key) = conversation(platform, chat, addressee, &id, &at) else {
                     return;
                 };
@@ -246,6 +283,7 @@ impl Router {
                         addressee,
                         text,
                         permit: None,
+                        receipt,
                     };
                     self.message(channel, key, incoming);
                 } else if addressee == Addressee::Bot {
@@ -401,14 +439,11 @@ impl Router {
         // A closed receiver makes waiting senders fail at once, so no worker can hold up the
         // stop. The channels are read to the end instead.
         self.retired.close();
-        // The platforms were told about these events already and will not send them again.
-        // Routed as usual, each message reaches a stopping worker, which answers that it will
-        // not run it. The channels stop sending once cancelled, and their tasks then drop
-        // the senders, which ends this loop; reading on means no channel waits on a full
-        // buffer meanwhile.
-        while let Some((index, event)) = self.inbound.recv().await {
-            self.route(index, event);
-        }
+        // What the channels pass on during the stop is not routed: each message stays in the
+        // backlog, for the next start, and a click finds its approval ended. The channels
+        // stop sending once cancelled, and their tasks then drop the senders, which ends this
+        // loop; reading on means no channel waits on a full buffer meanwhile.
+        while self.inbound.recv().await.is_some() {}
         // Without their inboxes, workers end once their runs have stopped and they have
         // posted.
         self.workers.clear();

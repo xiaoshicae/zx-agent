@@ -1,16 +1,15 @@
 //! The Socket Mode connection: opening it, keepalive pings, and the envelopes that arrive
-//! over it, each acknowledged before it is handled.
+//! over it, each acknowledged once its message is kept, before it is handled.
 
 use std::time::Duration;
 
 use futures::SinkExt;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::{Keepalive, Next, Seen, Socket, next_message, report};
-use crate::{ImError, Inbound};
+use crate::platform::{Keepalive, Next, Socket, keep, next_message, report};
+use crate::{ImError, Inbound, Inlet};
 
 use super::SlackChannel;
 use super::events::{decisions, message};
@@ -35,9 +34,8 @@ impl SlackChannel {
     pub(super) async fn receive(
         &self,
         url: &str,
-        inbound: &mpsc::Sender<Inbound>,
+        inlet: &Inlet,
         bot: Option<&str>,
-        seen: &mut Seen<(String, String)>,
         cancel: &CancellationToken,
     ) -> Ended {
         let opened = tokio::select! {
@@ -64,15 +62,18 @@ impl SlackChannel {
             let Some(frame) = self.frame_of(&text) else {
                 continue;
             };
-            if let Err(ended) = acknowledge(&mut socket, &frame).await {
-                return ended;
-            }
-            let events = match envelope(&frame, bot, seen) {
+            let events = match envelope(&frame, bot) {
                 Envelope::Disconnect => return Ended::Lost,
                 Envelope::Events(events) => events,
             };
-            for event in events {
-                if inbound.send(event).await.is_err() {
+            let delivery = keep(inlet, events, self.config.on_error.as_ref()).await;
+            if delivery.acknowledge
+                && let Err(ended) = acknowledge(&mut socket, &frame).await
+            {
+                return ended;
+            }
+            for event in delivery.events {
+                if !inlet.pass(event).await {
                     // The server no longer reads: it is stopping.
                     return Ended::Cancelled;
                 }
@@ -96,7 +97,7 @@ impl SlackChannel {
 }
 
 /// Acknowledge the envelope of `frame`, if it has one. Slack redelivers what is not
-/// acknowledged in time, so this comes before any handling.
+/// acknowledged in time, so this comes as soon as its message is kept, before any handling.
 async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
     if let Some(id) = frame["envelope_id"].as_str() {
         let ack = json!({ "envelope_id": id }).to_string();
@@ -132,17 +133,11 @@ enum Envelope {
     Events(Vec<Inbound>),
 }
 
-/// What `frame` asks for; a redelivered message is left out.
-fn envelope(frame: &Value, bot: Option<&str>, seen: &mut Seen<(String, String)>) -> Envelope {
+/// What `frame` asks for.
+fn envelope(frame: &Value, bot: Option<&str>) -> Envelope {
     match frame["type"].as_str() {
         Some("disconnect") => Envelope::Disconnect,
-        Some("events_api") => Envelope::Events(
-            message(&frame["payload"], bot)
-                .filter(|(key, _)| seen.insert(key))
-                .map(|(_, event)| event)
-                .into_iter()
-                .collect(),
-        ),
+        Some("events_api") => Envelope::Events(message(&frame["payload"], bot).into_iter().collect()),
         Some("interactive") => Envelope::Events(decisions(&frame["payload"])),
         _ => Envelope::Events(Vec::new()),
     }

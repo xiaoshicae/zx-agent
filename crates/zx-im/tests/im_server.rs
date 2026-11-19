@@ -27,9 +27,9 @@ use zx_agent::transcript::{
     Transcript,
 };
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
-    StatusStore, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, Backlog, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError,
+    Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
+    ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
 use zx_testing::{EchoTool, config, fast_retry, summarize, test_limits};
 
@@ -75,6 +75,15 @@ enum Updates {
     Held(CancellationToken),
 }
 
+/// Deliver `event` as a platform's channel does: kept first, then passed on unless the
+/// backlog has it already. False once the server no longer reads.
+async fn deliver(inlet: &Inlet, event: Inbound) -> bool {
+    match inlet.keep(&event).await.unwrap() {
+        Kept::New => inlet.pass(event).await,
+        Kept::Again => true,
+    }
+}
+
 /// A platform in memory: the test injects inbound events and reads what the server sent.
 struct FakeChannel {
     name: &'static str,
@@ -116,7 +125,7 @@ impl ImChannel for FakeChannel {
         self.name
     }
 
-    async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
+    async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
         if let Some(error) = &self.fail {
             return Err(ImError::Config(error.clone()));
         }
@@ -126,14 +135,14 @@ impl ImChannel for FakeChannel {
                 () = cancel.cancelled() => {
                     let late = std::mem::take(&mut *self.late.lock().unwrap());
                     for event in late {
-                        if inbound.send(event).await.is_err() {
+                        if !deliver(&inlet, event).await {
                             break;
                         }
                     }
                     return Ok(());
                 }
                 Some(event) = events.recv() => {
-                    if inbound.send(event).await.is_err() {
+                    if !deliver(&inlet, event).await {
                         return Ok(());
                     }
                 }
@@ -397,6 +406,8 @@ struct Setup {
     /// Where the sessions are kept: a new storage without one, the one an earlier server
     /// left with one.
     storage: Option<Arc<MemoryStorage>>,
+    /// Where the messages are kept until handled, the one an earlier server left included.
+    backlog: Arc<MemoryBacklog>,
     fail_channel: Option<String>,
     /// Events the channel passes on as the server stops.
     late: Vec<Inbound>,
@@ -425,6 +436,7 @@ impl Default for Setup {
             setup_gate: None,
             history_gate: None,
             storage: None,
+            backlog: Arc::default(),
             fail_channel: None,
             late: Vec::new(),
             statuses: None,
@@ -446,6 +458,7 @@ struct Harness {
     agent: Agent,
     replies: Replies,
     statuses: Option<Arc<Statuses>>,
+    backlog: Arc<MemoryBacklog>,
 }
 
 fn start(setup: Setup) -> Harness {
@@ -488,6 +501,8 @@ fn start(setup: Setup) -> Harness {
         let store: Arc<dyn StatusStore> = statuses.clone();
         config.statuses = Some(store);
     }
+    let backlog = setup.backlog;
+    config.backlog = backlog.clone();
     let replies = config.replies.clone();
     let server = Server::new(config, agent.clone(), Arc::new(Events(events_to)));
     let cancel = CancellationToken::new();
@@ -503,6 +518,7 @@ fn start(setup: Setup) -> Harness {
         agent,
         replies,
         statuses,
+        backlog,
     }
 }
 
@@ -718,12 +734,18 @@ fn direct_key() -> SessionKey {
     }
 }
 
-/// The operator's record of a thread's messages that will not run.
-fn unanswered(root: &str, count: usize) -> ServerEvent {
-    ServerEvent::Failed {
-        key: Some(key(root)),
-        error: format!("{count} message(s) were not answered: the server is stopping"),
-    }
+/// The IDs of the messages pending in `backlog`, in the order kept.
+async fn pending(backlog: &MemoryBacklog) -> Vec<String> {
+    let pending = backlog.pending().await.unwrap();
+    pending.into_iter().map(|(key, _)| key.message.0).collect()
+}
+
+/// Keep `event` in `backlog` as the channel `PLATFORM` does as it receives it: what a server
+/// that ended before handling it leaves behind.
+async fn kept_before(backlog: &Arc<MemoryBacklog>, event: &Inbound) {
+    let (unread, _) = mpsc::channel(1);
+    let inlet = Inlet::new(PLATFORM, unread, backlog.clone());
+    assert_eq!(inlet.keep(event).await.unwrap(), Kept::New);
 }
 
 /// What the card of an `echo` call shows.
@@ -1054,7 +1076,7 @@ async fn a_run_cancelled_by_the_stop_says_the_server_is_stopping() {
 }
 
 #[tokio::test]
-async fn stopping_tells_a_thread_waiting_for_a_run_slot_that_it_will_not_run() {
+async fn stopping_leaves_a_message_waiting_for_a_run_slot_in_the_backlog() {
     let mut h = start(Setup {
         steps: vec![FauxStep::Hang],
         config: ServerConfig {
@@ -1064,33 +1086,33 @@ async fn stopping_tells_a_thread_waiting_for_a_run_slot_that_it_will_not_run() {
         ..Setup::default()
     });
     let replies = h.replies.clone();
+    let backlog = h.backlog.clone();
     h.say("a", None, "task a").await;
     let status_a = h.posted(&thread("a"), text(&replies.working)).await;
     h.say("b", None, "task b").await;
     h.posted(&thread("b"), text(&replies.queued)).await;
     let (sent, events) = h.stop_and_take().await;
-    let (mut in_a, mut in_b) = (Vec::new(), Vec::new());
-    for sent in sent {
-        match sent {
-            Sent::Update { posted, message } if posted == status_a => in_a.push(message),
-            Sent::Post { to, message, .. } if to == thread("b") => in_b.push(message),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
     // The run had taken in all its input, so its thread only learns that the stop cancelled
-    // it. Thread b never ran: a run posts its status first.
-    assert_eq!(in_a, [text(&replies.stopped)]);
-    assert_eq!(in_b, [text(&replies.stopping)]);
-    assert_eq!(events, [unanswered("b", 1)]);
+    // it. Thread b never ran: its message waits for the next start.
+    assert_eq!(
+        sent,
+        [Sent::Update {
+            posted: status_a,
+            message: text(&replies.stopped)
+        }]
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(pending(&backlog).await, ["b"]);
 }
 
 #[tokio::test]
-async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
+async fn stopping_leaves_steering_its_run_did_not_take_in_in_the_backlog() {
     let mut h = start(Setup {
         steps: vec![echo_call()],
         ..Setup::default()
     });
     let replies = h.replies.clone();
+    let backlog = h.backlog.clone();
     h.say("m1", None, "run echo").await;
     let status = h.posted(&thread("m1"), text(&replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
@@ -1106,51 +1128,107 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
         user: None,
         result: ApprovalResult::Cancelled,
     };
-    match sent.as_slice() {
-        [first, second, Sent::Post { to, message, .. }] => {
-            assert_eq!(
-                first,
-                &Sent::Update {
-                    posted: card,
-                    message: closed
-                }
-            );
-            assert_eq!(
-                second,
-                &Sent::Update {
-                    posted: status,
-                    message: text(&replies.stopped)
-                }
-            );
-            assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping)));
-        }
-        other => panic!("expected the card, the status and a notice, got {other:?}"),
-    }
-    assert!(
-        matches!(events.as_slice(), [ServerEvent::Approval(_), last] if *last == unanswered("m1", 1)),
-        "{events:?}"
+    assert_eq!(
+        sent,
+        [
+            Sent::Update {
+                posted: card,
+                message: closed
+            },
+            Sent::Update {
+                posted: status,
+                message: text(&replies.stopped)
+            }
+        ]
     );
+    assert!(matches!(events.as_slice(), [ServerEvent::Approval(_)]), "{events:?}");
+    // The run recorded its prompt; the steering it never took waits for the next start.
+    assert_eq!(pending(&backlog).await, ["m2"]);
 }
 
 #[tokio::test]
-async fn a_message_received_as_the_server_stops_is_answered_without_running() {
+async fn a_message_received_as_the_server_stops_stays_in_the_backlog() {
     let h = start(Setup {
         late: vec![message(CHAT, "m1", None, "hello")],
         ..Setup::default()
     });
-    let replies = h.replies.clone();
     let sessions = Arc::clone(&h.sessions);
+    let backlog = h.backlog.clone();
     let (sent, events) = h.stop_and_take().await;
-    match sent.as_slice() {
-        [Sent::Post { to, message, .. }] => assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping))),
-        other => panic!("expected one notice, got {other:?}"),
-    }
-    assert_eq!(events, [unanswered("m1", 1)]);
+    assert!(sent.is_empty(), "{sent:?}");
+    assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         sessions.opened.load(Ordering::SeqCst),
         0,
-        "no session is opened to refuse"
+        "nothing runs during the stop"
     );
+    assert_eq!(pending(&backlog).await, ["m1"]);
+}
+
+#[tokio::test]
+async fn a_message_an_earlier_server_left_in_the_backlog_is_answered() {
+    let backlog = Arc::new(MemoryBacklog::default());
+    kept_before(&backlog, &message(CHAT, "m1", None, "left behind")).await;
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer"), FauxStep::text("answer")],
+        backlog: backlog.clone(),
+        ..Setup::default()
+    });
+    // Delivered again by the platform, it is known and not answered twice.
+    h.say("m1", None, "left behind").await;
+    h.say("m2", None, "new").await;
+    // The two threads may run at the same time.
+    let mut answers = 0;
+    while answers < 2 {
+        if let Sent::Update { message, .. } = h.next().await {
+            assert_eq!(message, text("answer"));
+            answers += 1;
+        }
+    }
+    let mut requests = h.requests();
+    requests.sort();
+    assert_eq!(requests, [["user:U-asker: left behind"], ["user:U-asker: new"]]);
+    let (sent, events) = h.stop_and_take().await;
+    assert!(sent.is_empty(), "{sent:?}");
+    assert!(events.is_empty(), "{events:?}");
+    assert!(pending(&backlog).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_handled_message_delivered_again_is_not_answered_again() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    h.say("m1", None, "first").await;
+    h.say("m2", Some("m1"), "second").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests().len(), 2);
+    let backlog = h.backlog.clone();
+    h.stop().await.unwrap();
+    assert!(pending(&backlog).await.is_empty());
+}
+
+#[tokio::test]
+async fn messages_answered_without_a_run_leave_the_backlog() {
+    let mut h = start(Setup::default());
+    let replies = h.replies.clone();
+    h.say("m1", None, "/cancel").await;
+    h.posted(&thread("m1"), text(&replies.nothing_to_cancel)).await;
+    h.say_in("C-other", "m2", None, "hello").await;
+    let elsewhere = Destination {
+        conversation: ConversationId("C-other".into()),
+        thread: Some(ThreadId("m2".into())),
+    };
+    h.posted(&elsewhere, text(&replies.unauthorized)).await;
+    let backlog = h.backlog.clone();
+    h.stop().await.unwrap();
+    assert!(pending(&backlog).await.is_empty());
 }
 
 /// A status that an earlier process left in thread `root`.

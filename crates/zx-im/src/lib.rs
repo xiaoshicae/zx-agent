@@ -9,15 +9,19 @@
 //! a module of `platform`, beside the others, with the helpers there for the duties every
 //! platform has.
 //!
-//! - `channel`: what one platform does for the server ([`ImChannel`]), and the words they
-//!   share
+//! - `channel`: what one platform does for the server ([`ImChannel`]), where it puts what it
+//!   receives ([`Inlet`]), and the words they share
+//! - `backlog`: each message from its arrival until it is handled ([`Backlog`])
 //! - `server`: the server, its configuration and what it reports to the operator
 //! - `platform`: the platforms, Slack and, with the feature `feishu`, Feishu, and what they
 //!   share
+//! - `files`: one record per file, as the program's stores on disk write them
 //! - `program`: the program: im.toml, its command line, the platforms it configures, the
 //!   operator log and the exit codes
 
+mod backlog;
 mod channel;
+mod files;
 mod platform;
 mod program;
 mod server;
@@ -26,9 +30,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+pub use backlog::{Backlog, Kept, MemoryBacklog, MessageKey};
 pub use channel::{
     Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ErrorReport,
-    ImChannel, ImError, Inbound, MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
+    ImChannel, ImError, Inbound, Inlet, MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
 #[cfg(feature = "feishu")]
 pub use platform::{FeishuChannel, FeishuConfig};

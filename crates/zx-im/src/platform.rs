@@ -1,8 +1,9 @@
 //! The chat platforms, each an [`ImChannel`](crate::ImChannel), and what every platform
 //! shares: an HTTP client, its connection and the loop that reads it (pings, the silence
-//! that means it died, the stop), reports to the operator, splitting long text, dropping
-//! redeliveries, pacing posts to a chat, waiting out a rate limit, and waiting between
-//! attempts to reach the platform. A platform uses these and nothing of another platform.
+//! that means it died, the stop), keeping a delivery's messages before it is acknowledged,
+//! reports to the operator, splitting long text, pacing posts to a chat, waiting out a rate
+//! limit, and waiting between attempts to reach the platform. A platform uses these and
+//! nothing of another platform.
 //!
 //! - `slack`: Slack, over Socket Mode and the Web API
 //! - `feishu`: Feishu, over its long connection and the open API (the feature `feishu`)
@@ -11,8 +12,7 @@
 mod feishu;
 mod slack;
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use zx_util::env::env_value;
 use zx_util::sync::lock;
 
-use crate::{ErrorReport, ImError};
+use crate::{ErrorReport, ImError, Inbound, Inlet, Kept};
 
 #[cfg(feature = "feishu")]
 pub(crate) use feishu::FeishuSection;
@@ -42,9 +42,6 @@ pub use slack::{SlackChannel, SlackConfig};
 const MAX_TEXT_CHARS: usize = 4000;
 /// How often a rate-limited call is retried after waiting as long as the platform asks.
 const RATE_LIMIT_RETRIES: u32 = 3;
-/// Messages a [`Seen`] remembers: platforms redeliver only for a short while, and this
-/// covers far more messages than arrive in that time.
-const SEEN_CAPACITY: usize = 1024;
 /// Limit for each call to a platform and for opening its connection, unless a channel's
 /// settings say otherwise: long enough for a slow answer, short enough that a platform that
 /// stopped answering is tried again soon.
@@ -140,37 +137,35 @@ fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName, longest: Durati
     Duration::from_secs(secs).min(longest)
 }
 
-/// Keys seen recently, such as the messages a channel has passed on, to drop redeliveries;
-/// the oldest are forgotten first.
-struct Seen<K> {
-    order: VecDeque<K>,
-    keys: HashSet<K>,
-    capacity: usize,
+/// One delivery's events once its messages are kept in the backlog ([`keep`]).
+struct Delivery {
+    /// What to pass on: the clicks, and the messages new to the backlog.
+    events: Vec<Inbound>,
+    /// Whether the delivery may be acknowledged: not when one of its messages could not be
+    /// kept, so that the platform delivers it again. The messages kept are passed on even
+    /// so: delivered again, they are known.
+    acknowledge: bool,
 }
 
-impl<K: Clone + Eq + Hash> Seen<K> {
-    /// Remember the last `capacity` keys.
-    fn new(capacity: usize) -> Self {
-        Self {
-            order: VecDeque::new(),
-            keys: HashSet::new(),
-            capacity,
+/// Keep the messages of one delivery, `events`, in the backlog of `inlet`, as a channel does
+/// before it acknowledges the delivery; a message that could not be kept is reported through
+/// `on_error`.
+async fn keep(inlet: &Inlet, events: Vec<Inbound>, on_error: Option<&ErrorReport>) -> Delivery {
+    let mut delivery = Delivery {
+        events: Vec::with_capacity(events.len()),
+        acknowledge: true,
+    };
+    for event in events {
+        match inlet.keep(&event).await {
+            Ok(Kept::New) => delivery.events.push(event),
+            Ok(Kept::Again) => {}
+            Err(error) => {
+                report(on_error, &error);
+                delivery.acknowledge = false;
+            }
         }
     }
-
-    /// Record `key`; false if it was seen already.
-    fn insert(&mut self, key: &K) -> bool {
-        if !self.keys.insert(key.clone()) {
-            return false;
-        }
-        self.order.push_back(key.clone());
-        if self.order.len() > self.capacity
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.keys.remove(&oldest);
-        }
-        true
-    }
+    delivery
 }
 
 /// When each chat may be posted to next, for a platform that allows so many posts per chat
@@ -378,18 +373,6 @@ mod tests {
     use reqwest::header::{HeaderValue, RETRY_AFTER};
 
     use super::*;
-
-    #[test]
-    fn seen_messages_are_dropped_and_old_ones_forgotten() {
-        let mut seen = Seen::new(SEEN_CAPACITY);
-        let key = |n: usize| ("C1".to_string(), n.to_string());
-        assert!(seen.insert(&key(0)));
-        assert!(!seen.insert(&key(0)));
-        for n in 1..=SEEN_CAPACITY {
-            assert!(seen.insert(&key(n)));
-        }
-        assert!(seen.insert(&key(0)), "the oldest key is forgotten");
-    }
 
     #[test]
     fn the_first_part_is_there_even_for_empty_text() {

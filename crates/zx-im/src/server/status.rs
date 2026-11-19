@@ -1,8 +1,6 @@
 //! Statuses of runs in progress, kept so that the next start can replace those a crash left
 //! behind.
 
-use std::fs::OpenOptions;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,30 +8,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::files::{RECORD, blocking, record_paths, remove_record, segment, write_record};
 use crate::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, ThreadId};
 
 use super::{SessionKey, Shared};
 
-/// The extension of a record file; a record is written under another name first.
-const RECORD: &str = "json";
-const PARTIAL: &str = "partial";
-
-/// `id` as one part of a file name, encoded so that no ID can name another file: bytes other
-/// than ASCII letters, digits, `-` and `_` become `%XX`, and an empty part becomes `%`.
-fn segment(id: &str) -> String {
-    if id.is_empty() {
-        return "%".to_string();
-    }
-    let mut encoded = String::with_capacity(id.len());
-    for byte in id.bytes() {
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
+/// What [`blocking`] names in its error.
+const FILES: &str = "status files";
 
 /// Keeps the status message of each run while it runs: the one that says
 /// [`Replies::working`](super::Replies::working).
@@ -86,78 +67,27 @@ impl StatusStore for StatusFiles {
         let path = self.path(key, status);
         let text = serde_json::to_string(&Record::new(key, status))
             .map_err(|error| format!("cannot encode the record of {}: {error}", path.display()))?;
-        blocking(move || write_record(&path, &text)).await
+        blocking(FILES, move || write_record(&path, &text)).await
     }
 
     async fn remove(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
         let path = self.path(key, status);
-        blocking(move || remove_record(&path)).await
+        blocking(FILES, move || remove_record(&path)).await
     }
 
     async fn list(&self) -> Result<Vec<(SessionKey, MessageRef)>, String> {
         let dir = self.dir.clone();
-        blocking(move || read_records(&dir)).await
-    }
-}
-
-/// Run `work`, which reads or writes status files, off the runtime: a volume that stopped
-/// answering then stalls neither the runtime nor the server's timeout of the call.
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| format!("reading or writing status files stopped: {error}"))?
-}
-
-/// Write `text` to `path` under a temporary name first, then rename it, so that a crash never
-/// leaves part of a record.
-fn write_record(path: &Path, text: &str) -> Result<(), String> {
-    let partial = path.with_extension(PARTIAL);
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    // Which chats and threads the server answers in is not for other users to read.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(&partial)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(|error| format!("cannot write {}: {error}", partial.display()))?;
-    if let Err(error) = std::fs::rename(&partial, path) {
-        // The record failed either way. Should the removal fail too, the file stays, and
-        // `list` passes over it.
-        std::fs::remove_file(&partial).ok();
-        return Err(format!(
-            "cannot rename {} to {}: {error}",
-            partial.display(),
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-/// Remove the record in `path`; one that is not there is removed already.
-fn remove_record(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("cannot remove {}: {error}", path.display())),
+        blocking(FILES, move || read_records(&dir)).await
     }
 }
 
 /// The records in `dir`, in the order of their names.
 fn read_records(dir: &Path) -> Result<Vec<(SessionKey, MessageRef)>, String> {
-    let unreadable = |path: &Path, error: io::Error| format!("cannot read {}: {error}", path.display());
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|error| unreadable(dir, error))? {
-        let path = entry.map_err(|error| unreadable(dir, error))?.path();
-        // Anything else is a write that a crash cut short before its rename.
-        if path.extension().is_some_and(|extension| extension == RECORD) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
+    let paths = record_paths(dir)?;
     let mut kept = Vec::with_capacity(paths.len());
     for path in paths {
-        let text = std::fs::read_to_string(&path).map_err(|error| unreadable(&path, error))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         let record: Record = serde_json::from_str(&text)
             .map_err(|error| format!("{} is not a status record: {error}", path.display()))?;
         kept.push(record.into_parts());
@@ -264,20 +194,6 @@ pub(super) async fn replace_left_behind(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_part_of_a_file_name_cannot_name_another_file() {
-        for (id, encoded) in [
-            ("C0123", "C0123"),
-            ("..", "%2E%2E"),
-            ("a/b", "a%2Fb"),
-            ("1700000000.000100", "1700000000%2E000100"),
-            ("群", "%E7%BE%A4"),
-            ("", "%"),
-        ] {
-            assert_eq!(segment(id), encoded, "{id:?}");
-        }
-    }
 
     fn key(platform: &str, conversation: &str, thread: &str) -> SessionKey {
         SessionKey {

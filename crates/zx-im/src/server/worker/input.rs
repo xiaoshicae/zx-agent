@@ -45,8 +45,8 @@ impl Worker {
             Input::Custom(said(content))
         };
         let admitted = match incoming.permit {
-            Some(permit) => permit.attach(input),
-            None => self.budget.try_admit(input),
+            Some(permit) => permit.attach(input, incoming.receipt),
+            None => self.budget.try_admit(input, incoming.receipt),
         };
         let Some(pending) = admitted else {
             self.out

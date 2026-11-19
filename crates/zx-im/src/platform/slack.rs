@@ -1,7 +1,7 @@
 //! Slack: messages and button clicks arrive over Socket Mode, posts go through the Web API.
 //!
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
-//! each envelope before handling it.
+//! each envelope once its message is kept, before handling it.
 //!
 //! The Web API calls are in `api.rs`; the Socket Mode connection in `connection.rs`; what
 //! arrives over it, and the cards, in `events.rs`.
@@ -16,18 +16,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageRef, Post, Replacement,
-    Said, ThreadId, UserId,
+    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said,
+    ThreadId, UserId,
 };
 
-use super::{
-    Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, http_client,
-    report, secret,
-};
+use super::{Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, http_client, report, secret};
 use api::CallError;
 use connection::{Ended, connection_url};
 use events::{button, card_request, escape, history, resolution, section, split};
@@ -197,7 +193,7 @@ impl ImChannel for SlackChannel {
         PLATFORM
     }
 
-    async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
+    async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut backoff = Backoff::default();
         // The bot's own user ID tells its messages apart; asking also checks the bot token.
         let bot = loop {
@@ -216,7 +212,6 @@ impl ImChannel for SlackChannel {
                 }
             }
         };
-        let mut seen = Seen::new(SEEN_CAPACITY);
         loop {
             let opened = self
                 .call_unless_cancelled("apps.connections.open", &self.config.app_token, cancel)
@@ -231,7 +226,7 @@ impl ImChannel for SlackChannel {
                 }
             };
             let ended = match url {
-                Some(url) => self.receive(&url, &inbound, bot.as_deref(), &mut seen, cancel).await,
+                Some(url) => self.receive(&url, &inlet, bot.as_deref(), cancel).await,
                 None => Ended::Failed,
             };
             match ended {
