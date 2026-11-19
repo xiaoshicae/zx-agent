@@ -227,7 +227,7 @@ impl Signal {
             EventKind::ContextOverflow { .. } => What::Overflow,
             EventKind::HookFailed { hook, phase, .. } => What::HookFailed {
                 hook: hook.clone(),
-                phase: phase.as_str(),
+                phase: phase.name(),
             },
             EventKind::ToolCallRecovered {
                 tool_call_id,

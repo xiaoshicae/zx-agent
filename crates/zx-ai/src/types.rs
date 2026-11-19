@@ -140,6 +140,19 @@ pub enum StopReason {
     Aborted,
 }
 
+impl StopReason {
+    /// The reason as JSON names it, such as `toolUse`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolUse => "toolUse",
+            Self::Error => "error",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
 /// One block of assistant output, in the order the model produced it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]

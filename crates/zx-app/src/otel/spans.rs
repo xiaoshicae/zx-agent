@@ -7,7 +7,6 @@ use std::time::SystemTime;
 use opentelemetry::trace::{SpanContext, Status, TraceContextExt, Tracer};
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::trace::SdkTracer;
-use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -263,7 +262,7 @@ impl OpenRun<'_> {
         // A summary request belongs to its compaction.
         let parent = self.spans.compaction.as_ref().or(self.spans.current()).cloned();
         let attributes = vec![
-            KeyValue::new("zx.request.kind", name(&kind)),
+            KeyValue::new("zx.request.kind", kind.name()),
             KeyValue::new("zx.model", model),
             KeyValue::new("zx.attempt", i64::from(attempt)),
         ];
@@ -273,7 +272,7 @@ impl OpenRun<'_> {
     fn response(&mut self, usage: &Usage, stop: StopReason) {
         if let Some(request) = self.spans.request.take() {
             let mut attributes = usage_attributes(usage);
-            attributes.push(KeyValue::new("zx.stop_reason", name(&stop)));
+            attributes.push(KeyValue::new("zx.stop_reason", stop.name()));
             finish(&request, self.at, attributes, stop == StopReason::Error);
         }
     }
@@ -299,7 +298,7 @@ impl OpenRun<'_> {
 
     fn approval_resolved(&self, call: &str, result: ApprovalResult, wait_ms: u64) {
         let attributes = vec![
-            KeyValue::new("zx.approval.result", name(&result)),
+            KeyValue::new("zx.approval.result", result.name()),
             KeyValue::new("zx.approval.wait_ms", saturate(wait_ms)),
         ];
         event(self.spans.for_call(call), "approval_resolved", self.at, attributes);
@@ -368,7 +367,7 @@ impl OpenRun<'_> {
         let attributes = vec![
             KeyValue::new("zx.tool.name", tool),
             KeyValue::new("zx.tool.call_id", call),
-            KeyValue::new("zx.recovery.state", name(&state)),
+            KeyValue::new("zx.recovery.state", state.name()),
         ];
         event(self.spans.run.as_ref(), "tool_call_recovered", self.at, attributes);
     }
@@ -450,15 +449,6 @@ fn outcome_attributes(outcome: RunOutcome) -> Vec<KeyValue> {
         attributes.push(KeyValue::new("zx.truncated", truncated));
     }
     attributes
-}
-
-/// The name a value has in events and reports, such as `summary`.
-fn name(value: &impl Serialize) -> String {
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::String(name)) => name,
-        // Only unit variants are named here, and they serialize as strings.
-        _ => String::new(),
-    }
 }
 
 /// Attribute integers are signed; counts beyond them show as the largest one.

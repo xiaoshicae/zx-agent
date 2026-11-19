@@ -4,6 +4,18 @@
 //!
 //! - `report`: what a run produced and how it ended, as `run_end` and `attempt_end` carry it
 
+/// `Serialize` for an enum without data, as the string its `name()` gives, so that each
+/// name is written once.
+macro_rules! serialize_by_name {
+    ($($kind:ty),* $(,)?) => {$(
+        impl serde::Serialize for $kind {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.name())
+            }
+        }
+    )*};
+}
+
 pub(crate) mod report;
 
 use async_trait::async_trait;
@@ -48,8 +60,7 @@ pub struct Event {
 }
 
 /// Which model request a `request_start` announces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestKind {
     /// A request for the task: the conversation so far.
     Task,
@@ -57,9 +68,18 @@ pub enum RequestKind {
     Summary,
 }
 
+impl RequestKind {
+    /// The kind as JSON names it: `task` or `summary`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Summary => "summary",
+        }
+    }
+}
+
 /// How an approval ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalResult {
     /// Allowed for this call.
     AllowOnce,
@@ -74,10 +94,23 @@ pub enum ApprovalResult {
     Cancelled,
 }
 
+impl ApprovalResult {
+    /// The result as JSON names it, such as `allow_once` or `timed_out`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowSession => "allow_session",
+            Self::Remembered => "remembered",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// What is known about a tool call that an interrupted run left without a result. The
 /// result recorded during recovery tells the model the same thing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interruption {
     /// The call started and may have changed state; its outcome is unknown.
     Started,
@@ -90,9 +123,21 @@ pub enum Interruption {
     ReadOnly,
 }
 
+impl Interruption {
+    /// The state as JSON names it, such as `start_unknown`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::StartUnknown => "start_unknown",
+            Self::NotStarted => "not_started",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
 /// Which phase of the loop a hook call is in: one per [`Hook`](crate::hooks::Hook) method.
 /// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks in the same
-/// phase. In JSON, the name [`HookPhase::as_str`] gives.
+/// phase. In JSON, the name [`HookPhase::name`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookPhase {
     OnInput,
@@ -105,7 +150,7 @@ pub enum HookPhase {
 
 impl HookPhase {
     /// The phase as JSON names it: the name of the hook method, such as `after_tool`.
-    pub fn as_str(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::OnInput => "on_input",
             Self::TransformContext => "transform_context",
@@ -119,15 +164,11 @@ impl HookPhase {
 
 impl std::fmt::Display for HookPhase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.write_str(self.name())
     }
 }
 
-impl Serialize for HookPhase {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
+serialize_by_name!(RequestKind, ApprovalResult, Interruption, HookPhase);
 
 /// Events emitted while the agent runs.
 ///
@@ -540,6 +581,24 @@ mod tests {
                 serde_json::to_value(&event).unwrap(),
                 json!({"type": "tool_call_recovered", "toolCallId": "c", "toolName": "bash", "state": name})
             );
+        }
+    }
+
+    #[test]
+    fn approval_results_and_request_kinds_serialize_their_documented_names() {
+        let results = [
+            (ApprovalResult::AllowOnce, "allow_once"),
+            (ApprovalResult::AllowSession, "allow_session"),
+            (ApprovalResult::Remembered, "remembered"),
+            (ApprovalResult::Denied, "denied"),
+            (ApprovalResult::TimedOut, "timed_out"),
+            (ApprovalResult::Cancelled, "cancelled"),
+        ];
+        for (result, name) in results {
+            assert_eq!(serde_json::to_value(result).unwrap(), name);
+        }
+        for (kind, name) in [(RequestKind::Task, "task"), (RequestKind::Summary, "summary")] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
         }
     }
 

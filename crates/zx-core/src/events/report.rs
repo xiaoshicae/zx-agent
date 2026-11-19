@@ -31,20 +31,19 @@ pub enum RunOutcome {
     Cancelled,
 }
 
-/// A budget of a run, which ends the run once it leaves no room for another request. In JSON
-/// each is named after the limit that sets it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// A budget of a run, which ends the run once it leaves no room for another request. In JSON,
+/// the name [`Budget::name`] gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Budget {
     /// The model requests a run may make, summary requests included.
-    #[serde(rename = "model_request_limit")]
     ModelRequests,
     /// The input and output tokens a run may use.
-    #[serde(rename = "token_budget")]
     Tokens,
     /// What a run may cost.
-    #[serde(rename = "cost_budget")]
     Cost,
 }
+
+serialize_by_name!(Budget);
 
 impl RunOutcome {
     /// The outcome as JSON names it, such as `completed` or `budget_exhausted`.
@@ -61,7 +60,8 @@ impl RunOutcome {
 }
 
 impl Budget {
-    /// The budget as JSON names it, after the limit that sets it, such as `token_budget`.
+    /// The budget as JSON names it: `model_request_limit` (set by `max_model_requests`),
+    /// `token_budget` or `cost_budget`.
     pub fn name(self) -> &'static str {
         match self {
             Self::ModelRequests => "model_request_limit",

@@ -4,6 +4,19 @@ use super::*;
 use crate::{SectionChange, SystemMessage};
 
 #[test]
+fn stop_reason_names_are_the_ones_json_gives() {
+    for reason in [
+        StopReason::Stop,
+        StopReason::Length,
+        StopReason::ToolUse,
+        StopReason::Error,
+        StopReason::Aborted,
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), reason.name());
+    }
+}
+
+#[test]
 fn invalid_streamed_tool_arguments_keep_what_the_model_sent() {
     let raw = "{\"command\":\"echo \"quoted\" text\"}";
     let call = ToolCall::streamed("c".into(), "bash".into(), raw);
