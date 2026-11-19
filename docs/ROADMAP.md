@@ -73,6 +73,8 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - MCP 工具的参数 schema 没有大小上限，原样交给模型；工具名与描述有上限。
 - JSONL 存储不缓存：`headers` 每次读取查询范围内每个会话文件的头部，`list` 每次回放匹配的会话；会话很多、ACP 客户端频繁列出时，再引入磁盘索引或数据库。
 - 每一步多次重建并复制整个投影（构造请求、比较系统提示词、检查摘要阈值等各取一次）；会话很长时再优化。
+- 两个 HTTP provider 发请求与读事件流的流程仍大体相同，`SystemUpdates` 各定义一份；再下沉到 `zx-ai-http` 涉及 D24 的分层，单独设计（2026-11-19 定为不在 e10a914 评审的修复中做）。
+- ACP 在运行中不显示扩展要求显示的消息，回放时显示：zx-agent 里没有部件会在运行中发出这种消息，所以没有端到端测试可写；`acp/updates.rs` 的单元测试要能构造 ACP 连接。
 - 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）。
 - 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；FauxProvider 响应增量之间的取消；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
@@ -114,7 +116,8 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - durable 的自动续跑与重放，工具结果中的图片、`structuredContent` 与 `runToolCall`（见 REFERENCE“与 pi 的差异”），codemode
 - MCP 的 stdio、OAuth 与运行中更新工具列表（D8）
 - 完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时、A/B 行为评测框架
+- 事件 JSON 中预算的名字 `model_request_limit` 不改为与设置同名的 `max_model_requests`：事件是对外格式（`schemaVersion`），改名的收益只是名字对齐
 
 ---
 
-ROADMAP.md · v0.49 · 2026年11月
+ROADMAP.md · v0.50 · 2026年11月

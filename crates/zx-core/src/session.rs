@@ -183,6 +183,11 @@ impl Session {
     /// ([`PendingInput::held`]), which ends once the session has recorded the input, or with a
     /// run that ends without recording it. This only takes the conversation; the returned
     /// [`Run`] makes the requests as it is read. An overlap returns Busy.
+    ///
+    /// A run cancelled while the input hooks ([`Hook::on_input`](crate::hooks::Hook::on_input))
+    /// run records no input: recorded without their rewrite, it would reach the model as it
+    /// was written. Without input hooks, the input is recorded before the run notices the
+    /// cancellation.
     pub fn send(&self, input: impl Into<PendingInput>) -> Result<Run, SessionError> {
         // The conversion is host code: it runs before the conversation is leased.
         self.start(Start::Message(input.into()))
