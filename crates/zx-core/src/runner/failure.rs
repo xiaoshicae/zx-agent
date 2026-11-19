@@ -21,32 +21,34 @@ impl Running<'_> {
         task_steps: u32,
     ) -> Result<(), RunStop> {
         let error = failed.failure_reason();
-        let cancelled = self.run.target.trace.cancel().is_cancelled();
-        let out_of_budget = self.accounting.exhausted().is_some() || cancelled;
-        if is_context_overflow(failed) && self.run.compacts_automatically() {
+        let cancelled = self.scope.target.trace.cancel().is_cancelled();
+        let no_further_request = self.accounting.exhausted().is_some() || cancelled;
+        if is_context_overflow(failed) && self.scope.compacts_automatically() {
             // A context the model rejects as too long fails again however often it is sent:
             // compact once and continue. Not a retry, so it has its own limit: once per run,
             // until an answer succeeds again (more than one step in the attempt).
             let refusal = if self.overflow_recovered && task_steps <= 1 {
                 Some("the context still overflowed after compacting it once".to_string())
             } else {
-                self.run.pause.refusal()
+                self.scope.pause.refusal()
             };
             if let Some(refusal) = refusal {
                 return Err(RunStop::Failed(format!("{error}; {refusal}")));
             }
-            if out_of_budget {
+            if no_further_request {
                 return Err(RunStop::Failed(error.to_string()));
             }
-            self.run.recover_overflow(error, entry_id, &mut self.accounting).await?;
+            self.scope
+                .recover_overflow(error, entry_id, &mut self.accounting)
+                .await?;
             self.overflow_recovered = true;
             return Ok(());
         }
         // Without budget, the provider error is the reason the run ends.
-        if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || out_of_budget {
+        if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || no_further_request {
             return Err(RunStop::Failed(error.to_string()));
         }
-        self.run
+        self.scope
             .schedule_retry(self.retry, &mut self.accounting, failed, entry_id)
             .await
     }
@@ -56,7 +58,7 @@ impl RunScope<'_> {
     /// Keep the failed answer `entry_id` in the session but drop it from the model context, so
     /// that the next attempt continues from the message before it without repeating the user
     /// message.
-    pub(super) async fn omit_failed_attempt(&mut self, entry_id: &str) -> Result<(), String> {
+    pub(super) async fn omit_answer(&mut self, entry_id: &str) -> Result<(), String> {
         let index = self
             .transcript
             .projection()
@@ -91,7 +93,7 @@ impl RunScope<'_> {
         self.target
             .emit(EventKind::ContextOverflow { error: error.into() })
             .await;
-        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
+        self.omit_answer(failed_entry).await.map_err(RunStop::Failed)?;
         let compacted = self.compact_for_run(accounting).await;
         let reason = match compacted.end {
             End::Completed { .. } => return Ok(()),
@@ -118,7 +120,7 @@ impl RunScope<'_> {
         failed: &AssistantMessage,
         failed_entry: &str,
     ) -> Result<(), RunStop> {
-        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
+        self.omit_answer(failed_entry).await.map_err(RunStop::Failed)?;
         accounting.retries = accounting.retries.saturating_add(1);
         let delay = retry.delay_for(accounting.retries, failed);
         self.target

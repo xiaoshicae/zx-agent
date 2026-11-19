@@ -211,13 +211,13 @@ impl Session {
         self.start(Start::Continue)
     }
 
-    fn start(&self, begin: Start) -> Result<Run, SessionError> {
+    fn start(&self, from: Start) -> Result<Run, SessionError> {
         let (mut lease, link, events) = self.begin()?;
         let id = link.id.clone();
         Ok(Run::new(
             id,
             events,
-            async move { lease.runner().run(begin, &link).await },
+            async move { lease.runner().run(from, &link).await },
         ))
     }
 

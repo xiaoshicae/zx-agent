@@ -180,7 +180,7 @@ impl RunScope<'_> {
     /// as a retry does: the model answers again.
     async fn omit_failed_answer(&mut self) -> Result<(), String> {
         match self.last_message() {
-            LastMessage::Failed(failed) => self.omit_failed_attempt(&failed).await,
+            LastMessage::Failed(failed) => self.omit_answer(&failed).await,
             LastMessage::Nothing | LastMessage::Unanswered | LastMessage::Answered => Ok(()),
         }
     }

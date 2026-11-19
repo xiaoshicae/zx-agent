@@ -21,8 +21,8 @@ impl StepLoop<'_> {
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.accounting.remaining_model_requests();
-        let messages = self.run.transcript.messages();
-        let summary = FinishedStep {
+        let messages = self.scope.transcript.messages();
+        let finished = FinishedStep {
             response: &response,
             messages: &messages,
             step,
@@ -30,13 +30,13 @@ impl StepLoop<'_> {
             remaining_model_requests: remaining,
             disposition,
         };
-        let decision = self.finish_step(&summary).await?;
+        let decision = self.finish_step(&finished).await?;
         if decision == StepDecision::Stop {
             return Err(Halt::Ended(completed(stop)));
         }
         // Inspect again: input may have arrived while the hook ran. Steering is taken at the
         // top of every step; follow-ups only when the model has nothing left to do.
-        let queues = &self.run.config.queues;
+        let queues = &self.scope.config.queues;
         if queues.has(Queue::Steering) {
             return Ok(NextInput::None);
         }
@@ -54,13 +54,13 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Ask the finish hooks what follows the step `summary` describes.
-    async fn finish_step(&self, summary: &FinishedStep<'_>) -> Result<StepDecision, Halt> {
+    /// Ask the finish hooks what follows the step `finished` describes.
+    async fn finish_step(&self, finished: &FinishedStep<'_>) -> Result<StepDecision, Halt> {
         match self
-            .run
+            .scope
             .config
             .hooks
-            .finish_step(summary, &self.run.target.trace.context())
+            .finish_step(finished, &self.scope.target.trace.hook_context())
             .await
         {
             Ok(decision) => Ok(decision),
@@ -73,7 +73,7 @@ impl StepLoop<'_> {
         let needs_more = after_tools == AfterTools::Ran;
         // Inspect queues without consuming them: stopping or failing in a hook must
         // leave accepted user input available to the next run.
-        let queues = &self.run.config.queues;
+        let queues = &self.scope.config.queues;
         let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
         if needs_more || queued {
             StepDisposition::Continue

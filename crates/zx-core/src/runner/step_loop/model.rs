@@ -12,15 +12,15 @@ use crate::transcript::RequestSource;
 impl StepLoop<'_> {
     /// Record and send the task request of step `step`, then account for its response.
     pub(super) async fn request_model(&mut self, step: u32) -> Result<AssistantMessage, Halt> {
-        let config = self.run.config;
-        let messages = self.run.transcript.messages();
+        let config = self.scope.config;
+        let messages = self.scope.transcript.messages();
         let configured = RequestSettings {
             model: config.model.clone(),
             reasoning: config.reasoning,
         };
         let prepared = config
             .hooks
-            .prepare_request(&messages, step, configured, &self.run.target.trace.context())
+            .prepare_request(&messages, step, configured, &self.scope.target.trace.hook_context())
             .await;
         let settings = match prepared {
             Ok(settings) => settings,
@@ -41,7 +41,7 @@ impl StepLoop<'_> {
         };
         let provider = config.provider.as_ref();
         let request_entry = self
-            .run
+            .scope
             .transcript
             .record_request(
                 &request,
@@ -71,8 +71,10 @@ impl StepLoop<'_> {
     /// Stream one response, reporting its start and its deltas. The caller records the
     /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
-        let config = self.run.config;
-        let mut events = config.provider.stream(request, self.run.target.trace.cancel().clone());
+        let config = self.scope.config;
+        let mut events = config
+            .provider
+            .stream(request, self.scope.target.trace.cancel().clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
@@ -85,7 +87,7 @@ impl StepLoop<'_> {
                 StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
-        let stop = if self.run.target.trace.cancel().is_cancelled() {
+        let stop = if self.scope.target.trace.cancel().is_cancelled() {
             StopReason::Aborted
         } else {
             StopReason::Error

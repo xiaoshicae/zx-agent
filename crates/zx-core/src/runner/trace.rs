@@ -66,7 +66,7 @@ impl RunTrace {
     }
 
     /// What every hook of this run is told, as of now.
-    pub(crate) fn context(&self) -> Arc<HookContext> {
+    pub(crate) fn hook_context(&self) -> Arc<HookContext> {
         Arc::clone(&lock(&self.told).hooks)
     }
 
@@ -77,7 +77,7 @@ impl RunTrace {
 
     /// The run takes an input that `actor` sent: its hooks and policies are told so from here
     /// on.
-    pub(crate) fn answer(&self, actor: Option<&str>) {
+    pub(crate) fn set_actor(&self, actor: Option<&str>) {
         let mut told = lock(&self.told);
         if told.hooks.actor.as_deref() == actor {
             return;
@@ -128,7 +128,7 @@ impl EventTarget<'_> {
         let Some(event) = self.queue(event).await else {
             return;
         };
-        for error in self.hooks.on_event(&event, &self.trace.context()).await {
+        for error in self.hooks.on_event(&event, &self.trace.hook_context()).await {
             self.report_failure(error).await;
         }
     }
@@ -165,7 +165,7 @@ impl EventTarget<'_> {
         if let Some(report) = self.queue(report).await {
             // A hook that fails to observe the report is not reported in turn: it would
             // fail on that report as well, without end.
-            drop(self.hooks.on_event(&report, &self.trace.context()).await);
+            drop(self.hooks.on_event(&report, &self.trace.hook_context()).await);
         }
         text
     }
@@ -198,16 +198,16 @@ mod tests {
     #[test]
     fn hooks_and_policies_are_told_whose_input_the_run_answers_from_then_on() {
         let trace = trace();
-        let before = trace.context();
+        let before = trace.hook_context();
         assert_eq!(
             (before.actor.as_deref(), trace.policy_context().actor.as_deref()),
             (None, None)
         );
 
-        trace.answer(Some("alice"));
+        trace.set_actor(Some("alice"));
 
         assert_eq!(before.actor, None, "a call under way keeps what it was told");
-        let (hooks, policies) = (trace.context(), trace.policy_context());
+        let (hooks, policies) = (trace.hook_context(), trace.policy_context());
         assert_eq!(
             (hooks.actor.as_deref(), policies.actor.as_deref()),
             (Some("alice"), Some("alice"))
@@ -216,8 +216,8 @@ mod tests {
             (hooks.run_id.as_str(), policies.run_id.as_str()),
             (before.run_id.as_str(), before.run_id.as_str())
         );
-        trace.answer(None);
-        assert_eq!(trace.context().actor, None);
+        trace.set_actor(None);
+        assert_eq!(trace.hook_context().actor, None);
     }
 
     #[test]

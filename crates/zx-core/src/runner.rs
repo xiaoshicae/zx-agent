@@ -124,7 +124,7 @@ impl Runner {
             hooks: &self.config.hooks,
         };
         let run_start = self.transcript.entries().len();
-        let mut run = RunScope {
+        let mut scope = RunScope {
             transcript: &mut self.transcript,
             run_start,
             target,
@@ -133,7 +133,7 @@ impl Runner {
             pause: &mut self.pause,
             cost_budget: self.limits.cost_budget,
         };
-        run.compact(Trigger::Manual, 1).await.into()
+        scope.compact(Trigger::Manual, 1).await.into()
     }
 
     /// The loop configuration.
@@ -200,7 +200,7 @@ impl Runner {
         // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = transcript.entries().len();
         let running = Running {
-            run: RunScope {
+            scope: RunScope {
                 transcript,
                 run_start,
                 target,
@@ -223,7 +223,7 @@ impl Runner {
 /// One run in progress: the scope it records through, what else it borrows from the
 /// Runner, and what its attempts have spent so far.
 struct Running<'a> {
-    run: RunScope<'a>,
+    scope: RunScope<'a>,
     retry: &'a RetryPolicy,
     limits: &'a RunLimits,
     approvals: &'a ApprovalGate,
@@ -236,7 +236,7 @@ struct Running<'a> {
 impl Running<'_> {
     /// Open the run from `begin`, run its attempts, and report how it ended.
     async fn run(mut self, begin: Start) -> RunReport {
-        let stop = match self.run.open(begin).await {
+        let stop = match self.scope.open(begin).await {
             Ok(first) => self.attempts(first).await,
             Err(error) => RunStop::Failed(error),
         };
@@ -273,7 +273,7 @@ impl Running<'_> {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
         // The scope borrowed again for this attempt alone, so that the loop's borrow of the
         // scope and the scope's borrow of the Runner end together.
-        StepLoop::new(self.run.reborrow(), self.approvals, &mut self.accounting)
+        StepLoop::new(self.scope.reborrow(), self.approvals, &mut self.accounting)
             .run(first)
             .await
     }
@@ -283,12 +283,12 @@ impl Running<'_> {
     async fn close(mut self, stop: RunStop) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
-        let stop = match self.run.record_pending_entries().await {
+        let stop = match self.scope.record_pending_entries().await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
-        let transcript = &self.run.transcript;
-        let added = transcript.messages_since(self.run.run_start);
+        let transcript = &self.scope.transcript;
+        let added = transcript.messages_since(self.scope.run_start);
         let (outcome, error) = self.conclude(stop, cut_off(&added));
         let accounting = &self.accounting;
         let report = RunReport {
@@ -302,7 +302,7 @@ impl Running<'_> {
             error,
             session_id: transcript.header().id.clone(),
         };
-        self.run
+        self.scope
             .target
             .emit(EventKind::RunEnd {
                 report: Box::new(report.clone()),

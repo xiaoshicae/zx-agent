@@ -16,7 +16,7 @@ impl StepLoop<'_> {
     /// Returns its entry ID.
     async fn append_message(&mut self, message: &Message, actor: Option<String>) -> Result<String, Halt> {
         // The event that reports the message owns it, so the session stores a copy.
-        self.run
+        self.scope
             .transcript
             .append_message_from(message.clone(), actor)
             .await
@@ -54,7 +54,7 @@ impl StepLoop<'_> {
         self.emit(EventKind::MessageStart { role: message.role() }).await;
         let id = self.append_message(&message, actor).await?;
         if let Some((queue, original)) = queued {
-            self.run.config.queues.remove_front(queue, original);
+            self.scope.config.queues.remove_front(queue, original);
         }
         self.emit(EventKind::MessageEnd {
             message,
@@ -69,7 +69,7 @@ impl StepLoop<'_> {
     /// `custom_message` entry, without input hooks, and seen by the model as a user message.
     async fn custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
         self.emit(EventKind::MessageStart { role: Role::User }).await;
-        let transcript = &mut *self.run.transcript;
+        let transcript = &mut *self.scope.transcript;
         let id = transcript
             .append_custom_message(message.clone())
             .await
@@ -80,7 +80,7 @@ impl StepLoop<'_> {
             _ => return Err(Halt::Unrecorded(anyhow!("custom message {id} was not recorded"))),
         };
         if let Some(queue) = queue {
-            self.run
+            self.scope
                 .config
                 .queues
                 .remove_front(queue, &Input::Custom(message.clone()));
@@ -129,7 +129,7 @@ impl StepLoop<'_> {
     /// over: its text replaced by `replacement`, or, with `None`, the message omitted.
     async fn edit_entry(&mut self, target: String, index: usize, replacement: Option<String>) -> Result<(), Halt> {
         let entry_id = self
-            .run
+            .scope
             .transcript
             .append_context_edit(&target, replacement.clone())
             .await
@@ -165,13 +165,13 @@ impl StepLoop<'_> {
         else {
             return self.append(message).await.map(drop);
         };
-        self.run.target.trace.answer(actor.as_deref());
+        self.scope.target.trace.set_actor(actor.as_deref());
         let text = content.clone();
         let transformed = match self
-            .run
+            .scope
             .config
             .hooks
-            .on_input(text.clone(), &self.run.target.trace.context())
+            .on_input(text.clone(), &self.scope.target.trace.hook_context())
             .await
         {
             Err(error) if error.failure == HookFailure::Stopped(Stopped::Cancelled) => {
@@ -187,7 +187,7 @@ impl StepLoop<'_> {
             .append_from(message, actor, queue.map(|queue| (queue, &queued)))
             .await?;
         // The input is the last message of the projection now.
-        let index = self.run.transcript.messages().len() - 1;
+        let index = self.scope.transcript.messages().len() - 1;
         match transformed {
             Ok(replacement) if replacement != text => self.edit_entry(id, index, Some(replacement)).await,
             Ok(_) => Ok(()),
@@ -200,7 +200,7 @@ impl StepLoop<'_> {
     }
 
     /// Record a queued message of either kind; see [`StepLoop::input`] and the custom case.
-    pub(super) async fn queued_input(&mut self, message: Input, queue: Option<Queue>) -> Result<(), Halt> {
+    pub(super) async fn record_input(&mut self, message: Input, queue: Option<Queue>) -> Result<(), Halt> {
         match message {
             Input::User { text, actor } => self.input(Message::user(text), actor, queue).await,
             Input::Custom(message) => self.custom_message(message, queue).await,
@@ -210,9 +210,9 @@ impl StepLoop<'_> {
     /// Drain one queue in order, or only its oldest message in one-at-a-time mode; input
     /// removes each item only after it is recorded.
     pub(super) async fn drain_queue(&mut self, queue: Queue) -> Result<(), Halt> {
-        let mode = self.run.config.queues.mode();
-        while let Some(message) = self.run.config.queues.front(queue) {
-            self.queued_input(message, Some(queue)).await?;
+        let mode = self.scope.config.queues.mode();
+        while let Some(message) = self.scope.config.queues.front(queue) {
+            self.record_input(message, Some(queue)).await?;
             if mode == QueueMode::OneAtATime {
                 break;
             }
