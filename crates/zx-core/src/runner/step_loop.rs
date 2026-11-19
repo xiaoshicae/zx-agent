@@ -98,8 +98,9 @@ pub(crate) struct StepLoop<'a> {
 
 /// What an attempt starts with.
 pub(crate) enum FirstInput {
-    /// The prompt of a run, recorded before the first request; its hold ends once it is.
-    Prompt(PendingInput),
+    /// The message the run starts with, recorded before the first request; its hold ends
+    /// once it is.
+    Message(PendingInput),
     /// Nothing new: the attempt answers the conversation as it is, as a retry does.
     Conversation,
     /// The follow-ups that wait in the queue, taken as they are between steps: as many at
@@ -142,12 +143,12 @@ impl<'a> StepLoop<'a> {
     /// Record what the attempt starts with, then run steps until a step stops the loop.
     /// Returns why it did.
     async fn run_steps(&mut self, first: FirstInput) -> Halt {
-        let (prompt, mut next) = match first {
-            FirstInput::Prompt(prompt) => (Some(prompt), NextInput::None),
+        let (message, mut next) = match first {
+            FirstInput::Message(message) => (Some(message), NextInput::None),
             FirstInput::Conversation => (None, NextInput::None),
             FirstInput::QueuedFollowUps => (None, NextInput::FollowUps),
         };
-        if let Err(halt) = self.initialize(prompt).await {
+        if let Err(halt) = self.initialize(message).await {
             return halt;
         }
         loop {
@@ -207,9 +208,9 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Record the system prompt's changes and the prompt, if there is one. The prompt's hold
-    /// ends once it is recorded, or failed to be.
-    async fn initialize(&mut self, prompt: Option<PendingInput>) -> Result<(), Halt> {
+    /// Record the system prompt's changes and the message the run starts with, if there is
+    /// one. The message's hold ends once it is recorded, or failed to be.
+    async fn initialize(&mut self, first: Option<PendingInput>) -> Result<(), Halt> {
         let config = self.scope.config;
         self.start_step().await;
         let changes = SystemPrompt::from_transcript(&self.scope.transcript.messages()).diff(&config.system_prompt);
@@ -223,8 +224,8 @@ impl<'a> StepLoop<'a> {
         // State an extension recorded before the run, such as from a command, precedes the
         // input it may refer to.
         self.scope.record_pending_entries().await.map_err(Halt::Unrecorded)?;
-        if let Some(prompt) = prompt {
-            let (message, _hold) = prompt.into_parts();
+        if let Some(first) = first {
+            let (message, _hold) = first.into_parts();
             self.record_input(message, None).await?;
         }
         Ok(())
@@ -248,7 +249,7 @@ impl<'a> StepLoop<'a> {
                 NextInput::None => {}
                 NextInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
                 // A hook asked for it: nobody sent it.
-                NextInput::Requested(message) => self.input(*message, None, None).await?,
+                NextInput::Requested(message) => self.record_user_input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
             let (targets, messages): (Vec<String>, Vec<Message>) = self

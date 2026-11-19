@@ -184,7 +184,7 @@ impl<'a> RunScope<'a> {
             .await
             .map_err(|error| format!("{error:#}"))?;
         match begin {
-            Start::Message(message) => Ok(FirstInput::Prompt(message)),
+            Start::Message(message) => Ok(FirstInput::Message(message)),
             Start::Continue => self.continuation(),
         }
     }

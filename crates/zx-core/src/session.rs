@@ -236,7 +236,7 @@ impl Session {
     }
 
     /// Summarize the old prefix of the conversation without executing a task or tools, as a
-    /// run of its own, with the same exclusive hold on the conversation as a prompt. An
+    /// run of its own, with the same exclusive lease of the conversation as a prompt. An
     /// overlap returns Busy; no eligible old prefix gives a no-op report. A cancelled or
     /// dropped run keeps an incomplete compaction out of the context.
     pub fn compact(&self) -> Result<Run<compaction::Report>, SessionError> {
@@ -365,7 +365,7 @@ impl Session {
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
     /// result. Returns false when idle or closed. The short operations that read or write the
     /// session while idle (`with_transcript`, `append_custom_entry`, `append_custom_message`,
-    /// `set_name`) hold the conversation as well: during one of them this returns true,
+    /// `set_name`) lease the conversation as well: during one of them this returns true,
     /// although they have nothing to cancel.
     pub fn cancel(&self) -> bool {
         let cancel = match &*lock(&self.shared.state) {

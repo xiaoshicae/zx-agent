@@ -42,7 +42,7 @@ impl StepLoop<'_> {
 
     /// Append a message from an extension (pi: a `custom` message): recorded as a
     /// `custom_message` entry, without input hooks, and seen by the model as a user message.
-    async fn custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
+    async fn record_custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
         self.emit(EventKind::MessageStart { role: Role::User }).await;
         let transcript = &mut *self.scope.transcript;
         let id = transcript
@@ -126,7 +126,7 @@ impl StepLoop<'_> {
     /// cancelled or dropped run leaves it for the next run.
     ///
     /// From a prompt on, the hooks and the policies are told that the run answers `actor`.
-    pub(super) async fn input(
+    pub(super) async fn record_user_input(
         &mut self,
         message: Message,
         actor: Option<String>,
@@ -179,11 +179,12 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Record a queued message of either kind; see [`StepLoop::input`] and the custom case.
+    /// Record a queued message of either kind: see [`StepLoop::record_user_input`] and
+    /// [`StepLoop::record_custom_message`].
     pub(super) async fn record_input(&mut self, message: Input, queue: Option<Queue>) -> Result<(), Halt> {
         match message {
-            Input::User { text, actor } => self.input(Message::user(text), actor, queue).await,
-            Input::Custom(message) => self.custom_message(message, queue).await,
+            Input::User { text, actor } => self.record_user_input(Message::user(text), actor, queue).await,
+            Input::Custom(message) => self.record_custom_message(message, queue).await,
         }
     }
 

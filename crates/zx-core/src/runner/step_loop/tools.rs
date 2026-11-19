@@ -122,7 +122,7 @@ impl StepLoop<'_> {
             .policies
             .check(call, &self.scope.target.trace.policy_context())
             .await;
-        self.decision(call, verdict.clone()).await;
+        self.report_decision(call, verdict.clone()).await;
         match verdict {
             PolicyDecision::Allow => {}
             PolicyDecision::Deny(reason) => return Err(blocked_by_policy(&reason)),
@@ -196,7 +196,7 @@ impl StepLoop<'_> {
     }
 
     /// Report the policies' verdict on `call`.
-    async fn decision(&self, call: &ToolCall, decision: PolicyDecision) {
+    async fn report_decision(&self, call: &ToolCall, decision: PolicyDecision) {
         self.emit(EventKind::ToolDecision {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
