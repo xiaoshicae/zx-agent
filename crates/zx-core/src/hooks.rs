@@ -289,7 +289,9 @@ pub trait Hook: Send + Sync {
 
     /// Transform a tool's result before it is delivered and recorded. Results chain in hook
     /// order, including results for blocked calls. Failure withholds the raw output and yields
-    /// an error result; it cannot undo effects of a tool that has already run.
+    /// an error result; it cannot undo effects of a tool that has already run. Not called for
+    /// a call that the run's cancellation kept from starting or interrupted: its result is
+    /// the kernel's own words.
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         Ok(output)
     }
