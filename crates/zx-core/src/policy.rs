@@ -30,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::ToolCall;
 use crate::guard::CancelSignal;
 
-pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN, request_id};
 pub use approval::{ApprovalDecision, ApprovalMode};
+pub(crate) use approval::{ApprovalGate, NO_HUMAN, RequestEnd, request_id};
 pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the

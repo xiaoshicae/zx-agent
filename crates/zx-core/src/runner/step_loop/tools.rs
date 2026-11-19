@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
 use crate::events::{ApprovalResult, EventKind};
-use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision, request_id};
+use crate::policy::{ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision, RequestEnd, request_id};
 use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
@@ -164,23 +164,23 @@ impl StepLoop<'_> {
         .await;
         let asked = Instant::now();
         let answer = match waiting {
-            None => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
+            None => RequestEnd::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
             // Withdrawn as this arm ends, before it is reported: an answer that comes later
             // finds no request.
-            Some((mut request, timeout)) => request.answer(timeout, self.scope.cancel()).await,
+            Some((mut request, timeout)) => request.wait(timeout, self.scope.cancel()).await,
         };
         let (approval, denial) = match answer {
-            Answer::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
-            Answer::Decided(ApprovalDecision::AllowSession) => {
+            RequestEnd::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
+            RequestEnd::Decided(ApprovalDecision::AllowSession) => {
                 self.approvals.remember(call);
                 (ApprovalResult::AllowSession, None)
             }
-            Answer::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
-            Answer::TimedOut(timeout) => (
+            RequestEnd::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
+            RequestEnd::TimedOut(timeout) => (
                 ApprovalResult::TimedOut,
                 Some(format!("nobody answered the approval request within {timeout:?}")),
             ),
-            Answer::Cancelled => (
+            RequestEnd::Cancelled => (
                 ApprovalResult::Cancelled,
                 Some("the run was cancelled while the call waited for approval".to_string()),
             ),

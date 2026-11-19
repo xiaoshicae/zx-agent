@@ -102,7 +102,7 @@ fn granted(calls: &[(String, Value)], call: &ToolCall) -> bool {
 
 /// How a request ended.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Answer {
+pub(crate) enum RequestEnd {
     Decided(ApprovalDecision),
     /// Nobody answered within this time.
     TimedOut(Duration),
@@ -125,16 +125,16 @@ impl Waiting<'_> {
     }
 
     /// Wait for the host's answer, at most `timeout` and until `cancel` is cancelled.
-    pub(crate) async fn answer(&mut self, timeout: Duration, cancel: &CancellationToken) -> Answer {
+    pub(crate) async fn wait(&mut self, timeout: Duration, cancel: &CancellationToken) -> RequestEnd {
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Answer::Cancelled,
+            () = cancel.cancelled() => RequestEnd::Cancelled,
             decision = &mut self.answer => match decision {
-                Ok(decision) => Answer::Decided(decision),
+                Ok(decision) => RequestEnd::Decided(decision),
                 // Only this request's own withdrawal drops the sender unanswered.
-                Err(_) => Answer::Cancelled,
+                Err(_) => RequestEnd::Cancelled,
             },
-            () = tokio::time::sleep(timeout) => Answer::TimedOut(timeout),
+            () = tokio::time::sleep(timeout) => RequestEnd::TimedOut(timeout),
         }
     }
 }
@@ -172,8 +172,8 @@ mod tests {
         assert!(gate.resolve(&id, ApprovalDecision::Deny("not now".into())));
         assert!(!gate.resolve(&id, ApprovalDecision::AllowOnce), "answered already");
 
-        let answer = request.answer(LONG, &CancellationToken::new()).await;
-        assert_eq!(answer, Answer::Decided(ApprovalDecision::Deny("not now".into())));
+        let end = request.wait(LONG, &CancellationToken::new()).await;
+        assert_eq!(end, RequestEnd::Decided(ApprovalDecision::Deny("not now".into())));
     }
 
     #[tokio::test]
@@ -182,15 +182,15 @@ mod tests {
         let brief = Duration::from_millis(1);
         let mut request = gate.open();
         assert_eq!(
-            request.answer(brief, &CancellationToken::new()).await,
-            Answer::TimedOut(brief)
+            request.wait(brief, &CancellationToken::new()).await,
+            RequestEnd::TimedOut(brief)
         );
 
         let cancel = CancellationToken::new();
         cancel.cancel();
         // Cancellation counts even when an answer has arrived as well.
         assert!(gate.resolve(request.id(), ApprovalDecision::AllowOnce));
-        assert_eq!(request.answer(LONG, &cancel).await, Answer::Cancelled);
+        assert_eq!(request.wait(LONG, &cancel).await, RequestEnd::Cancelled);
     }
 
     #[test]
