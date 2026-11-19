@@ -1,4 +1,7 @@
 //! One JSONL session file: a header line, then one record per line.
+//!
+//! Its functions block on the file system: the storage runs them on a blocking thread
+//! (`JsonlStorage::blocking`), and records reach the file on a writer thread of their own.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,10 +35,23 @@ fn header_line(header: &SessionHeader) -> Result<String> {
     Ok(serde_json::to_string(&HeaderLine::Session(header.clone()))?)
 }
 
-/// The header that `line`, the first line of a session file, holds.
-fn parse_header(line: &[u8]) -> Result<SessionHeader> {
-    let HeaderLine::Session(header) = serde_json::from_slice(line)?;
+/// The header in `line`, the first line of the session file at `path` that is not blank;
+/// `None` when the file has no such line.
+fn header_in(line: Option<&[u8]>, path: &Path) -> Result<SessionHeader> {
+    let line = line.ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
+    let HeaderLine::Session(header) =
+        serde_json::from_slice(line).with_context(|| format!("{}: invalid session header", path.display()))?;
     Ok(header)
+}
+
+/// Whether `line` holds nothing but whitespace.
+fn is_blank(line: &[u8]) -> bool {
+    line.iter().all(u8::is_ascii_whitespace)
+}
+
+/// What a failure to read the session file at `path` says.
+fn cannot_read(path: &Path) -> String {
+    format!("cannot read session file {}", path.display())
 }
 
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
@@ -103,8 +119,8 @@ impl Writer {
                 let Ok(first) = received.recv() else {
                     return;
                 };
-                let mut target = match open() {
-                    Ok(target) => target,
+                let mut destination = match open() {
+                    Ok(destination) => destination,
                     Err(error) => {
                         // The transcript may have stopped waiting for this write; then no one
                         // needs its result.
@@ -113,7 +129,9 @@ impl Writer {
                     }
                 };
                 for line in std::iter::once(first).chain(received) {
-                    let result = target.write_all(line.text.as_bytes()).and_then(|()| target.flush());
+                    let result = destination
+                        .write_all(line.text.as_bytes())
+                        .and_then(|()| destination.flush());
                     // As above: the transcript may have stopped waiting.
                     let _ = line.written.send(result.map_err(anyhow::Error::from));
                 }
@@ -127,15 +145,13 @@ impl Writer {
     }
 
     async fn write(&mut self, text: String) -> Result<()> {
-        let lines = self
-            .lines
-            .as_ref()
-            .ok_or_else(|| anyhow!("the session writer has stopped"))?;
+        // With no write pending the channel is empty, so a line it refuses means the thread
+        // is gone.
+        ensure!(!self.pending, "an earlier write of the session file has not finished");
+        let stopped = || anyhow!("the session writer has stopped");
+        let lines = self.lines.as_ref().ok_or_else(stopped)?;
         let (written, result) = oneshot::channel();
-        lines.try_send(Line { text, written }).map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => anyhow!("an earlier write of the session file has not finished"),
-            mpsc::TrySendError::Disconnected(_) => anyhow!("the session writer has stopped"),
-        })?;
+        lines.try_send(Line { text, written }).map_err(|_| stopped())?;
         self.pending = true;
         let result = result
             .await
@@ -183,9 +199,9 @@ impl JsonlFile {
     /// header is written immediately, so even a run that crashes before the first answer
     /// leaves a record.
     pub(super) fn create(path: &Path, header: &SessionHeader) -> Result<Self> {
-        // A header-only line and one small directory: quick, like any append.
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            super::create_private(parent)?;
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            crate::files::create_private_dir(parent)
+                .with_context(|| format!("cannot create the session directory {}", parent.display()))?;
         }
         let mut options = OpenOptions::new();
         options.append(true).create_new(true);
@@ -221,13 +237,12 @@ impl JsonlFile {
         // Before reading: a concurrent writer's unfinished line must not look like a crash.
         lock(&file, path)?;
         let mut content = Vec::new();
-        file.read_to_end(&mut content)
-            .with_context(|| format!("cannot read session file {}", path.display()))?;
-        let (loaded, truncate_at) = parse(&content, path)?;
-        let repair = match truncate_at {
-            Some(at) => Repair::Truncate(u64::try_from(at)?),
-            None if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
-            None => Repair::Nothing,
+        file.read_to_end(&mut content).with_context(|| cannot_read(path))?;
+        let loaded = parse(&content, path)?;
+        let repair = match loaded.incomplete_tail_bytes {
+            0 if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
+            0 => Repair::Nothing,
+            tail => Repair::Truncate(u64::try_from(content.len() - tail)?),
         };
         let opened = Self {
             path: path.to_path_buf(),
@@ -256,42 +271,40 @@ impl JsonlFile {
 /// Read a session file without locking or changing it. An incomplete last line, such as a
 /// record that a writer has not finished, is left out.
 pub(super) fn read(path: &Path) -> Result<LoadedSession> {
-    let content = std::fs::read(path).with_context(|| format!("cannot read session file {}", path.display()))?;
-    Ok(parse(&content, path)?.0)
+    let content = std::fs::read(path).with_context(|| cannot_read(path))?;
+    parse(&content, path)
 }
 
-/// Read only the header of a session file, without locking or changing it.
+/// Read only the header of a session file, without locking or changing it. Blank lines
+/// before it are skipped, as [`parse`] skips them.
 pub(super) fn read_header(path: &Path) -> Result<SessionHeader> {
-    let file = File::open(path).with_context(|| format!("cannot read session file {}", path.display()))?;
+    let file = File::open(path).with_context(|| cannot_read(path))?;
+    let mut lines = BufReader::new(file).take(MAX_HEADER_BYTES);
     let mut line = Vec::new();
-    BufReader::new(file)
-        .take(MAX_HEADER_BYTES)
-        .read_until(b'\n', &mut line)
-        .with_context(|| format!("cannot read session file {}", path.display()))?;
-    ensure!(
-        !line.iter().all(u8::is_ascii_whitespace),
-        "session file {} is empty",
-        path.display()
-    );
-    parse_header(&line).with_context(|| format!("{}: invalid session header", path.display()))
+    loop {
+        line.clear();
+        let read = lines.read_until(b'\n', &mut line).with_context(|| cannot_read(path))?;
+        if read == 0 || !is_blank(&line) {
+            break;
+        }
+    }
+    header_in((!is_blank(&line)).then_some(&line[..]), path)
 }
 
-/// The header and complete records of `content`, and where an incomplete last line starts.
-fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> {
+/// The header and complete records of `content`, with the length of an incomplete last
+/// line.
+fn parse(content: &[u8], path: &Path) -> Result<LoadedSession> {
     // A short final write can end inside a UTF-8 character, so check one record at a
     // time rather than rejecting the whole file during UTF-8 decoding.
     let mut lines = Vec::new();
     let mut offset = 0;
     for raw in content.split_inclusive(|&byte| byte == b'\n') {
-        if !raw.iter().all(u8::is_ascii_whitespace) {
+        if !is_blank(raw) {
             lines.push((offset, raw));
         }
         offset += raw.len();
     }
-    let (_, first) = lines
-        .first()
-        .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-    let header = parse_header(first).with_context(|| format!("{}: invalid session header", path.display()))?;
+    let header = header_in(lines.first().map(|&(_, first)| first), path)?;
 
     let mut records = Vec::new();
     let mut incomplete = None;
@@ -303,12 +316,11 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
         let record = std::str::from_utf8(raw).with_context(|| format!("{}: record {position}", path.display()))?;
         records.push(record.trim_end().to_string());
     }
-    let loaded = LoadedSession {
+    Ok(LoadedSession {
         header,
         records,
         incomplete_tail_bytes: incomplete.map_or(0, |start| content.len() - start),
-    };
-    Ok((loaded, incomplete))
+    })
 }
 
 impl Unrepaired {
@@ -317,14 +329,11 @@ impl Unrepaired {
     fn repair(self) -> Result<Box<dyn Write + Send>> {
         let Self { path, file, repair } = self;
         match repair {
-            Repair::Truncate(length) => file
-                .set_len(length)
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Terminate => (&file)
-                .write_all(b"\n")
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Nothing => {}
+            Repair::Truncate(length) => file.set_len(length),
+            Repair::Terminate => (&file).write_all(b"\n"),
+            Repair::Nothing => Ok(()),
         }
+        .with_context(|| format!("cannot repair session file {}", path.display()))?;
         Ok(Box::new(file))
     }
 }
@@ -383,12 +392,10 @@ fn lock(file: &File, path: &Path) -> Result<()> {
             // A signal interrupted the call: try again at once.
             std::io::ErrorKind::Interrupted => {}
             std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
-                // A synchronous pause: opening happens once per session, and it waits only
-                // while another descriptor holds the lock.
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(LOCK_RETRY_MAX);
             }
-            std::io::ErrorKind::WouldBlock => anyhow::bail!(
+            std::io::ErrorKind::WouldBlock => bail!(
                 "session file {} is in use: another process or session has it open for writing",
                 path.display()
             ),
@@ -693,6 +700,18 @@ mod tests {
             let error = read_header(&path).unwrap_err();
             assert!(format!("{error:#}").contains(expected), "{name}: {error:#}");
         }
+    }
+
+    #[test]
+    fn blank_lines_before_the_header_are_skipped_by_every_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let header = create(&path).unwrap().header().clone();
+        let content = std::fs::read(&path).unwrap();
+        std::fs::write(&path, [b"\n \n".as_slice(), &content].concat()).unwrap();
+
+        assert_eq!(read_header(&path).unwrap(), header);
+        assert_eq!(read(&path).unwrap().header, header);
     }
 
     #[cfg(unix)]

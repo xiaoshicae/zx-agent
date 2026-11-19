@@ -150,8 +150,7 @@ impl Files {
                 root.join(directory_name(&header.cwd)).join(name)
             }
         };
-        let file = JsonlFile::create(&path, header)?;
-        Ok(file)
+        JsonlFile::create(&path, header)
     }
 
     fn open(&self, id: &str) -> Result<(LoadedSession, JsonlFile)> {
@@ -172,7 +171,7 @@ impl Files {
         let mut sessions = Vec::new();
         let (candidates, mut unreadable) = self.candidates(query)?;
         for path in candidates {
-            match self.listed(&path, query) {
+            match listed(&path, query) {
                 Ok(Some(session)) => sessions.push(session),
                 Ok(None) => {}
                 Err(error) => unreadable.push(Unreadable {
@@ -207,19 +206,9 @@ impl Files {
                     Some(cwd) => vec![root.join(directory_name(&cwd.display().to_string()))],
                     None => directories_in(root)?,
                 };
-                Ok(session_files_of(directories))
+                Ok(session_files_in_each(directories))
             }
         }
-    }
-
-    /// What a listing shows of the session in `path`, if `query` asks for it. Only a
-    /// session it asks for is read whole.
-    fn listed(&self, path: &Path, query: &SessionQuery) -> Result<Option<SessionInfo>> {
-        if !query.matches(&file::read_header(path)?) {
-            return Ok(None);
-        }
-        let transcript = Transcript::snapshot(file::read(path)?).with_context(|| path.display().to_string())?;
-        Ok(Some(SessionInfo::of(&transcript)))
     }
 
     /// The file of session `id`, or an error that says where it was looked for.
@@ -245,7 +234,7 @@ impl Files {
         };
         // A directory that cannot be read holds no session this storage can open; a listing
         // reports it.
-        let (mut files, _) = session_files_of(directories_in(root)?);
+        let (mut files, _) = session_files_in_each(directories_in(root)?);
         // A file named after the session first, so that finding it reads few headers.
         files.sort_by_key(|path| !is_named_after(path, id));
         // A file that cannot be read is not the session; a listing reports it.
@@ -291,8 +280,18 @@ fn session_files_in(directory: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-/// The session files in `directories`, and the directories that cannot be read.
-fn session_files_of(directories: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<Unreadable>) {
+/// What a listing shows of the session in `path`, if `query` asks for it. Only a session it
+/// asks for is read whole.
+fn listed(path: &Path, query: &SessionQuery) -> Result<Option<SessionInfo>> {
+    if !query.matches(&file::read_header(path)?) {
+        return Ok(None);
+    }
+    let transcript = Transcript::snapshot(file::read(path)?).with_context(|| path.display().to_string())?;
+    Ok(Some(SessionInfo::of(&transcript)))
+}
+
+/// The session files in each of `directories`, and the directories that cannot be read.
+fn session_files_in_each(directories: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<Unreadable>) {
     let mut files = Vec::new();
     let mut unreadable = Vec::new();
     for directory in directories {
@@ -340,7 +339,7 @@ fn is_a(entry: &DirEntry, kind: Kind) -> bool {
 /// A session file under `root` that is named after session `id`, by its name alone. A
 /// directory that cannot be read is passed over, as finding a session passes it over.
 fn named_after(root: &Path, id: &str) -> Result<Option<PathBuf>> {
-    let (files, _) = session_files_of(directories_in(root)?);
+    let (files, _) = session_files_in_each(directories_in(root)?);
     Ok(files.into_iter().find(|path| is_named_after(path, id)))
 }
 
@@ -359,7 +358,13 @@ fn directory_name(cwd: &str) -> String {
         .strip_prefix(['/', '\\'])
         .unwrap_or(cwd)
         .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
+        .map(|character| {
+            if matches!(character, '/' | '\\' | ':') {
+                '-'
+            } else {
+                character
+            }
+        })
         .collect();
     format!("--{encoded}--")
 }
@@ -387,11 +392,4 @@ fn utc_time(ms: u64) -> String {
     let (second, milli) = (ms_of_day / 1000 % 60, ms_of_day % 1000);
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}-{milli:03}Z")
-}
-
-/// Create the session directory `directory` and its missing parents, readable only by this
-/// user ([`create_private_dir`](crate::files::create_private_dir)).
-fn create_private(directory: &Path) -> Result<()> {
-    crate::files::create_private_dir(directory)
-        .with_context(|| format!("cannot create the session directory {}", directory.display()))
 }

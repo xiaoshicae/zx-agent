@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::ai::{Message, StopReason, ToolCall, now_ms};
@@ -140,9 +140,7 @@ impl Transcript {
     fn started_off_branch(&self, issuer: &str, call_id: &str) -> bool {
         self.entries.iter().any(|entry| match entry {
             Entry::ToolCallStarted(start) if start.tool_call_id == call_id => self
-                .branch_path_from(start.parent_id.as_deref())
-                .into_iter()
-                .rev()
+                .ancestors(start.parent_id.as_deref())
                 .find(|entry| issued_call(entry, call_id).is_some())
                 .is_some_and(|entry| entry.id() == issuer),
             _ => false,
@@ -150,36 +148,33 @@ impl Transcript {
     }
 
     /// The call must have been issued on this branch and have neither a result nor an
-    /// earlier start record since.
+    /// earlier start record since. Walks the branch upward from the start to the answer that
+    /// issued the call.
     pub(super) fn validate_tool_call_start(&self, start: &ToolCallStartedEntry) -> Result<()> {
-        let path = self.branch_path_from(start.parent_id.as_deref());
-        let (position, call) = path
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, entry)| issued_call(entry, &start.tool_call_id).map(|call| (index, call)))
-            .ok_or_else(|| anyhow!("tool call {:?} is not on this branch", start.tool_call_id))?;
-        ensure!(
-            call.name == start.tool_name,
-            "tool call {:?} is {:?}, not {:?}",
-            start.tool_call_id,
-            call.name,
-            start.tool_name
-        );
-        for entry in &path[position + 1..] {
+        let id = &start.tool_call_id;
+        for entry in self.ancestors(start.parent_id.as_deref()) {
+            if let Some(call) = issued_call(entry, id) {
+                ensure!(
+                    call.name == start.tool_name,
+                    "tool call {id:?} is {:?}, not {:?}",
+                    call.name,
+                    start.tool_name
+                );
+                return Ok(());
+            }
             if let Entry::Message(entry) = entry
                 && let Message::ToolResult(result) = &entry.message
-                && result.tool_call_id == start.tool_call_id
+                && result.tool_call_id == *id
             {
-                bail!("tool call {:?} already has a result", start.tool_call_id);
+                bail!("tool call {id:?} already has a result");
             }
             if let Entry::ToolCallStarted(earlier) = entry
-                && earlier.tool_call_id == start.tool_call_id
+                && earlier.tool_call_id == *id
             {
-                bail!("tool call {:?} has already started", start.tool_call_id);
+                bail!("tool call {id:?} has already started");
             }
         }
-        Ok(())
+        bail!("tool call {id:?} is not on this branch")
     }
 }
 

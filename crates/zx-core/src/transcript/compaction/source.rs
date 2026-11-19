@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow, ensure};
 
-use crate::ai::{Message, PREAMBLE, SystemMessage, SystemPrompt, UserMessageKind};
+use crate::ai::{Message, SystemMessage, SystemPrompt, UserMessageKind};
 use crate::transcript::{ProjectedMessage, Transcript, without_details};
 
 /// The two messages of a summary request: `instructions` as the system prompt, `input` as
@@ -17,7 +17,7 @@ pub(crate) fn summary_messages(
 ) -> Vec<Message> {
     vec![
         Message::System(SystemMessage {
-            sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section(PREAMBLE, instructions)),
+            sections: SystemPrompt::default().diff(&SystemPrompt::new(instructions)),
             timestamp: system_timestamp,
         }),
         Message::User {
