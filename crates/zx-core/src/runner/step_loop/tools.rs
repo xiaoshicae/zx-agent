@@ -21,8 +21,8 @@ use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRES
 impl StepLoop<'_> {
     /// The tool the model calls `name`, and what it declared it changes.
     fn find_tool(&self, name: &str) -> Option<(Arc<dyn Tool>, Effects)> {
-        let tools = &self.scope.config.tools;
-        Some((tools.find(name)?.clone(), tools.effects(name)?))
+        let declared = self.scope.config.tools.declared(name)?;
+        Some((Arc::clone(&declared.tool), declared.effects))
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
@@ -225,9 +225,13 @@ impl StepLoop<'_> {
     /// gets its result here, in a cancelled run too: the calls it did not reach are recorded
     /// as not started, so that only a run that died leaves calls for the next one to answer.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let sequential = calls
-            .iter()
-            .any(|call| self.scope.config.tools.execution_mode(&call.name) == Some(ExecutionMode::Sequential));
+        let sequential = calls.iter().any(|call| {
+            self.scope
+                .config
+                .tools
+                .declared(&call.name)
+                .is_some_and(|declared| declared.execution_mode == ExecutionMode::Sequential)
+        });
         if sequential {
             self.sequential(calls).await
         } else {

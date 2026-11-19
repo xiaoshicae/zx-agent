@@ -346,7 +346,7 @@ impl Transcript {
         let target = edit.target_id.as_str();
         match self.get(target) {
             Some(Entry::Message(entry)) => {
-                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.is_some()) {
+                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.as_deref()) {
                     bail!("entry {target} {reason}");
                 }
             }
@@ -524,16 +524,17 @@ impl Transcript {
     }
 }
 
-/// Why a context edit may not change `message`, if it may not. A system message is never
-/// edited: prompt changes are new system messages. A text replacement (`replaces_text`) does
-/// not erase tool calls, whose results would otherwise lose their call.
+/// Why a context edit may not change `message` to `replacement`, or omit it when that is
+/// `None`, if it may not. A system message is never edited: prompt changes are new system
+/// messages. A text replacement does not erase tool calls, whose results would otherwise
+/// lose their call.
 ///
 /// The transcript applies this to every edit it records or loads, and the hook chain to a whole
 /// plan of edits before any of them is recorded, so both refuse the same edits.
-pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Option<&'static str> {
+pub(crate) fn context_edit_refusal(message: &Message, replacement: Option<&str>) -> Option<&'static str> {
     match message {
         Message::System(_) => Some("is a system message; record prompt changes as new system messages"),
-        Message::Assistant(answer) if replaces_text && !answer.tool_calls().is_empty() => {
+        Message::Assistant(answer) if replacement.is_some() && !answer.tool_calls().is_empty() => {
             Some("has tool calls, which a text replacement would erase")
         }
         Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => None,

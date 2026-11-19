@@ -27,6 +27,7 @@ pub struct PolicyChain {
 }
 
 impl PolicyChain {
+    /// A chain without policies, which allows every call.
     pub fn new() -> Self {
         Self::default()
     }
@@ -50,11 +51,6 @@ impl PolicyChain {
     /// was registered with.
     pub(crate) fn extend(&mut self, other: PolicyChain) {
         self.policies.extend(other.policies);
-    }
-
-    /// Whether no policy is registered: every call is then allowed.
-    pub fn is_empty(&self) -> bool {
-        self.policies.is_empty()
     }
 
     /// The decision on `call`: the first deny, else the first ask, else allow. A policy that
@@ -169,7 +165,6 @@ mod tests {
     #[tokio::test]
     async fn no_policy_allows_every_call() {
         let chain = PolicyChain::new();
-        assert!(chain.is_empty());
         assert_eq!(chain.check(&call(), &context()).await, PolicyDecision::Allow);
     }
 

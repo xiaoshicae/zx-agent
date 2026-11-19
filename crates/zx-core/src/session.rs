@@ -307,8 +307,8 @@ impl Session {
             .find(|command| command.name() == name)
             .ok_or(CommandError::Unknown)?;
         let ctx = CommandContext::new(
-            shared.cwd.clone(),
             shared.id.clone(),
+            shared.cwd.clone(),
             shared.queues.clone(),
             shared.active_tools.clone(),
         );

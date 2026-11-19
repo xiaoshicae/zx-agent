@@ -57,7 +57,7 @@ impl HookCall<'_> {
 }
 
 #[derive(Clone)]
-struct RegisteredHook {
+struct Registered {
     name: String,
     stage: HookStage,
     // Shared, not owned: the hooks of an agent serve every session it opens, and the
@@ -66,7 +66,7 @@ struct RegisteredHook {
     timeout: Duration,
 }
 
-impl RegisteredHook {
+impl Registered {
     fn call(&self, phase: HookPhase) -> HookCall<'_> {
         HookCall {
             name: &self.name,
@@ -97,10 +97,11 @@ impl RegisteredHook {
 /// own hooks are then added to the clone.
 #[derive(Clone, Default)]
 pub struct HookChain {
-    hooks: Vec<RegisteredHook>,
+    hooks: Vec<Registered>,
 }
 
 impl HookChain {
+    /// A chain without hooks.
     pub fn new() -> Self {
         Self::default()
     }
@@ -114,7 +115,7 @@ impl HookChain {
 
     /// Register `hook` as [`push`](Self::push) does, with `timeout` bounding each call.
     pub fn push_with_timeout(&mut self, name: impl Into<String>, hook: Arc<dyn Hook>, timeout: Duration) {
-        self.insert(RegisteredHook {
+        self.insert(Registered {
             name: name.into(),
             stage: hook.stage(),
             hook,
@@ -130,7 +131,7 @@ impl HookChain {
         }
     }
 
-    fn insert(&mut self, entry: RegisteredHook) {
+    fn insert(&mut self, entry: Registered) {
         let position = self.hooks.partition_point(|existing| existing.stage <= entry.stage);
         self.hooks.insert(position, entry);
     }
@@ -180,10 +181,9 @@ impl HookChain {
         &self,
         messages: &[Message],
         step: u32,
-        settings: RequestSettings,
+        mut settings: RequestSettings,
         ctx: &HookContext,
     ) -> Result<RequestSettings, HookError> {
-        let mut settings = settings;
         for entry in &self.hooks {
             let phase = HookPhase::PrepareRequest;
             let plan = RequestPlan {

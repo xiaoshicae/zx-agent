@@ -6,7 +6,7 @@ use super::{Halt, StepLoop};
 use crate::ai::{Message, Role, UserMessageKind};
 use crate::events::{CustomMessageInfo, EventKind};
 use crate::guard::Stopped;
-use crate::hooks::{ContextEdit, HookFailure};
+use crate::hooks::{ContextEdit, HookFailure, out_of_bounds};
 use crate::input::{Input, Queue, QueueMode};
 use crate::runner::run_scope::PERSIST_FAILED;
 use crate::transcript::{CustomMessage, Entry};
@@ -80,17 +80,17 @@ impl StepLoop<'_> {
     /// recorded. The chain applied the plan to a copy of the same context, so every index is
     /// in bounds.
     pub(super) async fn record_plan(&mut self, mut targets: Vec<String>, edits: Vec<ContextEdit>) -> Result<(), Halt> {
-        let out_of_bounds = |index: usize| Halt::Failed(format!("context index {index} is out of bounds"));
+        let missing = |index: usize| Halt::Failed(out_of_bounds(index));
         for edit in edits {
             match edit {
                 ContextEdit::Append { message } => targets.push(self.append(message).await?),
                 ContextEdit::ReplaceText { index, text } => {
-                    let target = targets.get(index).ok_or_else(|| out_of_bounds(index))?;
+                    let target = targets.get(index).ok_or_else(|| missing(index))?;
                     self.edit_entry(target, index, Some(text)).await?;
                 }
                 ContextEdit::Omit { index } => {
                     if index >= targets.len() {
-                        return Err(out_of_bounds(index));
+                        return Err(missing(index));
                     }
                     let target = targets.remove(index);
                     self.edit_entry(&target, index, None).await?;

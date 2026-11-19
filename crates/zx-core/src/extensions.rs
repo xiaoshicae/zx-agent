@@ -169,7 +169,8 @@ impl Expanded {
             .find(|stage| *stage != HookStage::Default)
         {
             return Err(format!(
-                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Default stage"
+                "extension {name:?}: a hook declares the {} stage; extension hooks run in the default stage",
+                stage.name()
             ));
         }
         let sections = extension.prompt_sections();

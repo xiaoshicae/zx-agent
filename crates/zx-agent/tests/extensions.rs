@@ -143,7 +143,7 @@ fn an_extension_hook_outside_the_extension_stage_refuses_the_agent() {
     };
     config.extensions = vec![Arc::new(early)];
     let error = refusal(config);
-    assert!(error.contains("declares the Redaction stage"), "{error}");
+    assert!(error.contains("declares the redaction stage"), "{error}");
 }
 
 #[test]

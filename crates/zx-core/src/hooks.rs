@@ -120,9 +120,9 @@ impl ContextEdit {
                 }
                 messages.push(message.clone());
             }
-            Self::ReplaceText { index, text } => replace_text(editable(messages, *index, true)?, text),
+            Self::ReplaceText { index, text } => replace_text(editable(messages, *index, Some(text))?, text),
             Self::Omit { index } => {
-                editable(messages, *index, false)?;
+                editable(messages, *index, None)?;
                 messages.remove(*index);
             }
         }
@@ -130,19 +130,27 @@ impl ContextEdit {
     }
 }
 
-/// The message at `index`, if an edit may change it: it exists, is not a summary, which only
-/// the session builds, and is one the session accepts an edit for ([`context_edit_refusal`]).
-fn editable(messages: &mut [Message], index: usize, replaces_text: bool) -> Result<&mut Message, String> {
-    let message = messages
-        .get_mut(index)
-        .ok_or_else(|| format!("context index {index} is out of bounds"))?;
+/// The message at `index`, if an edit may change it to `replacement`, or omit it when that is
+/// `None`: it exists, is not a summary, which only the session builds, and is one the session
+/// accepts the edit for ([`context_edit_refusal`]).
+fn editable<'m>(
+    messages: &'m mut [Message],
+    index: usize,
+    replacement: Option<&str>,
+) -> Result<&'m mut Message, String> {
+    let message = messages.get_mut(index).ok_or_else(|| out_of_bounds(index))?;
     if is_summary(message) {
         return Err("a context summary cannot be edited or omitted; edit its source messages instead".into());
     }
-    match context_edit_refusal(message, replaces_text) {
+    match context_edit_refusal(message, replacement) {
         Some(reason) => Err(format!("context message {index} {reason}")),
         None => Ok(message),
     }
+}
+
+/// Why an edit of the context at `index` cannot be made: the context has no such message.
+pub(crate) fn out_of_bounds(index: usize) -> String {
+    format!("context index {index} is out of bounds")
 }
 
 fn is_summary(message: &Message) -> bool {
@@ -238,6 +246,17 @@ pub enum HookStage {
     Redaction,
     /// Saves long tool output, after redaction.
     Storage,
+}
+
+impl HookStage {
+    /// The stage as messages name it: `default`, `redaction` or `storage`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Redaction => "redaction",
+            Self::Storage => "storage",
+        }
+    }
 }
 
 /// The callbacks an extension runs at the loop's extension points. Every method has a no-op
