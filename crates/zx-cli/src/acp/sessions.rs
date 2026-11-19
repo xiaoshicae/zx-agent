@@ -17,7 +17,7 @@ use zx_app::{ConfiguredAgent, resolve_cwd};
 use super::updates::Updates;
 use crate::application::open_session;
 use crate::process::eprint_line;
-use crate::render::{preview_text, visible};
+use crate::render::{preview_text, utc_time, visible};
 
 /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
 /// It is kept among the session files, where `session/load` finds it again.
@@ -119,12 +119,8 @@ pub(super) async fn list(configured: &ConfiguredAgent, request: &ListSessionsReq
 /// A listed session as the client shows it: its name, else its first prompt, as the title,
 /// and its last activity as the time.
 fn session_info(session: &StoredSession) -> SessionInfo {
-    // A time past the year 292 million is not one a session file records; the entry then
-    // has no time rather than a wrong one.
-    let updated_at = i64::try_from(session.last_activity_ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let updated_at =
+        utc_time(session.last_activity_ms).map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
         .title(session.title().map(preview_text))
         .updated_at(updated_at)

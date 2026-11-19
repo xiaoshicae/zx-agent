@@ -23,6 +23,8 @@ const PROGRESS_ARGS_CHARS: usize = 300;
 const LABEL_CHARS: usize = 80;
 /// Characters of a session's name or first prompt shown in a listing or as a client's title.
 const PROMPT_PREVIEW_CHARS: usize = 60;
+/// How a time is shown to a person, in a listing or a banner: to the minute.
+const LOCAL_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// [`describe_call`] cut to [`LABEL_CHARS`], for a line that lists the call.
 pub(crate) fn call_label(name: &str, args: &Value) -> String {
@@ -241,15 +243,16 @@ fn describe_interruption(state: Interruption) -> &'static str {
     }
 }
 
-/// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`
-/// for a time the calendar cannot hold.
-pub(crate) fn local_time(ms: u64, format: &str) -> Option<String> {
-    // A timestamp beyond i64, or past the year 262143, cannot occur; each caller shows its
-    // line without the time.
-    i64::try_from(ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|utc| utc.with_timezone(&chrono::Local).format(format).to_string())
+/// `ms` since the epoch as a time, or `None` for one the calendar cannot hold: beyond `i64`,
+/// or past the year 262143, which no record holds. A caller then shows no time rather than
+/// a wrong one.
+pub(crate) fn utc_time(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis)
+}
+
+/// `ms` since the epoch in local time, as a person reads it ([`utc_time`]).
+pub(crate) fn local_time(ms: u64) -> Option<String> {
+    utc_time(ms).map(|utc| utc.with_timezone(&chrono::Local).format(LOCAL_TIME_FORMAT).to_string())
 }
 
 /// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an

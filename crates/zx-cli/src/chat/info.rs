@@ -14,9 +14,6 @@ use super::output::{self, Output};
 use super::term::Tone;
 use crate::render::{local_time, visible};
 
-/// How the last activity of a resumed session is shown.
-const ACTIVITY_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
-
 /// What a conversation runs on, shown at startup and by `/status`.
 pub(super) struct About {
     pub(super) agent: String,
@@ -87,7 +84,7 @@ fn resumed_line(output: &Output, about: &About) {
     };
     let when = resumed
         .last_activity_ms
-        .and_then(|ms| local_time(ms, ACTIVITY_TIME_FORMAT))
+        .and_then(local_time)
         .map(|time| format!("; last activity {time}"))
         .unwrap_or_default();
     output.line(

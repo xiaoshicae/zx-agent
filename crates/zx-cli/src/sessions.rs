@@ -13,8 +13,6 @@ use crate::render::{local_time, preview_text, visible};
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
 /// `--resume` accepts as a prefix.
 const SHORT_ID_CHARS: usize = 8;
-/// How a listing shows when a session was last active.
-const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// List the sessions started in the working directory on stdout, newest first; their
 /// directory and the files in it that could not be read go to stderr.
@@ -46,7 +44,7 @@ fn lines(list: &SessionList) -> Vec<String> {
             format!(
                 "{}  {}  {:>3} message(s)  {}",
                 short_id(&session.id),
-                local_time(session.last_activity_ms, LISTING_TIME_FORMAT).unwrap_or_else(|| "-".to_string()),
+                local_time(session.last_activity_ms).unwrap_or_else(|| "-".to_string()),
                 session.messages,
                 preview(session)
             )
