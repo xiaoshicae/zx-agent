@@ -4,7 +4,8 @@
 //! - `input`: the single owner of the terminal's input
 //! - `turn`: one operation of a conversation driven to its end, with the approvals its
 //!   calls wait for
-//! - `output` and `term`: streaming output and colors
+//! - `output`: what a conversation shows as it runs, streamed
+//! - `term`: the lines drawn on the terminal, and their colors
 //! - `commands`: slash commands, which never reach the model
 //! - `storage`: where conversations are kept, and which one opens first
 //! - `info`: the banner, `/status` and `/help`
@@ -135,7 +136,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     let resume = resume.as_ref().map(Option::as_deref);
     let (storage, first) = opening(no_session, session, resume, chat.app.cwd()).await?;
     let built = chat.build(&model, &storage.place, first.id()).await?;
-    let mut terminal = Terminal {
+    let mut terminal = TerminalInput {
         signals: Signals::new().context("cannot register chat signal handlers")?,
         input: input::spawn(mode)?,
         next_approval: 1,
@@ -192,10 +193,10 @@ enum Read {
     Exit(u8),
 }
 
-/// The terminal side of the REPL: its input and signals, the number of the next approval
-/// request, and what the next read starts from.
-struct Terminal {
-    input: input::Input,
+/// The input side of the REPL: the terminal's lines and signals, the number of the next
+/// approval request, and what the next read starts from.
+struct TerminalInput {
+    input: input::Lines,
     /// Approval requests are numbered through the chat, so that a number names one request.
     next_approval: u64,
     signals: Signals,
@@ -206,7 +207,7 @@ struct Terminal {
     last_interrupt: Option<Instant>,
 }
 
-impl Terminal {
+impl TerminalInput {
     /// Read the next line, or the prompt queued for it. Ctrl+C twice, SIGTERM or the end of
     /// input end the chat.
     async fn read(&mut self, output: &Output) -> Result<Read> {
@@ -271,7 +272,7 @@ struct Repl<'a> {
 
 impl Repl<'_> {
     /// Carry out `command` typed while no task runs.
-    async fn command(&mut self, command: Command, terminal: &mut Terminal) -> Result<Flow> {
+    async fn command(&mut self, command: Command, terminal: &mut TerminalInput) -> Result<Flow> {
         let output = &self.chat.output;
         let session = &self.built.session;
         Ok(match command {
@@ -305,7 +306,7 @@ impl Repl<'_> {
     }
 
     /// Run `operation` while the terminal takes steering, approvals and signals.
-    async fn operate(&self, operation: Operation, terminal: &mut Terminal) -> Result<Flow> {
+    async fn operate(&self, operation: Operation, terminal: &mut TerminalInput) -> Result<Flow> {
         let mut io = terminal.io(&self.chat.output, &self.built.commands);
         drive_turn(&self.built.session, operation, &mut io).await
     }
@@ -341,7 +342,7 @@ impl Repl<'_> {
     }
 
     /// Do what `flow` asks of the REPL. Returns the exit code when the chat ends.
-    async fn follow(&mut self, flow: Flow, terminal: &mut Terminal) -> Option<u8> {
+    async fn follow(&mut self, flow: Flow, terminal: &mut TerminalInput) -> Option<u8> {
         match flow {
             Flow::Continue => {}
             Flow::Prompt(text) => terminal.next_prompt = Some(text),

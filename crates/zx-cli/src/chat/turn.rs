@@ -31,7 +31,7 @@ const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this
 const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
 
 pub(super) struct TurnIo<'a> {
-    pub(super) input: &'a mut input::Input,
+    pub(super) input: &'a mut input::Lines,
     /// The number the next approval request is shown under; it counts through the chat.
     pub(super) next_approval: &'a mut u64,
     pub(super) signals: &'a mut Signals,

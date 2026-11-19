@@ -21,9 +21,9 @@ pub(super) enum Line {
     Rejected(String),
 }
 
-pub(super) type Input = mpsc::Receiver<io::Result<Line>>;
+pub(super) type Lines = mpsc::Receiver<io::Result<Line>>;
 
-pub(super) fn spawn(mode: InputMode) -> Result<Input> {
+pub(super) fn spawn(mode: InputMode) -> Result<Lines> {
     // A handle of its own: only this thread reads stdin, so the global lock's buffer would hide
     // whether more input is waiting.
     let stdin = stdin_handle().context("cannot open terminal input")?;
