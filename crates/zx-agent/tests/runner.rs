@@ -1,43 +1,31 @@
 //! Run-level behavior: retries, limits, continuation of cut-off answers, persistence, and
 //! resumed sessions.
 
-struct CancellationProbe {
-    token: std::sync::Mutex<Option<CancellationToken>>,
-    started: tokio::sync::Notify,
-}
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Duration;
 
-impl zx_agent::ai::Provider for CancellationProbe {
-    fn name(&self) -> &str {
-        "cancellation-probe"
-    }
+use async_trait::async_trait;
+use serde_json::{Value, json};
 
-    fn stream(&self, _request: zx_agent::ai::Request, cancel: CancellationToken) -> zx_agent::ai::EventReceiver {
-        *self.token.lock().unwrap() = Some(cancel.clone());
-        self.started.notify_one();
-        let (mut tx, rx) = zx_agent::ai::provider::event_channel();
-        tokio::spawn(async move {
-            cancel.cancelled().await;
-            let _ = futures::SinkExt::send(
-                &mut tx,
-                zx_agent::ai::StreamEvent::Error(zx_agent::ai::AssistantMessage::failure(
-                    "cancellation-probe",
-                    "test-model",
-                    StopReason::Aborted,
-                    "cancelled",
-                )),
-            )
-            .await;
-        });
-        rx
-    }
-}
+use zx_agent::agent::RunLimits;
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, SystemPrompt, ToolCall, Usage};
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, RunOutcome};
+use zx_agent::hooks::{Hook, HookContext, HookResult};
+use zx_agent::input::Input;
+use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
+use zx_testing::{
+    EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
+    summarize, take_queued_inputs,
+};
 
 #[tokio::test]
 async fn dropping_a_run_cancels_its_provider() {
-    let probe = Arc::new(CancellationProbe {
-        token: std::sync::Mutex::new(None),
-        started: tokio::sync::Notify::new(),
-    });
+    let probe = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build().await;
     let mut running = Box::pin(runner.run("go"));
     tokio::select! {
@@ -50,31 +38,6 @@ async fn dropping_a_run_cancels_its_provider() {
     let cancelled = probe.token.lock().unwrap().as_ref().unwrap().is_cancelled();
     assert!(cancelled, "dropping the run left its provider active");
 }
-
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Duration;
-
-use async_trait::async_trait;
-use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
-
-use zx_agent::agent::RunLimits;
-use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{
-    Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, StopReason, SystemPrompt, ToolCall, Usage,
-};
-use zx_agent::builtin::continuation::ContinueOnLength;
-use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, RunOutcome};
-use zx_agent::hooks::{Hook, HookContext, HookResult};
-use zx_agent::input::Input;
-use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
-use zx_testing::{
-    EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
-    summarize, take_queued_inputs,
-};
 
 /// A stored record, as a database row would hold it.
 #[derive(Debug)]
