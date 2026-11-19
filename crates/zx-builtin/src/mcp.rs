@@ -24,7 +24,7 @@ use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lif
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
-use crate::ai::ToolDef;
+use crate::ai::{ToolDef, api_identifier};
 use crate::sync::lock;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
@@ -248,17 +248,7 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
 /// characters, including `.`; model APIs allow fewer (`MAX_TOOL_NAME_CHARS`). A server name has no
 /// `_`, so the first `__` ends it. Errors when the name would be too long.
 fn tool_name(server: &str, tool: &str) -> Result<String, String> {
-    let tool: String = tool
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let name = format!("{server}__{tool}");
+    let name = format!("{server}__{}", api_identifier(tool));
     if name.len() > MAX_TOOL_NAME_CHARS {
         return Err(fault(
             server,

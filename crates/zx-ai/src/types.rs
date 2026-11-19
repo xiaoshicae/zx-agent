@@ -476,6 +476,21 @@ pub enum Role {
     ToolResult,
 }
 
+/// `text` in the characters model APIs take in a tool's name or a call's ID: ASCII letters,
+/// digits, `_` and `-`, with every other character replaced by `_`. How long it may be is the
+/// caller's to bound.
+pub fn api_identifier(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Tool declaration sent to the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDef {

@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef};
+use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef, api_identifier};
 
 use crate::config::{BodyOptions, SystemUpdates};
 
@@ -308,16 +308,10 @@ fn tool_result(id: &str, content: &str, is_error: bool) -> Value {
 /// characters: the ids of another provider's answers may hold other characters (pi:
 /// `normalizeToolCallId`).
 fn tool_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect()
+    let mut id = api_identifier(id);
+    // ASCII only now, so a byte is a character.
+    id.truncate(64);
+    id
 }
 
 #[cfg(test)]
