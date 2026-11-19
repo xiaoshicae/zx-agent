@@ -3,10 +3,9 @@
 
 use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
-use crate::events::Budget;
 use crate::hooks::{FinishedStep, StepDecision, StepDisposition};
 use crate::input::Queue;
-use crate::runner::Ending;
+use crate::runner::{Ending, Exhausted};
 
 impl StepLoop<'_> {
     /// Ask the finish hooks and decide what the next step starts with. Ends the attempt when
@@ -91,7 +90,7 @@ impl StepLoop<'_> {
 fn requested_input(
     decision: StepDecision,
     disposition: StepDisposition,
-    exhausted: Option<Budget>,
+    exhausted: Option<Exhausted>,
 ) -> Result<Option<Message>, Halt> {
     let message = match decision {
         StepDecision::ContinueAnswer(text) if disposition == StepDisposition::Stop => Message::continuation(text),
@@ -101,7 +100,7 @@ fn requested_input(
         }
     };
     match exhausted {
-        Some(budget) => Err(Halt::Ended(Ending::BudgetExhausted(budget))),
+        Some(exhausted) => Err(Halt::Ended(Ending::BudgetExhausted(exhausted))),
         None => Ok(Some(message)),
     }
 }

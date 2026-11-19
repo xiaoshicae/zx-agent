@@ -40,12 +40,12 @@ use run_scope::{CompactionPause, RunScope, RunStop};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
-use crate::events::{Budget, Event, EventKind, RunOutcome, RunReport};
+use crate::events::{Event, EventKind, RunOutcome, RunReport};
 use crate::input::PendingInput;
 use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
-pub(crate) use accounting::RunAccounting;
+pub(crate) use accounting::{Exhausted, RunAccounting};
 use run_scope::PERSIST_FAILED;
 pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, StepLoop};
 pub(crate) use trace::{EventTarget, RunTrace};
@@ -212,9 +212,8 @@ impl Runner {
                 cost_budget: limits.cost_budget,
             },
             retry,
-            limits,
             approvals,
-            accounting: RunAccounting::new(limits.max_model_requests, limits.token_budget, limits.cost_budget),
+            accounting: RunAccounting::new(limits),
             overflow_recovered: false,
             timer,
         };
@@ -227,7 +226,6 @@ impl Runner {
 struct Running<'a> {
     scope: RunScope<'a>,
     retry: &'a RetryPolicy,
-    limits: &'a RunLimits,
     approvals: &'a ApprovalGate,
     accounting: RunAccounting,
     /// A context overflow was recovered from once already.
@@ -318,74 +316,42 @@ impl Running<'_> {
     /// How the run ended, as the report states it; `cut_off` says whether its last answer
     /// was cut off at the output token limit.
     fn conclude(&self, stop: RunStop, cut_off: bool) -> (RunOutcome, Option<String>) {
-        let (limits, accounting, timed_out) = (self.limits, &self.accounting, self.timer.timed_out());
+        const CUT_OFF: &str = "the answer was cut off at the output token limit";
         let ending = match stop {
             RunStop::Failed(error) => return (RunOutcome::Failed, Some(error)),
             RunStop::Ended(ending) => ending,
         };
-        match ending {
-            Ending::Completed => (RunOutcome::Completed, None),
-            Ending::Truncated => (
-                RunOutcome::Truncated,
-                Some("the answer was cut off at the output token limit".to_string()),
-            ),
-            Ending::BudgetExhausted(budget) => {
-                let reached = match budget {
-                    Budget::ModelRequests => format!(
-                        "model request limit reached (max_model_requests = {})",
-                        limits
-                            .max_model_requests
-                            .expect("a request budget ends a run only when one is configured")
-                    ),
-                    Budget::Tokens => format!(
-                        "token budget reached ({} tokens used, token_budget = {})",
-                        accounting.usage.input_and_output(),
-                        limits
-                            .token_budget
-                            .expect("a token budget ends a run only when one is configured")
-                    ),
-                    Budget::Cost => format!(
-                        "cost budget reached ({:.4} spent, cost_budget = {})",
-                        accounting.usage.total_cost.unwrap_or(0.0),
-                        limits
-                            .cost_budget
-                            .expect("a cost budget ends a run only when one is configured")
-                    ),
-                };
-                let error = if cut_off {
-                    format!("{reached}; the answer was cut off at the output token limit")
-                } else {
-                    reached
-                };
-                (ending.outcome(cut_off), Some(error))
-            }
-            // The time limit cancels the attempt, and only `timed_out` tells that
-            // cancellation from the caller's.
-            Ending::Cancelled if timed_out => {
-                // Only the timer of a configured limit sets `timed_out`.
-                let limit = limits
-                    .timeout
-                    .expect("a timeout ends a run only when a time limit is configured");
-                (
-                    RunOutcome::TimedOut,
-                    Some(format!("run exceeded the {limit:?} time limit")),
-                )
-            }
-            Ending::Cancelled => (RunOutcome::Cancelled, Some("run was cancelled".to_string())),
-        }
+        let error = match ending {
+            Ending::Completed => None,
+            Ending::Truncated => Some(CUT_OFF.to_string()),
+            Ending::BudgetExhausted(exhausted) if cut_off => Some(format!("{exhausted}; {CUT_OFF}")),
+            Ending::BudgetExhausted(exhausted) => Some(exhausted.to_string()),
+            // The time limit cancels the attempt, and only the timer tells that cancellation
+            // from the caller's.
+            Ending::Cancelled => match self.timer.reached() {
+                Some(limit) => {
+                    return (
+                        RunOutcome::TimedOut,
+                        Some(format!("run exceeded the {limit:?} time limit")),
+                    );
+                }
+                None => Some("run was cancelled".to_string()),
+            },
+        };
+        (ending.outcome(cut_off), error)
     }
 }
 
 /// How an attempt, and with it the run, ends when nothing failed. A failure is not among
 /// these: it comes with its reason ([`Halt::Failed`], [`RunStop::Failed`]). Nor is the time
 /// limit: it cancels the run, and the run's timer tells that from the caller's cancellation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ending {
     Completed,
     /// The answer was cut off at the output token limit.
     Truncated,
-    /// The budget left no room for another request.
-    BudgetExhausted(Budget),
+    /// A budget left no room for another request.
+    BudgetExhausted(Exhausted),
     Cancelled,
 }
 
@@ -396,8 +362,8 @@ impl Ending {
         match self {
             Self::Completed => RunOutcome::Completed,
             Self::Truncated => RunOutcome::Truncated,
-            Self::BudgetExhausted(budget) => RunOutcome::BudgetExhausted {
-                budget,
+            Self::BudgetExhausted(exhausted) => RunOutcome::BudgetExhausted {
+                budget: exhausted.budget(),
                 truncated: cut_off,
             },
             Self::Cancelled => RunOutcome::Cancelled,
@@ -415,6 +381,7 @@ pub(crate) enum Start {
 
 /// Cancels the run when its wall-clock limit passes, and remembers that it did.
 struct RunTimer {
+    limit: Option<Duration>,
     timed_out: Arc<AtomicBool>,
     _task: Option<AbortOnDrop<()>>,
 }
@@ -431,11 +398,16 @@ impl RunTimer {
                 token.cancel();
             }))
         });
-        Self { timed_out, _task: task }
+        Self {
+            limit,
+            timed_out,
+            _task: task,
+        }
     }
 
-    fn timed_out(&self) -> bool {
-        self.timed_out.load(Ordering::SeqCst)
+    /// The limit, once it has passed and cancelled the run.
+    fn reached(&self) -> Option<Duration> {
+        self.limit.filter(|_| self.timed_out.load(Ordering::SeqCst))
     }
 }
 

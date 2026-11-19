@@ -330,7 +330,7 @@ impl<'a> StepLoop<'a> {
     fn ensure_can_request(&self) -> Result<(), Halt> {
         self.ensure_not_cancelled()?;
         match self.accounting.exhausted() {
-            Some(budget) => Err(Halt::Ended(Ending::BudgetExhausted(budget))),
+            Some(exhausted) => Err(Halt::Ended(Ending::BudgetExhausted(exhausted))),
             None => Ok(()),
         }
     }

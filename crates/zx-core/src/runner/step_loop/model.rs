@@ -7,6 +7,7 @@ use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Request, Role, StopReason, StreamEvent};
 use crate::events::{EventKind, RequestKind};
 use crate::hooks::RequestSettings;
+use crate::runner::accounting::check_priced;
 use crate::transcript::RequestSource;
 
 impl StepLoop<'_> {
@@ -26,9 +27,7 @@ impl StepLoop<'_> {
             Ok(settings) => settings,
             Err(error) => return Err(self.hook_failed(error).await),
         };
-        self.accounting
-            .check_model(&config.models, &settings.model)
-            .map_err(Halt::Failed)?;
+        check_priced(&config.models, &settings.model, self.scope.cost_budget).map_err(Halt::Failed)?;
         let request = Request {
             model: settings.model,
             messages,
