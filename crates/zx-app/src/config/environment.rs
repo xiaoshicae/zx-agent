@@ -231,7 +231,7 @@ impl Config {
             ensure!(value != Some(0), "{key} must be greater than zero");
         }
         ensure!(!self.execution.trim().is_empty(), "execution must not be empty");
-        self.provider.validate()?;
+        self.provider.validate(self.reasoning)?;
         for (id, meta) in &self.models {
             check_model(id, meta)?;
         }
@@ -439,7 +439,7 @@ mod tests {
              apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
              maxTokensField = 'max_completion_tokens'\n\
              fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
-             requestFields = { thinking = { type = 'disabled' }, top_k = 5 }\n\
+             requestFields = { metadata = { user_id = 'u' }, top_k = 5 }\n\
              headers = { X-Route = 'eu' }",
         )
         .unwrap();
@@ -447,10 +447,10 @@ mod tests {
         assert_eq!(config.reasoning, Some(Reasoning::High));
         assert_eq!((config.max_tokens, config.tool_timeout_secs), (Some(512), Some(30)));
         let mut fields = serde_json::Map::new();
-        fields.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+        fields.insert("metadata".into(), serde_json::json!({"user_id": "u"}));
         fields.insert("top_k".into(), serde_json::json!(5));
         let provider = &config.provider;
-        let openai = openai_config(&provider.options).unwrap();
+        let openai = openai_config(&provider.options, config.reasoning).unwrap();
         assert_eq!(openai.base_url, "http://localhost:8000/v1");
         assert_eq!(provider.api_key_env.as_deref(), Some("LOCAL_KEY"));
         assert_eq!(openai.body.system_updates, SystemUpdates::Inline);
@@ -524,6 +524,10 @@ mod tests {
             ("reasoning = 'hard'", "unknown reasoning level"),
             ("[provider]\nsystemUpdates = 'merge'", "provider.systemUpdates"),
             ("[provider]\nreasoningFormat = 'x'", "provider.reasoningFormat"),
+            (
+                "reasoning = 'low'\n[provider]\nrequestFields = { reasoning_effort = 'high' }",
+                "provider.requestFields.reasoning_effort conflicts with reasoning",
+            ),
             (
                 "[provider]\nmaxTokensField = 'max_output_tokens'",
                 "provider.maxTokensField",

@@ -4,6 +4,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use serde::de::IntoDeserializer;
+use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zx_ai::ApiKey;
@@ -156,11 +158,32 @@ pub enum SystemUpdates {
     Inline,
 }
 
+/// Parsed by the names serde gives the variants, as the named settings of the
+/// OpenAI-compatible provider are: case and surrounding whitespace are ignored, and the error
+/// lists the names.
+impl std::str::FromStr for SystemUpdates {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let name = text.trim().to_ascii_lowercase();
+        let name: StrDeserializer<'_, NameError> = name.as_str().into_deserializer();
+        Self::deserialize(name).map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn system_updates_parse_from_the_names_they_are_recorded_by() {
+        assert_eq!(" Inline ".parse(), Ok(SystemUpdates::Inline));
+        assert_eq!("collapse".parse(), Ok(SystemUpdates::Collapse));
+        let error = "merge".parse::<SystemUpdates>().unwrap_err();
+        assert!(error.contains("`collapse`") && error.contains("`inline`"), "{error}");
+    }
 
     #[test]
     fn settings_the_client_cannot_use_are_refused() {

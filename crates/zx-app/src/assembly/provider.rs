@@ -5,13 +5,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
-use serde_json::{Map, Value};
+use anyhow::{Context, Result};
 
 use super::settings::BASE_URL_ENV;
 use crate::config::{ANTHROPIC, OPENAI, anthropic_config, openai_config};
 use zx_agent::ai::anthropic::AnthropicMessages;
-use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible};
+use zx_agent::ai::openai::OpenAiCompatible;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_util::registry::Registry;
 
@@ -68,10 +67,7 @@ impl ProviderFactory for OpenAi {
     }
 
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
-        let mut config = openai_config(input.options)?;
-        if input.reasoning.is_some() {
-            check_reasoning_fields(&config.body)?;
-        }
+        let mut config = openai_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
         let session_cache_key = config.body.prompt_cache_key;
         let provider = OpenAiCompatible::new(config).with_context(invalid_settings)?;
@@ -80,23 +76,6 @@ impl ProviderFactory for OpenAi {
             session_cache_key,
         })
     }
-}
-
-/// Refuse request fields that the reasoning level sets, with the format the settings write
-/// it in: which of the two would reach the server is not for the provider to choose.
-fn check_reasoning_fields(body: &BodyOptions) -> Result<()> {
-    if let Some(field) = body
-        .reasoning_format
-        .fields()
-        .iter()
-        .find(|field| body.extra_fields.contains_key(**field))
-    {
-        anyhow::bail!(
-            "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
-            body.reasoning_format
-        );
-    }
-    Ok(())
 }
 
 /// The provider of the Anthropic Messages API.
@@ -108,10 +87,7 @@ impl ProviderFactory for Anthropic {
     }
 
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
-        let mut config = anthropic_config(input.options)?;
-        if input.reasoning.is_some() {
-            check_thinking_fields(&config.body.extra_fields)?;
-        }
+        let mut config = anthropic_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
         let provider = AnthropicMessages::new(config).with_context(invalid_settings)?;
         Ok(BuiltProvider {
@@ -120,24 +96,6 @@ impl ProviderFactory for Anthropic {
             session_cache_key: false,
         })
     }
-}
-
-/// Refuse request fields that the reasoning level sets, `thinking.type`, `thinking.display`
-/// and `output_config.effort`, as [`check_reasoning_fields`] does for the OpenAI-compatible
-/// provider. The other settings of `thinking` and `output_config` go with the level's, such
-/// as `thinking.block_binding`.
-fn check_thinking_fields(fields: &Map<String, Value>) -> Result<()> {
-    for (field, key) in [
-        ("thinking", "type"),
-        ("thinking", "display"),
-        ("output_config", "effort"),
-    ] {
-        ensure!(
-            fields.get(field).and_then(|value| value.get(key)).is_none(),
-            "provider.requestFields.{field}.{key} conflicts with reasoning, which sets it; use one of them"
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -168,55 +126,15 @@ mod tests {
     }
 
     #[test]
-    fn request_fields_that_the_reasoning_level_sets_are_refused() {
-        for (api, text, expected) in [
-            (
-                OPENAI,
-                "requestFields = { reasoning_effort = 'high' }",
-                "provider.requestFields.reasoning_effort conflicts with reasoning",
-            ),
-            (
-                OPENAI,
-                "reasoningFormat = 'thinking'\nrequestFields = { thinking = { type = 'enabled' } }",
-                "provider.requestFields.thinking conflicts with reasoning",
-            ),
-            (
-                ANTHROPIC,
-                "requestFields = { thinking = { type = 'disabled' } }",
-                "provider.requestFields.thinking.type conflicts with reasoning",
-            ),
-            (
-                ANTHROPIC,
-                "requestFields = { thinking = { display = 'omitted' } }",
-                "provider.requestFields.thinking.display conflicts with reasoning",
-            ),
-            (
-                ANTHROPIC,
-                "requestFields = { output_config = { effort = 'max' } }",
-                "provider.requestFields.output_config.effort conflicts with reasoning",
-            ),
+    fn the_built_in_factories_check_the_settings_against_the_reasoning_level() {
+        for (api, text) in [
+            (OPENAI, "requestFields = { reasoning_effort = 'high' }"),
+            (ANTHROPIC, "requestFields = { thinking = { type = 'disabled' } }"),
         ] {
             let error = format!("{:#}", built(api, text, Some(Reasoning::Low)).err().unwrap());
-            assert!(error.contains(expected), "{api}, {text}: {error}");
+            assert!(error.contains("conflicts with reasoning"), "{api}: {error}");
+            built(api, text, None).unwrap();
         }
-        // Without a reasoning level, the field is the only one that sets it; the other
-        // settings of `output_config` are not the level's.
-        built(OPENAI, "requestFields = { reasoning_effort = 'high' }", None).unwrap();
-        built(ANTHROPIC, "requestFields = { thinking = { type = 'disabled' } }", None).unwrap();
-        built(
-            ANTHROPIC,
-            "requestFields = { output_config = { format = { type = 'json_schema', schema = {} } } }",
-            Some(Reasoning::Low),
-        )
-        .unwrap();
-        // Nor are the other settings of `thinking`, such as what the API does with thinking
-        // bound to another conversation.
-        built(
-            ANTHROPIC,
-            "requestFields = { thinking = { block_binding = { prefix_mismatch_behavior = 'drop_block' } } }",
-            Some(Reasoning::Low),
-        )
-        .unwrap();
     }
 
     #[test]
