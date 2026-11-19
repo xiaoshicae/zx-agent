@@ -261,9 +261,27 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].starts_with("bbbb0002  ") && lines[0].contains("  1 message(s)  deploy"));
     assert!(lines[1].starts_with("aaaa0001  ") && lines[1].ends_with("fix the build…"));
-    assert!(stderr(&output).contains("cannot read"));
-    assert!(stderr(&output).contains("broken.jsonl"));
-    assert!(stderr(&output).contains(&format!("[sessions] 2 session(s) in {}", dir.display())));
+    let errors = stderr(&output);
+    assert!(errors.contains("broken.jsonl: invalid session header"), "{errors}");
+    assert!(errors.contains(&format!("[sessions] 2 session(s) in {}", dir.display())));
+}
+
+#[tokio::test]
+async fn sessions_names_an_unreadable_file_once() {
+    let dirs = Dirs::new();
+    let dir = dirs.session_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("broken.jsonl"), "not json\n").unwrap();
+
+    let output = dirs.sessions(&[]).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let errors = stderr(&output);
+    let line = errors
+        .lines()
+        .find(|line| line.contains("broken.jsonl"))
+        .unwrap_or_else(|| panic!("{errors}"));
+    assert_eq!(line.matches("broken.jsonl").count(), 1, "{line}");
 }
 
 #[tokio::test]

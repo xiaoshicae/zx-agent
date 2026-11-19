@@ -139,8 +139,8 @@ impl SessionStorage for MemoryStorage {
                 match Transcript::snapshot(loaded) {
                     Ok(transcript) => sessions.push(SessionInfo::of(&transcript)),
                     Err(error) => unreadable.push(Unreadable {
+                        error: format!("session {id}: {error:#}"),
                         location: id,
-                        error: format!("{error:#}"),
                     }),
                 }
             }
