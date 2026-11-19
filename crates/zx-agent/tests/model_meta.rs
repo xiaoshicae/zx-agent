@@ -130,7 +130,7 @@ impl Provider for RenamingProvider {
 
 #[tokio::test]
 async fn costs_follow_the_requested_model_when_the_server_names_another() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(RenamingProvider {
         faux: FauxProvider::new([FauxStep::text(summary_json(&old)), FauxStep::text("done")]),
         served: "test-model-2026-01-01",
@@ -138,7 +138,7 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     let mut config = config(provider, vec![]);
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             keep_recent_bytes: 1,
             ..Config::default()
@@ -164,13 +164,13 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
 }
 
 async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'static str>, usize) {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(trigger_tokens),
@@ -202,14 +202,14 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
 
 #[tokio::test]
 async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_trigger() {
-    let mut store = Seed::in_memory(header()).await;
-    let old = store.append_old_observation().await;
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed.append_old_observation().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(100),
@@ -234,7 +234,7 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
 
 #[tokio::test]
 async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     // About 600 bytes of summary, which alone estimate to some 150 tokens.
     let long_summary =
         json!({"facts":[{"text":"observed ".repeat(66),"sourceEntryIds":[old]}],"inferences":[],"plans":[]});
@@ -243,7 +243,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(100),
@@ -278,15 +278,15 @@ fn token_trigger() -> Config {
 async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() {
     // An old message worth summarizing, then an answer that reported a context above the
     // trigger and is recent enough for the summary to keep.
-    let mut store = Seed::in_memory(header()).await;
-    let old = store.append_old_observation().await;
-    store.append_message(answer_reporting(5_000)).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed.append_old_observation().await;
+    seed.append_message(answer_reporting(5_000)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: token_trigger(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -328,14 +328,14 @@ impl Hook for TrimLongInput {
 async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() {
     // The last answer reported a context above the trigger. A hook then trims the message
     // that made it large, and what is left is too recent to compact.
-    let mut store = Seed::in_memory(header()).await;
-    store.append_old_observation().await;
-    store.append_message(answer_reporting(5_000)).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_old_observation().await;
+    seed.append_message(answer_reporting(5_000)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("trim_long_input", Arc::new(TrimLongInput));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: token_trigger(),
         ..RunnerSetup::new(config)
     }
@@ -351,11 +351,11 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
 
 /// An in-memory session that holds `messages`.
 async fn session_of(messages: &[Message]) -> Transcript {
-    let mut store = Transcript::in_memory(header());
+    let mut transcript = Transcript::in_memory(header());
     for message in messages {
-        store.append_message(message.clone()).await.unwrap();
+        transcript.append_message(message.clone()).await.unwrap();
     }
-    store
+    transcript
 }
 
 #[tokio::test]
@@ -403,7 +403,7 @@ fn window(tokens: u64) -> ModelMeta {
 /// tokens below the window of the model it asks, after switching from the agent's model to
 /// `model` when one is given. Returns the kinds of the run's events and the requests made.
 async fn run_after_switching_to(model: Option<&str>) -> (Vec<&'static str>, usize) {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
@@ -414,7 +414,7 @@ async fn run_after_switching_to(model: Option<&str>) -> (Vec<&'static str>, usiz
     config.models.insert("test-model".into(), window(1_000_000));
     config.models.insert("small-model".into(), window(2_000));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens: 1_000 },
             keep_recent_bytes: 1,

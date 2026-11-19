@@ -15,12 +15,12 @@ use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
 use zx_testing::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
-/// Every recorded request of `store`, rebuilt: the provider-neutral request and its
+/// Every recorded request of `transcript`, rebuilt: the provider-neutral request and its
 /// OpenAI-compatible body in both system update modes.
-fn replays(store: &Transcript) -> serde_json::Value {
+fn replays(transcript: &Transcript) -> serde_json::Value {
     let mut out = Vec::new();
-    for id in request_ids(store) {
-        let (config, request) = store.replay_request(&id).unwrap();
+    for id in request_ids(transcript) {
+        let (config, request) = transcript.replay_request(&id).unwrap();
         let mut bodies = serde_json::Map::new();
         for mode in ["collapse", "inline"] {
             let mut options = config.provider_options.clone();
@@ -49,17 +49,17 @@ fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
 /// byte for byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let store = zx_testing::read_session_file(&fixtures.join(format!("{name}.jsonl"))).unwrap();
+    let transcript = zx_testing::read_session_file(&fixtures.join(format!("{name}.jsonl"))).unwrap();
     let expected = std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap();
 
-    let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&store)).unwrap());
+    let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&transcript)).unwrap());
 
     assert!(rebuilt == expected, "rebuilt requests changed:\n{rebuilt}");
 }
 
 /// Request checkpoint IDs on the session's entry list, in file order.
-fn request_ids(store: &Transcript) -> Vec<String> {
-    store
+fn request_ids(transcript: &Transcript) -> Vec<String> {
+    transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -141,14 +141,14 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 async fn summary_requests_are_rebuilt_from_their_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    let old = store.append_old_observation().await;
-    store.append_message(Message::user("most recent input")).await.unwrap();
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    let old = seed.append_old_observation().await;
+    seed.append_message(Message::user("most recent input")).await.unwrap();
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary)]));
     let (session, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
@@ -176,10 +176,10 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
 
 #[tokio::test]
 async fn only_request_checkpoints_can_be_replayed() {
-    let mut store = Transcript::in_memory(header());
-    let message = store.append_message(Message::user("not a request")).await.unwrap();
-    assert!(store.replay_request(&message).is_err());
-    assert!(store.replay_request("missing").is_err());
+    let mut transcript = Transcript::in_memory(header());
+    let message = transcript.append_message(Message::user("not a request")).await.unwrap();
+    assert!(transcript.replay_request(&message).is_err());
+    assert!(transcript.replay_request("missing").is_err());
 }
 
 #[tokio::test]

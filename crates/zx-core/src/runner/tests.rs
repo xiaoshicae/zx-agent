@@ -97,9 +97,12 @@ async fn compaction_write_failures_fail_the_run_before_any_further_model_request
         "compaction_failed",
     ] {
         let header = SessionHeader::new(Path::new("."), "m");
-        let mut store = Transcript::with_writer(header, RejectWrites::entry(rejected));
-        let old = store.append_message(Message::user("x".repeat(4096))).await.unwrap();
-        store.append_message(Message::user("recent")).await.unwrap();
+        let mut transcript = Transcript::with_writer(header, RejectWrites::entry(rejected));
+        let old = transcript
+            .append_message(Message::user("x".repeat(4096)))
+            .await
+            .unwrap();
+        transcript.append_message(Message::user("recent")).await.unwrap();
         let summary = if rejected == "compaction_failed" {
             "invalid JSON".into()
         } else {
@@ -110,7 +113,7 @@ async fn compaction_write_failures_fail_the_run_before_any_further_model_request
             FauxStep::text(summary),
             FauxStep::text("must not execute"),
         ]));
-        let mut runner = runner(config(&provider, vec![]), store).with_compaction(compaction::Config {
+        let mut runner = runner(config(&provider, vec![]), transcript).with_compaction(compaction::Config {
             trigger_bytes: Some(1024),
             keep_recent_bytes: 1,
             ..compaction::Config::default()
@@ -130,9 +133,12 @@ async fn compaction_write_failures_fail_the_run_before_any_further_model_request
 #[tokio::test]
 async fn a_cancelled_summary_whose_failure_cannot_be_recorded_ends_the_run_as_an_error() {
     let header = SessionHeader::new(Path::new("."), "m");
-    let mut store = Transcript::with_writer(header, RejectWrites::entry("compaction_failed"));
-    store.append_message(Message::user("x".repeat(4096))).await.unwrap();
-    store.append_message(Message::user("recent")).await.unwrap();
+    let mut transcript = Transcript::with_writer(header, RejectWrites::entry("compaction_failed"));
+    transcript
+        .append_message(Message::user("x".repeat(4096)))
+        .await
+        .unwrap();
+    transcript.append_message(Message::user("recent")).await.unwrap();
     let cancel = CancellationToken::new();
     // The run is cancelled while its summary request waits; the session then rejects the
     // record of that failure.
@@ -141,7 +147,7 @@ async fn a_cancelled_summary_whose_failure_cannot_be_recorded_ends_the_run_as_an
         cancel_on_request.cancel();
         FauxStep::Hang
     })]));
-    let mut runner = runner(config(&provider, vec![]), store).with_compaction(compaction::Config {
+    let mut runner = runner(config(&provider, vec![]), transcript).with_compaction(compaction::Config {
         trigger_bytes: Some(1024),
         keep_recent_bytes: 1,
         ..compaction::Config::default()

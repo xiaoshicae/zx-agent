@@ -477,12 +477,12 @@ mod tests {
     async fn a_session_file_has_one_writer_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let store = create(&path).unwrap();
+        let transcript = create(&path).unwrap();
 
         let error = open(&path).err().unwrap().to_string();
         assert!(error.contains("is in use"), "{error}");
 
-        drop(store);
+        drop(transcript);
         let mut reopened = open(&path).unwrap();
         reopened.append_message(Message::user("q")).await.unwrap();
         let error = open(&path).err().unwrap().to_string();
@@ -516,7 +516,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
+    fn a_dropped_session_file_can_be_reopened_while_this_process_starts_programs() {
         // A program being started holds copies of this process's descriptors until it runs,
         // so the lock of a transcript that was just dropped can outlive the transcript for a moment.
         let dir = tempfile::tempdir().unwrap();
@@ -572,9 +572,9 @@ mod tests {
     async fn a_complete_last_line_without_newline_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = session_file(dir.path(), &[&user_entry("a", None)]);
-        let mut store = open(&path).unwrap();
-        store.append_message(Message::user("b")).await.unwrap();
-        drop(store);
+        let mut transcript = open(&path).unwrap();
+        transcript.append_message(Message::user("b")).await.unwrap();
+        drop(transcript);
         assert_eq!(texts(&open(&path).unwrap()), ["a", "b"]);
     }
 
@@ -582,10 +582,10 @@ mod tests {
     async fn recovers_a_tail_cut_inside_a_utf8_character() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("utf8.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        store.append_message(Message::user("中文")).await.unwrap();
-        drop(store);
+        let mut transcript = create(&path).unwrap();
+        transcript.append_message(Message::user("keep")).await.unwrap();
+        transcript.append_message(Message::user("中文")).await.unwrap();
+        drop(transcript);
         let bytes = std::fs::read(&path).unwrap();
         let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
         OpenOptions::new()
@@ -627,9 +627,9 @@ mod tests {
     async fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("invalid.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        drop(store);
+        let mut transcript = create(&path).unwrap();
+        transcript.append_message(Message::user("keep")).await.unwrap();
+        drop(transcript);
         OpenOptions::new()
             .append(true)
             .open(&path)
@@ -649,9 +649,9 @@ mod tests {
     async fn opening_changes_nothing_and_the_first_append_cuts_off_an_incomplete_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("kept")).await.unwrap();
-        drop(store);
+        let mut transcript = create(&path).unwrap();
+        transcript.append_message(Message::user("kept")).await.unwrap();
+        drop(transcript);
         let complete = std::fs::read(&path).unwrap();
         let cut_short = b"{\"type\":\"message\",\"id\":\"cut-short";
         OpenOptions::new()
@@ -678,11 +678,11 @@ mod tests {
     async fn a_header_is_read_without_the_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("q")).await.unwrap();
+        let mut transcript = create(&path).unwrap();
+        transcript.append_message(Message::user("q")).await.unwrap();
 
         // Also while the writer holds the file.
-        assert_eq!(&read_header(&path).unwrap(), store.header());
+        assert_eq!(&read_header(&path).unwrap(), transcript.header());
 
         for (name, content, expected) in [
             ("empty.jsonl", "", "is empty"),
@@ -713,9 +713,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         {
-            let mut store = create(&path).unwrap();
-            store.append_message(Message::user("q")).await.unwrap();
-            store.append_message(assistant("a")).await.unwrap();
+            let mut transcript = create(&path).unwrap();
+            transcript.append_message(Message::user("q")).await.unwrap();
+            transcript.append_message(assistant("a")).await.unwrap();
         }
         assert!(create(&path).is_err(), "never overwrites a session");
 
@@ -724,10 +724,10 @@ mod tests {
         file.write_all(b"{\"type\":\"message\",\"id\":\"x").unwrap();
         drop(file);
 
-        let mut store = open(&path).unwrap();
-        assert_eq!(texts(&store), ["q", "a"]);
-        store.append_message(Message::user("again")).await.unwrap();
-        drop(store);
+        let mut transcript = open(&path).unwrap();
+        assert_eq!(texts(&transcript), ["q", "a"]);
+        transcript.append_message(Message::user("again")).await.unwrap();
+        drop(transcript);
         let reopened = open(&path).unwrap();
         assert_eq!(texts(&reopened), ["q", "a", "again"]);
         assert_eq!(reopened.header().model, "m");

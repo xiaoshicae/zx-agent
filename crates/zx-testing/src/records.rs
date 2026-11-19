@@ -74,12 +74,12 @@ pub fn summary_of_the_source(request: &Request) -> String {
 }
 
 /// Every request of the session, rebuilt from its checkpoints, in order.
-pub fn replayed_requests(store: &Transcript) -> Vec<Request> {
-    store
+pub fn replayed_requests(transcript: &Transcript) -> Vec<Request> {
+    transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(store.replay_request(&started.id).unwrap().1),
+            Entry::RequestStarted(started) => Some(transcript.replay_request(&started.id).unwrap().1),
             _ => None,
         })
         .collect()

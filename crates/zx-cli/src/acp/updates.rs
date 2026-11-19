@@ -56,15 +56,15 @@ impl Updates {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
     }
 
-    /// Replay the conversation `store` holds to a client that loads the session: what it
+    /// Replay the conversation `transcript` holds to a client that loads the session: what it
     /// would have seen as the turns ran, without the streaming. That is every turn of the
     /// branch, also those a summary stands in for in what the model reads.
     ///
     /// The person's prompts, the answers with their thoughts, and the tool calls with their
     /// results; an extension's message when it asked to be shown. Summaries and the model's
     /// own continuations are the model's, not the person's.
-    pub(super) fn replay(&self, store: &Transcript) {
-        let projection = store.raw_projection();
+    pub(super) fn replay(&self, transcript: &Transcript) {
+        let projection = transcript.raw_projection();
         for (index, item) in projection.iter().enumerate() {
             match &item.message {
                 Message::User {
@@ -77,7 +77,7 @@ impl Updates {
                     kind: UserMessageKind::Custom,
                     ..
                 } => {
-                    if let Some(Entry::CustomMessage(entry)) = store.get(&item.entry_id)
+                    if let Some(Entry::CustomMessage(entry)) = transcript.get(&item.entry_id)
                         && entry.message.display
                     {
                         self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content)));

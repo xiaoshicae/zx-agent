@@ -57,11 +57,11 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
-    let mut store = zx_testing::create_session_file(&path, zx_testing::header())
+    let mut seed = zx_testing::create_session_file(&path, zx_testing::header())
         .await
         .unwrap();
-    let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
-    store.append_message(Message::user("recent input")).await.unwrap();
+    let id = seed.append_message(Message::user("x".repeat(bytes))).await.unwrap();
+    seed.append_message(Message::user("recent input")).await.unwrap();
     id
 }
 
@@ -152,11 +152,11 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     );
     assert_eq!(server.requests()[0].body["max_tokens"], 2048);
     assert!(server.requests()[0].body.get("tools").is_none());
-    let store = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
+    let seed = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
         .await
         .unwrap();
-    assert!(store.latest_compaction().is_some());
-    assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
+    assert!(seed.latest_compaction().is_some());
+    assert!(seed.raw_projection().iter().any(|item| item.entry_id == id));
 }
 
 #[tokio::test]
@@ -1391,14 +1391,14 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
 #[tokio::test]
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = zx_testing::create_session_file(&dir.path().join("chat.jsonl"), zx_testing::header())
+    let mut seed = zx_testing::create_session_file(&dir.path().join("chat.jsonl"), zx_testing::header())
         .await
         .unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
-    store.append_message(call).await.unwrap();
-    store.record_tool_call_started("c1", "bash").await.unwrap();
-    drop(store);
+    seed.append_message(call).await.unwrap();
+    seed.record_tool_call_started("c1", "bash").await.unwrap();
+    drop(seed);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
     let output = run(

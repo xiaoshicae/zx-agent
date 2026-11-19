@@ -28,8 +28,8 @@ async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<d
 /// The ID of the first message entry `matches` accepts.
 fn entry_id(session: &Driven, matches: impl Fn(&Message) -> bool) -> String {
     session
-        .with_transcript(|store| {
-            store.entries().iter().find_map(|entry| match entry {
+        .with_transcript(|transcript| {
+            transcript.entries().iter().find_map(|entry| match entry {
                 Entry::Message(entry) if matches(&entry.message) => Some(entry.id.clone()),
                 _ => None,
             })
@@ -73,8 +73,8 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         |message| matches!(message, Message::User { content, .. } if content == "third"),
     );
     let parent = session
-        .with_transcript(|store| {
-            store
+        .with_transcript(|transcript| {
+            transcript
                 .get(&third)
                 .and_then(|entry| entry.parent_id().map(str::to_string))
         })
@@ -163,7 +163,7 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     }
     assert_eq!(session.branch(None), Err(SessionError::Busy));
     assert_eq!(
-        session.with_transcript(|store| store.entries().len()).err(),
+        session.with_transcript(|transcript| transcript.entries().len()).err(),
         Some(SessionError::Busy)
     );
     assert!(session.cancel());

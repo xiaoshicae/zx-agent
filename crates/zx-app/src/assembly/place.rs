@@ -16,7 +16,7 @@ use zx_agent::transcript::{MemoryStorage, SessionList, SessionQuery, SessionStor
 const SESSIONS_DIR: &str = "sessions";
 
 /// Where a configured agent keeps its sessions. Clones share the same storage; constructors
-/// keep its layout private so a single-file store cannot be confused with a directory.
+/// keep its layout private so a single-file storage cannot be confused with a directory.
 #[derive(Clone)]
 pub struct SessionPlace(Place);
 

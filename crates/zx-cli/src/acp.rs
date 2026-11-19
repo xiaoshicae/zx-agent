@@ -143,7 +143,7 @@ impl Host {
         let session = self.locate(id, &request.cwd).await?;
         let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
         session
-            .with_transcript(|store| updates.replay(store))
+            .with_transcript(|transcript| updates.replay(transcript))
             .with_context(|| format!("cannot replay session {}", id.0))?;
         Ok(id.clone())
     }

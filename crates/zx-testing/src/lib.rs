@@ -38,7 +38,7 @@
 //!   evaluation and the regular tests
 //!
 //! Elsewhere: the scripted model `FauxProvider` (`crates/zx-ai/src/faux.rs`; how the tests
-//! turn it on is in `docs/TESTS.md`), `MemoryStorage` for a session store without files, what
+//! turn it on is in `docs/TESTS.md`), `MemoryStorage` for session storage without files, what
 //! only the program's tests can have (`crates/zx-cli/tests/common/mod.rs`: the compiled
 //! `zx-agent` and a pseudo-terminal), running a chat channel
 //! (`crates/zx-im/tests/common/im.rs`), and the unit tests' own `test_support` modules in

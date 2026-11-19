@@ -110,12 +110,12 @@ async fn summarized_by(
     compaction: Config,
     steps: Vec<FauxStep>,
 ) -> (Driven, Arc<Collect>, Arc<FauxProvider>, String) {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new(steps));
     let mut config = config(provider.clone(), vec![]);
     config.summarizer = Some(summarizer);
     let (session, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()

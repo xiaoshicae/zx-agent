@@ -354,8 +354,8 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     let sent: Vec<Option<Reasoning>> = provider.requests().iter().map(|request| request.reasoning).collect();
     assert_eq!(sent, [Some(Reasoning::Low), Some(Reasoning::High), None]);
     // Each change is a new request configuration, and every request rebuilds as sent.
-    let store = zx_testing::read_session_file(&file).unwrap();
-    let ids: Vec<String> = store
+    let transcript = zx_testing::read_session_file(&file).unwrap();
+    let ids: Vec<String> = transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -363,9 +363,9 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
             _ => None,
         })
         .collect();
-    let replayed: Vec<Request> = ids.iter().map(|id| store.replay_request(id).unwrap().1).collect();
+    let replayed: Vec<Request> = ids.iter().map(|id| transcript.replay_request(id).unwrap().1).collect();
     assert_eq!(replayed, provider.requests());
-    let configs = store
+    let configs = transcript
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::RequestConfig(_)))
@@ -396,7 +396,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
     session.cancel();
     running.await.unwrap();
     let named = session
-        .with_transcript(|store| store.session_name().map(|name| name.as_str().to_string()))
+        .with_transcript(|transcript| transcript.session_name().map(|name| name.as_str().to_string()))
         .unwrap();
     assert_eq!(named.as_deref(), Some("triage"));
     // The name is the session's, not the conversation's: the model never sees it.
@@ -715,9 +715,9 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one")]));
-    let store = zx_testing::create_session_file(&file, header()).await.unwrap();
+    let seed = zx_testing::create_session_file(&file, header()).await.unwrap();
     let (session, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build()
@@ -744,10 +744,10 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
 async fn the_reader_gets_a_message_only_once_it_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
-    let store = zx_testing::create_session_file(&file, header()).await.unwrap();
+    let seed = zx_testing::create_session_file(&file, header()).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let (session, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build()

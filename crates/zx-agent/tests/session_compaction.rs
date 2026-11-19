@@ -29,9 +29,9 @@ fn summary(id: &str) -> CompactionSummary {
     }
 }
 
-async fn seeded(store: &mut Seed) -> (String, String) {
-    let old = store.append_message(Message::user("old evidence")).await.unwrap();
-    let kept = store.append_message(Message::user("latest input")).await.unwrap();
+async fn seeded(seed: &mut Seed) -> (String, String) {
+    let old = seed.append_message(Message::user("old evidence")).await.unwrap();
+    let kept = seed.append_message(Message::user("latest input")).await.unwrap();
     (old, kept)
 }
 
@@ -39,9 +39,9 @@ async fn seeded(store: &mut Seed) -> (String, String) {
 async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    let (id, _) = seeded(&mut store).await;
-    drop(store);
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    let (id, _) = seeded(&mut seed).await;
+    drop(seed);
     let prefix = std::fs::read_to_string(&path).unwrap();
     for bad in [
         json!({"type":"context_edit","id":id,"parentId":id,"timestamp":0,"targetId":id,"replacement":null}),
@@ -80,25 +80,22 @@ fn exchange(id: &str) -> [Message; 2] {
 /// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
 /// question: the IDs of the earlier question, of the task, and of the two calls.
 async fn a_turn_with_two_calls() -> (Seed, [String; 4]) {
-    let mut store = Seed::in_memory(header()).await;
-    let earlier = store
-        .append_message(Message::user("an earlier question"))
-        .await
-        .unwrap();
-    let task = store.append_message(Message::user("the task")).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    let earlier = seed.append_message(Message::user("an earlier question")).await.unwrap();
+    let task = seed.append_message(Message::user("the task")).await.unwrap();
     let [call, result] = exchange("c1");
-    let first_call = store.append_message(call).await.unwrap();
-    store.append_message(result).await.unwrap();
+    let first_call = seed.append_message(call).await.unwrap();
+    seed.append_message(result).await.unwrap();
     let [call, result] = exchange("c2");
-    let second_call = store.append_message(call).await.unwrap();
-    store.append_message(result).await.unwrap();
-    (store, [earlier, task, first_call, second_call])
+    let second_call = seed.append_message(call).await.unwrap();
+    seed.append_message(result).await.unwrap();
+    (seed, [earlier, task, first_call, second_call])
 }
 
-/// Record, as a run leaves them, a compaction of `store` that keeps from `first_kept`, with
+/// Record, as a run leaves them, a compaction of `seed` that keeps from `first_kept`, with
 /// `kept_input` before its summary, and whose summary cites `cited`.
-async fn record_compaction(store: &mut Seed, first_kept: &str, kept_input: &str, cited: &str) {
-    let source_entry_ids = store
+async fn record_compaction(seed: &mut Seed, first_kept: &str, kept_input: &str, cited: &str) {
+    let source_entry_ids = seed
         .raw_projection()
         .into_iter()
         .take_while(|item| item.entry_id != first_kept)
@@ -106,7 +103,7 @@ async fn record_compaction(store: &mut Seed, first_kept: &str, kept_input: &str,
         .collect();
     let started = Entry::CompactionStarted(CompactionStartedEntry {
         id: "compaction-started".into(),
-        parent_id: store.leaf_id().map(String::from),
+        parent_id: seed.leaf_id().map(String::from),
         timestamp: now_ms(),
         first_kept_entry_id: first_kept.into(),
         kept_input_entry_id: Some(kept_input.into()),
@@ -119,7 +116,7 @@ async fn record_compaction(store: &mut Seed, first_kept: &str, kept_input: &str,
         }),
         input_bytes: 1000,
     });
-    store.append_record(started).await.unwrap();
+    seed.append_record(started).await.unwrap();
     let done = Entry::Compaction(CompactionEntry {
         id: "compaction".into(),
         parent_id: Some("compaction-started".into()),
@@ -129,7 +126,7 @@ async fn record_compaction(store: &mut Seed, first_kept: &str, kept_input: &str,
         summary: summary(cited),
         usage: Usage::default(),
     });
-    store.append_record(done).await.unwrap();
+    seed.append_record(done).await.unwrap();
 }
 
 #[tokio::test]
@@ -160,14 +157,14 @@ async fn a_context_plan_that_ends_a_summary_still_edits_the_messages_it_named() 
             })
         }
     }
-    let (mut store, [_, task, first_call, second_call]) = a_turn_with_two_calls().await;
-    record_compaction(&mut store, &second_call, &task, &first_call).await;
-    assert!(store.latest_compaction().is_some(), "the summary stands in for c1");
+    let (mut transcript, [_, task, first_call, second_call]) = a_turn_with_two_calls().await;
+    record_compaction(&mut transcript, &second_call, &task, &first_call).await;
+    assert!(transcript.latest_compaction().is_some(), "the summary stands in for c1");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("revise", Arc::new(ReviseTheTaskAndTrimC2));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: transcript.into(),
         ..RunnerSetup::new(config)
     }
     .build()

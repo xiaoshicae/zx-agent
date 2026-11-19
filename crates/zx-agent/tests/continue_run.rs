@@ -37,10 +37,10 @@ fn call_answer() -> Message {
 
 #[tokio::test]
 async fn continuing_answers_the_input_the_conversation_ends_with() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("question")).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -55,14 +55,14 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
 
 #[tokio::test]
 async fn after_a_crash_the_recovered_results_are_answered_without_running_the_call_again() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
-    store.append_message(call_answer()).await.unwrap();
-    store.record_tool_call_started("c1", "echo").await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
+    seed.append_message(call_answer()).await.unwrap();
+    seed.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let tool = Arc::new(EchoTool::new("echo"));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider.clone(), vec![tool.clone()]))
     }
     .build()
@@ -80,12 +80,12 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
 
 #[tokio::test]
 async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_results() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
-    store.append_message(call_answer()).await.unwrap();
-    store.record_tool_call_started("c1", "echo").await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
+    seed.append_message(call_answer()).await.unwrap();
+    seed.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
     let heard = CustomMessage {
         custom_type: "heard".into(),
         content: "someone spoke".into(),
@@ -103,8 +103,8 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
 
 #[tokio::test]
 async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
     let mut failed = AssistantMessage::failure("faux", "test-model", StopReason::Error, "the stream broke");
     failed.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
@@ -112,9 +112,9 @@ async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
         arguments: json!({"text": "h"}),
         arguments_error: None,
     })];
-    store.append_message(Message::Assistant(failed)).await.unwrap();
+    seed.append_message(Message::Assistant(failed)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("second try")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -253,15 +253,15 @@ async fn an_empty_conversation_has_nothing_to_continue() {
 async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("question")).await.unwrap();
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     runner.continue_run().await.unwrap();
 
-    let store = zx_testing::read_session_file(&path).unwrap();
-    let id = store
+    let transcript = zx_testing::read_session_file(&path).unwrap();
+    let id = transcript
         .entries()
         .iter()
         .find_map(|entry| match entry {
@@ -269,7 +269,7 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(store.replay_request(&id).unwrap().1, provider.requests()[0]);
+    assert_eq!(transcript.replay_request(&id).unwrap().1, provider.requests()[0]);
 }
 
 #[tokio::test]

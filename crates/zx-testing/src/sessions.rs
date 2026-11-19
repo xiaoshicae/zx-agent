@@ -170,10 +170,10 @@ impl DerefMut for Seed {
 /// A session in memory with one old message worth summarizing and a recent input; returns
 /// the old message's entry ID.
 pub async fn seeded_session() -> (Seed, String) {
-    let mut store = Seed::in_memory(header()).await;
-    let old = store.append_old_observation().await;
-    store.append_message(Message::user("most recent input")).await.unwrap();
-    (store, old)
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed.append_old_observation().await;
+    seed.append_message(Message::user("most recent input")).await.unwrap();
+    (seed, old)
 }
 
 /// A new session with `header` in the file `path`, through the storage of that one file.

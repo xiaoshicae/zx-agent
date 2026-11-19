@@ -840,21 +840,21 @@ impl Evaluation {
 /// cannot be written or does not load again at the end.
 pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let path = dir.join("summaries.jsonl");
-    let mut store = crate::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user(TASK)).await.unwrap();
-    drop(store);
+    let mut seed = crate::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user(TASK)).await.unwrap();
+    drop(seed);
     let mut rounds = Vec::new();
     let mut facts = Vec::new();
     for n in 1..=ROUNDS {
-        let mut store = crate::open_session_file(&path).await.unwrap();
+        let mut seed = crate::open_session_file(&path).await.unwrap();
         for message in round(n) {
-            store.append_message(message).await.unwrap();
+            seed.append_message(message).await.unwrap();
         }
-        let sent_before = summary_requests(&store).len();
+        let sent_before = summary_requests(&seed).len();
         let mut loop_config = config(Arc::clone(&provider), vec![]);
         loop_config.model = model.into();
         let (runner, _) = RunnerSetup {
-            session: store.into(),
+            session: seed.into(),
             compaction: Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
@@ -867,12 +867,12 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
 
         let report = runner.compact().await.unwrap();
 
-        let store = &runner.transcript();
-        let request_bytes = match summary_requests(store).get(sent_before) {
-            Some(id) => input_bytes(store, id),
+        let transcript = &runner.transcript();
+        let request_bytes = match summary_requests(transcript).get(sent_before) {
+            Some(id) => input_bytes(transcript, id),
             None => 0,
         };
-        let summary = store.entries().iter().rev().find_map(|entry| match entry {
+        let summary = transcript.entries().iter().rev().find_map(|entry| match entry {
             Entry::Compaction(done) => Some(done),
             _ => None,
         });
@@ -899,9 +899,9 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
     Evaluation { rounds, facts }
 }
 
-/// IDs of the summary requests recorded in `store`, oldest first.
-fn summary_requests(store: &Transcript) -> Vec<&str> {
-    store
+/// IDs of the summary requests recorded in `transcript`, oldest first.
+fn summary_requests(transcript: &Transcript) -> Vec<&str> {
+    transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -914,8 +914,8 @@ fn summary_requests(store: &Transcript) -> Vec<&str> {
 }
 
 /// Bytes of a summary request's input, rebuilt from the session as an audit would.
-fn input_bytes(store: &Transcript, request_id: &str) -> usize {
-    let (_, request) = store.replay_request(request_id).unwrap();
+fn input_bytes(transcript: &Transcript, request_id: &str) -> usize {
+    let (_, request) = transcript.replay_request(request_id).unwrap();
     match &request.messages[..] {
         [Message::System(_), Message::User { content, .. }] => content.len(),
         other => panic!("a summary request holds its instructions and its input, not {other:?}"),

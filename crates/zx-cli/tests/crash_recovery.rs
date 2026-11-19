@@ -305,22 +305,21 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store
-        .append_message(answer(&[
-            ("c1", "write"),
-            ("c2", "write"),
-            ("c3", "write"),
-            ("c4", "read"),
-            ("c5", "gone"),
-        ]))
-        .await
-        .unwrap();
-    store.record_tool_call_started("c1", "write").await.unwrap();
-    store.record_tool_call_started("c2", "write").await.unwrap();
-    store.append_message(result("c1", "write", "written")).await.unwrap();
-    drop(store);
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(answer(&[
+        ("c1", "write"),
+        ("c2", "write"),
+        ("c3", "write"),
+        ("c4", "read"),
+        ("c5", "gone"),
+    ]))
+    .await
+    .unwrap();
+    seed.record_tool_call_started("c1", "write").await.unwrap();
+    seed.record_tool_call_started("c2", "write").await.unwrap();
+    seed.append_message(result("c1", "write", "written")).await.unwrap();
+    drop(seed);
     let write = Counted::new("write", Effects::SideEffects);
     let read = Counted::new("read", Effects::ReadOnly);
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
@@ -385,19 +384,19 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
 #[tokio::test]
 async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
     for stop_reason in [StopReason::Error, StopReason::Aborted] {
-        let mut store = Seed::in_memory(header()).await;
-        store.append_message(Message::user("fix it")).await.unwrap();
+        let mut seed = Seed::in_memory(header()).await;
+        seed.append_message(Message::user("fix it")).await.unwrap();
         let Message::Assistant(mut failed) = answer(&[("c1", "write"), ("c2", "read")]) else {
             panic!("answer builds an assistant message");
         };
         failed.stop_reason = stop_reason;
-        store.append_message(Message::Assistant(failed)).await.unwrap();
+        seed.append_message(Message::Assistant(failed)).await.unwrap();
         let write = Counted::new("write", Effects::SideEffects);
         let read = Counted::new("read", Effects::ReadOnly);
         let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
         let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
         let (runner, events) = RunnerSetup {
-            session: store.into(),
+            session: seed.into(),
             ..RunnerSetup::new(config(provider.clone(), tools))
         }
         .build()
@@ -427,13 +426,13 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
 
 #[tokio::test]
 async fn the_recovery_event_follows_the_recorded_result() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store.append_message(answer(&[("c1", "write")])).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(answer(&[("c1", "write")])).await.unwrap();
     let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build()
@@ -671,14 +670,14 @@ fn sent_tool_result(server: &MockServer, index: usize) -> Value {
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = zx_testing::create_session_file(&dir.path().join("session.jsonl"), header())
+    let mut seed = zx_testing::create_session_file(&dir.path().join("session.jsonl"), header())
         .await
         .unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
-    store.append_message(call).await.unwrap();
-    store.record_tool_call_started("c1", "bash").await.unwrap();
-    drop(store);
+    seed.append_message(call).await.unwrap();
+    seed.record_tool_call_started("c1", "bash").await.unwrap();
+    drop(seed);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
     let output = run_command(&server, dir.path(), &["--session", "session.jsonl", "continue"])

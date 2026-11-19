@@ -17,8 +17,8 @@ pub(super) fn assistant(text: &str) -> Message {
     Message::Assistant(message)
 }
 
-pub(super) fn texts(store: &Transcript) -> Vec<String> {
-    store
+pub(super) fn texts(transcript: &Transcript) -> Vec<String> {
+    transcript
         .messages()
         .iter()
         .map(|message| match message {

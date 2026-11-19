@@ -234,9 +234,9 @@ mod tests {
         }
     }
 
-    /// The IDs of the request configurations `store` recorded, oldest first.
-    fn config_ids(store: &Transcript) -> Vec<String> {
-        store
+    /// The IDs of the request configurations `transcript` recorded, oldest first.
+    fn config_ids(transcript: &Transcript) -> Vec<String> {
+        transcript
             .entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -246,16 +246,16 @@ mod tests {
             .collect()
     }
 
-    /// Why the records of `store` do not load once a request checkpoint after `parent` names
+    /// Why the records of `transcript` do not load once a request checkpoint after `parent` names
     /// the configuration `config`.
-    fn refusal_of_a_request(store: &Transcript, parent: &str, config: &str) -> String {
-        let mut records = records_of(store);
+    fn refusal_of_a_request(transcript: &Transcript, parent: &str, config: &str) -> String {
+        let mut records = records_of(transcript);
         records.push(
             json!({"type":"request_started", "id":"invalid", "parentId":parent,
             "timestamp":0, "configId":config, "source":{"kind":"task"}})
             .to_string(),
         );
-        let error = Transcript::snapshot(loaded(store.header().clone(), records))
+        let error = Transcript::snapshot(loaded(transcript.header().clone(), records))
             .err()
             .expect("the request must be refused");
         format!("{error:#}")
@@ -263,56 +263,56 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_request_is_recorded_as_its_kind() {
-        let mut store = Transcript::in_memory(header());
+        let mut transcript = Transcript::in_memory(header());
 
-        let id = store
+        let id = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
 
-        let line = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        let line = serde_json::to_value(transcript.get(&id).unwrap()).unwrap();
         assert_eq!(line["source"], json!({"kind": "task"}));
     }
 
     #[tokio::test]
     async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
-        let mut store = Transcript::in_memory(header());
-        let first = store
+        let mut transcript = Transcript::in_memory(header());
+        let first = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        store
+        transcript
             .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let foreign = config_ids(&store).pop().unwrap();
-        store.branch(&first).unwrap();
-        let last = store
+        let foreign = config_ids(&transcript).pop().unwrap();
+        transcript.branch(&first).unwrap();
+        let last = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        assert_eq!(config_ids(&store).len(), 2, "the branch reuses its configuration");
+        assert_eq!(config_ids(&transcript).len(), 2, "the branch reuses its configuration");
 
-        let error = refusal_of_a_request(&store, &last, &foreign);
+        let error = refusal_of_a_request(&transcript, &last, &foreign);
 
         assert!(error.contains("is not the one in force on this branch"), "{error}");
     }
 
     #[tokio::test]
     async fn a_request_names_the_configuration_in_force_not_an_earlier_one_of_its_branch() {
-        let mut store = Transcript::in_memory(header());
-        store
+        let mut transcript = Transcript::in_memory(header());
+        transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let last = store
+        let last = transcript
             .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let configs = config_ids(&store);
+        let configs = config_ids(&transcript);
         assert_eq!(configs.len(), 2);
 
-        let error = refusal_of_a_request(&store, &last, &configs[0]);
+        let error = refusal_of_a_request(&transcript, &last, &configs[0]);
 
         assert!(error.contains("is not the one in force on this branch"), "{error}");
     }

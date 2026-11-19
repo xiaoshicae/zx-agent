@@ -215,13 +215,13 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     session.prompt("more").await.unwrap();
 
     assert_eq!(tool_names(&provider, 2), ["echo", "note"]);
-    let store = zx_testing::read_session_file(&file).unwrap();
-    let declared: Vec<Vec<String>> = store
+    let transcript = zx_testing::read_session_file(&file).unwrap();
+    let declared: Vec<Vec<String>> = transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
             Entry::RequestStarted(started) => Some(
-                store
+                transcript
                     .replay_request(&started.id)
                     .unwrap()
                     .1
@@ -440,8 +440,8 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
         summarize(&provider.requests()[0].messages),
         ["user:remember", "user:go"]
     );
-    let store = zx_testing::read_session_file(&file).unwrap();
-    assert_eq!(store.projection()[0].entry_id, id);
+    let transcript = zx_testing::read_session_file(&file).unwrap();
+    assert_eq!(transcript.projection()[0].entry_id, id);
 }
 
 /// Steers two messages when the tool runs.

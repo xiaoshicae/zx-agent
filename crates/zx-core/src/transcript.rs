@@ -161,18 +161,18 @@ impl Transcript {
     /// leaves out ([`Transcript::incomplete_tail_bytes`]); damage anywhere else is an error,
     /// and the stored session is left unchanged.
     pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
-        let mut store = Self::replay(loaded)?;
-        store.log = Some(log);
-        Ok(store)
+        let mut transcript = Self::replay(loaded)?;
+        transcript.log = Some(log);
+        Ok(transcript)
     }
 
     /// A stored session to read, not to write: what [`SessionStorage::read`] returned, also
     /// of a session that another transcript is writing. Checked like [`Transcript::load`]; every
     /// append to the snapshot fails.
     pub fn snapshot(loaded: LoadedSession) -> Result<Self> {
-        let mut store = Self::replay(loaded)?;
-        store.stopped = Some(WritesStopped::ReadOnly);
-        Ok(store)
+        let mut transcript = Self::replay(loaded)?;
+        transcript.stopped = Some(WritesStopped::ReadOnly);
+        Ok(transcript)
     }
 
     fn replay(loaded: LoadedSession) -> Result<Self> {
@@ -182,16 +182,16 @@ impl Transcript {
             incomplete_tail_bytes,
         } = loaded;
         header.check_version()?;
-        let mut store = Self::in_memory(header);
+        let mut transcript = Self::in_memory(header);
         for (position, record) in (1..).zip(&records) {
             let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
-            store
+            transcript
                 .validate_entry(&entry)
                 .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
-            store.insert(entry);
+            transcript.insert(entry);
         }
-        store.incomplete_tail_bytes = incomplete_tail_bytes;
-        Ok(store)
+        transcript.incomplete_tail_bytes = incomplete_tail_bytes;
+        Ok(transcript)
     }
 
     /// Whether an append failed, timed out or was interrupted, so that this transcript, which

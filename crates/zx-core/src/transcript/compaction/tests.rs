@@ -39,26 +39,29 @@ fn summarize(messages: &[Message]) -> Vec<String> {
 
 #[tokio::test]
 async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
-    let mut store = Transcript::in_memory(header());
+    let mut transcript = Transcript::in_memory(header());
     let first_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("preamble", "first")),
         timestamp: now_ms(),
     });
-    store.append_message(first_system.clone()).await.unwrap();
-    let old = store.append_message(Message::user("observed something")).await.unwrap();
+    transcript.append_message(first_system.clone()).await.unwrap();
+    let old = transcript
+        .append_message(Message::user("observed something"))
+        .await
+        .unwrap();
     let second_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("environment", "updated")),
         timestamp: now_ms(),
     });
-    store.append_message(second_system.clone()).await.unwrap();
-    let kept = store.append_message(Message::user("latest input")).await.unwrap();
-    let raw = store.raw_projection();
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    let done = store
+    transcript.append_message(second_system.clone()).await.unwrap();
+    let kept = transcript.append_message(Message::user("latest input")).await.unwrap();
+    let raw = transcript.raw_projection();
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let done = transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    let projection = store.projection();
+    let projection = transcript.projection();
     assert_eq!(
         projection
             .iter()
@@ -72,23 +75,23 @@ async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates()
         matches!(&projection[2].message, Message::User { content, .. } if content.contains(&old) && content.contains("Inferences (not independently verified)"))
     );
     assert_eq!(projection[3].entry_id, kept);
-    assert_eq!(store.raw_projection(), raw);
+    assert_eq!(transcript.raw_projection(), raw);
 }
 
 #[tokio::test]
 async fn unfinished_and_failed_attempts_do_not_change_context() {
-    let mut store = Transcript::in_memory(header());
-    let (_, kept) = seeded(&mut store).await;
-    let before = store.messages();
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    assert_eq!(store.messages(), before);
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut transcript).await;
+    let before = transcript.messages();
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    assert_eq!(transcript.messages(), before);
+    transcript
         .fail_compaction(&started, "cancelled".into(), Usage::default(), None)
         .await
         .unwrap();
-    assert_eq!(store.messages(), before);
+    assert_eq!(transcript.messages(), before);
     assert!(
-        store
+        transcript
             .append_compaction(&started, summary("unknown"), Usage::default())
             .await
             .unwrap_err()
@@ -99,91 +102,94 @@ async fn unfinished_and_failed_attempts_do_not_change_context() {
 
 #[tokio::test]
 async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    let recorded = store.entries().len();
+    let recorded = transcript.entries().len();
 
-    let again = store
+    let again = transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap_err();
-    let failed = store
+    let failed = transcript
         .fail_compaction(&started, "late".into(), Usage::default(), None)
         .await
         .unwrap_err();
 
     assert!(again.to_string().contains("already finished"), "{again:#}");
     assert!(failed.to_string().contains("already finished"), "{failed:#}");
-    assert_eq!(store.entries().len(), recorded);
+    assert_eq!(transcript.entries().len(), recorded);
 }
 
 #[tokio::test]
 async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    let done = store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let done = transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    let compacted = store.messages();
-    store.branch(&old).unwrap();
-    let other = store.append_message(Message::user("different branch")).await.unwrap();
-    assert_eq!(store.messages().len(), 2);
+    let compacted = transcript.messages();
+    transcript.branch(&old).unwrap();
+    let other = transcript
+        .append_message(Message::user("different branch"))
+        .await
+        .unwrap();
+    assert_eq!(transcript.messages().len(), 2);
     assert!(
-        store
+        transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await
             .unwrap_err()
             .to_string()
             .contains("not on this branch")
     );
-    let mut invalid = plan(&store, &other);
+    let mut invalid = plan(&transcript, &other);
     invalid.first_kept_entry_id = kept;
-    assert!(store.begin_compaction(invalid).await.is_err());
-    store.branch(&done).unwrap();
-    assert_eq!(store.messages(), compacted);
+    assert!(transcript.begin_compaction(invalid).await.is_err());
+    transcript.branch(&done).unwrap();
+    assert_eq!(transcript.messages(), compacted);
 }
 
 #[tokio::test]
 async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    store
+    transcript
         .append_context_edit(&old, Some("corrected observation".into()))
         .await
         .unwrap();
-    assert!(store.latest_compaction().is_none());
+    assert!(transcript.latest_compaction().is_none());
     assert_eq!(
-        summarize(&store.messages()),
+        summarize(&transcript.messages()),
         ["user:corrected observation", "user:latest input"]
     );
 }
 
 #[tokio::test]
 async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    store.append_message(Message::user("after")).await.unwrap();
-    store.append_context_edit(&kept, None).await.unwrap();
+    transcript.append_message(Message::user("after")).await.unwrap();
+    transcript.append_context_edit(&kept, None).await.unwrap();
     // The retained message is not summarized evidence, so the summary stays valid.
-    assert!(store.latest_compaction().is_some());
-    let messages = summarize(&store.messages());
+    assert!(transcript.latest_compaction().is_some());
+    let messages = summarize(&transcript.messages());
     assert_eq!(messages.len(), 2, "{messages:?}");
     assert!(messages[0].starts_with("user:<context_summary>"), "{messages:?}");
     assert_eq!(messages[1], "user:after");
@@ -191,15 +197,15 @@ async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_o
 
 #[tokio::test]
 async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    transcript
         .append_context_edit(&old, Some("corrected observation".into()))
         .await
         .unwrap();
     assert!(
-        store
+        transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await
             .is_err(),
@@ -209,10 +215,10 @@ async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt(
 
 #[tokio::test]
 async fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
-    let mut store = Transcript::in_memory(header());
-    let (_, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    let count = store.entries().len();
+    let mut transcript = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    let count = transcript.entries().len();
     for invalid in [
         summary("unknown"),
         CompactionSummary {
@@ -222,38 +228,38 @@ async fn invalid_fact_references_or_empty_summaries_never_append_a_success_recor
         },
     ] {
         assert!(
-            store
+            transcript
                 .append_compaction(&started, invalid, Usage::default())
                 .await
                 .is_err()
         );
-        assert_eq!(store.entries().len(), count);
+        assert_eq!(transcript.entries().len(), count);
     }
 }
 
 #[tokio::test]
 async fn an_invalid_plan_writes_nothing() {
-    let mut store = Transcript::in_memory(header());
-    let (_, kept) = seeded(&mut store).await;
-    let mut invalid = plan(&store, &kept);
+    let mut transcript = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut transcript).await;
+    let mut invalid = plan(&transcript, &kept);
     invalid.source_entry_ids.push("invented".into());
-    assert!(store.begin_compaction(invalid).await.is_err());
-    assert_eq!(store.entries().len(), 2);
+    assert!(transcript.begin_compaction(invalid).await.is_err());
+    assert_eq!(transcript.entries().len(), 2);
 }
 
 #[tokio::test]
 async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    let Entry::Compaction(entry) = store.entries().last().unwrap() else {
+    let Entry::Compaction(entry) = transcript.entries().last().unwrap() else {
         panic!("compaction");
     };
-    let json = serde_json::to_value(store.entries().last().unwrap()).unwrap();
+    let json = serde_json::to_value(transcript.entries().last().unwrap()).unwrap();
     assert_eq!(json["type"], "compaction");
     assert_eq!(json["compactionId"], started);
     assert_eq!(json["firstKeptEntryId"], kept);
@@ -263,26 +269,26 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
 
 #[tokio::test]
 async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
-    let mut store = Transcript::in_memory(header());
-    let (old, kept) = seeded(&mut store).await;
-    let by_model = plan(&store, &kept);
-    let asked = store.begin_compaction(by_model).await.unwrap();
-    store
+    let mut transcript = Transcript::in_memory(header());
+    let (old, kept) = seeded(&mut transcript).await;
+    let by_model = plan(&transcript, &kept);
+    let asked = transcript.begin_compaction(by_model).await.unwrap();
+    transcript
         .fail_compaction(&asked, "invalid".into(), Usage::default(), None)
         .await
         .unwrap();
     let by_summarizer = CompactionPlan {
         by: SummarizedBy::Summarizer("notes".into()),
-        ..plan(&store, &kept)
+        ..plan(&transcript, &kept)
     };
-    let made = store.begin_compaction(by_summarizer).await.unwrap();
-    store
+    let made = transcript.begin_compaction(by_summarizer).await.unwrap();
+    transcript
         .append_compaction(&made, summary(&old), Usage::default())
         .await
         .unwrap();
 
     // The records as the session's log was given them.
-    let records = records_of(&store);
+    let records = records_of(&transcript);
     let lines: Vec<serde_json::Value> = records
         .iter()
         .map(|record| serde_json::from_str(record).unwrap())
@@ -296,7 +302,7 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
     assert_eq!(starts[1]["summarizer"], "notes");
     assert!(starts[1].get("request").is_none());
     // Both load again, each as it was written.
-    let reopened = Transcript::snapshot(loaded(store.header().clone(), records)).unwrap();
+    let reopened = Transcript::snapshot(loaded(transcript.header().clone(), records)).unwrap();
     let recorded: Vec<&SummarizedBy> = reopened
         .entries()
         .iter()
@@ -312,20 +318,20 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
 
 #[tokio::test]
 async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
-    let mut store = Transcript::in_memory(header());
-    let (_, kept) = seeded(&mut store).await;
+    let mut transcript = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut transcript).await;
     let nameless = CompactionPlan {
         by: SummarizedBy::Summarizer(" ".into()),
-        ..plan(&store, &kept)
+        ..plan(&transcript, &kept)
     };
-    let error = store.begin_compaction(nameless).await.unwrap_err();
+    let error = transcript.begin_compaction(nameless).await.unwrap_err();
     assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
 
     let named = CompactionPlan {
         by: SummarizedBy::Summarizer("notes".into()),
-        ..plan(&store, &kept)
+        ..plan(&transcript, &kept)
     };
-    let started = store.begin_compaction(named).await.unwrap();
+    let started = transcript.begin_compaction(named).await.unwrap();
     let request = Request {
         model: "m".into(),
         messages: Vec::new(),
@@ -339,7 +345,7 @@ async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
         system_timestamp: now_ms(),
         user_timestamp: now_ms(),
     };
-    let error = store
+    let error = transcript
         .record_request(&request, "faux", json!({}), source)
         .await
         .unwrap_err();
@@ -375,31 +381,31 @@ fn exchange(id: &str) -> [Message; 2] {
 /// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
 /// question: the IDs of the earlier question, of the task, and of the two calls.
 async fn a_turn_with_two_calls() -> (Transcript, [String; 4]) {
-    let mut store = Transcript::in_memory(header());
-    let earlier = store
+    let mut transcript = Transcript::in_memory(header());
+    let earlier = transcript
         .append_message(Message::user("an earlier question"))
         .await
         .unwrap();
-    let task = store.append_message(Message::user("the task")).await.unwrap();
+    let task = transcript.append_message(Message::user("the task")).await.unwrap();
     let [call, result] = exchange("c1");
-    let first_call = store.append_message(call).await.unwrap();
-    store.append_message(result).await.unwrap();
+    let first_call = transcript.append_message(call).await.unwrap();
+    transcript.append_message(result).await.unwrap();
     let [call, result] = exchange("c2");
-    let second_call = store.append_message(call).await.unwrap();
-    store.append_message(result).await.unwrap();
-    (store, [earlier, task, first_call, second_call])
+    let second_call = transcript.append_message(call).await.unwrap();
+    transcript.append_message(result).await.unwrap();
+    (transcript, [earlier, task, first_call, second_call])
 }
 
 #[tokio::test]
 async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
-    let (mut store, [earlier, task, first_call, kept]) = a_turn_with_two_calls().await;
+    let (mut transcript, [earlier, task, first_call, kept]) = a_turn_with_two_calls().await;
 
     // Only the latest input before the boundary can be kept.
     let wrong = CompactionPlan {
         kept_input_entry_id: Some(earlier.clone()),
-        ..plan(&store, &kept)
+        ..plan(&transcript, &kept)
     };
-    let error = store.begin_compaction(wrong).await.unwrap_err();
+    let error = transcript.begin_compaction(wrong).await.unwrap_err();
     assert!(
         format!("{error:#}").contains("is not the latest input before its boundary"),
         "{error:#}"
@@ -407,15 +413,15 @@ async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summ
 
     let inside = CompactionPlan {
         kept_input_entry_id: Some(task.clone()),
-        ..plan(&store, &kept)
+        ..plan(&transcript, &kept)
     };
-    let started = store.begin_compaction(inside).await.unwrap();
-    store
+    let started = transcript.begin_compaction(inside).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&first_call), Usage::default())
         .await
         .unwrap();
 
-    let texts: Vec<String> = store
+    let texts: Vec<String> = transcript
         .messages()
         .iter()
         .map(|message| match message {
@@ -426,7 +432,7 @@ async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summ
         })
         .collect();
     assert_eq!(texts, ["the task", "<context_summary>", "calls c2", "value of c2"]);
-    let lines: Vec<serde_json::Value> = store
+    let lines: Vec<serde_json::Value> = transcript
         .entries()
         .iter()
         .map(|entry| serde_json::to_value(entry).unwrap())
@@ -437,8 +443,8 @@ async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summ
 
 #[tokio::test]
 async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
-    let mut store = Transcript::in_memory(header());
-    let old = store.append_message(Message::user("old evidence")).await.unwrap();
+    let mut transcript = Transcript::in_memory(header());
+    let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
     assistant.error_message = None;
     assistant.content = vec![ContentBlock::ToolCall(ToolCall {
@@ -447,8 +453,8 @@ async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
         arguments: json!({"path":"x"}),
         arguments_error: None,
     })];
-    let call = store.append_message(Message::Assistant(assistant)).await.unwrap();
-    let result = store
+    let call = transcript.append_message(Message::Assistant(assistant)).await.unwrap();
+    let result = transcript
         .append_message(Message::ToolResult(ToolResultMessage {
             tool_call_id: "c".into(),
             tool_name: "read_file".into(),
@@ -461,13 +467,13 @@ async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
         }))
         .await
         .unwrap();
-    assert!(store.begin_compaction(plan(&store, &result)).await.is_err());
-    let started = store.begin_compaction(plan(&store, &call)).await.unwrap();
-    store
+    assert!(transcript.begin_compaction(plan(&transcript, &result)).await.is_err());
+    let started = transcript.begin_compaction(plan(&transcript, &call)).await.unwrap();
+    transcript
         .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
-    let messages = store.messages();
+    let messages = transcript.messages();
     assert!(matches!(&messages[1], Message::Assistant(assistant) if assistant.tool_calls()[0].id == "c"));
     assert!(matches!(&messages[2], Message::ToolResult(result) if result.tool_call_id == "c"));
 }

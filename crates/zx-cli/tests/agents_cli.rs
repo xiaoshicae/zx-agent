@@ -267,15 +267,15 @@ async fn a_configured_output_directory_is_relative_to_config_toml() {
 async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = zx_testing::create_session_file(&dir.path().join("audit.jsonl"), zx_testing::header())
+        let mut seed = zx_testing::create_session_file(&dir.path().join("audit.jsonl"), zx_testing::header())
             .await
             .unwrap();
-        let id = store
+        let id = seed
             .append_message(Message::user("x".repeat(300 * 1024)))
             .await
             .unwrap();
-        store.append_message(Message::user("recent input")).await.unwrap();
-        drop(store);
+        seed.append_message(Message::user("recent input")).await.unwrap();
+        drop(seed);
         let summary =
             json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":[]}).to_string();
         let replies = if enable {
@@ -292,10 +292,10 @@ async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
         let output = run(&server, dir.path(), &args).await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), if enable { 2 } else { 1 });
-        let store = zx_testing::open_session_file(&dir.path().join("audit.jsonl"))
+        let seed = zx_testing::open_session_file(&dir.path().join("audit.jsonl"))
             .await
             .unwrap();
-        assert_eq!(store.latest_compaction().is_some(), enable);
+        assert_eq!(seed.latest_compaction().is_some(), enable);
     }
 }
 

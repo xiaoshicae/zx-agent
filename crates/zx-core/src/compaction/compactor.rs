@@ -226,8 +226,8 @@ impl Compactor<'_> {
     /// summarize, or the latest summary already covers it; an error when what it would read
     /// or keep is out of bounds.
     fn candidate(&self) -> Result<Option<Candidate>> {
-        let store = &*self.transcript;
-        let raw = store.raw_projection();
+        let transcript = &*self.transcript;
+        let raw = transcript.raw_projection();
         let Some(last_user) = raw
             .iter()
             .rposition(|item| matches!(item.message, Message::User { .. }))
@@ -246,7 +246,7 @@ impl Compactor<'_> {
         if !source.iter().enumerate().any(summarized) {
             return Ok(None);
         }
-        if let Some(previous) = store.latest_compaction()
+        if let Some(previous) = transcript.latest_compaction()
             && let Some(old) = raw
                 .iter()
                 .position(|item| item.entry_id == previous.first_kept_entry_id)

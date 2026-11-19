@@ -50,15 +50,15 @@ impl About {
     }
 }
 
-/// How much of an earlier conversation `store` holds, when it holds one.
-fn resumed(store: &Transcript) -> Option<Resumed> {
-    (!store.entries().is_empty()).then(|| Resumed {
-        messages: store
+/// How much of an earlier conversation `transcript` holds, when it holds one.
+fn resumed(transcript: &Transcript) -> Option<Resumed> {
+    (!transcript.entries().is_empty()).then(|| Resumed {
+        messages: transcript
             .messages()
             .iter()
             .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
             .count(),
-        last_activity_ms: store.entries().last().map(Entry::timestamp),
+        last_activity_ms: transcript.entries().last().map(Entry::timestamp),
     })
 }
 
