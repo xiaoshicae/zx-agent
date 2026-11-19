@@ -63,21 +63,6 @@ pub struct CommandOutcome {
     pub prompt: Option<Input>,
 }
 
-/// Why [`crate::Session::run_command`] returned no outcome.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CommandError {
-    /// No extension registered a command with that name.
-    #[error("unknown command")]
-    Unknown,
-    /// The command ran and failed with this message.
-    #[error("command failed: {0}")]
-    Failed(String),
-    /// The session is closed, as [`SessionError::Closed`](crate::session::SessionError::Closed)
-    /// says.
-    #[error("session is closed; the agent opens it again from its storage")]
-    Closed,
-}
-
 /// The rule a command name follows: ASCII letters, digits, `_` and `-`, starting with a
 /// letter, so that `/name args` splits at the first space and the name cannot be mistaken
 /// for a path.

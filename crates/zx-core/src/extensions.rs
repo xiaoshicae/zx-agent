@@ -13,7 +13,7 @@ use crate::hooks::{Hook, HookChain, HookStage};
 use crate::policy::{PolicyChain, ToolPolicy};
 use crate::tools::Tool;
 
-pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
+pub use command::{CommandContext, CommandOutcome, SlashCommand, check_command_name};
 
 /// Tools, hooks and system prompt sections registered together, such as a client for an
 /// external tool server. An agent takes its extensions in

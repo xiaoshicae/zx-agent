@@ -21,7 +21,7 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::events::Event;
-use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
+use crate::extensions::{CommandContext, CommandOutcome, SlashCommand};
 use crate::input::{InputQueues, PendingInput};
 use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
@@ -82,6 +82,20 @@ pub enum SessionError {
     /// its record could no longer be written. Its record stays in the storage, where the
     /// agent opens it again ([`Agent::open_session`](crate::Agent::open_session)).
     #[error("session is closed; the agent opens it again from its storage")]
+    Closed,
+}
+
+/// Why [`Session::run_command`] returned no outcome.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CommandError {
+    /// No extension registered a command with that name.
+    #[error("unknown command")]
+    Unknown,
+    /// The command ran and failed with this message.
+    #[error("command failed: {0}")]
+    Failed(String),
+    /// The session is closed, as [`SessionError::Closed`] says.
+    #[error("{}", SessionError::Closed)]
     Closed,
 }
 

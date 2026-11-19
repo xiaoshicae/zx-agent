@@ -257,7 +257,8 @@ pub enum EventKind {
     StepEnd {
         step: u32,
     },
-    /// End of one attempt. The runner may still retry afterwards.
+    /// End of one attempt. The runner may still retry afterwards. The time limit cancels the
+    /// attempt, so it ends `cancelled` here and `timed_out` in `run_end`.
     AttemptEnd {
         #[serde(flatten)]
         outcome: RunOutcome,
