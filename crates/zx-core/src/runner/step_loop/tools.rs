@@ -477,22 +477,19 @@ impl StepLoop<'_> {
 /// call asked to.
 #[derive(Default)]
 pub(super) struct Batch {
-    /// Whether a result was recorded.
-    recorded: bool,
-    /// Whether a recorded call did not ask to end the attempt.
-    declined: bool,
+    /// Whether every recorded call asked to end the attempt; `None` until one is recorded.
+    all_terminate: Option<bool>,
 }
 
 impl Batch {
     /// Count a recorded result, and whether its tool asked to end the attempt.
     fn add(&mut self, terminate: bool) {
-        self.recorded = true;
-        self.declined |= !terminate;
+        self.all_terminate = Some(self.all_terminate.unwrap_or(true) && terminate);
     }
 
     /// Whether the results end the attempt: there was one, and every call asked to.
     pub(super) fn terminates(&self) -> bool {
-        self.recorded && !self.declined
+        self.all_terminate == Some(true)
     }
 }
 
