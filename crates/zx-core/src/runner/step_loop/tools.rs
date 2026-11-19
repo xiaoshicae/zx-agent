@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
 use crate::events::{ApprovalResult, EventKind};
-use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision};
+use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision, request_id};
 use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
@@ -144,10 +144,16 @@ impl StepLoop<'_> {
     }
 
     /// Ask for the host's approval of `call`: announce the request, then wait at the gate
-    /// for its answer. Returns why the call may not run.
+    /// for its answer. Without a person to ask, the request is denied at once and never
+    /// waits at the gate, so no answer reaches it. Returns why the call may not run.
     async fn ask(&mut self, call: &ToolCall, reason: String) -> Result<(), String> {
-        let mut request = self.approvals.open();
-        let approval_id = request.id().to_string();
+        let waiting = match self.scope.config.approvals {
+            ApprovalMode::Deny => None,
+            ApprovalMode::Wait(timeout) => Some((self.approvals.open(), timeout)),
+        };
+        let approval_id = waiting
+            .as_ref()
+            .map_or_else(request_id, |(request, _)| request.id().to_string());
         self.emit(EventKind::ApprovalRequested {
             approval_id: approval_id.clone(),
             tool_call_id: call.id.clone(),
@@ -157,12 +163,12 @@ impl StepLoop<'_> {
         })
         .await;
         let asked = Instant::now();
-        let answer = match self.scope.config.approvals {
-            ApprovalMode::Deny => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
-            ApprovalMode::Wait(timeout) => request.answer(timeout, self.scope.cancel()).await,
+        let answer = match waiting {
+            None => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
+            // Withdrawn as this arm ends, before it is reported: an answer that comes later
+            // finds no request.
+            Some((mut request, timeout)) => request.answer(timeout, self.scope.cancel()).await,
         };
-        // Withdrawn before it is reported: an answer that comes now finds no request.
-        drop(request);
         let (approval, denial) = match answer {
             Answer::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
             Answer::Decided(ApprovalDecision::AllowSession) => {

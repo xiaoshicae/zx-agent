@@ -69,10 +69,9 @@ impl ApprovalGate {
         }
     }
 
-    /// Open a request for the host to answer, with an ID of its own: the model chooses the
-    /// IDs of its calls and may repeat one, and a late answer must not reach another request.
+    /// Open a request for the host to answer, with an ID of its own ([`request_id`]).
     pub(crate) fn open(&self) -> Waiting<'_> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = request_id();
         let (decide, answer) = oneshot::channel();
         lock(&self.state).waiting.insert(id.clone(), decide);
         Waiting { gate: self, id, answer }
@@ -87,6 +86,12 @@ impl ApprovalGate {
         // The request may stop waiting just now; then nobody takes the answer.
         decide.send(decision).is_ok()
     }
+}
+
+/// A new ID for an approval request: the model chooses the IDs of its calls and may repeat
+/// one, and a late answer must not reach another request.
+pub(crate) fn request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn granted(calls: &[(String, Value)], call: &ToolCall) -> bool {

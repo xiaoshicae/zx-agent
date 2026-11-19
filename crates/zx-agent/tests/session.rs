@@ -13,7 +13,8 @@ use tokio::sync::Notify;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ProviderErrorKind, Reasoning, Request, ToolDef};
-use zx_agent::events::{EventKind, RunOutcome};
+use zx_agent::events::{Event, EventKind, RunOutcome};
+use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, PendingInput};
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::session::SessionError;
@@ -654,6 +655,49 @@ async fn an_answer_that_comes_after_the_request_timed_out_reaches_no_call() {
         session.resolve_approval(&requests[0], ApprovalDecision::AllowOnce),
         Err(SessionError::UnknownApproval)
     );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+}
+
+/// Holds the run in the `approval_requested` event until the test lets it go.
+struct HoldTheRequest(Notify);
+
+#[async_trait]
+impl Hook for HoldTheRequest {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
+        if matches!(event.event, EventKind::ApprovalRequested { .. }) {
+            self.0.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn without_a_person_to_ask_a_request_takes_no_answer() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
+        FauxStep::text("went on"),
+    ]));
+    let tool = Arc::new(zx_testing::EchoTool::new("echo"));
+    let hold = Arc::new(HoldTheRequest(Notify::new()));
+    let mut config = config(provider, vec![tool.clone()]);
+    config.policies.push("ask", Arc::new(Ask));
+    config.approvals = ApprovalMode::Deny;
+    config.hooks.push("hold", hold.clone());
+    let (session, _) = RunnerSetup::new(config).build().await;
+
+    let mut run = session.send("go").unwrap();
+    let mut answers = Vec::new();
+    while let Some(event) = run.next().await {
+        if let EventKind::ApprovalRequested { approval_id, .. } = event.event {
+            // The run waits in the event, before the request is decided.
+            answers.push(session.resolve_approval(&approval_id, ApprovalDecision::AllowOnce));
+            hold.0.notify_one();
+        }
+    }
+    let report = run.wait().await;
+
+    assert_eq!(answers, [Err(SessionError::UnknownApproval)]);
+    assert_eq!((report.outcome, report.denied_calls), (RunOutcome::Completed, 1));
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 

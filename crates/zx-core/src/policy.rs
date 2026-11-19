@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::ToolCall;
 use crate::guard::CancelSignal;
 
-pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN};
+pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN, request_id};
 pub use approval::{ApprovalDecision, ApprovalMode};
 pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 
