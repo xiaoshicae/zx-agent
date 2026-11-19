@@ -205,7 +205,7 @@ impl Config {
             ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
             ensure!(
                 server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
-                "MCP server {name}: tokenEnv is empty"
+                "MCP server {name}: tokenEnv must not be empty"
             );
             ensure!(
                 server.timeout_secs != Some(0),
@@ -224,10 +224,11 @@ impl Config {
             "model must not be empty"
         );
         for (key, value) in [
+            ("maxTokens", self.max_tokens.map(u64::from)),
             ("toolTimeoutSecs", self.tool_timeout_secs),
             ("approvalTimeoutSecs", self.approval_timeout_secs),
         ] {
-            ensure!(value != Some(0), "{key} must be at least 1");
+            ensure!(value != Some(0), "{key} must be greater than zero");
         }
         ensure!(!self.execution.trim().is_empty(), "execution must not be empty");
         self.provider.validate()?;
@@ -367,7 +368,7 @@ fn check_model(id: &str, meta: &ModelMeta) -> Result<()> {
 fn secret_files(paths: Vec<PathBuf>, parent: &Path) -> Result<Vec<PathBuf>> {
     ensure!(
         paths.iter().all(|path| !path.as_os_str().is_empty()),
-        "secretFiles: an entry is empty"
+        "secretFiles: an entry must not be empty"
     );
     Ok(paths.into_iter().map(|path| parent.join(path)).collect())
 }
@@ -478,12 +479,16 @@ mod tests {
     #[test]
     fn invalid_values_of_the_former_options_name_their_key() {
         for (text, expected) in [
-            ("toolTimeoutSecs = 0", "toolTimeoutSecs must be at least 1"),
+            ("toolTimeoutSecs = 0", "toolTimeoutSecs must be greater than zero"),
+            ("maxTokens = 0", "maxTokens must be greater than zero"),
             (
                 "[provider]\nidleTimeoutSecs = 0",
-                "provider.idleTimeoutSecs must be at least 1",
+                "provider.idleTimeoutSecs must be greater than zero",
             ),
-            ("approvalTimeoutSecs = 0", "approvalTimeoutSecs must be at least 1"),
+            (
+                "approvalTimeoutSecs = 0",
+                "approvalTimeoutSecs must be greater than zero",
+            ),
             ("[chat]\nqueueMode = 'all'", "unknown field `chat`"),
             ("[chat]\napprovalTimeoutSecs = 60", "unknown field `chat`"),
             ("[acp]\napprovalTimeoutSecs = 60", "unknown field `acp`"),
@@ -502,7 +507,7 @@ mod tests {
             ("[provider]\nrequestFields = { seed = 1, seed = 2 }", "duplicate key"),
             ("[provider]\nrequestFields = 'seed=1'", "invalid type"),
             ("[provider]\nmaxRetries = -1", "maxRetries"),
-            ("secretFiles = ['']", "secretFiles: an entry is empty"),
+            ("secretFiles = ['']", "secretFiles: an entry must not be empty"),
             ("maxTokens = 'many'", "maxTokens"),
         ] {
             let error = error(text);
@@ -712,7 +717,10 @@ mod tests {
                 server("tools = ['query']\nmaxTimeoutSecs = 600"),
                 "unknown field `maxTimeoutSecs`",
             ),
-            (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
+            (
+                server("tools = ['query']\ntokenEnv = ' '"),
+                "tokenEnv must not be empty",
+            ),
             (server("tools = ['a.b', 'a_b']"), "like another of its tools"),
             (server(&format!("tools = ['{}']", "x".repeat(64))), "longer than 64"),
             (

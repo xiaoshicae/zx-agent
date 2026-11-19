@@ -311,7 +311,10 @@ async fn an_explicit_configuration_is_checked_as_a_file_would_be() {
         Ok(_) => panic!("an approval that times out at once was accepted"),
         Err(error) => format!("{error:#}"),
     };
-    assert!(error.contains("approvalTimeoutSecs must be at least 1"), "{error}");
+    assert!(
+        error.contains("approvalTimeoutSecs must be greater than zero"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

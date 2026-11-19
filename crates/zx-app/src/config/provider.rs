@@ -121,7 +121,7 @@ impl BuiltInKeys {
         );
         ensure!(
             keys.idle_timeout_secs != Some(0),
-            "provider.idleTimeoutSecs must be at least 1"
+            "provider.idleTimeoutSecs must be greater than zero"
         );
         ensure!(
             keys.request_fields.keys().all(|field| !field.trim().is_empty()),

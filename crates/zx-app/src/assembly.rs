@@ -170,18 +170,25 @@ impl Application {
         })
     }
 
+    /// Export the runs of every session through `traces`, the host's trace hook; `None`
+    /// exports nothing, as when the host has no collector to export to. The host starts and
+    /// finishes the export ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here
+    /// installs it.
+    pub fn set_traces(mut self, traces: Option<TraceHook>) -> Self {
+        self.traces = traces;
+        self
+    }
+
+    /// Make the summaries with `summarizer` in place of the agent's model.
+    pub fn set_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = Some(summarizer);
+        self
+    }
+
     /// Hide the variable `name` from commands and redact its value, beside the API key's: a
     /// credential such as a token of an IM service's platform.
     pub fn add_hidden_env(mut self, name: &str) -> Self {
         self.hidden_env.push(name.to_string());
-        self
-    }
-
-    /// Export the runs of every session through `traces`, the host's trace hook, when it
-    /// exports them. The host starts and finishes the export
-    /// ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here installs it.
-    pub fn set_traces(mut self, traces: Option<TraceHook>) -> Self {
-        self.traces = traces;
         self
     }
 
@@ -237,12 +244,6 @@ impl Application {
     /// tools that run commands and touch files work through.
     pub fn register_executor(mut self, name: &str, factory: Arc<dyn ExecutorFactory>) -> Self {
         self.executors.register(name, factory);
-        self
-    }
-
-    /// Make the summaries with `summarizer` in place of the agent's model.
-    pub fn set_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
-        self.summarizer = Some(summarizer);
         self
     }
 

@@ -200,7 +200,7 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
             "[permissions]\nallow = ['bash(sudo tool get)', 'bash(/bin/tool get)']\n[permissions.allowOptions.tool]\nlong = ['x']",
             "begins with",
         ),
-        ("[permissions]\nallowExcept = [' ']", "an entry is empty"),
+        ("[permissions]\nallowExcept = [' ']", "an entry must not be empty"),
     ] {
         let error = format!("{:#}", load_file(table).unwrap_err());
         assert!(error.contains(message), "{table}: {error}");

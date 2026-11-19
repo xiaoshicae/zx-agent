@@ -89,7 +89,7 @@ impl Settings {
                 .map_or_else(|| "config.toml".to_string(), |path| path.display().to_string());
             return Err(NoModel { config_file }.into());
         };
-        anyhow::ensure!(!model.trim().is_empty(), "the model is empty");
+        anyhow::ensure!(!model.trim().is_empty(), "the model must not be empty");
         if let Some(url) = base_url {
             config
                 .provider

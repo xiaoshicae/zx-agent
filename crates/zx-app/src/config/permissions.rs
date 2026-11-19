@@ -65,7 +65,7 @@ impl RawPermissions {
                     !tool.starts_with("bash("),
                     "permissions.ask: {tool:?}: ask names tools, such as \"bash\"; to let some commands run without asking, add bash(<command>) to permissions.allow"
                 );
-                ensure!(!tool.trim().is_empty(), "permissions.ask: an entry is empty");
+                ensure!(!tool.trim().is_empty(), "permissions.ask: an entry must not be empty");
             }
             permissions.ask = ask;
         }
@@ -75,7 +75,7 @@ impl RawPermissions {
         if let Some(texts) = self.allow_except {
             ensure!(
                 texts.iter().all(|text| !text.trim().is_empty()),
-                "permissions.allowExcept: an entry is empty"
+                "permissions.allowExcept: an entry must not be empty"
             );
             permissions.allow_except = texts;
         }
@@ -98,7 +98,7 @@ fn entries(key: &str, values: Vec<String>) -> Result<Vec<Entry>> {
 /// A tool name or `bash(<text>)`, the text not empty.
 fn entry(key: &str, value: String) -> Result<Entry> {
     let trimmed = value.trim();
-    ensure!(!trimmed.is_empty(), "permissions.{key}: an entry is empty");
+    ensure!(!trimmed.is_empty(), "permissions.{key}: an entry must not be empty");
     if let Some(inner) = trimmed.strip_prefix("bash(") {
         let Some(text) = inner.strip_suffix(')') else {
             bail!("permissions.{key}: {value:?} has no closing parenthesis; write bash(<command>)");
@@ -156,12 +156,12 @@ impl Permissions {
         for tool in self.allowed_tools() {
             ensure!(
                 !known(&tool),
-                "permissions.allow: {tool} runs without asking unless it is in permissions.ask"
+                "permissions.allow: {tool:?} runs without asking unless it is in permissions.ask"
             );
             ensure!(registered(&tool), "permissions.allow: unknown tool {tool:?}");
             ensure!(
                 !self.ask.contains(&tool),
-                "{tool} is in both permissions.ask and permissions.allow"
+                "permissions.allow: {tool:?} is in permissions.ask as well"
             );
         }
         for tool in self.denied_tools() {
@@ -259,7 +259,7 @@ mod tests {
     fn malformed_entries_name_their_field() {
         for (text, expected) in [
             ("ask = ['bash(ls)']", "permissions.ask: \"bash(ls)\": ask names tools"),
-            ("ask = [' ']", "permissions.ask: an entry is empty"),
+            ("ask = [' ']", "permissions.ask: an entry must not be empty"),
             ("allow = ['bash()']", "permissions.allow: \"bash()\" names no command"),
             (
                 "allow = ['bash(  )']",
@@ -273,8 +273,11 @@ mod tests {
                 "deny = ['shell(rm)']",
                 "permissions.deny: \"shell(rm)\" is neither a tool name",
             ),
-            ("allow = ['']", "permissions.allow: an entry is empty"),
-            ("allowExcept = [' ']", "permissions.allowExcept: an entry is empty"),
+            ("allow = ['']", "permissions.allow: an entry must not be empty"),
+            (
+                "allowExcept = [' ']",
+                "permissions.allowExcept: an entry must not be empty",
+            ),
             ("autoApprove = ['ls']", "unknown field `autoApprove`"),
         ] {
             let error = format!("{:#}", parse(text).unwrap_err());
@@ -291,11 +294,11 @@ mod tests {
             ("allow = ['missing']", "permissions.allow: unknown tool \"missing\""),
             (
                 "allow = ['read_file']",
-                "permissions.allow: read_file runs without asking unless it is in permissions.ask",
+                "permissions.allow: \"read_file\" runs without asking unless it is in permissions.ask",
             ),
             (
                 "ask = ['prom__query']\nallow = ['prom__query']",
-                "prom__query is in both permissions.ask and permissions.allow",
+                "permissions.allow: \"prom__query\" is in permissions.ask as well",
             ),
         ] {
             let error = format!("{:#}", parse(text).unwrap().validate(known, &mcp).unwrap_err());
