@@ -98,7 +98,10 @@ impl Worker {
 
     /// Write the messages heard but not answered into the session when the conversation holds
     /// it. A run that holds it, or waits for a slot, writes them when it next opens or ends; a
-    /// released session is opened again for them once a run slot is free, as for a run.
+    /// released session is opened again for them once a run slot is free, as for a run. A
+    /// conversation without a session yet, such as after a mention that was only `/cancel`,
+    /// drops them: its first session, made for the next mention, starts with what the thread
+    /// holds then, them included, on a platform that reads threads.
     pub(super) async fn record_heard(&mut self) {
         if self.heard.is_empty() {
             return;
@@ -108,7 +111,11 @@ impl Worker {
                 let session = open.session.clone();
                 self.record_in(&session).await;
             }
-            Phase::Idle { open: None, .. } => self.begin(None, Vec::new(), None).await,
+            Phase::Idle { open: None, .. } if self.out.shared.session_of(&self.out.key).is_some() => {
+                self.begin(None, Vec::new(), None).await;
+            }
+            // Dropping them returns their share of the budget and takes them out of the backlog.
+            Phase::Idle { open: None, .. } => self.heard.clear(),
             Phase::Waiting { .. } | Phase::Running { .. } => {}
         }
     }
