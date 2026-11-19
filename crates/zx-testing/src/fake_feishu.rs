@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -14,10 +13,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::http::{read_request, response};
-
-/// Only reached when an expected frame or call never comes.
-const WAIT: Duration = Duration::from_secs(10);
+use crate::http::{WAIT, read_request, response};
 
 /// One API call.
 #[derive(Clone, Debug)]
@@ -207,13 +203,7 @@ impl Socket {
 
     /// Whether the client closed the connection, waiting for it.
     pub async fn closed_by_client(&mut self) -> bool {
-        loop {
-            match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
-                Ok(Some(Ok(_))) => {}
-                Err(_) => return false,
-            }
-        }
+        crate::http::closed_by_client(&mut self.stream).await
     }
 }
 
