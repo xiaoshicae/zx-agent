@@ -261,8 +261,9 @@ fn tool_name(server: &str, tool: &str) -> Result<String, String> {
         .collect();
     let name = format!("{server}__{tool}");
     if name.len() > MAX_TOOL_NAME {
-        return Err(format!(
-            "MCP server {server}: tool name {name:?} is longer than {MAX_TOOL_NAME} characters"
+        return Err(fault(
+            server,
+            format_args!("tool name {name:?} is longer than {MAX_TOOL_NAME} characters"),
         ));
     }
     Ok(name)
@@ -374,21 +375,21 @@ struct McpTool {
 impl McpTool {
     /// The error of a failed call; the server's text in `error` is bounded like a result.
     fn failed(&self, error: &dyn std::fmt::Display) -> String {
-        format!(
-            "MCP server {}: {} failed: {}",
-            self.server,
-            self.remote,
-            truncate_head_noted(&error.to_string(), "error")
+        fault(
+            &self.server,
+            format_args!(
+                "{} failed: {}",
+                self.remote,
+                truncate_head_noted(&error.to_string(), "error")
+            ),
         )
     }
 
     /// The error of a call that went `bound` without an answer or progress.
     fn no_answer_within(&self, bound: Duration) -> String {
-        format!(
-            "MCP server {}: {} did not answer within {} s",
-            self.server,
-            self.remote,
-            bound.as_secs()
+        fault(
+            &self.server,
+            format_args!("{} did not answer within {} s", self.remote, bound.as_secs()),
         )
     }
 
@@ -421,7 +422,10 @@ impl McpTool {
                 }
                 () = ctx.cancel.cancelled() => {
                     // Dropping `unanswered` tells the server.
-                    return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
+                    return Err(fault(
+                        &self.server,
+                        format_args!("the call to {} was cancelled", self.remote),
+                    ));
                 }
             }
         };
@@ -429,9 +433,9 @@ impl McpTool {
         unanswered.settle();
         match answer {
             Ok(ServerResult::CallToolResult(result)) => Ok(result),
-            Ok(_) => Err(format!(
-                "MCP server {}: {} answered with a result of another kind",
-                self.server, self.remote
+            Ok(_) => Err(fault(
+                &self.server,
+                format_args!("{} answered with a result of another kind", self.remote),
             )),
             Err(ServiceError::Timeout { timeout }) => Err(self.no_answer_within(timeout)),
             Err(error) => Err(self.failed(&error)),
