@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
-use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, Initiative, SummaryReply};
 use crate::events::EventKind;
 use crate::input::{Input, Queue};
 use crate::transcript::Transcript;
@@ -194,7 +194,7 @@ impl<'a> RunScope<'a> {
     /// attempt of the run that compacts, for the events of the summary; 1 outside a run. A
     /// summary that the run's model would make, without the prices its cost budget needs,
     /// fails before anything is recorded or requested.
-    pub(super) async fn compact(&mut self, trigger: Trigger, attempt: u32) -> Compacted {
+    pub(super) async fn compact(&mut self, initiative: Initiative, attempt: u32) -> Compacted {
         // The kernel asks the model only when the host has no summarizer.
         if self.config.summarizer.is_none()
             && let Err(error) = check_priced(&self.config.models, &self.config.model, self.cost_budget)
@@ -211,7 +211,7 @@ impl<'a> RunScope<'a> {
             events: &self.target,
             // The field, not `cancel()`: the transcript above is borrowed mutably.
             cancel: self.target.trace.cancel(),
-            trigger,
+            initiative,
             attempt,
         };
         let compacted = compactor.run().await;
@@ -340,7 +340,7 @@ impl<'a> RunScope<'a> {
     /// Compact on the run's initiative, before a request or to recover from a context
     /// overflow, counting the summary's requests and usage into `accounting`.
     pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Compacted {
-        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
+        let compacted = self.compact(Initiative::Automatic, accounting.attempts).await;
         accounting.count_requests(compacted.reply.requests(), &compacted.usage);
         compacted
     }

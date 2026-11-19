@@ -553,7 +553,7 @@ fn compaction_errors_name_the_keys_of_the_agent_file() {
 #[test]
 fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_is_on() {
     let trigger = |front: &str| load_file(front).unwrap().compaction.trigger_tokens;
-    let window = |reserve_tokens| TokenTrigger::BelowWindow { reserve_tokens };
+    let window = |reserve_tokens| Some(TokenTrigger::BelowWindow { reserve_tokens });
 
     assert_eq!(trigger("extends = 'assistant'"), window(DEFAULT_RESERVE_TOKENS));
     assert_eq!(
@@ -562,7 +562,7 @@ fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_i
     );
     assert_eq!(
         trigger("extends = 'assistant'\n[compaction]\ntriggerBytes = 0"),
-        TokenTrigger::Off,
+        None,
         "without the byte trigger nothing turns automatic compaction on"
     );
     assert_eq!(
@@ -570,13 +570,10 @@ fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_i
         window(DEFAULT_RESERVE_TOKENS),
         "the unattended agent with the byte trigger turned on"
     );
-    assert_eq!(
-        trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 0"),
-        TokenTrigger::Off
-    );
+    assert_eq!(trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 0"), None);
     assert_eq!(
         trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 50000\nreserveTokens = 8000"),
-        TokenTrigger::Above(50_000),
+        Some(TokenTrigger::Above(50_000)),
         "a number of tokens does not follow the window"
     );
 }

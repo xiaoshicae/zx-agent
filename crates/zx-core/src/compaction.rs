@@ -36,8 +36,8 @@ pub struct Config {
     /// the byte trigger.
     pub trigger_bytes: Option<usize>,
     /// When the estimated tokens of the context ([`context_tokens`]) run an automatic
-    /// compaction. Either trigger runs one.
-    pub trigger_tokens: TokenTrigger,
+    /// compaction; `None` disables the token trigger. Either trigger runs one.
+    pub trigger_tokens: Option<TokenTrigger>,
     /// Recent message budget. The complete latest input and all system messages survive.
     pub keep_recent_bytes: usize,
     /// Output token budget for the summary request, independently of task requests.
@@ -50,8 +50,6 @@ pub struct Config {
 /// the model the session asks at that time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenTrigger {
-    /// No token trigger.
-    Off,
     /// Above this many estimated tokens, whatever the model.
     Above(u64),
     /// Above the context window of the model, less `reserve_tokens` (pi: `shouldCompact`,
@@ -70,7 +68,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Off,
+            trigger_tokens: None,
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
             timeout: Duration::from_secs(120),
@@ -89,8 +87,7 @@ impl Config {
     /// automatic compaction; `None` when no token trigger applies to that model. `models`
     /// gives the window that a [`TokenTrigger::BelowWindow`] trigger lies below.
     pub(crate) fn trigger_tokens_for(&self, models: &HashMap<String, ModelMeta>, model: &str) -> Option<u64> {
-        match self.trigger_tokens {
-            TokenTrigger::Off => None,
+        match self.trigger_tokens? {
             TokenTrigger::Above(tokens) => Some(tokens),
             TokenTrigger::BelowWindow { reserve_tokens } => models
                 .get(model)?
@@ -111,7 +108,7 @@ impl Config {
         if self.keep_recent_bytes == 0 {
             return Err(InvalidConfig::ZeroKeepRecentBytes);
         }
-        if let TokenTrigger::Above(tokens) = self.trigger_tokens {
+        if let Some(TokenTrigger::Above(tokens)) = self.trigger_tokens {
             if tokens == 0 {
                 return Err(InvalidConfig::ZeroTriggerTokens);
             }
@@ -147,7 +144,7 @@ pub enum InvalidConfig {
     #[error("keep_recent_bytes must be greater than zero")]
     ZeroKeepRecentBytes,
     /// `trigger_tokens` is `Above(0)`.
-    #[error("trigger_tokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)")]
+    #[error("trigger_tokens must be greater than zero (`None` disables the token trigger)")]
     ZeroTriggerTokens,
     /// `trigger_tokens` lies within the recent messages a summary keeps, so a summary could
     /// never bring the context under it.
@@ -352,9 +349,9 @@ pub(crate) enum End {
     Unrecorded(anyhow::Error),
 }
 
-/// Why a compaction runs.
+/// Whose initiative a compaction runs on.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Trigger {
+pub(crate) enum Initiative {
     /// Someone asked for it.
     Manual,
     /// The run started it: the context passed a trigger before a request, or the model
@@ -433,7 +430,7 @@ mod tests {
     /// Settings whose token trigger lies `reserve_tokens` below the window of the model.
     fn below_window(reserve_tokens: u64) -> Config {
         Config {
-            trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens },
+            trigger_tokens: Some(TokenTrigger::BelowWindow { reserve_tokens }),
             ..Config::default()
         }
     }
@@ -462,7 +459,7 @@ mod tests {
     #[test]
     fn a_token_trigger_of_a_number_of_tokens_is_kept_whatever_the_window() {
         let config = Config {
-            trigger_tokens: TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS),
+            trigger_tokens: Some(TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS)),
             ..Config::default()
         };
 
@@ -498,7 +495,7 @@ mod tests {
     fn a_token_trigger_must_lie_above_zero_and_the_kept_messages() {
         assert!(
             Config {
-                trigger_tokens: TokenTrigger::Above(100),
+                trigger_tokens: Some(TokenTrigger::Above(100)),
                 ..Config::default()
             }
             .validate()
@@ -508,7 +505,7 @@ mod tests {
         );
         assert!(
             Config {
-                trigger_tokens: TokenTrigger::Above(0),
+                trigger_tokens: Some(TokenTrigger::Above(0)),
                 ..Config::default()
             }
             .validate()

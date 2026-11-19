@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
 use super::{
-    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, Trigger,
+    Compacted, Config, End, Initiative, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource,
     context_bytes, estimated_tokens, message_bytes,
 };
 use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, now_ms};
@@ -47,7 +47,7 @@ pub(crate) struct Compactor<'a> {
     pub(crate) events: &'a dyn Emit,
     /// The run's cancellation, which is the compaction's.
     pub(crate) cancel: &'a CancellationToken,
-    pub(crate) trigger: Trigger,
+    pub(crate) initiative: Initiative,
     /// The attempt of the run that compacts; 1 for a manual compaction.
     pub(crate) attempt: u32,
 }
@@ -200,7 +200,7 @@ impl<'a> Compactor<'a> {
     /// Whether the compaction runs on the run's initiative, as the `automatic` field of its
     /// events says.
     fn automatic(&self) -> bool {
-        self.trigger == Trigger::Automatic
+        self.initiative == Initiative::Automatic
     }
 
     /// Where the kept tail starts: the most recent messages within the recent-bytes

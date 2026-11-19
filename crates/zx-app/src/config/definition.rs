@@ -177,9 +177,9 @@ impl AgentDefinition {
             // Until a file sets `triggerTokens`, the token trigger follows the context window;
             // `load` settles it once every file is applied.
             compaction: compaction::Config {
-                trigger_tokens: TokenTrigger::BelowWindow {
+                trigger_tokens: Some(TokenTrigger::BelowWindow {
                     reserve_tokens: DEFAULT_RESERVE_TOKENS,
-                },
+                }),
                 ..compaction::Config::default()
             },
         }

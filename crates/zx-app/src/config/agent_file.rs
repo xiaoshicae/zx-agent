@@ -193,14 +193,11 @@ impl RawCompaction {
             config.trigger_bytes = (bytes > 0).then_some(bytes);
         }
         if let Some(tokens) = self.trigger_tokens {
-            config.trigger_tokens = match tokens {
-                0 => TokenTrigger::Off,
-                tokens => TokenTrigger::Above(tokens),
-            };
+            config.trigger_tokens = (tokens > 0).then_some(TokenTrigger::Above(tokens));
         }
         // Only a token trigger that no file set follows the window, below its reserve.
         if let Some(tokens) = self.reserve_tokens
-            && let TokenTrigger::BelowWindow { reserve_tokens } = &mut config.trigger_tokens
+            && let Some(TokenTrigger::BelowWindow { reserve_tokens }) = &mut config.trigger_tokens
         {
             *reserve_tokens = tokens;
         }
@@ -245,8 +242,8 @@ pub(super) fn compaction_error(error: &InvalidConfig) -> anyhow::Error {
 /// ([`TokenTrigger::BelowWindow`]) while the byte trigger is on, and is off otherwise: then
 /// nothing turns automatic compaction on.
 pub(super) fn settle_token_trigger(config: &mut compaction::Config) {
-    if config.trigger_bytes.is_none() && matches!(config.trigger_tokens, TokenTrigger::BelowWindow { .. }) {
-        config.trigger_tokens = TokenTrigger::Off;
+    if config.trigger_bytes.is_none() && matches!(config.trigger_tokens, Some(TokenTrigger::BelowWindow { .. })) {
+        config.trigger_tokens = None;
     }
 }
 

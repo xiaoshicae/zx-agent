@@ -39,7 +39,7 @@ use run_scope::{CompactionPause, RunScope, RunStop};
 
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
-use crate::compaction::{self, Trigger};
+use crate::compaction::{self, Initiative};
 use crate::events::{Event, EventKind, RunOutcome, RunReport};
 use crate::input::PendingInput;
 use crate::policy::ApprovalGate;
@@ -138,7 +138,7 @@ impl Runner {
             pause: &mut self.pause,
             cost_budget: self.limits.cost_budget,
         };
-        scope.compact(Trigger::Manual, 1).await.into()
+        scope.compact(Initiative::Manual, 1).await.into()
     }
 
     /// The loop configuration.

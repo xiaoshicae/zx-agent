@@ -173,7 +173,7 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
         session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Above(trigger_tokens),
+            trigger_tokens: Some(TokenTrigger::Above(trigger_tokens)),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
@@ -212,7 +212,7 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
         session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Above(100),
+            trigger_tokens: Some(TokenTrigger::Above(100)),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
@@ -246,7 +246,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
         session: seed.into(),
         compaction: Config {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Above(100),
+            trigger_tokens: Some(TokenTrigger::Above(100)),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
@@ -267,7 +267,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
 /// A token trigger of 1000 that keeps about 1 KiB of recent messages.
 fn token_trigger() -> Config {
     Config {
-        trigger_tokens: TokenTrigger::Above(1_000),
+        trigger_tokens: Some(TokenTrigger::Above(1_000)),
         keep_recent_bytes: 1_024,
         timeout: Duration::from_secs(1),
         ..Config::default()
@@ -416,7 +416,7 @@ async fn run_after_switching_to(model: Option<&str>) -> (Vec<&'static str>, usiz
     let (runner, events) = RunnerSetup {
         session: seed.into(),
         compaction: Config {
-            trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens: 1_000 },
+            trigger_tokens: Some(TokenTrigger::BelowWindow { reserve_tokens: 1_000 }),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
