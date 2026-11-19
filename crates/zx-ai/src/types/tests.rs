@@ -4,6 +4,28 @@ use super::*;
 use crate::{SectionChange, SystemMessage};
 
 #[test]
+fn invalid_streamed_tool_arguments_keep_what_the_model_sent() {
+    let raw = "{\"command\":\"echo \"quoted\" text\"}";
+    let call = ToolCall::streamed("c".into(), "bash".into(), raw);
+
+    assert_eq!(call.arguments, json!({}));
+    let error = call.arguments_error.unwrap();
+    assert!(error.starts_with("arguments are not valid JSON: "), "{error}");
+    assert!(error.ends_with(&format!("\n\nReceived arguments:\n{raw}")), "{error}");
+
+    // A long one is cut at a character boundary, so the error stays bounded.
+    let long = format!("{{\"text\":\"{}", "界".repeat(2000));
+    let error = ToolCall::streamed("c".into(), "bash".into(), &long)
+        .arguments_error
+        .unwrap();
+    assert!(error.len() < MAX_RECEIVED_ARGUMENTS + 200, "{}", error.len());
+    assert!(error.ends_with("…"), "{error}");
+
+    let empty = ToolCall::streamed("c".into(), "bash".into(), " ");
+    assert_eq!((empty.arguments, empty.arguments_error), (json!({}), None));
+}
+
+#[test]
 fn provider_error_metadata_is_optional_and_round_trips() {
     let mut message = AssistantMessage::failure("p", "m", StopReason::Error, "rate limited");
     let without = serde_json::to_value(&message).unwrap();

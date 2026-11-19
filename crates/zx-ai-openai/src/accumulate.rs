@@ -2,19 +2,14 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, ToolCall, Usage};
-use zx_util::text::prefix_noted;
 
 use crate::failure::kind;
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
 pub(crate) const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
-
-/// The most of an invalid argument text that its error keeps: enough for the model to see
-/// what it sent, bounded so the session and the next request do not grow with it.
-const MAX_RECEIVED_ARGUMENTS: usize = 2048;
 
 /// One block of the answer as it arrives.
 enum Block {
@@ -242,13 +237,7 @@ impl Accumulator {
                     signature: Some((*field).to_string()),
                 },
                 Block::Tool { id, name, args } => {
-                    let (arguments, arguments_error) = parse_arguments(args);
-                    ContentBlock::ToolCall(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments,
-                        arguments_error,
-                    })
+                    ContentBlock::ToolCall(ToolCall::streamed(id.clone(), name.clone(), args))
                 }
             })
             .collect()
@@ -319,26 +308,10 @@ impl Accumulator {
     }
 }
 
-fn parse_arguments(raw: &str) -> (Value, Option<String>) {
-    if raw.trim().is_empty() {
-        return (json!({}), None);
-    }
-    match serde_json::from_str::<Value>(raw) {
-        Ok(value) => (value, None),
-        Err(e) => {
-            let received = prefix_noted(raw, MAX_RECEIVED_ARGUMENTS, |_, _| "…".to_string());
-            (
-                json!({}),
-                Some(format!(
-                    "arguments are not valid JSON: {e}\n\nReceived arguments:\n{received}"
-                )),
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn apply_all(acc: &mut Accumulator, chunks: &[Value]) -> Vec<Delta> {
@@ -386,23 +359,6 @@ mod tests {
         assert!(acc.finish().is_err());
         let failed = acc.failure(StopReason::Error, "cut off", None);
         assert!(failed.tool_calls()[0].arguments_error.is_some());
-    }
-
-    #[test]
-    fn invalid_tool_arguments_keep_what_the_model_sent() {
-        let raw = "{\"command\":\"echo \"quoted\" text\"}";
-        let (arguments, error) = parse_arguments(raw);
-
-        assert_eq!(arguments, json!({}));
-        let error = error.unwrap();
-        assert!(error.starts_with("arguments are not valid JSON: "), "{error}");
-        assert!(error.ends_with(&format!("\n\nReceived arguments:\n{raw}")), "{error}");
-
-        // A long one is cut at a character boundary, so the error stays bounded.
-        let long = format!("{{\"text\":\"{}", "界".repeat(2000));
-        let error = parse_arguments(&long).1.unwrap();
-        assert!(error.len() < MAX_RECEIVED_ARGUMENTS + 200, "{}", error.len());
-        assert!(error.ends_with("…"), "{error}");
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use serde_json::Map;
 use zx_ai::provider::Provider;
-use zx_ai::{SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
+use zx_ai::{ApiKey, SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
 
 use super::*;
 use crate::OpenAiCompatible;
-use crate::config::{ApiKey, MaxTokensField, OpenAiConfig, RESERVED_FIELDS};
+use crate::config::{MaxTokensField, OpenAiConfig, RESERVED_FIELDS};
 
 /// The options of a provider that sends system prompt changes as `system_updates` says and
 /// leaves every other setting at its default.

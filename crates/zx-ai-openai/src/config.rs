@@ -2,16 +2,15 @@
 //! how requests are written.
 
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::de::IntoDeserializer;
 use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_ai::provider::ApiKey;
+use zx_util::sse::DEFAULT_MAX_EVENT_BYTES;
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -161,75 +160,6 @@ impl BodyOptions {
             );
         }
         Ok(())
-    }
-}
-
-/// Where the bearer token of a request comes from.
-#[derive(Clone, Default)]
-pub enum ApiKey {
-    /// No `Authorization` header.
-    #[default]
-    None,
-    /// The same token for every request.
-    Fixed(String),
-    /// A token asked for before every request, for credentials that expire (pi:
-    /// `getApiKey`). A failure fails the request as
-    /// [`ProviderErrorKind::ApiKey`](zx_ai::ProviderErrorKind::ApiKey), which is not retried.
-    Dynamic(Arc<dyn ApiKeySource>),
-}
-
-/// Supplies the bearer token for the next request; see [`ApiKey::Dynamic`].
-#[async_trait]
-pub trait ApiKeySource: Send + Sync {
-    /// The token to send, asked for before every request on the request's task, so a source
-    /// may refresh an expired one over the network here. The provider waits at most its
-    /// `idle_timeout`, and stops waiting when the request is cancelled.
-    async fn api_key(&self) -> Result<String, String>;
-}
-
-impl ApiKey {
-    /// A fixed token; an empty one is no token.
-    pub fn fixed(key: impl Into<String>) -> Self {
-        let key = key.into();
-        if key.is_empty() { Self::None } else { Self::Fixed(key) }
-    }
-
-    /// The token for the next request, or `None` to send no `Authorization` header.
-    pub(crate) async fn resolve(&self) -> Result<Option<String>, String> {
-        match self {
-            Self::None => Ok(None),
-            Self::Fixed(key) => Ok(Some(key.clone())),
-            Self::Dynamic(source) => source.api_key().await.map(|key| (!key.is_empty()).then_some(key)),
-        }
-    }
-}
-
-impl fmt::Debug for ApiKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Debug output can reach logs and panic messages; the key must not.
-        f.write_str(match self {
-            Self::None => "none",
-            Self::Fixed(_) => "[REDACTED]",
-            Self::Dynamic(_) => "[dynamic]",
-        })
-    }
-}
-
-impl From<Option<String>> for ApiKey {
-    fn from(key: Option<String>) -> Self {
-        key.map_or(Self::None, Self::fixed)
-    }
-}
-
-impl From<String> for ApiKey {
-    fn from(key: String) -> Self {
-        Self::fixed(key)
-    }
-}
-
-impl From<&str> for ApiKey {
-    fn from(key: &str) -> Self {
-        Self::fixed(key)
     }
 }
 
@@ -552,7 +482,5 @@ mod tests {
         .map(|_| ())
         .unwrap_err();
         assert!(error.to_string().contains("prompt_cache_key"), "{error}");
-        assert!(matches!(ApiKey::fixed(""), ApiKey::None));
-        assert!(matches!(ApiKey::from(Some("k".to_string())), ApiKey::Fixed(key) if key == "k"));
     }
 }

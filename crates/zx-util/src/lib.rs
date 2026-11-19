@@ -12,9 +12,13 @@
 //!   out of serialized records
 //! - [`env`](mod@env): [`env::env_value`], an environment variable that counts only when it
 //!   is set and not empty
+//! - [`error`]: [`error::with_causes`], an error's text followed by its causes
+//! - [`sse`]: the data of each Server-Sent Event of a stream, with a byte limit per event
 
 pub mod default;
 pub mod env;
+pub mod error;
 pub mod random;
+pub mod sse;
 pub mod sync;
 pub mod text;

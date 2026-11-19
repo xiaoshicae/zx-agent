@@ -1,5 +1,9 @@
-//! The provider contract.
+//! The provider contract, and the API key a provider authenticates with.
 
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use futures::SinkExt;
 use futures::channel::mpsc::{Receiver, Sender, channel};
 use tokio_util::sync::CancellationToken;
@@ -47,4 +51,86 @@ pub trait Provider: Send + Sync {
 /// stop. The send error itself is dropped: a closed receiver needs no further events.
 pub async fn send_event(tx: &mut EventSender, event: StreamEvent) -> bool {
     tx.send(event).await.is_ok()
+}
+
+/// Where the API key of a request comes from, for the providers that authenticate with one.
+#[derive(Clone, Default)]
+pub enum ApiKey {
+    /// No key: the request carries no credentials.
+    #[default]
+    None,
+    /// The same key for every request.
+    Fixed(String),
+    /// A key asked for before every request, for credentials that expire (pi:
+    /// `getApiKey`). A failure fails the request as
+    /// [`ProviderErrorKind::ApiKey`](crate::ProviderErrorKind::ApiKey), which is not retried.
+    Dynamic(Arc<dyn ApiKeySource>),
+}
+
+/// Supplies the key for the next request; see [`ApiKey::Dynamic`].
+#[async_trait]
+pub trait ApiKeySource: Send + Sync {
+    /// The key to send, asked for before every request on the request's task, so a source
+    /// may refresh an expired one over the network here. A provider bounds the wait, and
+    /// stops waiting when the request is cancelled.
+    async fn api_key(&self) -> Result<String, String>;
+}
+
+impl ApiKey {
+    /// A fixed key; an empty one is no key.
+    pub fn fixed(key: impl Into<String>) -> Self {
+        let key = key.into();
+        if key.is_empty() { Self::None } else { Self::Fixed(key) }
+    }
+
+    /// The key for the next request, or `None` to send no credentials. Fails when a dynamic
+    /// source does, with its reason.
+    pub async fn resolve(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::None => Ok(None),
+            Self::Fixed(key) => Ok(Some(key.clone())),
+            Self::Dynamic(source) => source.api_key().await.map(|key| (!key.is_empty()).then_some(key)),
+        }
+    }
+}
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug output can reach logs and panic messages; the key must not.
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Fixed(_) => "[REDACTED]",
+            Self::Dynamic(_) => "[dynamic]",
+        })
+    }
+}
+
+impl From<Option<String>> for ApiKey {
+    fn from(key: Option<String>) -> Self {
+        key.map_or(Self::None, Self::fixed)
+    }
+}
+
+impl From<String> for ApiKey {
+    fn from(key: String) -> Self {
+        Self::fixed(key)
+    }
+}
+
+impl From<&str> for ApiKey {
+    fn from(key: &str) -> Self {
+        Self::fixed(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_key_is_no_key_and_a_key_is_never_shown() {
+        assert!(matches!(ApiKey::fixed(""), ApiKey::None));
+        assert!(matches!(ApiKey::from(Some("k".to_string())), ApiKey::Fixed(key) if key == "k"));
+        assert_eq!(format!("{:?}", ApiKey::fixed("sk-secret")), "[REDACTED]");
+    }
 }

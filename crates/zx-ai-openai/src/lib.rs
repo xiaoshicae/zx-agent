@@ -2,21 +2,20 @@
 //! `openai-completions.ts` and `transform-messages.ts`).
 //!
 //! Works with OpenAI and the many servers that speak the same protocol
-//! (vLLM, Ollama, llama.cpp server, LiteLLM, most hosted gateways). The only crate of the
-//! model layer that needs an HTTP client: `zx-ai` holds the types and the `Provider`
-//! contract. The `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
+//! (vLLM, Ollama, llama.cpp server, LiteLLM, most hosted gateways). A provider crate of the
+//! model layer, with an HTTP client: `zx-ai` holds the types and the `Provider` contract. The
+//! `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
 //!
 //! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
 //! request and what kind each is (the error codes and wording of OpenAI-compatible services)
-//! in `failure.rs`, the message built from the stream in `accumulate.rs` and the parser of the
-//! stream's events in `sse.rs`; this module holds the provider and the HTTP flow of one
-//! request.
+//! in `failure.rs` and the message built from the stream in `accumulate.rs`; this module
+//! holds the provider and the HTTP flow of one request, which reads the stream's events with
+//! `zx_util::sse`.
 
 mod accumulate;
 mod config;
 mod failure;
 mod request;
-mod sse;
 
 use std::time::{Duration, Instant};
 
@@ -27,12 +26,12 @@ use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_
 use zx_ai::{ProviderErrorKind, Request, StopReason, StreamEvent, duration_ms, now_ms};
 
 use accumulate::Accumulator;
-pub use config::{ApiKey, ApiKeySource, BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
+pub use config::{BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
 use failure::{
     Failure, answers_json, error_object, http_failure, json_body_failure, provider_failure, transport_failure,
 };
 pub use request::replay_body;
-use sse::SseParser;
+use zx_util::sse::SseParser;
 
 /// Longest wait for a connection to the server to be established. Fixed, unlike
 /// [`OpenAiConfig::idle_timeout`]: how long a server takes to answer varies with the model and
