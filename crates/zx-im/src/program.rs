@@ -213,7 +213,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
             let app = assemble(
                 connect(overrides).await?,
                 customizations,
-                hidden_env,
+                &hidden_env,
                 telemetry.map(Telemetry::hook),
             );
             let agent = conversations_agent(&app, &dir).await?;
@@ -252,12 +252,13 @@ async fn connect(overrides: Overrides) -> Result<Application> {
 fn assemble(
     app: Application,
     customizations: Vec<Customization>,
-    credentials: Vec<String>,
+    credentials: &[String],
     traces: Option<TraceHook>,
 ) -> Application {
     let app = customizations.into_iter().fold(app, |app, customize| customize(app));
-    let hidden = app.hidden_env().iter().cloned().chain(credentials).collect();
-    app.set_hidden_env(hidden)
+    credentials
+        .iter()
+        .fold(app, |app, name| app.add_hidden_env(name))
         .set_traces(traces)
         .add_prompt_section(CONVERSATION_SECTION, CONVERSATION)
 }
@@ -688,24 +689,6 @@ mod tests {
         let error = platform_error(&format!("[feishu]\n{SERVER}"), &platform::built_in());
         assert!(error.contains("this build of zx-im has no such platform"), "{error}");
         assert!(error.contains("[feishu]"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn the_hosts_parts_come_first_and_the_platforms_credentials_join_its_hidden_variables() {
-        let config = zx_app::config::Config {
-            model: Some("m".into()),
-            ..zx_app::config::Config::default()
-        };
-        let app = Application::from_config(config, None, Overrides::default(), Builtin::Assistant)
-            .await
-            .unwrap();
-        let customizations: Vec<Customization> = vec![
-            Box::new(|app: Application| app.set_hidden_env(vec!["HOST_TOKEN".into()])),
-            Box::new(|app: Application| app.add_prompt_section("host", "From the host.")),
-        ];
-        let app = assemble(app, customizations, vec!["SLACK_BOT_TOKEN".into()], None);
-        // The platforms' credentials are hidden beside the host's, not in their place.
-        assert_eq!(app.hidden_env(), ["HOST_TOKEN", "SLACK_BOT_TOKEN"]);
     }
 
     #[test]

@@ -170,10 +170,10 @@ impl Application {
         })
     }
 
-    /// Hide `names` from commands and redact their values: credentials besides the API key,
-    /// such as the tokens of an IM service's platforms.
-    pub fn set_hidden_env(mut self, names: Vec<String>) -> Self {
-        self.hidden_env = names;
+    /// Hide the variable `name` from commands and redact its value, beside the API key's: a
+    /// credential such as a token of an IM service's platform.
+    pub fn add_hidden_env(mut self, name: &str) -> Self {
+        self.hidden_env.push(name.to_string());
         self
     }
 
@@ -266,13 +266,6 @@ impl Application {
     /// The reasoning level config.toml sets; `None` when it sets none.
     pub fn reasoning(&self) -> Option<Reasoning> {
         self.settings.config.reasoning
-    }
-
-    /// The variables hidden from commands besides the API key's, as
-    /// [`set_hidden_env`](Self::set_hidden_env) gave them, for a program that hides its own
-    /// beside those a host gave.
-    pub fn hidden_env(&self) -> &[String] {
-        &self.hidden_env
     }
 
     /// Where new sessions work unless a request names a directory: [`Overrides::cwd`];

@@ -576,6 +576,30 @@ async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_sess
 }
 
 #[tokio::test]
+async fn the_variables_a_host_hides_are_hidden_beside_the_api_key() {
+    let noting = Arc::new(Noting::default());
+    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_executor("noting", noting.clone())
+        .add_hidden_env("ZX_APPLICATION_TEST_TOKEN")
+        .add_hidden_env("ZX_APPLICATION_TEST_SECRET");
+    let agent = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    agent.create(None).await.unwrap();
+    let started = lock(&noting.started).clone();
+    let hidden_env = &started[0].1;
+    for name in [
+        "ZX_APPLICATION_TEST_UNUSED_KEY",
+        "ZX_APPLICATION_TEST_TOKEN",
+        "ZX_APPLICATION_TEST_SECRET",
+    ] {
+        assert!(hidden_env.contains(&name.to_string()), "{name}: {hidden_env:?}");
+    }
+}
+
+#[tokio::test]
 async fn approving_every_call_needs_an_executor_that_isolates_commands() {
     let dir = tempfile::tempdir().unwrap();
     agent_in(dir.path(), "[permissions]\napproveAll = true\nask = []");
