@@ -1,21 +1,17 @@
-//! How a request fails: the failures of HTTP responses, bodies and stream events, and what kind
-//! each is ([`ProviderErrorKind`]) by the statuses, error types and wording of the Messages API.
-//! The kernel acts on the kind alone, so the API's error types are known here and nowhere
-//! else.
+//! How a request fails at the Messages API: the failures its error statuses, bodies and stream
+//! events report, and what kind each is ([`ProviderErrorKind`]) by the statuses, error types
+//! and wording of the API. The kernel acts on the kind alone, so the API's error types are
+//! known here and nowhere else; what every HTTP provider shares, such as the transport's
+//! failures and the Retry-After hint, is in `zx_ai_http::failure`.
 
-use futures::StreamExt;
+use std::time::SystemTime;
+
 use serde_json::Value;
 use zx_ai::{ProviderError, ProviderErrorKind};
-use zx_util::error::with_causes;
-use zx_util::text::clip;
+use zx_ai_http::Failure;
+use zx_ai_http::failure::{diagnostic_body, excerpt, retry_after_ms};
 
 use crate::config::AnthropicConfig;
-
-/// Error bodies only add diagnostic detail; keep their memory use independent of the server.
-const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
-
-/// The most characters of a server's text that a failure message keeps.
-const MAX_ERROR_EXCERPT_CHARS: usize = 2000;
 
 /// What the API says of a thinking block whose signature binds it to the conversation as it
 /// was, before its beginning changed, as a compaction or a changed system prompt changes it.
@@ -31,42 +27,21 @@ const OVERFLOW_TEXT: &[&str] = &[
     "too many tokens",
 ];
 
-/// Why a request did not end with a complete answer.
-pub(crate) enum Failure {
-    /// The caller cancelled the request.
-    Aborted,
-    /// The consumer of the stream went away, so nothing is left to report to.
-    Closed,
-    /// The request failed, with the error for the message and its classification.
-    Error { details: ProviderError, message: String },
-}
-
-impl Failure {
-    /// A failed request: `details`, a whole [`ProviderError`] or only its kind, and the text
-    /// for the message.
-    pub(crate) fn error(details: impl Into<ProviderError>, message: impl Into<String>) -> Self {
-        Self::Error {
-            details: details.into(),
-            message: message.into(),
-        }
+/// For `failure`, a request the API refused because a thinking block is bound to a different
+/// conversation: the index of the message it named, from which on the thinking goes, or the
+/// first message when it named none.
+pub(crate) fn thinking_bound_elsewhere(failure: &Failure) -> Option<usize> {
+    let Failure::Error { message, .. } = failure else {
+        return None;
+    };
+    if !message.contains(BOUND_ELSEWHERE) {
+        return None;
     }
-
-    /// For a request the API refused because a thinking block is bound to a different
-    /// conversation: the index of the message it named, from which on the thinking goes, or
-    /// the first message when it named none.
-    pub(crate) fn thinking_bound_elsewhere(&self) -> Option<usize> {
-        let Self::Error { message, .. } = self else {
-            return None;
-        };
-        if !message.contains(BOUND_ELSEWHERE) {
-            return None;
-        }
-        let named = message
-            .split_once("messages.")
-            .and_then(|(_, rest)| rest.split('.').next())
-            .and_then(|index| index.parse().ok());
-        Some(named.unwrap_or(0))
-    }
+    let named = message
+        .split_once("messages.")
+        .and_then(|(_, rest)| rest.split('.').next())
+        .and_then(|index| index.parse().ok());
+    Some(named.unwrap_or(0))
 }
 
 /// The failure of a response with an error status, of the kind its status and error type say
@@ -74,8 +49,8 @@ impl Failure {
 /// its text; the status still decides.
 pub(crate) async fn http_failure(response: reqwest::Response, config: &AnthropicConfig) -> Failure {
     let status = response.status().as_u16();
-    let retry_after_ms = retry_after_ms(response.headers());
-    let bytes = diagnostic_body(response, config).await;
+    let retry_after_ms = retry_after_ms(response.headers(), SystemTime::now());
+    let bytes = diagnostic_body(response, config.idle_timeout, config.max_response_bytes).await;
     let body = serde_json::from_slice::<Value>(&bytes).ok();
     let error = body.as_ref().and_then(|body| body.get("error"));
     let code = error.and_then(error_type);
@@ -93,21 +68,10 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &Anthropic
     Failure::error(details, format!("HTTP {status}: {text}"))
 }
 
-/// Whether the server answered with a JSON document rather than an event stream: a gateway can
-/// put an error object under a success status, and a server that ignores `stream: true` sends
-/// the whole answer as JSON.
-pub(crate) fn answers_json(response: &reqwest::Response) -> bool {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
-}
-
 /// What a JSON body under a success status says: its error, or else that the server did not
 /// stream.
 pub(crate) async fn json_body_failure(response: reqwest::Response, config: &AnthropicConfig) -> Failure {
-    let bytes = diagnostic_body(response, config).await;
+    let bytes = diagnostic_body(response, config.idle_timeout, config.max_response_bytes).await;
     let body = serde_json::from_slice::<Value>(&bytes).ok();
     if let Some(error) = body
         .as_ref()
@@ -143,23 +107,8 @@ pub(crate) fn provider_failure(error: &Value) -> Failure {
     Failure::error(details, format!("provider error: {text}"))
 }
 
-/// The failure of `operation`, a request or a stream read, that `error` ended.
-pub(crate) fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
-    let kind = if error.is_timeout() {
-        ProviderErrorKind::Timeout
-    } else {
-        ProviderErrorKind::Transport
-    };
-    Failure::error(kind, format!("{operation}: {}", with_causes(error)))
-}
-
 fn error_type(error: &Value) -> Option<String> {
     error.get("type").and_then(Value::as_str).map(str::to_string)
-}
-
-/// The start of a server's text, for a failure message.
-fn excerpt(text: &str) -> String {
-    clip(text.trim(), MAX_ERROR_EXCERPT_CHARS)
 }
 
 /// The kind of failure a response's status says, with its error type and wording where the
@@ -192,38 +141,6 @@ pub(crate) fn of_type(code: Option<&str>, text: &str) -> ProviderErrorKind {
 fn says_overflow(text: &str) -> bool {
     let text = text.to_lowercase();
     OVERFLOW_TEXT.iter().any(|phrase| text.contains(phrase))
-}
-
-/// The wait the API asks for, in milliseconds: `retry-after` in whole seconds. Another form is
-/// left to the local backoff.
-fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let seconds: u64 = headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()?;
-    seconds.checked_mul(1000)
-}
-
-/// The start of a body read only to explain a failure, within the idle timeout. A body that
-/// cannot be read in time loses only the explanation, so it reads as empty. As zx-ai-openai's:
-/// the providers share no crate that has an HTTP client.
-async fn diagnostic_body(response: reqwest::Response, config: &AnthropicConfig) -> Vec<u8> {
-    let read = read_error_body(response, MAX_ERROR_BODY_BYTES.min(config.max_response_bytes));
-    match tokio::time::timeout(config.idle_timeout, read).await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) | Err(_) => Vec::new(),
-    }
-}
-
-async fn read_error_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, reqwest::Error> {
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let keep = chunk.len().min(max_bytes.saturating_sub(bytes.len()));
-        bytes.extend_from_slice(&chunk[..keep]);
-        if bytes.len() == max_bytes {
-            break;
-        }
-    }
-    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -274,32 +191,23 @@ mod tests {
 
     #[test]
     fn a_thinking_block_bound_elsewhere_names_where_the_thinking_goes_from() {
-        let refused = |text: &str| Failure::error(ProviderErrorKind::Other, format!("HTTP 400: {text}"));
+        let refused = |text: &str| {
+            thinking_bound_elsewhere(&Failure::error(ProviderErrorKind::Other, format!("HTTP 400: {text}")))
+        };
         assert_eq!(
             refused(
                 "messages.4.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block."
-            )
-            .thinking_bound_elsewhere(),
+            ),
             Some(4)
         );
         assert_eq!(
-            refused("Invalid `signature` in `thinking` block. The block is bound to a different conversation.")
-                .thinking_bound_elsewhere(),
+            refused("Invalid `signature` in `thinking` block. The block is bound to a different conversation."),
             Some(0)
         );
         // A tampered signature is refused whatever is sent: no retry.
         assert_eq!(
-            refused("messages.4.content.0: Invalid `signature` in `thinking` block.").thinking_bound_elsewhere(),
+            refused("messages.4.content.0: Invalid `signature` in `thinking` block."),
             None
         );
-    }
-
-    #[test]
-    fn retry_after_is_read_in_whole_seconds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("retry-after", "7".parse().unwrap());
-        assert_eq!(retry_after_ms(&headers), Some(7000));
-        headers.insert("retry-after", "soon".parse().unwrap());
-        assert_eq!(retry_after_ms(&headers), None);
     }
 }

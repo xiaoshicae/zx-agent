@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, ToolCall, Usage};
+use zx_ai_http::stream::Answer;
 
 use crate::failure::kind;
 
@@ -243,11 +244,34 @@ impl Accumulator {
             .collect()
     }
 
+    fn message(
+        &self,
+        stop_reason: StopReason,
+        error_message: Option<String>,
+        provider_error: Option<ProviderError>,
+    ) -> AssistantMessage {
+        AssistantMessage {
+            content: self.content(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            usage: self.usage.clone(),
+            stop_reason,
+            error_message,
+            provider_error,
+            timestamp: self.timestamp,
+            duration_ms: None,
+            response_id: self.response_id.clone(),
+            response_model: self.response_model.clone(),
+        }
+    }
+}
+
+impl Answer for Accumulator {
     /// The complete message, from the finish reason: only the known endings succeed, and any
     /// other value means the server interrupted or rejected the answer, a failure of the kind
     /// [`kind::of_finish_reason`] gives, with the reason as its code. Fails on a stream that
     /// ended without a finish reason.
-    pub(crate) fn finish(&self) -> Result<AssistantMessage, String> {
+    fn finish(&self) -> Result<AssistantMessage, String> {
         let Some(reason) = self.finish_reason.as_deref() else {
             return Err("stream ended without a finish_reason".to_string());
         };
@@ -276,35 +300,13 @@ impl Accumulator {
         Ok(self.message(stop_reason, error, details))
     }
 
-    /// The message so far, ended by `stop_reason` with `error` and its `details`.
-    pub(crate) fn failure(
+    fn failure(
         &self,
         stop_reason: StopReason,
         error: impl Into<String>,
         details: Option<ProviderError>,
     ) -> AssistantMessage {
         self.message(stop_reason, Some(error.into()), details)
-    }
-
-    fn message(
-        &self,
-        stop_reason: StopReason,
-        error_message: Option<String>,
-        provider_error: Option<ProviderError>,
-    ) -> AssistantMessage {
-        AssistantMessage {
-            content: self.content(),
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            usage: self.usage.clone(),
-            stop_reason,
-            error_message,
-            provider_error,
-            timestamp: self.timestamp,
-            duration_ms: None,
-            response_id: self.response_id.clone(),
-            response_model: self.response_model.clone(),
-        }
     }
 }
 

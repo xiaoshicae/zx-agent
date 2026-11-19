@@ -1,11 +1,11 @@
 //! Server-Sent Events: the `data` payload of each event of a stream, read incrementally with a
-//! byte limit per event. The providers of the model layer read their responses with it.
+//! byte limit per event. [`Events`](crate::stream::Events) reads a response with it.
 
 /// Default maximum bytes in one SSE event, including its framing.
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 /// Incremental parser with a byte limit per event. Discard it after a parsing error.
-pub struct SseParser {
+pub(crate) struct SseParser {
     buffer: Vec<u8>,
     data: Vec<String>,
     event_bytes: usize,
@@ -20,7 +20,7 @@ impl Default for SseParser {
 
 impl SseParser {
     /// Limit each event, including unterminated lines and multi-line data fields.
-    pub fn new(max_event_bytes: usize) -> Self {
+    pub(crate) fn new(max_event_bytes: usize) -> Self {
         Self {
             buffer: Vec::new(),
             data: Vec::new(),
@@ -34,7 +34,7 @@ impl SseParser {
     ///
     /// Only whole lines are decoded, and a newline byte never occurs inside a
     /// multi-byte UTF-8 sequence, so characters split across chunks stay intact.
-    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
         let mut events = Vec::new();
         // Scan each incoming byte once; only a partial line is carried across calls.
         for part in bytes.split_inclusive(|&byte| byte == b'\n') {
@@ -59,7 +59,7 @@ impl SseParser {
     }
 
     /// Flush an event left unterminated at end of stream.
-    pub fn finish(&mut self) -> Option<String> {
+    pub(crate) fn finish(&mut self) -> Option<String> {
         let tail = std::mem::take(&mut self.buffer);
         self.event_bytes = 0;
         keep_data(&mut self.data, &String::from_utf8_lossy(&tail));
