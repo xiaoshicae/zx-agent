@@ -300,8 +300,7 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
             incomplete = Some(line_offset);
             break;
         }
-        let record =
-            std::str::from_utf8(raw).map_err(|error| anyhow!("{}: entry {position}: {error}", path.display()))?;
+        let record = std::str::from_utf8(raw).with_context(|| format!("{}: record {position}", path.display()))?;
         records.push(record.trim_end().to_string());
     }
     let loaded = LoadedSession {

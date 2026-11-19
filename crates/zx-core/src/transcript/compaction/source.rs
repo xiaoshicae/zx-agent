@@ -48,10 +48,10 @@ impl Transcript {
         let cut = raw
             .iter()
             .position(|item| item.entry_id == first_kept)
-            .ok_or_else(|| anyhow!("compaction retained entry not on branch"))?;
+            .ok_or_else(|| anyhow!("its first kept entry {first_kept} is not a message of this branch"))?;
         ensure!(
             !matches!(raw[cut].message, Message::ToolResult(_) | Message::System(_)),
-            "compaction cannot split a tool exchange or retain from a system message"
+            "its boundary at {first_kept} would split a tool exchange or keep from a system message"
         );
         raw.truncate(cut);
         Ok(raw)

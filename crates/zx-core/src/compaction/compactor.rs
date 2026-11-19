@@ -52,16 +52,16 @@ pub(crate) struct Compactor<'a> {
     pub(crate) attempt: u32,
 }
 
-/// The context after a summary, except the summary itself: what stays of the records before
-/// the boundary, then the messages the summary keeps.
-struct Retained {
+/// The context after a summary, except the summary itself: what is kept of the records
+/// before the boundary, then the messages after it.
+struct Kept {
     messages: Vec<Message>,
     /// How many of `messages` are from before the boundary: the system messages there, and
     /// the input the compaction keeps when its boundary falls after the latest input.
     before_boundary: usize,
 }
 
-impl Retained {
+impl Kept {
     /// What a summary that keeps `raw[cut..]`, and the input `raw[kept_input]` before it,
     /// leaves in the context.
     fn of(raw: &[ProjectedMessage], cut: usize, kept_input: Option<usize>) -> Self {
@@ -76,8 +76,8 @@ impl Retained {
         }
     }
 
-    /// The context with `summary` in its place: after what stays of the records before the
-    /// boundary, before the kept messages. The session's projection orders them the same way.
+    /// The context with `summary` in its place: after what is kept of the records before the
+    /// boundary, before the messages after it. The session's projection orders them the same way.
     fn with_summary(&self, summary: Message) -> Vec<Message> {
         let (before, kept) = self.messages.split_at(self.before_boundary);
         before
@@ -92,12 +92,12 @@ impl Retained {
 /// What a summary would read and keep, chosen from the current projection.
 struct Candidate {
     first_kept: String,
-    /// The latest input, when the boundary is after it: it stays in the context as it is.
+    /// The latest input, when the boundary is after it: it is kept in the context as it is.
     kept_input: Option<String>,
     /// The records the summary reads, which its facts may cite.
     source_ids: Vec<String>,
     source: Source,
-    retained: Retained,
+    kept: Kept,
 }
 
 /// The records a summary reads, as whoever makes it takes them.
@@ -112,7 +112,7 @@ enum Source {
 struct OpenCompaction {
     id: String,
     source_ids: Vec<String>,
-    retained: Retained,
+    kept: Kept,
 }
 
 /// What an open compaction got back.
@@ -194,7 +194,7 @@ impl Compactor<'_> {
         self.trigger == Trigger::Automatic
     }
 
-    /// Where the retained tail starts: the most recent messages within the recent-bytes
+    /// Where the kept tail starts: the most recent messages within the recent-bytes
     /// budget, and never between a call and its result. It may be after the latest input:
     /// work of many tool calls since the latest input is summarized up to its recent ones.
     fn cut(&self, raw: &[ProjectedMessage]) -> Result<usize> {
@@ -206,7 +206,7 @@ impl Compactor<'_> {
             }
             let next_bytes = bytes.saturating_add(message_bytes(&item.message)?);
             // An oversized old message belongs in the source, rather than forcing
-            // the entire prefix into the retained tail. Always keep at least one.
+            // the entire prefix into the kept tail. Always keep at least one.
             if cut < raw.len() && next_bytes > self.compaction.keep_recent_bytes {
                 break;
             }
@@ -236,10 +236,10 @@ impl Compactor<'_> {
         };
         // There is an input, so the tail keeps at least one message and `raw[cut]` exists.
         let cut = self.cut(&raw)?;
-        // The input of work summarized in its middle stays as it was sent.
+        // The input of work summarized in its middle is kept as it was sent.
         let kept_input = (cut > last_user).then_some(last_user);
         let source = &raw[..cut];
-        // Nothing to summarize when all that is before the boundary stays in the context.
+        // Nothing to summarize when all that is before the boundary is kept in the context.
         let summarized = |(index, item): (usize, &ProjectedMessage)| {
             !matches!(item.message, Message::System(_)) && Some(index) != kept_input
         };
@@ -268,19 +268,19 @@ impl Compactor<'_> {
                 Some(_) => Source::Records(without_details(source).into_owned()),
                 None => Source::Text(input),
             },
-            retained: Retained::of(&raw, cut, kept_input),
+            kept: Kept::of(&raw, cut, kept_input),
         };
         if self.automatic() {
             // What a summary keeps is already over a trigger: no summary could help, so none
             // is asked for.
-            let retained = context_bytes(&candidate.retained.messages)?;
+            let kept = context_bytes(&candidate.kept.messages)?;
             ensure!(
-                self.compaction.trigger_bytes.is_none_or(|limit| retained < limit),
-                "retained system messages and latest input already exceed trigger_bytes; raise it or start a new session"
+                self.compaction.trigger_bytes.is_none_or(|limit| kept < limit),
+                "kept system messages and latest input already exceed trigger_bytes; raise it or start a new session"
             );
             ensure!(
-                self.below_token_trigger(estimated_tokens(retained)),
-                "retained system messages and latest input already exceed trigger_tokens; raise it or start a new session"
+                self.below_token_trigger(estimated_tokens(kept)),
+                "kept system messages and latest input already exceed trigger_tokens; raise it or start a new session"
             );
         }
         Ok(Some(candidate))
@@ -330,7 +330,7 @@ impl Compactor<'_> {
             .transcript
             .begin_compaction(plan)
             .await
-            .context("cannot persist compaction request")?;
+            .context("cannot persist compaction start")?;
         let made = match candidate.source {
             Source::Text(input) => {
                 let (request, request_entry) = self.record_request(&id, input).await?;
@@ -345,7 +345,7 @@ impl Compactor<'_> {
         let open = OpenCompaction {
             id,
             source_ids: candidate.source_ids,
-            retained: candidate.retained,
+            kept: candidate.kept,
         };
         Ok((open, made))
     }
@@ -506,20 +506,20 @@ impl Compactor<'_> {
         input_bytes: usize,
     ) -> Result<(CompactionSummary, usize)> {
         summary.validate(&open.source_ids)?;
-        let output_bytes = context_bytes(&open.retained.with_summary(summary.message(now_ms())))?;
+        let output_bytes = context_bytes(&open.kept.with_summary(summary.message(now_ms())))?;
         ensure!(
             output_bytes < input_bytes,
             "summary did not reduce the context: {output_bytes} bytes with it, {input_bytes} before"
         );
         ensure!(
             !self.automatic() || self.compaction.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
-            "retained context still exceeds trigger_bytes; reduce retained input or raise the trigger"
+            "kept context still exceeds trigger_bytes; reduce the kept input or raise the trigger"
         );
         // With no answer to measure it yet, the new context's tokens are estimated from its
         // bytes, as the next request's trigger check estimates them.
         ensure!(
             !self.automatic() || !self.above_token_trigger(estimated_tokens(output_bytes)),
-            "retained context still exceeds trigger_tokens; reduce retained input or raise the trigger"
+            "kept context still exceeds trigger_tokens; reduce the kept input or raise the trigger"
         );
         if self.cancel.is_cancelled() {
             bail!(CANCELLED);

@@ -2,7 +2,7 @@
 //! and the rules each record follows, both when it is appended and when a session is
 //! loaded.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use super::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
@@ -102,7 +102,7 @@ impl Transcript {
                 | Entry::CustomMessage(_)
                 | Entry::SessionInfo(_) => false,
             }),
-            "the compaction already finished"
+            "compaction {id} already finished"
         );
         Ok(found)
     }
@@ -129,14 +129,18 @@ impl Transcript {
                 entry.id
             ),
         }
-        let source = self.compaction_source(entry.parent_id.as_deref(), &entry.first_kept_entry_id)?;
+        let source = self
+            .compaction_source(entry.parent_id.as_deref(), &entry.first_kept_entry_id)
+            .with_context(|| format!("compaction {}", entry.id))?;
         ensure!(
             source.iter().any(|item| !matches!(item.message, Message::System(_))),
-            "no old messages to compact"
+            "compaction {}: no old messages to compact",
+            entry.id
         );
         ensure!(
             source.iter().map(|item| &item.entry_id).eq(&entry.source_entry_ids),
-            "compaction sources must be the original prefix"
+            "compaction {}: its sources are not the records before its boundary",
+            entry.id
         );
         if let Some(kept) = &entry.kept_input_entry_id {
             let latest = source

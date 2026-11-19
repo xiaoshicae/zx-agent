@@ -177,7 +177,7 @@ async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_appli
 }
 
 #[tokio::test]
-async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
+async fn omitting_the_first_kept_message_keeps_the_summary_in_place_of_the_old_prefix() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
     let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
@@ -187,7 +187,7 @@ async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_o
         .unwrap();
     transcript.append_message(Message::user("after")).await.unwrap();
     transcript.append_context_edit(&kept, None).await.unwrap();
-    // The retained message is not summarized evidence, so the summary stays valid.
+    // The kept message is not summarized evidence, so the summary stays valid.
     assert!(transcript.latest_compaction().is_some());
     let messages = summarize(&transcript.messages());
     assert_eq!(messages.len(), 2, "{messages:?}");
@@ -442,7 +442,7 @@ async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summ
 }
 
 #[tokio::test]
-async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
+async fn the_kept_tail_never_splits_an_assistant_tool_result_exchange() {
     let mut transcript = Transcript::in_memory(header());
     let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");

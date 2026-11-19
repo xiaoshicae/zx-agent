@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::ai::{Message, UserMessageKind, now_ms};
 
@@ -184,10 +184,10 @@ impl Transcript {
         header.check_version()?;
         let mut transcript = Self::in_memory(header);
         for (position, record) in (1..).zip(&records) {
-            let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
+            let entry: Entry = serde_json::from_str(record).with_context(|| format!("record {position}"))?;
             transcript
                 .validate_entry(&entry)
-                .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
+                .with_context(|| format!("record {position}"))?;
             transcript.insert(entry);
         }
         transcript.incomplete_tail_bytes = incomplete_tail_bytes;

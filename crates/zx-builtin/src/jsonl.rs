@@ -218,8 +218,7 @@ impl Files {
         if !query.matches(&file::read_header(path)?) {
             return Ok(None);
         }
-        let transcript =
-            Transcript::snapshot(file::read(path)?).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
+        let transcript = Transcript::snapshot(file::read(path)?).with_context(|| path.display().to_string())?;
         Ok(Some(SessionInfo::of(&transcript)))
     }
 

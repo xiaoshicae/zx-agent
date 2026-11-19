@@ -952,7 +952,7 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
 }
 
 #[tokio::test]
-async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_retained() {
+async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_kept() {
     let mut seed = Seed::in_memory(header()).await;
     let old = seed
         .append_message(Message::user("x".repeat(300 * 1024)))

@@ -309,7 +309,7 @@ pub enum EventKind {
         usage: Usage,
         automatic: bool,
     },
-    /// A compaction failed; the preceding projection is retained.
+    /// A compaction failed; the preceding projection is kept.
     CompactionFailed {
         error: String,
         automatic: bool,

@@ -163,8 +163,8 @@ pub struct CompactionStartedEntry {
     pub timestamp: u64,
     pub first_kept_entry_id: String,
     /// The latest input before the boundary, when the boundary falls among what followed
-    /// that input. The summary reads it like every record before the boundary, and it also
-    /// stays in the context as it was sent, before the summary: work summarized in its
+    /// that input. The summary reads it like every record before the boundary, and it is
+    /// also kept in the context as it was sent, before the summary: work summarized in its
     /// middle keeps the request it answers. Absent when the boundary is at or before the
     /// latest input, which is then kept anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]

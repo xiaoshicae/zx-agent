@@ -1,6 +1,6 @@
 //! Request configuration changes and per-dispatch projection checkpoints.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -153,7 +153,8 @@ impl Transcript {
     pub(super) fn validate_request_config(entry: &RequestConfigEntry) -> Result<()> {
         ensure!(
             !entry.config.model.trim().is_empty() && !entry.config.provider.trim().is_empty(),
-            "empty request model or provider"
+            "request configuration {}: the model or the provider is empty",
+            entry.id
         );
         Ok(())
     }
@@ -203,7 +204,9 @@ impl Transcript {
                 user_timestamp,
             } => {
                 let (_, started) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
-                let source = self.compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)?;
+                let source = self
+                    .compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)
+                    .with_context(|| format!("compaction {compaction_id}"))?;
                 Ok(summary_messages(
                     Self::summary_instructions(started)?,
                     summary_input(&source)?,

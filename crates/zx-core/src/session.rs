@@ -431,7 +431,7 @@ impl Session {
     /// `provider` as the host configured it, authentication and transport limits included,
     /// and `model`, the ID later prompts pass to it. An empty ID returns InvalidModel; a run
     /// returns Busy. History, tools, hooks, limits and exact-call approval grants are
-    /// retained. No request is made and the session header keeps its original starting model.
+    /// kept. No request is made and the session header keeps its original starting model.
     pub fn set_model(&self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Result<(), SessionError> {
         let model = model.into();
         if model.trim().is_empty() {

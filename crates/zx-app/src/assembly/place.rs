@@ -154,11 +154,11 @@ mod tests {
         drop(create(&place, &header).await);
 
         let error = place
-            .naming_file(&header.id, anyhow::anyhow!("entry 1: no parent"))
+            .naming_file(&header.id, anyhow::anyhow!("record 1: no parent"))
             .await;
         assert_eq!(
             format!("{error:#}"),
-            format!("cannot open the session in {}: entry 1: no parent", path.display())
+            format!("cannot open the session in {}: record 1: no parent", path.display())
         );
 
         let kept_in_memory = SessionPlace::memory()
