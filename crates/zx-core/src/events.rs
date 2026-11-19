@@ -35,7 +35,7 @@ pub(crate) trait Emit: Send + Sync {
 }
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
-/// changes; events without a version predate the envelope.
+/// changes.
 pub const EVENT_SCHEMA_VERSION: u32 = 7;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
@@ -117,7 +117,8 @@ pub enum Interruption {
     /// Whether the call started is unknown: the tool is no longer configured, so whether it
     /// has side effects, whose starts are recorded, is unknown too. Treated like `Started`.
     StartUnknown,
-    /// A call with side effects that never started, so it had no effect.
+    /// A call that never started, so it had no effect: one with side effects and no start
+    /// record, or any call of an answer that failed or was cancelled, whose calls never run.
     NotStarted,
     /// A read-only call: it changed nothing, whether or not it ran.
     ReadOnly,

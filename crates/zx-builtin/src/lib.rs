@@ -17,10 +17,8 @@
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by
 //!   default
 
-// The modules name the model layer, the shared helpers and the kernel by these crate-root paths.
+// The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-#[cfg(feature = "mcp")]
-use zx_core::extensions;
 use zx_util::{sync, text};
 
 mod calendar;

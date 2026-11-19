@@ -49,9 +49,9 @@ pub struct HookContext {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// Who sent the input the run is answering: the actor of the latest prompt of the
-    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
-    /// nobody. In `on_input` it is the sender of that input. Left out of the JSON when there
-    /// is none.
+    /// session ([`Input::User`](crate::input::Input::User)); `None` when the host named
+    /// nobody, and after a `finish_step` hook asked for a follow-up, which nobody sent. In
+    /// `on_input` it is the sender of that input. Left out of the JSON when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the hook.
@@ -207,8 +207,8 @@ pub struct FinishedStep<'a> {
 
 /// What a finish hook asks for after a step; [`Hook::finish_step`] says how the decisions
 /// of several hooks combine. Input queued while the hooks ran takes precedence over
-/// `ContinueAnswer` and `FollowUp`, and either of them ends the attempt instead when the
-/// request budget leaves no request for it.
+/// `ContinueAnswer` and `FollowUp`, and either of them ends the attempt instead when a
+/// budget leaves no room for the request it needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "text", rename_all = "snake_case")]
 pub enum StepDecision {
@@ -249,22 +249,23 @@ pub enum HookStage {
 #[async_trait]
 pub trait Hook: Send + Sync {
     /// Transform prompt text before it enters the model context. Transformations chain in
-    /// order. With a session, the original is recorded and a rewrite is recorded as an edit.
+    /// order. The original is recorded, and a rewrite is recorded as an edit of it.
     /// A failure rejects the input and stops the attempt; cancellation records no input.
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text)
     }
 
     /// Propose ordered edits before a task request. Each hook sees preceding edits; the full
-    /// plan is validated before it is applied. With a session, edits are recorded and affect
-    /// the session projection. Failure stops the attempt before the request.
+    /// plan is validated before it is applied. Edits are recorded and change the session's
+    /// projection. Called again when the step's preparation compacted the context, before
+    /// the same request: a hook that appends a message on every call appends it each time.
+    /// Failure stops the attempt before the request.
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(Vec::new())
     }
 
-    /// Change the model or reasoning level of the next task request, for example to use a
-    /// cheaper model for a simple step. The context is not among
-    /// the settings: what the model sees is always the session projection. Return `None` to keep the
+    /// Change the model or reasoning level of the next task request ([`RequestSettings`]),
+    /// for example to use a cheaper model for a simple step. Return `None` to keep the
     /// settings. Changes chain in hook order and last for this request only; the request
     /// audit records the settings each request used. An empty model and a failure both stop
     /// the attempt before the request; summary requests do not call this hook.

@@ -65,7 +65,7 @@ async fn a_current_server_is_discovered_and_only_the_configured_tools_are_offere
     assert_eq!(names, ["prom__query", "prom__range"]);
     assert_eq!(definitions[0].description, "Run an instant query.");
     assert_eq!(definitions[0].parameters, tool("query", "")["inputSchema"]);
-    assert_eq!(server.tool_names()[1], ("range".to_string(), "prom__range".to_string()));
+    assert_eq!(server.tool_names()[1], "prom__range");
     assert!(fake.requests("initialize").is_empty());
     // One tool per page: every page was read.
     assert_eq!(fake.requests("tools/list").len(), 3);

@@ -53,7 +53,7 @@ impl McpTools {
         let mut notices = Vec::new();
         for (entry, server) in mcp.iter().zip(connected) {
             let server = server.map_err(anyhow::Error::msg)?;
-            let names: Vec<&str> = server.tool_names().iter().map(|(_, name)| name.as_str()).collect();
+            let names: Vec<&str> = server.tool_names().iter().map(String::as_str).collect();
             // The origin only: a path or query may hold a credential. `Server::connect` has parsed
             // the URL already, so the empty fallback is never shown.
             let origin = reqwest::Url::parse(&entry.url)

@@ -7,11 +7,7 @@
 //! in a container or VM, for real isolation.
 //!
 //! Only policies decide; hooks observe and transform. The policies that ship with zx-agent
-//! live outside the kernel, in the zx-builtin crate (`zx_agent::builtin::policy`):
-//!
-//! ```compile_fail
-//! use zx_core::policy::CommandPolicy;
-//! ```
+//! live outside the kernel, in the zx-builtin crate (`zx_agent::builtin::policy`).
 //!
 //! - `chain`: the policies of a loop, and how their decisions combine
 //! - `approval`: who answers when a policy asks, the answer, and the gate where the call
@@ -62,9 +58,10 @@ pub struct PolicyContext {
     /// tenant or the chat it belongs to.
     pub labels: BTreeMap<String, String>,
     /// Who sent the input the run is answering: the actor of the latest prompt of the
-    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
-    /// nobody. Other people may have spoken earlier in the run: a policy that must hold for
-    /// each of them keeps track of them itself, with a hook's `on_input`.
+    /// session ([`Input::User`](crate::input::Input::User)); `None` when the host named
+    /// nobody, and after a `finish_step` hook asked for a follow-up, which nobody sent. Other
+    /// people may have spoken earlier in the run: a policy that must hold for each of them
+    /// keeps track of them itself, with a hook's `on_input`.
     pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the policy.
     pub cancel: CancelSignal,
