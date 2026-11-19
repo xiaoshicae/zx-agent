@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::edit_text::{Edit, apply_edits, lf_endings, split_bom, unified_patch};
 use super::mutation::{FileMutationQueue, write_locked};
-use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
@@ -172,7 +172,7 @@ impl Tool for EditFileTool {
         details.insert("path".into(), json!(path.display().to_string()));
         // The patch shows the lines as the model reads them, with `\n` endings.
         if let Some((patch, first_changed_line)) = unified_patch(shown, &lf_endings(text), &lf_endings(&changed)) {
-            details.insert("patch".into(), json!(bounded_patch(&patch)));
+            details.insert(PATCH_DETAIL.into(), json!(bounded_patch(&patch)));
             details.insert("firstChangedLine".into(), json!(first_changed_line));
         }
         let count = args.edits.len();

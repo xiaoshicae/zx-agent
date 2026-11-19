@@ -5,7 +5,6 @@ use std::io::IsTerminal;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::Value;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
@@ -14,7 +13,7 @@ use zx_util::text::clip;
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, print_json_line};
-use crate::render::{Severity, answer_end_line, call_label, progress_line, visible};
+use crate::render::{Severity, answer_end_line, call_label, patch_of, progress_line, visible};
 
 use super::term::{Style, Terminal, Tone, elapsed_text};
 
@@ -311,12 +310,7 @@ pub(super) fn cost_text(total_cost: f64) -> String {
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its
 /// details (what `edit_file` changed), otherwise the first lines of its text.
 fn preview(result: &ToolResultMessage, style: Style) -> Vec<String> {
-    let patch = result
-        .details
-        .as_ref()
-        .and_then(|details| details.get("patch"))
-        .and_then(Value::as_str);
-    match patch {
+    match patch_of(&result.tool_name, result.details.as_ref()) {
         Some(patch) => limited(patch, PATCH_PREVIEW_LINES, style, |line| {
             // Unified diff: added and removed lines stand out, headers and context do not.
             if line.starts_with('+') && !line.starts_with("+++") {
@@ -356,7 +350,8 @@ fn tone(severity: Severity) -> Tone {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use zx_agent::builtin::tools::{EDIT_FILE, PATCH_DETAIL};
 
     use super::*;
 
@@ -419,7 +414,13 @@ mod tests {
     #[test]
     fn a_patch_in_the_details_is_previewed_instead_of_the_text_with_changes_colored() {
         let patch = "--- f\n+++ f\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n";
-        let message = result("Replaced 1 block in f.", Some(json!({"patch": patch, "path": "f"})));
+        let message = ToolResultMessage {
+            tool_name: EDIT_FILE.into(),
+            ..result(
+                "Replaced 1 block in f.",
+                Some(json!({PATCH_DETAIL: patch, "path": "f"})),
+            )
+        };
         assert_eq!(
             preview(&message, Style::new(false)),
             ["--- f", "+++ f", "@@ -1,2 +1,2 @@", "-old", "+new", " same"]

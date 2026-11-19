@@ -17,14 +17,14 @@ use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, Role, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
-use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
+use zx_agent::builtin::tools::WRITE_FILE;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 
 use super::tool_kind;
 use crate::process::eprint_line;
-use crate::render::call_label;
+use crate::render::{call_label, patch_of};
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.
 pub(super) struct Updates {
@@ -204,11 +204,7 @@ impl Updates {
         {
             shown.push(ToolCallContent::Diff(Diff::new(self.absolute(path), text)));
         }
-        let patch = details.and_then(|details| details.get("patch")).and_then(Value::as_str);
-        let text = match patch {
-            Some(patch) if name == EDIT_FILE => patch,
-            Some(_) | None => content,
-        };
+        let text = patch_of(name, details).unwrap_or(content);
         if !text.is_empty() {
             shown.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
                 TextContent::new(text),

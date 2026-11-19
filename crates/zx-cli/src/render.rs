@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use zx_agent::ai::{AssistantMessage, StopReason};
+use zx_agent::builtin::tools::{EDIT_FILE, PATCH_DETAIL};
 use zx_agent::events::{EventKind, Interruption};
 use zx_util::text::clip;
 
@@ -105,6 +106,15 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => lines.push(format!("{path}: {value}")),
     }
+}
+
+/// The unified patch in the details of a result of the call `tool_name`, when the call was
+/// [`EDIT_FILE`]'s: what it changed, shown in place of the text the model received.
+pub(crate) fn patch_of<'a>(tool_name: &str, details: Option<&'a Value>) -> Option<&'a str> {
+    if tool_name != EDIT_FILE {
+        return None;
+    }
+    details?.get(PATCH_DETAIL)?.as_str()
 }
 
 /// How serious a line is, for a terminal that colors lines.
