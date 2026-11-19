@@ -82,7 +82,8 @@ fn which(index: usize, total: usize) -> String {
     }
 }
 
-/// Apply `edits` to `content`, whose lines end with `\n` and which has no byte order mark.
+/// Apply `edits` to `text`, which has no byte order mark; lines that end with `\r\n` are
+/// matched as if they ended with `\n`, and keep their ending.
 /// Every edit is matched against the original content, must match once, and must not
 /// overlap another (pi: `applyEditsToNormalizedContent`). When one only matches in the
 /// tolerant form, all are matched in that form; the lines a replacement touches are then
@@ -231,8 +232,14 @@ fn replace_touched_lines(original: &str, base: &str, replacements: &[Replacement
             cursor = replacement.start + replacement.len;
         }
         rewritten.push_str(&base[cursor..group_end]);
-        // The rewritten lines end as the first of them did.
-        if original_lines[first].ends_with("\r\n") {
+        // The rewritten lines end as the first of them did, or, when that is the file's last
+        // line and has no ending, as the line before it.
+        let ended = if original_lines[first].ends_with('\n') || first == 0 {
+            original_lines[first]
+        } else {
+            original_lines[first - 1]
+        };
+        if ended.ends_with("\r\n") {
             rewritten = rewritten.replace('\n', "\r\n");
         }
         result.push_str(&rewritten);
@@ -497,6 +504,12 @@ mod tests {
         let changed = apply_edits(text, &[edit("two", "2")], "f").unwrap();
         assert_eq!(format!("{bom}{changed}"), "\u{feff}one\r\n2\r\n");
         assert_eq!(split_bom("plain"), ("", "plain"));
+    }
+
+    #[test]
+    fn lines_added_after_the_unended_last_line_of_a_crlf_file_end_as_the_others() {
+        let changed = apply_edits("one\r\ntwo", &[edit("two", "two\nthree")], "f").unwrap();
+        assert_eq!(changed, "one\r\ntwo\r\nthree");
     }
 
     #[test]
