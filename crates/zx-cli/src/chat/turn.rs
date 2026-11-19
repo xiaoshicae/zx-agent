@@ -23,11 +23,10 @@ use super::info::help;
 use super::input::{self, Line};
 use super::output::Output;
 use super::term::Tone;
-use super::{Flow, InputMode, rejected, run_extension_command};
+use super::{APPROVAL_MENU, Flow, InputMode, rejected, run_extension_command};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
 use crate::render::{describe_arguments, describe_call, visible};
 
-const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
 const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
 
 pub(super) struct TurnIo<'a> {
@@ -317,7 +316,7 @@ async fn typed(
     let command = match line {
         Some(line) => match line.context("cannot read terminal input")? {
             Line::Text(text) => {
-                if state.pending.waiting() && text.trim() != "/quit" && text.trim() != "/new" {
+                if state.pending.waiting() && !commands::ends_the_operation(&text) {
                     answer_approval(session, io.output, &mut state.pending, text);
                     return Ok(None);
                 }
@@ -490,6 +489,6 @@ fn show_approval(output: &Output, ticket: &Ticket) {
         output.line(Tone::Plain, &format!("  {line}"));
     }
     output.line(Tone::Dim, &format!("  {}", visible(&ticket.reason)));
-    output.line(Tone::Dim, APPROVAL_MENU);
+    output.line(Tone::Dim, &format!("  {APPROVAL_MENU}"));
     output.line(Tone::Warn, APPROVAL_PROMPT);
 }

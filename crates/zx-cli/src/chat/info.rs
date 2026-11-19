@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use zx_agent::Session;
-use zx_agent::ai::Message;
 use zx_agent::builtin::tools::BASH;
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::SessionInfo;
 use zx_app::ConfiguredAgent;
 
 use super::output::{self, Output};
 use super::term::Tone;
+use super::{APPROVAL_MENU, QUIT_INTERRUPT_WINDOW};
 use crate::render::{local_time, visible};
 
 /// What a conversation runs on, shown at startup and by `/status`.
@@ -21,15 +21,9 @@ pub(super) struct About {
     pub(super) auto_approve: Vec<String>,
     pub(super) cwd: PathBuf,
     pub(super) session: Option<PathBuf>,
-    /// Set when the session file already held a conversation.
-    pub(super) resumed: Option<Resumed>,
-}
-
-pub(super) struct Resumed {
-    /// User and assistant messages in the model's context.
-    messages: usize,
-    /// When the last record was written.
-    last_activity_ms: Option<u64>,
+    /// What a listing shows of the conversation the session file held already, when it held
+    /// one.
+    pub(super) resumed: Option<SessionInfo>,
 }
 
 impl About {
@@ -42,21 +36,11 @@ impl About {
             auto_approve: agent.auto_approve_commands().to_vec(),
             cwd: session.cwd().to_path_buf(),
             session: file,
-            resumed: session.with_transcript(resumed)?,
+            resumed: session.with_transcript(|transcript| {
+                (!transcript.entries().is_empty()).then(|| SessionInfo::of(transcript))
+            })?,
         })
     }
-}
-
-/// How much of an earlier conversation `transcript` holds, when it holds one.
-fn resumed(transcript: &Transcript) -> Option<Resumed> {
-    (!transcript.entries().is_empty()).then(|| Resumed {
-        messages: transcript
-            .messages()
-            .iter()
-            .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
-            .count(),
-        last_activity_ms: transcript.entries().last().map(Entry::timestamp),
-    })
 }
 
 fn session_text(about: &About) -> String {
@@ -78,28 +62,23 @@ fn about_line(prefix: &str, model: &str, about: &About) -> String {
 }
 
 /// How much of an earlier conversation the session file held, when it held one.
-fn resumed_line(output: &Output, about: &About) {
-    let Some(resumed) = &about.resumed else {
-        return;
-    };
-    let when = resumed
-        .last_activity_ms
-        .and_then(local_time)
+fn resumed_line(about: &About) -> Option<String> {
+    let resumed = about.resumed.as_ref()?;
+    let when = local_time(resumed.last_activity_ms)
         .map(|time| format!("; last activity {time}"))
         .unwrap_or_default();
-    output.line(
-        Tone::Dim,
-        &format!(
-            "[chat] resumed {} message(s) from the session file{when}",
-            resumed.messages
-        ),
-    );
+    Some(format!(
+        "[chat] resumed {} message(s) from the session file{when}",
+        resumed.messages
+    ))
 }
 
 /// What the conversation runs on, once at startup.
 pub(super) fn banner(output: &Output, model: &str, about: &About) {
     output.line(Tone::Dim, &about_line("[chat]", model, about));
-    resumed_line(output, about);
+    if let Some(line) = resumed_line(about) {
+        output.line(Tone::Dim, &line);
+    }
     let approvals = if about.tools.iter().any(|tool| tool == BASH) {
         let asks = if about.auto_approve.is_empty() {
             "every bash command asks first".to_string()
@@ -137,6 +116,11 @@ pub(super) fn status(output: &Output, model: &str, about: &About) {
 }
 
 pub(super) fn help(output: &Output, commands: &[(String, String)]) {
+    let quit = format!(
+        "                      twice within {} seconds while idle: exit",
+        QUIT_INTERRUPT_WINDOW.as_secs()
+    );
+    let approvals = format!("Approvals: {APPROVAL_MENU}");
     for line in [
         "/new                  start a fresh conversation; approvals granted so far are dropped",
         "/model [id]           show or change the model while idle",
@@ -147,10 +131,10 @@ pub(super) fn help(output: &Output, commands: &[(String, String)]) {
         "/status               show the model, session file and what this conversation has used",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
-        "                      twice within 2 seconds while idle: exit",
+        &quit,
         "While a task runs, a typed line is steering: the model sees it before its next request.",
         "Lines pasted together are sent as one message; a slash command is always one line.",
-        "Approvals: 1 or y allow once · 2 allow identical calls in this conversation · 3 or n deny · 4 discuss",
+        &approvals,
     ] {
         output.line(Tone::Plain, line);
     }

@@ -34,43 +34,49 @@ pub(super) fn parse(line: String, extensions: &[(String, String)]) -> Command {
     }
     let (name, rest) = trimmed.split_once(char::is_whitespace).unwrap_or((trimmed, ""));
     let rest = rest.trim();
-    if let Some(extension) = extensions
+    if let Some(command) = builtin(name, rest) {
+        return command;
+    }
+    match extensions
         .iter()
         .map(|(name, _)| name.as_str())
-        .find(|registered| !is_builtin(name) && name[1..] == **registered)
+        .find(|registered| name[1..] == **registered)
     {
-        return Command::Extension {
+        Some(extension) => Command::Extension {
             name: extension.to_string(),
             args: rest.to_string(),
-        };
-    }
-    match name {
-        "/new" if rest.is_empty() => Command::New,
-        "/quit" if rest.is_empty() => Command::Quit,
-        "/help" if rest.is_empty() => Command::Help,
-        "/compact" if rest.is_empty() => Command::Compact,
-        "/continue" if rest.is_empty() => Command::Continue,
-        "/status" if rest.is_empty() => Command::Status,
-        "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
-        "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
-        _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
+        },
+        None => unknown(name),
     }
 }
 
-/// The commands chat handles itself, which an extension's command cannot shadow.
-const BUILTIN: [&str; 8] = [
-    "/new",
-    "/quit",
-    "/help",
-    "/compact",
-    "/continue",
-    "/status",
-    "/model",
-    "/reasoning",
-];
+/// The command chat handles itself that `name` names, with `rest`, the text after it: an
+/// invalid one for text a command does not take. `None` for a name that is no built-in
+/// command; an extension's command cannot shadow one that is.
+fn builtin(name: &str, rest: &str) -> Option<Command> {
+    let bare = |command| if rest.is_empty() { command } else { unknown(name) };
+    let text = || (!rest.is_empty()).then(|| rest.to_string());
+    Some(match name {
+        "/new" => bare(Command::New),
+        "/quit" => bare(Command::Quit),
+        "/help" => bare(Command::Help),
+        "/compact" => bare(Command::Compact),
+        "/continue" => bare(Command::Continue),
+        "/status" => bare(Command::Status),
+        "/model" => Command::Model(text()),
+        "/reasoning" => Command::Reasoning(text()),
+        _ => return None,
+    })
+}
 
-fn is_builtin(name: &str) -> bool {
-    BUILTIN.contains(&name)
+fn unknown(name: &str) -> Command {
+    Command::Invalid(format!("unknown command or arguments: {name}; use /help"))
+}
+
+/// Whether `text` is `/quit` or `/new`, which end the operation that runs; any other line
+/// answers the approval a call waits for.
+pub(super) fn ends_the_operation(text: &str) -> bool {
+    matches!(builtin(text.trim(), ""), Some(Command::Quit | Command::New))
 }
 
 #[cfg(test)]

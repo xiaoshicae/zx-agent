@@ -48,6 +48,8 @@ use turn::{Operation, TurnIo, drive_turn};
 
 /// A second Ctrl+C within this long, while idle, exits.
 const QUIT_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);
+/// The answers to an approval request, as the request and /help show them.
+const APPROVAL_MENU: &str = "1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
 const PROMPT: &str = "zx> ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]

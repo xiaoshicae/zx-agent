@@ -203,17 +203,6 @@ fn tool_result(state: &mut TextState, result: &ToolResultMessage) {
     }
 }
 
-/// Retry `retry` of `max_retries` is scheduled: say so, unless the failed response just
-/// said it.
-fn retry_scheduled(state: &mut TextState, retry: u32, max_retries: u32, delay_ms: u64, error: &str) {
-    let line = if state.last_error.as_deref() == Some(error) {
-        format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)")
-    } else {
-        format!("[retry] {retry}/{max_retries} in {delay_ms}ms: {}", visible(error))
-    };
-    state.terminal.line(Tone::Warn, &line);
-}
-
 /// An event with no line of chat's own: print it as `run` does.
 fn progress(state: &mut TextState, event: &EventKind) {
     if let Some((severity, line)) = progress_line(event) {
@@ -263,12 +252,16 @@ impl Output {
             } if info.display => custom_message(&mut state, &info.custom_type, content),
             // The result line that follows says how the call ended.
             EventKind::ToolExecutionStart { .. } | EventKind::ToolExecutionEnd { .. } => {}
+            // The failed response said the error just now: the retry need not repeat it.
             EventKind::RetryScheduled {
                 retry,
                 max_retries,
                 delay_ms,
                 error,
-            } => retry_scheduled(&mut state, *retry, *max_retries, *delay_ms, error),
+            } if state.last_error.as_ref() == Some(error) => {
+                let line = format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)");
+                state.terminal.line(Tone::Warn, &line);
+            }
             // Everything else is printed as `run` prints it; `progress_line` covers every event.
             other => progress(&mut state, other),
         }
