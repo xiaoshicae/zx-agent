@@ -44,7 +44,8 @@ use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
 pub(crate) use accounting::RunAccounting;
-pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, PERSIST_FAILED, StepLoop, record_pending_entries};
+use run_scope::PERSIST_FAILED;
+pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, StepLoop};
 pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. The defaults impose no request limit, time limit or budget.
@@ -154,8 +155,9 @@ impl Runner {
         )
     }
 
-    pub(crate) fn replace_reasoning(&mut self, reasoning: Option<Reasoning>) -> Option<Reasoning> {
-        std::mem::replace(&mut self.config.reasoning, reasoning)
+    /// Ask later task requests for `reasoning`; `None` leaves the server's default.
+    pub(crate) fn set_reasoning(&mut self, reasoning: Option<Reasoning>) {
+        self.config.reasoning = reasoning;
     }
 
     /// The session the runner records in.
@@ -278,11 +280,10 @@ impl Running<'_> {
 
     /// Close the run: keep the state hooks asked to record, then report how the run ended
     /// and the answer it added.
-    async fn close(self, stop: RunStop) -> RunReport {
+    async fn close(mut self, stop: RunStop) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
-        let (config, target) = (self.run.config, self.run.target);
-        let stop = match record_pending_entries(&config.queues, self.run.transcript, target).await {
+        let stop = match self.run.record_pending_entries().await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
@@ -301,7 +302,8 @@ impl Running<'_> {
             error,
             session_id: transcript.header().id.clone(),
         };
-        target
+        self.run
+            .target
             .emit(EventKind::RunEnd {
                 report: Box::new(report.clone()),
             })

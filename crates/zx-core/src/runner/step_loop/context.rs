@@ -7,34 +7,9 @@ use crate::ai::{Message, Role, UserMessageKind};
 use crate::events::{CustomMessageInfo, EventKind};
 use crate::guard::Stopped;
 use crate::hooks::{ContextEdit, HookFailure};
-use crate::input::{Input, InputQueues, Queue, QueueMode};
-use crate::runner::EventTarget;
-use crate::transcript::{CustomMessage, Entry, Transcript};
-
-/// The context of the error for an entry the session could not record.
-pub(crate) const PERSIST_FAILED: &str = "cannot persist session entry";
-
-/// Record the custom entries extensions queued since the last step (pi: `appendEntry`), each
-/// announced as a `custom_entry` event. An error means the session could not record one.
-pub(crate) async fn record_pending_entries(
-    queues: &InputQueues,
-    transcript: &mut Transcript,
-    target: EventTarget<'_>,
-) -> Result<()> {
-    for entry in queues.take_entries() {
-        let entry_id = transcript
-            .append_custom_entry(&entry.custom_type, entry.data)
-            .await
-            .context(PERSIST_FAILED)?;
-        target
-            .emit(EventKind::CustomEntry {
-                entry_id,
-                custom_type: entry.custom_type,
-            })
-            .await;
-    }
-    Ok(())
-}
+use crate::input::{Input, Queue, QueueMode};
+use crate::runner::run_scope::PERSIST_FAILED;
+use crate::transcript::{CustomMessage, Entry};
 
 impl StepLoop<'_> {
     /// Record `message` in the session, with `actor` when a person the host names sent it.
@@ -243,13 +218,5 @@ impl StepLoop<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Record the custom entries extensions asked for; see [`record_pending_entries`].
-    pub(super) async fn record_pending_entries(&mut self) -> Result<(), Halt> {
-        let target = self.target();
-        record_pending_entries(&self.run.config.queues, self.run.transcript, target)
-            .await
-            .map_err(Halt::Unrecorded)
     }
 }

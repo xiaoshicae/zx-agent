@@ -84,15 +84,6 @@ impl HookContext {
             active_tools: Arc::default(),
         }
     }
-
-    /// The same context, sharing the loop's queues and tool set.
-    pub(crate) fn with_shared(self, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
-        Self {
-            queues,
-            active_tools,
-            ..self
-        }
-    }
 }
 
 /// Audit-friendly changes, applied in order against the current projection.

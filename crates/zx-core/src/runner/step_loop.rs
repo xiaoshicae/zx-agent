@@ -31,7 +31,6 @@ use crate::runner::run_scope::RunScope;
 use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
 
 pub(crate) use config::LoopConfig;
-pub(crate) use context::{PERSIST_FAILED, record_pending_entries};
 use step::{AfterTools, NextInput, StepResponse};
 
 /// Why the loop stops. Every part of a step returns it as its error, so `?` ends the attempt
@@ -226,7 +225,7 @@ impl<'a> StepLoop<'a> {
         }
         // State an extension recorded before the run, such as from a command, precedes the
         // input it may refer to.
-        self.record_pending_entries().await?;
+        self.run.record_pending_entries().await.map_err(Halt::Unrecorded)?;
         if let Some(prompt) = prompt {
             let (message, _hold) = prompt.into_parts();
             self.queued_input(message, None).await?;
@@ -244,7 +243,7 @@ impl<'a> StepLoop<'a> {
             self.ensure_can_request()?;
             let step = self.start_step().await;
             // State an extension asked to record is written before the input it may refer to.
-            self.record_pending_entries().await?;
+            self.run.record_pending_entries().await.map_err(Halt::Unrecorded)?;
             // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
             self.drain_queue(Queue::Steering).await?;

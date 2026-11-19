@@ -427,9 +427,7 @@ impl Session {
     /// server's default. A run returns Busy. The change is recorded with the next request
     /// (`request_config`); no request is made now.
     pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), SessionError> {
-        self.idle(|runner| {
-            runner.replace_reasoning(reasoning);
-        })
+        self.idle(|runner| runner.set_reasoning(reasoning))
     }
 
     /// Move the conversation to another point of its session tree while idle (pi:

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::compaction::Summarizer;
 use crate::extensions::SlashCommand;
+use crate::guard::CancelSignal;
 use crate::hooks::{HookChain, HookContext};
 use crate::input::InputQueues;
 use crate::policy::{ApprovalMode, PolicyChain};
@@ -81,12 +82,15 @@ impl LoopConfig {
     /// reach this configuration's queues and tool set.
     pub(crate) fn trace(&self, transcript: &Transcript, run_id: String, cancel: CancellationToken) -> RunTrace {
         let header = transcript.header();
-        let fresh = HookContext::new(header.id.clone(), self.cwd.clone(), cancel);
         RunTrace::new(HookContext {
+            session_id: header.id.clone(),
             run_id,
+            cwd: self.cwd.clone(),
             labels: header.labels.clone(),
             actor: transcript.latest_actor().map(String::from),
-            ..fresh.with_shared(self.queues.clone(), self.active_tools.clone())
+            cancel: CancelSignal::new(cancel),
+            queues: Arc::clone(&self.queues),
+            active_tools: Arc::clone(&self.active_tools),
         })
     }
 }

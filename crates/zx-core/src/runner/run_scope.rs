@@ -5,6 +5,8 @@
 //! it: recording goes to the session as it would without a run, and preparing the context may
 //! summarize it (pi: AgentSession writes on `message_end`).
 
+use anyhow::Context;
+
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
@@ -12,6 +14,9 @@ use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, Trigger};
 use crate::events::EventKind;
 use crate::input::Queue;
 use crate::transcript::Transcript;
+
+/// The context of the error for an entry the session could not record.
+pub(super) const PERSIST_FAILED: &str = "cannot persist session entry";
 
 /// How a run ends: as its last attempt ended, or failed for a reason.
 pub(super) enum RunStop {
@@ -83,6 +88,26 @@ pub(super) struct RunScope<'a> {
 }
 
 impl RunScope<'_> {
+    /// Record the custom entries extensions queued since the last step (pi: `appendEntry`),
+    /// each announced as a `custom_entry` event. An error means the session could not record
+    /// one.
+    pub(super) async fn record_pending_entries(&mut self) -> anyhow::Result<()> {
+        for entry in self.config.queues.take_entries() {
+            let entry_id = self
+                .transcript
+                .append_custom_entry(&entry.custom_type, entry.data)
+                .await
+                .context(PERSIST_FAILED)?;
+            self.target
+                .emit(EventKind::CustomEntry {
+                    entry_id,
+                    custom_type: entry.custom_type,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     /// The same scope, borrowed for a shorter time.
     pub(super) fn reborrow(&mut self) -> RunScope<'_> {
         RunScope {
