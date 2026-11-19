@@ -1,7 +1,7 @@
 //! Where one session's records are kept. The transcript validates and orders them; a log only
 //! keeps them, in order, and its storage gives them back when the session is opened again.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use async_trait::async_trait;
 
 use super::SessionHeader;
@@ -10,11 +10,11 @@ use super::SessionHeader;
 /// [`SessionStorage`](super::SessionStorage) hands out for a session it created or opened. A
 /// session file is one implementation; the rows of a database table are another.
 ///
-/// [`Transcript`](super::Transcript) checks each record before it reaches the log,
-/// waits for the log before changing memory, and stops writing after the first failure,
-/// including an append that timed out or whose future was dropped, because its outcome is
-/// unknown. A log only has to keep the records in order, so that its storage can return them
-/// as a [`LoadedSession`] when the session is opened again.
+/// [`Transcript`](super::Transcript) checks each record before it reaches the log, waits
+/// for the log before changing memory, and stops writing after a write whose outcome is not
+/// known to be success, as its documentation says. A log only has to keep the records in
+/// order, so that its storage can return them as a [`LoadedSession`] when the session is
+/// opened again.
 ///
 /// # Example
 ///
@@ -84,6 +84,19 @@ pub struct LogRecord<'a> {
     /// The entry as JSON, exactly as a JSONL session file stores it on one line. The other
     /// fields repeat parts of it, so that a database can index them.
     pub json: &'a str,
+}
+
+impl LogRecord<'_> {
+    /// Refuse this record unless it is the one a log expects next, `expected`: a log keeps
+    /// the records in order and never overwrites one.
+    pub fn check_seq(&self, expected: u64) -> Result<()> {
+        ensure!(
+            self.seq == expected,
+            "record {} is out of order: the log expects record {expected}",
+            self.seq
+        );
+        Ok(())
+    }
 }
 
 /// A stored session as its storage reads it back, for

@@ -223,11 +223,9 @@ impl JsonlFile {
         })
     }
 
-    /// Lock an existing file and read its header and records without changing it.
-    ///
-    /// A crash during the final write can leave an incomplete last line. It is left out of
-    /// the records, and cut off before the first record is appended; damage anywhere else is
-    /// an error.
+    /// Lock an existing file and read its header and records without changing it. An
+    /// incomplete last line is left out, and repaired before the first record is appended
+    /// ([`JsonlStorage`](super::JsonlStorage) says when it occurs).
     pub(super) fn open(path: &Path) -> Result<(LoadedSession, Self)> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -341,12 +339,9 @@ impl Unrepaired {
 #[async_trait]
 impl SessionLog for JsonlFile {
     async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
-        ensure!(
-            record.seq == self.next_seq,
-            "record {} is out of order: the session file expects record {}",
-            record.seq,
-            self.next_seq
-        );
+        record
+            .check_seq(self.next_seq)
+            .with_context(|| format!("session file {}", self.path.display()))?;
         // The line survives a crash of this process, not of the machine: there is no fsync.
         let mut line = String::with_capacity(record.json.len() + 1);
         line.push_str(record.json);

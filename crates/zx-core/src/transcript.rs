@@ -217,8 +217,7 @@ impl Transcript {
     }
 
     /// Bytes of an incomplete final record that the storage left out when the session was
-    /// loaded; zero if there was none. A session file cuts them off before its next record.
-    /// Complete corrupt records are errors and are never silently removed.
+    /// loaded ([`LoadedSession::incomplete_tail_bytes`]); zero if there was none.
     pub fn incomplete_tail_bytes(&self) -> usize {
         self.incomplete_tail_bytes
     }

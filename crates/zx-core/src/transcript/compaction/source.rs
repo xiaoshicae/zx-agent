@@ -7,8 +7,7 @@ use crate::ai::{Message, SystemMessage, SystemPrompt, UserMessageKind};
 use crate::transcript::{ProjectedMessage, Transcript, without_details};
 
 /// The two messages of a summary request: `instructions` as the system prompt, `input` as
-/// the user message. Built the same way when the request is sent and when it is replayed
-/// from the session.
+/// the user message.
 pub(crate) fn summary_messages(
     instructions: &str,
     input: String,
@@ -29,7 +28,6 @@ pub(crate) fn summary_messages(
 }
 
 /// The content of a summary request: the records it reads, without tool result details.
-/// The same when the request is sent and when it is replayed.
 pub(crate) fn summary_input(records: &[ProjectedMessage]) -> Result<String> {
     Ok(serde_json::to_string(&without_details(records))?)
 }
