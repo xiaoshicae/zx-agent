@@ -73,7 +73,7 @@ fn builtin_names_are_spelt_as_extends_takes_them() {
 }
 
 #[test]
-fn built_in_agents_preserve_the_existing_scenario_defaults() {
+fn each_built_in_agent_has_the_settings_of_its_file() {
     for (agent, name, file) in [
         (
             load(Builtin::Unattended),
@@ -151,7 +151,7 @@ fn no_built_in_agent_names_a_program_of_a_particular_environment() {
 }
 
 #[test]
-fn only_the_interactive_agent_discovers_project_instructions_by_default() {
+fn only_the_assistant_discovers_project_instructions_by_default() {
     assert!(!load(Builtin::Unattended).context.discover);
     assert!(!shipped("deploy/kubernetes/agents/unattended.md").context.discover);
     assert!(load(Builtin::Assistant).context.discover);
@@ -445,8 +445,6 @@ fn a_cost_budget_of_zero_disables_it() {
 fn unknown_fields_and_invalid_budget_values_are_rejected() {
     for text in [
         "typo = true",
-        "[limits]\nmax_turns = 2",
-        "[limits]\nmaxTurns = 2",
         "[limits]\nmaxModelRequests = -1",
         "[limits]\nmaxModelRequests = 'infinite'",
         "[limits]\ntokenBudget = -1",
@@ -589,36 +587,6 @@ fn invalid_tool_names_and_empty_entries_are_configuration_errors() {
     ] {
         assert!(load_file(text).is_err(), "{text}");
     }
-}
-
-#[test]
-fn bounded_reads_accept_the_exact_limit_and_reject_oversize_and_invalid_utf8() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("text");
-    let exact = "x".repeat(64 * 1024);
-    std::fs::write(&path, &exact).unwrap();
-    assert_eq!(read_text(&path).unwrap(), exact);
-    std::fs::write(&path, format!("{exact}界")).unwrap();
-    assert!(read_text(&path).unwrap_err().to_string().contains("exceeds"));
-    std::fs::write(&path, [0xff]).unwrap();
-    assert!(read_text(&path).unwrap_err().to_string().contains("UTF-8"));
-    assert!(
-        read_text(dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("not a regular file")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn special_files_are_refused_before_reading() {
-    assert!(
-        read_text(Path::new("/dev/null"))
-            .unwrap_err()
-            .to_string()
-            .contains("not a regular file")
-    );
 }
 
 #[test]

@@ -87,3 +87,38 @@ fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) 
         .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
         .transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_reads_accept_the_exact_limit_and_reject_oversize_and_invalid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("text");
+        let exact = "x".repeat(usize::try_from(MAX_FILE_BYTES).unwrap());
+        std::fs::write(&path, &exact).unwrap();
+        assert_eq!(read_text(&path).unwrap(), exact);
+        std::fs::write(&path, format!("{exact}界")).unwrap();
+        assert!(read_text(&path).unwrap_err().to_string().contains("exceeds"));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(read_text(&path).unwrap_err().to_string().contains("UTF-8"));
+        assert!(
+            read_text(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_refused_before_reading() {
+        assert!(
+            read_text(Path::new("/dev/null"))
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+    }
+}
