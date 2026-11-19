@@ -481,12 +481,12 @@ impl Transcript {
                 Ok(Ok(())) => self.stopped = None,
                 Ok(Err(error)) => {
                     self.stopped = Some(WritesStopped::Failed(format!("{error:#}")));
-                    return Err(error.context("cannot write session entry"));
+                    return Err(error);
                 }
                 Err(_) => {
                     let timeout = self.append_timeout;
                     self.stopped = Some(WritesStopped::TimedOut(timeout));
-                    bail!("cannot write session entry: the log did not answer within {timeout:?}");
+                    bail!("the session log did not answer within {timeout:?}");
                 }
             }
         }

@@ -41,6 +41,7 @@ fn parse_header(line: &[u8]) -> Result<SessionHeader> {
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
 /// is dropped, so a second writer, in this process or another, cannot open the same file.
 pub(super) struct JsonlFile {
+    path: PathBuf,
     target: Target,
     /// The `seq` the next record must have.
     next_seq: u64,
@@ -200,6 +201,7 @@ impl JsonlFile {
             .and_then(|()| file.flush())
             .with_context(|| format!("cannot write the header of {}", path.display()))?;
         Ok(Self {
+            path: path.to_path_buf(),
             target: Target::Writer(Writer::spawn(move || Ok(Box::new(file)))?),
             next_seq: 1,
         })
@@ -228,6 +230,7 @@ impl JsonlFile {
             None => Repair::Nothing,
         };
         let opened = Self {
+            path: path.to_path_buf(),
             target: Target::Unrepaired(Unrepaired {
                 path: path.to_path_buf(),
                 file,
@@ -238,10 +241,12 @@ impl JsonlFile {
         Ok((loaded, opened))
     }
 
-    /// Records go to `writer`, so tests can make writes fail. No header is written.
+    /// Records of the file at `path` go to `writer`, so tests can make writes fail. No
+    /// header is written.
     #[cfg(test)]
-    pub(super) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
+    pub(super) fn with_writer(path: &Path, writer: Box<dyn Write + Send + Sync>) -> Self {
         Self {
+            path: path.to_path_buf(),
             target: Target::Writer(Writer::spawn(move || Ok(writer)).expect("tests can start a thread")),
             next_seq: 1,
         }
@@ -338,7 +343,11 @@ impl SessionLog for JsonlFile {
         let mut line = String::with_capacity(record.json.len() + 1);
         line.push_str(record.json);
         line.push('\n');
-        self.target.writer()?.write(line).await?;
+        self.target
+            .writer()?
+            .write(line)
+            .await
+            .with_context(|| format!("cannot write session file {}", self.path.display()))?;
         self.next_seq += 1;
         Ok(())
     }

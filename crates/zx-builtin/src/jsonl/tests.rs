@@ -405,7 +405,8 @@ async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
             Ok(())
         }
     }
-    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(Stuck))));
+    let log = JsonlFile::with_writer(Path::new("s.jsonl"), Box::new(Stuck));
+    let mut store = Transcript::with_log(header(), Box::new(log));
     let started = std::time::Instant::now();
 
     let error = tokio::time::timeout(
@@ -420,6 +421,26 @@ async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
         "{:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn a_failed_write_names_the_session_file() {
+    /// Refuses every write, like a full disk.
+    struct Full;
+    impl Write for Full {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = JsonlFile::with_writer(Path::new("s.jsonl"), Box::new(Full));
+    let mut transcript = Transcript::with_log(header(), Box::new(log));
+
+    let error = transcript.append_message(Message::user("q")).await.unwrap_err();
+
+    assert_eq!(format!("{error:#}"), "cannot write session file s.jsonl: disk full");
 }
 
 /// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
@@ -462,7 +483,7 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
         keep: 10,
         calls: 0,
     };
-    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(writer))));
+    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(&path, Box::new(writer))));
 
     assert!(store.append_message(Message::user("cut short")).await.is_err());
     // A run keeps emitting messages until it observes its cancellation.
