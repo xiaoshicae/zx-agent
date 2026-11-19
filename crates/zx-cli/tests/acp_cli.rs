@@ -898,6 +898,58 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
 }
 
 #[tokio::test]
+async fn a_listing_names_the_session_files_it_cannot_read_on_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let dir = session_dir(home.path(), &cwd);
+    seed_session(&dir, "aaaa0001", &cwd, 1_000, "first question");
+    std::fs::write(dir.join("broken.jsonl"), "not json\n").unwrap();
+    write_config(&home.path().join(".zx-agent"), &fake_model_config(KEY_VAR, "", ""));
+    // The harness passes stderr through, so this agent is driven by hand.
+    let mut child = zx_agent_in(&cwd, Home::User(home.path()))
+        .args(["acp", "--model", "mock-model"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    // Each request waits for its answer: the protocol takes no other request before
+    // `initialize` is answered.
+    let mut ask = async |id: u64, method: &str, params: Value| -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(8), lines.next_line())
+                .await
+                .expect("no message within 8 seconds")
+                .unwrap()
+                .expect("the agent closed stdout");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["id"] == json!(id) {
+                return message;
+            }
+        }
+    };
+    ask(1, "initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let listed = ask(2, "session/list", json!({"cwd": cwd})).await;
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("the agent did not exit after stdin closed")
+        .unwrap();
+
+    let sessions = listed["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(sessions.len(), 1, "{listed}");
+    let errors = stderr(&output);
+    assert!(errors.contains("[acp]") && errors.contains("broken.jsonl"), "{errors}");
+}
+
+#[tokio::test]
 async fn resume_continues_a_session_without_replaying_it() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

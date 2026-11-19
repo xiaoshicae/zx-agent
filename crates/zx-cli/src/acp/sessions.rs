@@ -16,7 +16,8 @@ use zx_app::{ConfiguredAgent, resolve_cwd};
 
 use super::updates::Updates;
 use crate::application::open_session;
-use crate::render::preview_text;
+use crate::process::eprint_line;
+use crate::render::{preview_text, visible};
 
 /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
 /// It is kept among the session files, where `session/load` finds it again.
@@ -108,6 +109,10 @@ pub(super) async fn list(configured: &ConfiguredAgent, request: &ListSessionsReq
         return Ok(Vec::new());
     }
     let kept = configured.place().started_in(&cwd).await?;
+    // The client gets what could be read; stderr is where the agent reports the rest.
+    for unreadable in &kept.unreadable {
+        eprint_line(&format!("[acp] {}", visible(&unreadable.error)));
+    }
     Ok(kept.sessions.iter().map(session_info).collect())
 }
 
