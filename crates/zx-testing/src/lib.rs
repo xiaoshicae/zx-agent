@@ -31,8 +31,8 @@
 //! - [`http`]: reading and answering one HTTP request, and a listener that never answers
 //! - [`program`]: a program a test runs, such as the compiled `zx-agent` or `zx-im`: the
 //!   command that starts it apart from the developer's environment, the zx-agent home a
-//!   test gives it, and what it leaves behind; its [`stdout`], [`stderr`] and [`signal`] are
-//!   re-exported here
+//!   test gives it, how it ended, and what it leaves behind; its [`stdout`], [`stderr`] and
+//!   [`signal`] are re-exported here
 //! - [`summary_eval`] (sessions, runner): the summary evaluation, shared by the paid
 //!   evaluation and the regular tests
 //!

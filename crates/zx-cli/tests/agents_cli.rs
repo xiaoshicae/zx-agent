@@ -14,7 +14,7 @@ use tokio::process::Command;
 use common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, agent_text, fake_model_config, write_agent_file, write_config};
+use zx_testing::program::{Home, agent_text, ended_output, fake_model_config, write_agent_file, write_config};
 use zx_testing::{json_lines, stderr, stdout};
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
@@ -576,10 +576,7 @@ async fn chat_uses_the_agent_turn_budget() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"go\n/quit\n").await.unwrap();
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reports: Vec<Value> = json_lines(&stdout(&output));
     assert!(reports.iter().any(|value| value["type"] == "run_end"
@@ -606,10 +603,7 @@ async fn chat_keeps_shell_approval_even_when_the_agent_has_no_ask_rule() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"go\n1\n/quit\n").await.unwrap();
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stderr(&output).contains("[approval 1]"));
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "approved");

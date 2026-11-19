@@ -15,7 +15,7 @@ use tokio::process::Command;
 use common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, fake_model_config, seed_session, write_config};
+use zx_testing::program::{Home, ended_output, fake_model_config, seed_session, write_config};
 use zx_testing::{stderr, stdout};
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
@@ -64,10 +64,7 @@ impl Dirs {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(input.as_bytes()).await.unwrap();
         drop(stdin);
-        tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-            .await
-            .unwrap()
-            .unwrap()
+        ended_output(child).await
     }
 
     async fn sessions(&self, args: &[&str]) -> Output {
@@ -149,10 +146,7 @@ async fn the_default_session_directory_follows_zx_agent_home() {
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"hello\n/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let encoded = dirs
         .cwd()

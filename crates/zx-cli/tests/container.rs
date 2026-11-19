@@ -29,7 +29,7 @@ use zx_agent::tools::{ExecutionMode, Tool};
 use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{AgentHome, Home};
+use zx_testing::program::{AgentHome, Home, ended, ended_output};
 use zx_testing::{RunnerSetup, config, read_session_file, stderr};
 
 // ---------------------------------------------------------------------------
@@ -1092,10 +1092,7 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &st
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(input.as_bytes()).await.unwrap();
     drop(stdin);
-    tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap()
+    ended_output(child).await
 }
 
 /// A config.toml that runs commands in a container of `image`, with `extra` after it.
@@ -1371,10 +1368,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let mut stdin = chat.stdin.take().unwrap();
     stdin.write_all(b"which system is this?\n/quit\n").await.unwrap();
     drop(stdin);
-    let status = tokio::time::timeout(Duration::from_secs(60), chat.wait())
-        .await
-        .unwrap()
-        .unwrap();
+    let status = ended(&mut chat).await;
 
     assert_eq!(status.code(), Some(0));
     let result = tool_result(&server, 1);

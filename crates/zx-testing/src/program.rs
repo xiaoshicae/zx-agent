@@ -5,6 +5,7 @@
 //! the workspace start theirs alike.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The families of variables that a test's program inherits none of: zx-agent's own, and the
 /// OpenTelemetry exporter's, of which the SDK reads more than the programs name.
@@ -157,6 +158,26 @@ pub fn session_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// How long a test waits for a program it started to end: long enough for a slow machine and
+/// for a container to start, so that only a program that hangs fails the test.
+pub const EXIT_WAIT: Duration = Duration::from_secs(60);
+
+/// How `child` ended. Panics when it has not ended within [`EXIT_WAIT`].
+pub async fn ended(child: &mut tokio::process::Child) -> std::process::ExitStatus {
+    tokio::time::timeout(EXIT_WAIT, child.wait())
+        .await
+        .expect("the program did not end in time")
+        .unwrap()
+}
+
+/// What `child` wrote, once it ended. Panics when it has not ended within [`EXIT_WAIT`].
+pub async fn ended_output(child: tokio::process::Child) -> std::process::Output {
+    tokio::time::timeout(EXIT_WAIT, child.wait_with_output())
+        .await
+        .expect("the program did not end in time")
+        .unwrap()
 }
 
 /// What a finished program wrote to stdout, decoded lossily.

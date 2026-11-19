@@ -17,7 +17,9 @@ use tokio::process::Command;
 use common::zx_agent_in;
 use zx_testing::http::{Request, read_request, silent_listener};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{AgentHome, Home, agent_text, fake_model_config, write_agent_file, write_config};
+use zx_testing::program::{
+    AgentHome, Home, agent_text, ended, ended_output, fake_model_config, write_agent_file, write_config,
+};
 use zx_testing::{json_lines, stderr, stdout};
 
 /// The variable the program reads the API key from, and the fake key it holds.
@@ -233,10 +235,7 @@ async fn a_second_signal_ends_the_process_without_waiting_for_its_shutdown() {
 
     zx_testing::signal(&child, "-INT").await;
 
-    let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
-        .await
-        .expect("the program did not end")
-        .unwrap();
+    let status = ended(&mut child).await;
     assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
 }
 
@@ -492,10 +491,7 @@ async fn an_answer_written_to_a_terminal_cannot_drive_it() {
         }
         seen
     });
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
+    let status = ended(&mut child).await;
     assert_eq!(status.code(), Some(0));
     let seen = tokio::time::timeout(Duration::from_secs(10), reader)
         .await
@@ -570,10 +566,7 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
         "the second run wrote to the session"
     );
     release.notify_one();
-    let first = tokio::time::timeout(Duration::from_secs(10), first.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let first = ended_output(first).await;
     assert_eq!(first.status.code(), Some(0));
     assert_eq!(server.requests().len(), 1, "the second run sent a request");
 }

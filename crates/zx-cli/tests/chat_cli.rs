@@ -12,7 +12,7 @@ use tokio::process::{ChildStdout, Command};
 use common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, write_agent, write_config};
+use zx_testing::program::{Home, ended, ended_output, write_agent, write_config};
 use zx_testing::{json_lines, signal, stderr, stdout, tool_call_answer};
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
@@ -48,10 +48,7 @@ async fn run(server: &MockServer, cwd: &Path, args: &[&str], input: &str) -> Out
     stdin.write_all(input.as_bytes()).await.unwrap();
     stdin.shutdown().await.unwrap();
     drop(stdin);
-    tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap()
+    ended_output(child).await
 }
 
 fn users(server: &MockServer, index: usize) -> Vec<String> {
@@ -271,14 +268,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     drop(stdin);
     let task = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(task["report"]["finalText"], "reused");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(
         zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
             .await
@@ -335,14 +325,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
     assert_eq!(users(&server, 1).last().unwrap(), "queued task");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -667,10 +650,7 @@ async fn a_retried_error_is_named_once() {
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"go\n/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "recovered\n");
     let log = stderr(&output);
@@ -705,14 +685,7 @@ async fn ctrl_c_twice_while_idle_exits() {
     signal(&child, "-INT").await;
     read_error_until(&mut errors, "press Ctrl+C again").await;
     signal(&child, "-INT").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -727,10 +700,7 @@ async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
     assert!(!dir.path().join("marker").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let result = ended_output(child).await;
     assert_eq!(result.status.code(), Some(0));
     assert!(dir.path().join("marker").exists());
 }
@@ -752,10 +722,7 @@ async fn a_file_write_waits_for_an_approval_by_default() {
     assert!(!dir.path().join("notes.txt").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let result = ended_output(child).await;
     assert_eq!(result.status.code(), Some(0));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
@@ -1098,14 +1065,7 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
     let next = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(next["report"]["outcome"], "completed");
     assert_eq!(next["report"]["finalText"], "after cancellation");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
 
@@ -1133,10 +1093,7 @@ async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
     signal(&child, "-INT").await;
     stdin.write_all(b"/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0));
     let log = stderr(&output);
     assert!(log.contains("[chat] run was cancelled"), "{log}");
@@ -1165,14 +1122,7 @@ async fn lines_pasted_together_into_a_terminal_are_one_message() {
     assert_eq!(users(&server, 0), ["第一行：日志\n第二行：ERROR\n请分析"]);
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
@@ -1201,14 +1151,7 @@ async fn a_terminal_separates_answers_with_blank_lines() {
     assert!(!output.contains("\x1b["), "{output:?}");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
@@ -1231,14 +1174,7 @@ async fn cancelling_an_approval_drops_its_reply_and_allows_a_new_prompt() {
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["finalText"], "safe");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
@@ -1253,14 +1189,7 @@ async fn sigterm_exits_even_when_the_input_reader_is_waiting_for_a_line() {
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     read_error_until(&mut errors, "[chat] model=").await;
     signal(&child, "-TERM").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(5)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(5));
 }
 
 #[cfg(unix)]
@@ -1276,10 +1205,7 @@ async fn ctrl_c_while_idle_keeps_chat_open() {
     read_error_until(&mut errors, "no active task").await;
     stdin.write_all(b"hello\n/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), "done\n");
 }
@@ -1320,14 +1246,7 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
     assert_eq!(server.requests()[1].body["model"], "mock-model");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
@@ -1360,14 +1279,7 @@ async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     read_error_until(&mut errors, "discarded").await;
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -1398,14 +1310,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
     assert_eq!(report["report"]["finalText"], "second answer");
     assert_eq!(users(&server, 2), ["first", "second"]);
     read_error_until(&mut errors, "expired").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
 }
 
@@ -1437,14 +1342,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     assert_eq!(users(&server, 1), ["second"]);
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -1469,14 +1367,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["finalText"], "safe");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
@@ -1497,14 +1388,7 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
 }
 

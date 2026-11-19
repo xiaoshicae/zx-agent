@@ -7,7 +7,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
@@ -16,14 +15,12 @@ use tokio::process::Command;
 use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, write_agent, write_config};
+use zx_testing::program::{Home, ended_output, write_agent, write_config};
 use zx_testing::{stderr, stdout};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
 const KEY_VAR: &str = "ZX_MCP_CLI_TEST_KEY";
-/// Only reached when the program never prints what is expected.
-const WAIT: Duration = Duration::from_secs(20);
 
 async fn prom() -> FakeMcp {
     FakeMcp::start(
@@ -154,10 +151,7 @@ async fn chat_asks_before_an_mcp_tool_that_needs_approval() {
     stdin.write_all(b"go\n1\n/quit\n").await.unwrap();
     stdin.shutdown().await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(WAIT, child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
