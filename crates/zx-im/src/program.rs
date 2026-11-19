@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
+use zx_agent::builtin::files::create_private_dir;
 use zx_app::config::{Builtin, read_text};
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
@@ -361,12 +362,13 @@ fn platforms(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path
     Ok(platforms)
 }
 
-/// Create the session directory `dir` and the directory of the runs in progress under it.
-/// Returns the latter. A startup write; nothing runs concurrently yet.
+/// Create the session directory `dir` and the directory of the runs in progress under it,
+/// readable only by this user, as the session files are. Returns the latter. A startup write;
+/// nothing runs concurrently yet.
 fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
+    create_private_dir(dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
     let running = dir.join(RUNNING_DIR);
-    std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+    create_private_dir(&running).with_context(|| format!("cannot create {}", running.display()))?;
     Ok(running)
 }
 
@@ -532,6 +534,20 @@ mod tests {
 
     fn slack_only() -> HashSet<&'static str> {
         HashSet::from(["slack"])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_owner_may_list_the_session_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let running = create_session_dirs(&sessions).unwrap();
+        for path in [&sessions, &running] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", path.display());
+        }
     }
 
     /// A channel that only goes by its platform's name.

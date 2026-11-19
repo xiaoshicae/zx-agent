@@ -1,8 +1,10 @@
 //! Bounded reads of regular files, opened without blocking so that a FIFO is refused rather
 //! than waited on: synchronous for configuration at startup and for secret files before a
 //! redaction (`redact`), asynchronous for the files that tools read (`LocalExecutor` and
-//! `tools::paging`). [`read_text_file`] is public for zx-app, which reads its configuration
-//! files with it; the module is not part of the API.
+//! `tools::paging`); and the directories only this user may read, for what other users must
+//! not see. [`read_text_file`] is public for zx-app, which reads its configuration files with
+//! it, and [`create_private_dir`] for zx-im, which keeps its messages in such directories;
+//! the module is not part of the API.
 
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -11,6 +13,17 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
+
+/// Create `directory` and its missing parents so that on Unix only this user may read, list
+/// or enter them, as for session files, which hold the conversation and tool output. A
+/// directory that exists keeps its permissions.
+pub fn create_private_dir(directory: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(directory)
+}
 
 /// Read a regular UTF-8 file of at most `max_bytes`: a small, bounded, synchronous read, as
 /// for configuration at startup; errors name the path, and FIFOs and devices are refused

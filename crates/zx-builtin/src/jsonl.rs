@@ -390,14 +390,9 @@ fn utc_time(ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}-{milli:03}Z")
 }
 
-/// Create `directory` and its missing parents, readable only by this user on Unix: session
-/// files hold the conversation and tool output. Existing directories keep their permissions.
+/// Create the session directory `directory` and its missing parents, readable only by this
+/// user ([`create_private_dir`](crate::files::create_private_dir)).
 fn create_private(directory: &Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(directory)
+    crate::files::create_private_dir(directory)
         .with_context(|| format!("cannot create the session directory {}", directory.display()))
 }

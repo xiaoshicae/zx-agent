@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zx_agent::ai::now_ms;
+use zx_agent::builtin::files::create_private_dir;
 use zx_util::sync::lock;
 
 use crate::files::{RECORD, blocking, record_paths, remove_record, segment, write_record};
@@ -48,13 +49,13 @@ pub(crate) struct BacklogFiles {
 }
 
 impl BacklogFiles {
-    /// The backlog in `dir`, whose two directories are created when they are missing. Fails
-    /// when they cannot be.
+    /// The backlog in `dir`, whose two directories are created when they are missing,
+    /// readable only by this user. Fails when they cannot be.
     pub(crate) fn open(dir: &Path) -> io::Result<Self> {
         let pending = dir.join("pending");
         let handled = dir.join("handled");
-        std::fs::create_dir_all(&pending)?;
-        std::fs::create_dir_all(&handled)?;
+        create_private_dir(&pending)?;
+        create_private_dir(&handled)?;
         Ok(Self {
             pending,
             handled,
@@ -359,6 +360,19 @@ mod tests {
         for path in ["pending/slack.C1.m1.json", "handled/slack.C1.m2.handled"] {
             let mode = std::fs::metadata(dir.path().join(path)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_owner_may_list_the_backlog() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        BacklogFiles::open(&dir.path().join(".backlog")).unwrap();
+        for path in [".backlog", ".backlog/pending", ".backlog/handled"] {
+            let mode = std::fs::metadata(dir.path().join(path)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{path}");
         }
     }
 
