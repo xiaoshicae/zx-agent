@@ -271,6 +271,8 @@ pub(super) fn event(at_ms: u64, event: EventKind) -> Event {
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::Role;
+
     use super::*;
 
     #[test]
@@ -284,7 +286,7 @@ mod tests {
         hook.observe(&event(1, EventKind::StepStart { step: 1 }));
         hook.observe(&event(2, EventKind::StepStart { step: 2 }));
         // Not for spans: neither queued nor counted.
-        hook.observe(&event(3, EventKind::MessageStart { role: "assistant" }));
+        hook.observe(&event(3, EventKind::MessageStart { role: Role::Assistant }));
         assert_eq!(hook.dropped.load(Ordering::Relaxed), 1);
     }
 }

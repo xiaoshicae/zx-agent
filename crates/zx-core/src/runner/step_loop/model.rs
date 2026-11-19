@@ -4,7 +4,7 @@ use anyhow::Context;
 use futures::StreamExt;
 
 use super::{Halt, StepLoop};
-use crate::ai::{AssistantMessage, Request, StopReason, StreamEvent};
+use crate::ai::{AssistantMessage, Request, Role, StopReason, StreamEvent};
 use crate::events::{EventKind, RequestKind};
 use crate::hooks::RequestSettings;
 use crate::transcript::RequestSource;
@@ -77,7 +77,7 @@ impl StepLoop<'_> {
         while let Some(event) = events.next().await {
             if !started {
                 started = true;
-                self.emit(EventKind::MessageStart { role: "assistant" }).await;
+                self.emit(EventKind::MessageStart { role: Role::Assistant }).await;
             }
             match event {
                 StreamEvent::Start => {}
@@ -91,7 +91,7 @@ impl StepLoop<'_> {
             StopReason::Error
         };
         if !started {
-            self.emit(EventKind::MessageStart { role: "assistant" }).await;
+            self.emit(EventKind::MessageStart { role: Role::Assistant }).await;
         }
         AssistantMessage::failure(
             config.provider.name(),

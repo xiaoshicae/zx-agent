@@ -16,7 +16,7 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, StopReason, ToolDef, ToolResultMessage};
+use zx_agent::ai::{Message, Role, StopReason, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, ReadOutputTool};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
@@ -347,18 +347,18 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     );
     let sent = &provider.requests()[0].messages;
     // Results follow their calls, before the new input.
-    let roles: Vec<&str> = sent.iter().map(Message::role).collect();
+    let roles: Vec<Role> = sent.iter().map(Message::role).collect();
     assert_eq!(
         roles,
         [
-            "user",
-            "assistant",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "user"
+            Role::User,
+            Role::Assistant,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::User
         ]
     );
     let results = results(sent);

@@ -424,15 +424,26 @@ impl Message {
         }
     }
 
-    /// The serialized role name: `system`, `user`, `assistant`, or `toolResult`.
-    pub fn role(&self) -> &'static str {
+    /// Who the message is from: its `role`, as the session file writes it.
+    pub fn role(&self) -> Role {
         match self {
-            Message::System(_) => "system",
-            Message::User { .. } => "user",
-            Message::Assistant(_) => "assistant",
-            Message::ToolResult(_) => "toolResult",
+            Message::System(_) => Role::System,
+            Message::User { .. } => Role::User,
+            Message::Assistant(_) => Role::Assistant,
+            Message::ToolResult(_) => Role::ToolResult,
         }
     }
+}
+
+/// Who a [`Message`] is from, serialized as its `role`: `system`, `user`, `assistant` or
+/// `toolResult`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    ToolResult,
 }
 
 /// Tool declaration sent to the model.

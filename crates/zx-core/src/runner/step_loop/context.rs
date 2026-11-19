@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 
 use super::{Halt, StepLoop};
-use crate::ai::{Message, UserMessageKind};
+use crate::ai::{Message, Role, UserMessageKind};
 use crate::events::{CustomMessageInfo, EventKind};
 use crate::guard::Stopped;
 use crate::hooks::{ContextEdit, HookFailure};
@@ -93,7 +93,7 @@ impl StepLoop<'_> {
     /// Append a message from an extension (pi: a `custom` message): recorded as a
     /// `custom_message` entry, without input hooks, and seen by the model as a user message.
     async fn custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
-        self.emit(EventKind::MessageStart { role: "user" }).await;
+        self.emit(EventKind::MessageStart { role: Role::User }).await;
         let transcript = &mut *self.run.transcript;
         let id = transcript
             .append_custom_message(message.clone())

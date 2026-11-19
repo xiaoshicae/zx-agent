@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
-use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
@@ -241,7 +241,7 @@ impl Output {
         let mut state = lock(&self.text);
         match &event.event {
             EventKind::RunStart { .. } => state.last_error = None,
-            EventKind::MessageStart { role: "assistant" } => state.wrote_text = false,
+            EventKind::MessageStart { role: Role::Assistant } => state.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => {

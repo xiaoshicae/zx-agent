@@ -14,7 +14,7 @@ use agent_client_protocol::v1::schema::{
 use serde_json::Value;
 
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
+    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, Role, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
 use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
@@ -287,7 +287,7 @@ impl Updates {
     /// Send what `event` of a run means to the client.
     pub(super) fn emit(&mut self, event: &Event) {
         match &event.event {
-            EventKind::MessageStart { role: "assistant" } => self.wrote_text = false,
+            EventKind::MessageStart { role: Role::Assistant } => self.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => self.text_streamed(text),

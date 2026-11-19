@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::ai::{Delta, Message, Usage};
+use crate::ai::{Delta, Message, Role, Usage};
 use crate::policy::PolicyDecision;
 pub use report::{Budget, RunOutcome, RunReport};
 
@@ -171,7 +171,7 @@ pub enum EventKind {
         attempt: u32,
     },
     MessageStart {
-        role: &'static str,
+        role: Role,
     },
     /// Streaming output of the assistant message in progress.
     MessageUpdate {
@@ -404,7 +404,7 @@ mod tests {
                 model: "m".into(),
                 attempt: 1,
             },
-            EventKind::MessageStart { role: "user" },
+            EventKind::MessageStart { role: Role::User },
             EventKind::MessageUpdate {
                 delta: Delta::Text { text: "x".into() },
             },
@@ -506,6 +506,19 @@ mod tests {
         kinds.sort_unstable();
         kinds.dedup();
         assert_eq!(kinds.len(), 25, "every variant was checked: {kinds:?}");
+    }
+
+    #[test]
+    fn a_message_start_names_its_role_as_the_session_file_does() {
+        for (role, name) in [
+            (Role::System, "system"),
+            (Role::User, "user"),
+            (Role::Assistant, "assistant"),
+            (Role::ToolResult, "toolResult"),
+        ] {
+            let event = EventKind::MessageStart { role };
+            assert_eq!(serde_json::to_value(&event).unwrap()["role"], name);
+        }
     }
 
     #[test]
