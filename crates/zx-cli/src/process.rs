@@ -11,6 +11,8 @@ use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};
 
+use crate::render::visible;
+
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
 pub(crate) const EXIT_ERROR: u8 = 1;
@@ -113,8 +115,9 @@ where
             end.dropped
         ));
     }
+    // The collector's answer is quoted in the error.
     if let Some(error) = end.error {
-        eprint_line(&format!("[otel] {error:#}"));
+        eprint_line(&format!("[otel] {}", visible(&format!("{error:#}"))));
     }
     code
 }

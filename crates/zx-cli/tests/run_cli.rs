@@ -941,6 +941,23 @@ async fn a_cost_budget_without_prices_for_the_model_is_a_configuration_error() {
 }
 
 #[tokio::test]
+async fn an_error_shows_what_its_causes_quote_with_control_characters_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+
+    let output = run(&server, dir.path())
+        .args(["--cwd", "missing-\u{1b}[31m-dir"])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("missing-\\u{1b}[31m-dir"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
+}
+
+#[tokio::test]
 async fn a_negative_cost_budget_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;

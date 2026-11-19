@@ -45,7 +45,8 @@ pub async fn main() -> ExitCode {
     match result {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            process::eprint_line(&format!("zx-agent: {error:#}"));
+            // The causes may quote a server, a file or the environment.
+            process::eprint_line(&format!("zx-agent: {}", render::visible(&format!("{error:#}"))));
             ExitCode::from(EXIT_USAGE)
         }
     }

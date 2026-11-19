@@ -9,6 +9,7 @@ use zx_app::config::Builtin;
 use zx_app::{Application, ConfiguredAgent, NoModel, Overrides};
 
 use crate::process::eprint_line;
+use crate::render::visible;
 
 /// What the process shares, read and connected once for sessions of `builtin`, with its
 /// startup notices written to stderr. Without a model, the error names the program's ways to
@@ -17,8 +18,9 @@ pub(crate) async fn connect(overrides: Overrides, builtin: Builtin) -> Result<Ap
     let app = Application::from_environment(overrides, builtin)
         .await
         .map_err(with_model_hint)?;
+    // A notice may quote an MCP server, such as the protocol version it settled on.
     for notice in app.notices() {
-        eprint_line(notice);
+        eprint_line(&visible(notice));
     }
     Ok(app)
 }

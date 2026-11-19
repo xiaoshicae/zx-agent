@@ -94,7 +94,10 @@ fn run_traces(telemetry: &Telemetry) -> TraceHook {
         }
         Ok(None) => telemetry.hook(),
         Err(error) => {
-            eprint_line(&format!("[otel] {error:#}; the run starts a trace of its own"));
+            eprint_line(&format!(
+                "[otel] {}; the run starts a trace of its own",
+                visible(&format!("{error:#}"))
+            ));
             telemetry.hook()
         }
     }
