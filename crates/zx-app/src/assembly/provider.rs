@@ -122,19 +122,19 @@ impl ProviderFactory for Anthropic {
     }
 }
 
-/// Refuse request fields that the reasoning level sets, `thinking` and the effort of
-/// `output_config`, as [`check_reasoning_fields`] does for the OpenAI-compatible provider.
+/// Refuse request fields that the reasoning level sets, `thinking.type`, `thinking.display`
+/// and `output_config.effort`, as [`check_reasoning_fields`] does for the OpenAI-compatible
+/// provider. The other settings of `thinking` and `output_config` go with the level's, such
+/// as `thinking.block_binding`.
 fn check_thinking_fields(fields: &Map<String, Value>) -> Result<()> {
-    let effort = fields
-        .get("output_config")
-        .is_some_and(|config| config.get("effort").is_some());
-    for (field, set) in [
-        ("thinking", fields.contains_key("thinking")),
-        ("output_config.effort", effort),
+    for (field, key) in [
+        ("thinking", "type"),
+        ("thinking", "display"),
+        ("output_config", "effort"),
     ] {
         ensure!(
-            !set,
-            "provider.requestFields.{field} conflicts with reasoning, which sets it; use one of them"
+            fields.get(field).and_then(|value| value.get(key)).is_none(),
+            "provider.requestFields.{field}.{key} conflicts with reasoning, which sets it; use one of them"
         );
     }
     Ok(())
@@ -183,7 +183,12 @@ mod tests {
             (
                 ANTHROPIC,
                 "requestFields = { thinking = { type = 'disabled' } }",
-                "provider.requestFields.thinking conflicts with reasoning",
+                "provider.requestFields.thinking.type conflicts with reasoning",
+            ),
+            (
+                ANTHROPIC,
+                "requestFields = { thinking = { display = 'omitted' } }",
+                "provider.requestFields.thinking.display conflicts with reasoning",
             ),
             (
                 ANTHROPIC,
@@ -201,6 +206,14 @@ mod tests {
         built(
             ANTHROPIC,
             "requestFields = { output_config = { format = { type = 'json_schema', schema = {} } } }",
+            Some(Reasoning::Low),
+        )
+        .unwrap();
+        // Nor are the other settings of `thinking`, such as what the API does with thinking
+        // bound to another conversation.
+        built(
+            ANTHROPIC,
+            "requestFields = { thinking = { block_binding = { prefix_mismatch_behavior = 'drop_block' } } }",
             Some(Reasoning::Low),
         )
         .unwrap();

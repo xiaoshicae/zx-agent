@@ -13,11 +13,6 @@ use zx_ai_http::failure::{diagnostic_body, excerpt, retry_after_ms};
 
 use crate::config::AnthropicConfig;
 
-/// What the API says of a thinking block whose signature binds it to the conversation as it
-/// was, before its beginning changed, as a compaction or a changed system prompt changes it.
-/// Sending it again never succeeds; the request does without it.
-const BOUND_ELSEWHERE: &str = "bound to a different conversation";
-
 /// Wording of a request that does not fit the model's context window, for an invalid request
 /// whose error type does not say so.
 const OVERFLOW_TEXT: &[&str] = &[
@@ -26,23 +21,6 @@ const OVERFLOW_TEXT: &[&str] = &[
     "context window",
     "too many tokens",
 ];
-
-/// For `failure`, a request the API refused because a thinking block is bound to a different
-/// conversation: the index of the message it named, from which on the thinking goes, or the
-/// first message when it named none.
-pub(crate) fn thinking_bound_elsewhere(failure: &Failure) -> Option<usize> {
-    let Failure::Error { message, .. } = failure else {
-        return None;
-    };
-    if !message.contains(BOUND_ELSEWHERE) {
-        return None;
-    }
-    let named = message
-        .split_once("messages.")
-        .and_then(|(_, rest)| rest.split('.').next())
-        .and_then(|index| index.parse().ok());
-    Some(named.unwrap_or(0))
-}
 
 /// The failure of a response with an error status, of the kind its status and error type say
 /// ([`of_status`]), with the server's Retry-After hint. A body that cannot be read only loses
@@ -187,27 +165,5 @@ mod tests {
         assert_eq!(details.kind, ProviderErrorKind::Unavailable);
         assert_eq!(details.code.as_deref(), Some("overloaded_error"));
         assert_eq!(message, "provider error: Overloaded");
-    }
-
-    #[test]
-    fn a_thinking_block_bound_elsewhere_names_where_the_thinking_goes_from() {
-        let refused = |text: &str| {
-            thinking_bound_elsewhere(&Failure::error(ProviderErrorKind::Other, format!("HTTP 400: {text}")))
-        };
-        assert_eq!(
-            refused(
-                "messages.4.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block."
-            ),
-            Some(4)
-        );
-        assert_eq!(
-            refused("Invalid `signature` in `thinking` block. The block is bound to a different conversation."),
-            Some(0)
-        );
-        // A tampered signature is refused whatever is sent: no retry.
-        assert_eq!(
-            refused("messages.4.content.0: Invalid `signature` in `thinking` block."),
-            None
-        );
     }
 }

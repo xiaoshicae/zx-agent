@@ -2,7 +2,7 @@
 //! (pi: anthropic-messages.ts).
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef};
 
 use crate::config::{BodyOptions, SystemUpdates};
@@ -98,12 +98,16 @@ fn tools(tools: &[ToolDef]) -> Value {
 }
 
 /// Write `reasoning` into `body`: adaptive thinking at an effort, with the thinking shown as a
-/// summary, or thinking turned off. Minimal is the API's lowest effort, `low`. An
-/// `output_config` among the extra fields keeps its other settings.
+/// summary, or thinking turned off. Minimal is the API's lowest effort, `low`. The level sets
+/// `thinking.type`, `thinking.display` and `output_config.effort`; the other settings of a
+/// `thinking` or an `output_config` among the extra fields stay, such as
+/// `thinking.block_binding`.
 fn apply_reasoning(body: &mut Value, reasoning: Reasoning) {
     let effort = match reasoning {
         Reasoning::Off => {
-            body["thinking"] = json!({ "type": "disabled" });
+            let thinking = object(body, "thinking");
+            thinking.insert("type".into(), json!("disabled"));
+            thinking.remove("display");
             return;
         }
         Reasoning::Minimal | Reasoning::Low => "low",
@@ -111,11 +115,18 @@ fn apply_reasoning(body: &mut Value, reasoning: Reasoning) {
         Reasoning::High => "high",
         Reasoning::Xhigh => "xhigh",
     };
-    body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
-    if !body["output_config"].is_object() {
-        body["output_config"] = json!({});
+    let thinking = object(body, "thinking");
+    thinking.insert("type".into(), json!("adaptive"));
+    thinking.insert("display".into(), json!("summarized"));
+    object(body, "output_config").insert("effort".into(), json!(effort));
+}
+
+/// The object `body[field]`, an empty one in place of anything else there.
+fn object<'a>(body: &'a mut Value, field: &str) -> &'a mut Map<String, Value> {
+    if !body[field].is_object() {
+        body[field] = json!({});
     }
-    body["output_config"]["effort"] = json!(effort);
+    body[field].as_object_mut().expect("the field holds an object now")
 }
 
 /// The conversation's turns as the body's `messages` are built: a block joins the turn before
@@ -307,21 +318,6 @@ fn tool_id(id: &str) -> String {
         })
         .take(64)
         .collect()
-}
-
-/// Leave out the thinking blocks of the body's messages from the one at `from` on, for a
-/// request the API refused because one of them is bound to a different conversation.
-pub(crate) fn drop_thinking_from(body: &mut Value, from: usize) {
-    let Some(messages) = body["messages"].as_array_mut() else {
-        return;
-    };
-    for message in messages.iter_mut().skip(from) {
-        if let Some(content) = message["content"].as_array_mut() {
-            content.retain(|block| !matches!(block["type"].as_str(), Some("thinking" | "redacted_thinking")));
-        }
-    }
-    // A turn that held thinking alone is left without content, which the API refuses.
-    messages.retain(|message| message["content"].as_array().is_none_or(|content| !content.is_empty()));
 }
 
 #[cfg(test)]

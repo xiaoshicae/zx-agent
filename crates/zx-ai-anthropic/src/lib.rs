@@ -31,7 +31,7 @@ use zx_ai_http::{CONNECT_TIMEOUT, Failure};
 use accumulate::Accumulator;
 pub use config::{AnthropicConfig, BodyOptions, DEFAULT_API_VERSION, SystemUpdates};
 use config::{KEY_HEADER, VERSION_HEADER};
-use failure::{http_failure, json_body_failure, thinking_bound_elsewhere};
+use failure::{http_failure, json_body_failure};
 
 /// Streaming provider for the Anthropic Messages API.
 pub struct AnthropicMessages {
@@ -87,7 +87,7 @@ async fn run(
 ) {
     let started = Instant::now();
     let mut acc = Accumulator::new(&config.provider_name, &request.model, now_ms());
-    let mut post = Post {
+    let post = Post {
         client: &client,
         config: &config,
         url: format!("{}/v1/messages", config.base_url.trim_end_matches('/')),
@@ -97,7 +97,7 @@ async fn run(
     let outcome = tokio::select! {
         biased;
         () = cancel.cancelled() => Err(Failure::Aborted),
-        result = stream_response(&mut post, &mut acc, &mut tx) => result,
+        result = stream_response(&post, &mut acc, &mut tx) => result,
     };
     end(outcome, &acc, started, &mut tx).await;
 }
@@ -112,9 +112,12 @@ struct Post<'a> {
 
 /// Post the request, check its answer, and stream the answer into `acc`, forwarding each
 /// delta through `tx`.
-async fn stream_response(post: &mut Post<'_>, acc: &mut Accumulator, tx: &mut EventSender) -> Result<(), Failure> {
+async fn stream_response(post: &Post<'_>, acc: &mut Accumulator, tx: &mut EventSender) -> Result<(), Failure> {
     let config = post.config;
-    let response = answered(post).await?;
+    let response = send_request(post).await?;
+    if !response.status().is_success() {
+        return Err(http_failure(response, config).await);
+    }
     if answers_json(&response) {
         return Err(json_body_failure(response, config).await);
     }
@@ -122,28 +125,6 @@ async fn stream_response(post: &mut Post<'_>, acc: &mut Accumulator, tx: &mut Ev
         return Err(Failure::Closed);
     }
     read_stream(response, config, acc, tx).await
-}
-
-/// Post the request and return the response once its status is a success. A request the API
-/// refused because a thinking block is bound to a different conversation, after a compaction
-/// or a changed system prompt, goes once more without the thinking from the message the API
-/// named on, as the API's error advises; sending the same body again could never succeed.
-async fn answered(post: &mut Post<'_>) -> Result<reqwest::Response, Failure> {
-    let mut retried = false;
-    loop {
-        let response = send_request(post).await?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        let failure = http_failure(response, post.config).await;
-        match thinking_bound_elsewhere(&failure) {
-            Some(from) if !retried => {
-                request::drop_thinking_from(&mut post.body, from);
-                retried = true;
-            }
-            _ => return Err(failure),
-        }
-    }
 }
 
 /// Post the request, with the API version and the API key in their headers, and wait for the

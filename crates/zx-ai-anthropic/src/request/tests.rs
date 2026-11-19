@@ -305,26 +305,36 @@ fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
 }
 
 #[test]
-fn thinking_left_out_after_a_refusal_goes_from_the_named_message_on() {
-    let mut body = json!({"messages": [
-        {"role": "user", "content": [{"type": "text", "text": "a"}]},
-        {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "early", "signature": "s1"},
-            {"type": "text", "text": "kept"},
-        ]},
-        {"role": "user", "content": [{"type": "text", "text": "b"}]},
-        {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "late", "signature": "s2"},
-            {"type": "redacted_thinking", "data": "d"},
-            {"type": "text", "text": "answer"},
-        ]},
-        {"role": "assistant", "content": [{"type": "thinking", "thinking": "alone", "signature": "s3"}]},
-    ]});
-    drop_thinking_from(&mut body, 3);
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 4);
-    assert_eq!(messages[1]["content"][0]["type"], "thinking");
-    assert_eq!(messages[3]["content"], json!([{"type": "text", "text": "answer"}]));
+fn a_reasoning_level_keeps_the_other_thinking_settings_of_the_extra_fields() {
+    let binding = json!({"prefix_mismatch_behavior": "drop_block"});
+    let mut extra_fields = Map::new();
+    extra_fields.insert(
+        "thinking".into(),
+        json!({"block_binding": binding, "display": "omitted"}),
+    );
+    let options = BodyOptions {
+        extra_fields,
+        ..BodyOptions::default()
+    };
+    let with = |reasoning| {
+        build_body(
+            &Request {
+                reasoning: Some(reasoning),
+                ..request(vec![Message::user("hi")])
+            },
+            &options,
+            "p",
+        )
+    };
+    assert_eq!(
+        with(Reasoning::Medium)["thinking"],
+        json!({"block_binding": binding, "type": "adaptive", "display": "summarized"})
+    );
+    // The level says how thinking is shown too, and thinking that is off shows nothing.
+    assert_eq!(
+        with(Reasoning::Off)["thinking"],
+        json!({"block_binding": binding, "type": "disabled"})
+    );
 }
 
 #[test]

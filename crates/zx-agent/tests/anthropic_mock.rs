@@ -145,7 +145,7 @@ async fn a_tool_round_trip_sends_thinking_back_with_its_signature() {
 }
 
 #[tokio::test]
-async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
+async fn thinking_bound_to_another_conversation_fails_the_request_as_the_api_answered() {
     let refused = error_reply(
         400,
         "",
@@ -160,7 +160,6 @@ async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
             ended("end_turn"),
         ]),
         refused,
-        answer(vec![started(), text(0, "second"), ended("end_turn")]),
     ])
     .await;
     let (runner, _) = setup(&server).build().await;
@@ -168,14 +167,14 @@ async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
 
     let report = runner.run("two").await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Completed, 0));
+    // Nothing leaves the thinking out unrecorded: the API drops it only when the request's
+    // `thinking.block_binding` asks it to.
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("bound to a different conversation"), "{error}");
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].body["messages"][1]["content"][0]["type"], json!("thinking"));
-    assert_eq!(
-        requests[2].body["messages"][1]["content"],
-        json!([{"type": "text", "text": "first"}])
-    );
 }
 
 #[tokio::test]

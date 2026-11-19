@@ -147,7 +147,7 @@ pub enum SystemUpdates {
     /// Fold every version into the top-level `system` of the request, which every model
     /// takes. A change rewrites the beginning of the conversation: the cache reuses less, and
     /// a model that binds thinking to the conversation refuses the earlier thinking, which
-    /// the provider then leaves out of one more try.
+    /// fails the request unless its `thinking.block_binding` lets the API drop that thinking.
     #[default]
     Collapse,
     /// Send each change as a system message in the conversation, right before the next answer
