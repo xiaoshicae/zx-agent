@@ -128,13 +128,16 @@ impl StepLoop<'_> {
             PolicyDecision::Deny(reason) => return Err(blocked_by_policy(&reason)),
             PolicyDecision::Ask(reason) => {
                 if self.approvals.allows(call) {
-                    let remembered = Resolved {
+                    // A session grant covered the call: nobody was asked.
+                    self.emit(EventKind::ApprovalResolved {
                         approval_id: None,
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
                         approval: ApprovalResult::Remembered,
                         reason: None,
                         wait_ms: 0,
-                    };
-                    self.approval_resolved(call, remembered).await;
+                    })
+                    .await;
                 } else if let Err(denied) = self.ask(call, reason).await {
                     return Err(not_executed(format_args!("approval denied: {denied}")));
                 }
@@ -185,13 +188,15 @@ impl StepLoop<'_> {
                 Some("the run was cancelled while the call waited for approval".to_string()),
             ),
         };
-        let resolved = Resolved {
+        self.emit(EventKind::ApprovalResolved {
             approval_id: Some(approval_id),
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
             approval,
             reason: denial.clone(),
             wait_ms: duration_ms(asked.elapsed()),
-        };
-        self.approval_resolved(call, resolved).await;
+        })
+        .await;
         denial.map_or(Ok(()), Err)
     }
 
@@ -201,18 +206,6 @@ impl StepLoop<'_> {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
             decision,
-        })
-        .await;
-    }
-
-    async fn approval_resolved(&self, call: &ToolCall, resolved: Resolved) {
-        self.emit(EventKind::ApprovalResolved {
-            approval_id: resolved.approval_id,
-            tool_call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            approval: resolved.approval,
-            reason: resolved.reason,
-            wait_ms: resolved.wait_ms,
         })
         .await;
     }
@@ -447,8 +440,8 @@ impl StepLoop<'_> {
     }
 
     /// Answer every call of a response cut off at the output token limit without running it:
-    /// its arguments may be cut off too. Calls that never ran cannot end the attempt, whatever
-    /// an output hook sets on their results.
+    /// its arguments may be cut off too. These calls never ran, so they cannot end the
+    /// attempt, whatever an output hook sets on their results.
     pub(super) async fn reject_truncated_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         for call in calls {
             self.tool_start(call).await;
@@ -533,17 +526,6 @@ fn invalid_arguments(call: &ToolCall, reason: impl Display) -> String {
 /// The result text of a call the policy denied.
 fn blocked_by_policy(reason: &str) -> String {
     not_executed(format_args!("a policy denied it: {reason}"))
-}
-
-/// How an approval ended, as its `approval_resolved` event reports it.
-struct Resolved {
-    /// The request that was answered; `None` when a session grant covered the call and
-    /// nobody was asked.
-    approval_id: Option<String>,
-    approval: ApprovalResult,
-    /// Why the call may not run, when it may not.
-    reason: Option<String>,
-    wait_ms: u64,
 }
 
 /// What a call came to, before the output hooks.

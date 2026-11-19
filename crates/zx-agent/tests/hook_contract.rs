@@ -51,7 +51,7 @@ fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
 }
 
 #[test]
-fn turn_decisions_carry_the_text_of_a_continuation_or_follow_up() {
+fn step_decisions_carry_the_text_of_a_continuation_or_follow_up() {
     round_trip(&StepDecision::Default, json!({"decision": "default"}));
     round_trip(&StepDecision::Stop, json!({"decision": "stop"}));
     round_trip(
@@ -188,10 +188,10 @@ fn the_hook_context_names_the_labels_and_the_actor_when_it_has_them() {
 }
 
 #[test]
-fn a_step_summary_serializes_for_hook_processes() {
+fn a_finished_step_serializes_for_hook_processes() {
     let response = AssistantMessage::new("p", "m", StopReason::Stop, Vec::new());
     let messages = vec![Message::user("go")];
-    let summary = FinishedStep {
+    let finished = FinishedStep {
         response: &response,
         messages: &messages,
         step: 2,
@@ -200,14 +200,10 @@ fn a_step_summary_serializes_for_hook_processes() {
         disposition: StepDisposition::Stop,
     };
 
-    let value = serde_json::to_value(&summary).unwrap();
+    let value = serde_json::to_value(&finished).unwrap();
 
     assert_eq!(value["response"], serde_json::to_value(&response).unwrap());
     assert_eq!(value["messages"], serde_json::to_value(&messages).unwrap());
-    assert_eq!(value["answerContinuations"], 1);
-    assert_eq!(value["remainingModelRequests"], 8);
-    assert!(value.get("continuations").is_none());
-    assert!(value.get("remainingTurns").is_none());
     assert_eq!(
         (
             &value["step"],

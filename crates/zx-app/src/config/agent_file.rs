@@ -158,8 +158,8 @@ impl AgentFile {
 impl RawLimits {
     /// Lay these over `limits`. A cost budget that is negative or not finite is an error.
     pub(crate) fn apply(self, limits: &mut RunLimits) -> Result<()> {
-        if let Some(turns) = self.max_model_requests {
-            limits.max_model_requests = match turns {
+        if let Some(requests) = self.max_model_requests {
+            limits.max_model_requests = match requests {
                 ModelRequestLimit::Count(count) => Some(count),
                 ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
             };
