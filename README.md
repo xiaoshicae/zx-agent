@@ -111,7 +111,7 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 
 ## 架构
 
-一个 Cargo workspace，11 个 crate，依赖只能自上而下，由编译器保证：
+一个 Cargo workspace，12 个 crate，依赖只能自上而下，由编译器保证：
 
 ```
 zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、sessions）
@@ -121,10 +121,11 @@ zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   内核：Agent、会话与运行，循环，会话记录，摘要，工具、策略、钩子与扩展的接口
        │    └─ zx-ai  crates/zx-ai   消息类型、系统提示词、流式事件协议、provider 契约
-       ├─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai 与 zx-util）
-       └─ zx-ai-anthropic  crates/zx-ai-anthropic  Anthropic Messages API provider（同上）
+       ├─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（不依赖内核：只依赖 zx-ai、zx-ai-http 与 zx-util）
+       └─ zx-ai-anthropic  crates/zx-ai-anthropic  Anthropic Messages API provider（只依赖 zx-ai 与 zx-ai-http）
 
-zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数、判断默认值、读环境变量），在最底层，不属于 API
+zx-ai-http  crates/zx-ai-http  两个 provider 共用的 HTTP 部分（设置检查、发请求、读事件流、请求失败），依赖 zx-ai 与 zx-util，不属于 API
+zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短、随机数、判断默认值、读环境变量、按名字登记），在最底层，不属于 API
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
 ```
 
@@ -162,7 +163,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 11 个 crate；加 `-p <crate>` 只处理一个。集成测试放在被测的 crate 里，每个文件在哪、覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 12 个 crate；加 `-p <crate>` 只处理一个。集成测试放在被测的 crate 里，每个文件在哪、覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `crates/zx-agent/tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 
