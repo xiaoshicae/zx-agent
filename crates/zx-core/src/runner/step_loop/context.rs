@@ -12,21 +12,17 @@ use crate::runner::run_scope::PERSIST_FAILED;
 use crate::transcript::{CustomMessage, Entry};
 
 impl StepLoop<'_> {
-    /// Record `message` in the session, with `actor` when a person the host names sent it.
+    /// Record a finished message, whose start the stream reported, then report its end.
     /// Returns its entry ID.
-    async fn append_message(&mut self, message: &Message, actor: Option<String>) -> Result<String, Halt> {
+    pub(super) async fn record_finished_message(&mut self, message: Message) -> Result<String, Halt> {
         // The event that reports the message owns it, so the session stores a copy.
-        self.scope
+        let id = self
+            .scope
             .transcript
-            .append_message_from(message.clone(), actor)
+            .append_message(message.clone())
             .await
             .context(PERSIST_FAILED)
-            .map_err(Halt::Unrecorded)
-    }
-
-    /// Record a finished message, then report it. Returns its entry ID.
-    pub(super) async fn record_finished_message(&mut self, message: Message) -> Result<String, Halt> {
-        let id = self.append_message(&message, None).await?;
+            .map_err(Halt::Unrecorded)?;
         self.emit(EventKind::MessageEnd {
             message,
             entry_id: id.clone(),
@@ -38,31 +34,10 @@ impl StepLoop<'_> {
 
     /// Append a message that arrives whole: report its start, record it, then report its end.
     pub(super) async fn append(&mut self, message: Message) -> Result<String, Halt> {
-        self.append_from(message, None, None).await
-    }
-
-    /// Append `message`, which `actor` sent when it is a person's input, and which is the
-    /// message at the front of a queue if `queued` names one, as the queue holds it. It
-    /// leaves the queue as soon as it is recorded, before observers see it: a run dropped
-    /// while they run cannot take the same input again.
-    async fn append_from(
-        &mut self,
-        message: Message,
-        actor: Option<String>,
-        queued: Option<(Queue, Input)>,
-    ) -> Result<String, Halt> {
-        self.emit(EventKind::MessageStart { role: message.role() }).await;
-        let id = self.append_message(&message, actor).await?;
-        if let Some((queue, original)) = queued {
-            self.scope.config.queues.remove_front(queue, &original);
-        }
-        self.emit(EventKind::MessageEnd {
-            message,
-            entry_id: id.clone(),
-            custom: None,
-        })
-        .await;
-        Ok(id)
+        self.scope
+            .append_from(message, None, None)
+            .await
+            .map_err(Halt::Unrecorded)
     }
 
     /// Append a message from an extension (pi: a `custom` message): recorded as a
@@ -186,7 +161,11 @@ impl StepLoop<'_> {
             };
             (queue, original)
         });
-        let id = self.append_from(message, actor, queued).await?;
+        let id = self
+            .scope
+            .append_from(message, actor, queued)
+            .await
+            .map_err(Halt::Unrecorded)?;
         // The input is the last message of the projection now.
         let index = self.scope.transcript.messages().len() - 1;
         match transformed {

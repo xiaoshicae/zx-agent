@@ -117,6 +117,9 @@ impl Runner {
     /// Summarize the old prefix without executing a task or tools, as the run `link` names.
     /// Cancellation and future drop cancel only this operation.
     pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
+        // The scope is built as `run` builds it. Each keeps its own copy: the target borrows
+        // the trace, which must outlive the scope, and `run` also lends the Runner's other
+        // fields to the run.
         let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
         let trace = self.config.trace(&self.transcript, link.id.clone(), child.clone());

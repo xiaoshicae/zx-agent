@@ -13,7 +13,7 @@ use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, St
 use crate::ai::{Message, StopReason};
 use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, Trigger};
 use crate::events::EventKind;
-use crate::input::Queue;
+use crate::input::{Input, Queue};
 use crate::transcript::Transcript;
 
 /// The context of the error for an entry the session could not record.
@@ -117,6 +117,37 @@ impl<'a> RunScope<'a> {
                 .await;
         }
         Ok(())
+    }
+
+    /// Append `message`, which `actor` sent when it is a person's input, and which is the
+    /// message at the front of a queue if `queued` names one, as the queue holds it: report
+    /// its start, record it, then report its end. It leaves the queue as soon as it is
+    /// recorded, before observers see it: a run dropped while they run cannot take the same
+    /// input again. Returns its entry ID.
+    pub(super) async fn append_from(
+        &mut self,
+        message: Message,
+        actor: Option<String>,
+        queued: Option<(Queue, Input)>,
+    ) -> anyhow::Result<String> {
+        self.target.emit(EventKind::MessageStart { role: message.role() }).await;
+        // The event that reports the message owns it, so the session stores a copy.
+        let entry_id = self
+            .transcript
+            .append_message_from(message.clone(), actor)
+            .await
+            .context(PERSIST_FAILED)?;
+        if let Some((queue, original)) = queued {
+            self.config.queues.remove_front(queue, &original);
+        }
+        self.target
+            .emit(EventKind::MessageEnd {
+                message,
+                entry_id: entry_id.clone(),
+                custom: None,
+            })
+            .await;
+        Ok(entry_id)
     }
 
     /// The same scope, borrowed for a shorter time.

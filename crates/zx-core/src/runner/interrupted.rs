@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 
 use super::run_scope::RunScope;
 use super::{PERSIST_FAILED, Runner};
-use crate::ai::{Message, Role, ToolResultMessage, now_ms};
+use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::events::{EventKind, Interruption};
 use crate::tools::{Effects, Toolbox};
 use crate::transcript::{StartRecord, Transcript};
@@ -15,21 +15,7 @@ impl RunScope<'_> {
     /// again. Stops at the first result the session cannot record.
     pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
         for (result, recovered) in recovered_results(self.transcript, &self.config.tools) {
-            self.target
-                .emit(EventKind::MessageStart { role: Role::ToolResult })
-                .await;
-            let entry_id = self
-                .transcript
-                .append_message(result.clone())
-                .await
-                .context(PERSIST_FAILED)?;
-            self.target
-                .emit(EventKind::MessageEnd {
-                    message: result,
-                    entry_id,
-                    custom: None,
-                })
-                .await;
+            self.append_from(result, None, None).await?;
             // Reported once recorded, so the event never claims a result the session lacks.
             self.target.emit(recovered).await;
         }
