@@ -2285,6 +2285,36 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
 }
 
 #[tokio::test]
+async fn talk_in_a_thread_whose_session_closed_is_recorded_in_the_session_opened_again() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    // Closed under the conversation, as a session closes itself when it can no longer write
+    // its records.
+    let session = h.sessions.of(&key("m1")).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&session));
+    h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "fixed it").await;
+    h.say("m3", Some("m1"), "confirm?").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(
+        h.requests()[1],
+        [
+            "user:U-asker: first",
+            "assistant:one",
+            "user:U-other: fixed it",
+            "user:U-asker: confirm?"
+        ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn talk_heard_before_a_thread_has_a_session_is_read_with_the_thread_at_the_next_mention() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one")],
