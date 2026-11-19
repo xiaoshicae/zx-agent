@@ -3,7 +3,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ProviderErrorKind, Reasoning, Request, ToolDef};
 use zx_agent::events::{EventKind, RunOutcome};
-use zx_agent::input::Input;
+use zx_agent::input::{Input, PendingInput};
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
@@ -218,6 +218,45 @@ async fn a_run_makes_no_request_until_it_is_read_and_holds_the_session_meanwhile
 /// Read `run` until its events end.
 async fn read_all(run: &mut Run) {
     while run.next().await.is_some() {}
+}
+
+/// A hold of the host's that says when it has ended.
+struct Hold(Arc<AtomicBool>);
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_s_hold_ends_once_the_session_has_recorded_the_prompt() {
+    let (session, provider, _) = setup([FauxStep::Hang]).await;
+    let ended = Arc::new(AtomicBool::new(false));
+    let mut run = session
+        .send(PendingInput::held("go", Hold(Arc::clone(&ended))))
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(!ended.load(Ordering::SeqCst), "a run not read yet has recorded nothing");
+
+    // The prompt is recorded before the first request.
+    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
+    assert!(ended.load(Ordering::SeqCst));
+    assert_eq!(summarize(&provider.requests()[0].messages), ["user:go"]);
+}
+
+#[tokio::test]
+async fn a_prompt_s_hold_ends_with_a_run_that_never_recorded_it() {
+    let (session, provider, _) = setup([FauxStep::text("done")]).await;
+    let ended = Arc::new(AtomicBool::new(false));
+    let run = session
+        .send(PendingInput::held("go", Hold(Arc::clone(&ended))))
+        .unwrap();
+
+    drop(run);
+
+    assert!(ended.load(Ordering::SeqCst));
+    assert!(provider.requests().is_empty());
 }
 
 #[tokio::test]

@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
 use crate::events::EventKind;
 use crate::hooks::HookError;
-use crate::input::{Input, Queue};
+use crate::input::{PendingInput, Queue};
 use crate::policy::ApprovalGate;
 use crate::runner::final_answer::cut_off;
 use crate::runner::run_scope::RunScope;
@@ -99,8 +99,8 @@ pub(crate) struct StepLoop<'a> {
 
 /// What an attempt starts with.
 pub(crate) enum FirstInput {
-    /// The prompt of a run, recorded before the first request.
-    Prompt(Input),
+    /// The prompt of a run, recorded before the first request; its hold ends once it is.
+    Prompt(PendingInput),
     /// Nothing new: the attempt answers the conversation as it is, as a retry does.
     Conversation,
     /// The follow-ups that wait in the queue, taken as they are between steps: as many at
@@ -211,8 +211,9 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Record the system prompt's changes and the prompt, if there is one.
-    async fn initialize(&mut self, prompt: Option<Input>) -> Result<(), Halt> {
+    /// Record the system prompt's changes and the prompt, if there is one. The prompt's hold
+    /// ends once it is recorded, or failed to be.
+    async fn initialize(&mut self, prompt: Option<PendingInput>) -> Result<(), Halt> {
         let config = self.run.config;
         self.start_step().await;
         let changes = SystemPrompt::from_transcript(&self.run.transcript.messages()).diff(&config.system_prompt);
@@ -226,7 +227,8 @@ impl<'a> StepLoop<'a> {
         // State an extension recorded before the run, such as from a command, precedes the
         // input it may refer to.
         self.record_pending_entries().await?;
-        if let Some(message) = prompt {
+        if let Some(prompt) = prompt {
+            let (message, _hold) = prompt.into_parts();
             self.queued_input(message, None).await?;
         }
         Ok(())

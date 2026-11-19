@@ -41,10 +41,11 @@ impl From<&str> for Input {
     }
 }
 
-/// Input waiting in a queue, with what the host attached to it, if anything: a hold, such as a
-/// share of the host's capacity, that ends when the input leaves the queues: once it is
-/// recorded, withdrawn or taken without it ([`PendingInput::into_input`]), or when the queues
-/// are dropped. Ending a hold drops it, never under a queue's lock.
+/// Input waiting in a queue, or to start a run ([`Session::send`](crate::Session::send)), with
+/// what the host attached to it, if anything: a hold, such as a share of the host's capacity,
+/// that ends when the input leaves the queues: once it is recorded, withdrawn or taken without
+/// it ([`PendingInput::into_input`]), or when the queues are dropped. Ending a hold drops it,
+/// never under a queue's lock.
 #[derive(Debug)]
 pub struct PendingInput {
     input: Input,
@@ -70,6 +71,12 @@ impl PendingInput {
         let Self { input, hold } = self;
         drop(hold);
         input
+    }
+
+    /// The input and its hold, which is the host's again: for a host that joins several
+    /// inputs into one and keeps their holds with it.
+    pub fn into_parts(self) -> (Input, Option<Box<dyn Any + Send>>) {
+        (self.input, self.hold)
     }
 }
 
@@ -390,6 +397,17 @@ mod tests {
         queues.follow_up(PendingInput::held("d", Hold::new(&alive)));
         drop(queues);
         assert_eq!(alive.load(Ordering::SeqCst), 0, "and input dropped with the queues");
+    }
+
+    #[test]
+    fn a_hold_taken_apart_from_its_input_lasts_as_long_as_the_host_keeps_it() {
+        let alive = Arc::new(AtomicUsize::new(0));
+        let (input, hold) = PendingInput::held("a", Hold::new(&alive)).into_parts();
+        assert_eq!(input, Input::from("a"));
+        assert_eq!(alive.load(Ordering::SeqCst), 1);
+        assert!(hold.is_some_and(|hold| hold.is::<Hold>()));
+        assert_eq!(alive.load(Ordering::SeqCst), 0);
+        assert!(PendingInput::from("b").into_parts().1.is_none());
     }
 
     #[test]
