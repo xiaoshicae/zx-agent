@@ -506,7 +506,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
     };
     let (report, ()) = tokio::join!(runner.run("go"), cancelling);
     assert_eq!(report.outcome, RunOutcome::Cancelled);
-    // The next run gives the calls left without a result one, from what the session recorded.
+    // The cancelled run gave every call its result, so the next one has none to recover.
     runner.run("again").await;
 
     let results: Vec<(String, String)> = runner
@@ -526,8 +526,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
         results[1],
         (
             "c2".to_string(),
-            "Not executed: the agent stopped before this call started, so it had no effect. Run it again if it is still needed."
-                .to_string()
+            "Not executed: the run was cancelled before this call started, so it had no effect.".to_string()
         )
     );
     assert_eq!(fake.execs("zx-agent-run").len(), 1);
