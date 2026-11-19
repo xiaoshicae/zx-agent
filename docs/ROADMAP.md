@@ -24,7 +24,7 @@
 | D4 | 会话 API 是进程内方法调用，不做提交队列 / 事件队列（SQ/EQ） |
 | D5 | 命令默认在本机执行；容器执行在 `config.toml` 中显式开启。理由：Kubernetes Job 的 Pod 内通常没有 Docker |
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |
-| D10 | 通用，不为场景定制：某个环境、平台或厂商的知识放在 agent、部署清单或配置里；外部系统经适配器调用 `run`、SDK 或 IM，zx-agent 不解析其私有格式；provider 的协议方言显式开启。例外：回答中的推理内容按它到达的字段（`reasoning_content` 或 `reasoning`）原样回传给同一 provider 名与模型，不设开关，因为它只回放该服务自己发来的内容；两个地址配置了同一 provider 名与模型时会互相回传 |
+| D10 | 通用，不为场景定制：某个环境、平台或厂商的知识放在 agent、部署清单或配置里；外部系统经适配器调用 `run`、SDK 或 IM，zx-agent 不解析其私有格式；provider 的协议方言显式开启。例外：回答中的推理内容原样回传给同一 provider 名与模型，不设开关，因为它只回放该服务自己发来的内容：OpenAI 兼容服务按它到达的字段（`reasoning_content` 或 `reasoning`），Anthropic 是思考块连同签名；两个地址配置了同一 provider 名与模型时会互相回传 |
 | D11 | 容器是沙箱：限制放在外墙上，容器内默认可写、联网，命令不以 root 运行，审批由 agent 决定；只读、无网络是可选的严格模式。外墙与默认值见 [SECURITY.md](SECURITY.md#容器执行) |
 | D12 | chat 不给 `--session` 时把会话存到主目录的会话目录（路径与权限见 [REFERENCE.md](REFERENCE.md#chat)），`--no-session` 只存在内存；`run` 只在给出 `--session` 时写文件 |
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
@@ -115,4 +115,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.46 · 2026年11月
+ROADMAP.md · v0.47 · 2026年11月
