@@ -64,7 +64,7 @@ struct Reminder;
 impl Hook for Reminder {
     async fn after_tool(&self, call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         ctx.queues.steer(Input::Custom(note(&format!("{} ran", call.name))));
-        ctx.queues.append_custom_entry("calls", json!({"id": call.id}));
+        ctx.queues.append_custom_entry("calls", json!({"id": call.id})).unwrap();
         Ok(output)
     }
 }
@@ -129,10 +129,40 @@ struct AtEnd;
 impl Hook for AtEnd {
     async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
         if matches!(event.event, EventKind::AttemptEnd { .. }) {
-            ctx.queues.append_custom_entry("final", json!(true));
+            ctx.queues.append_custom_entry("final", json!(true)).unwrap();
         }
         Ok(())
     }
+}
+
+/// When the run starts: queues an entry without a custom type, then one with a type.
+struct BlankThenNamed;
+
+#[async_trait]
+impl Hook for BlankThenNamed {
+    async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
+        if matches!(event.event, EventKind::RunStart { .. }) {
+            // Whatever the hook makes of the refusal, the run goes on.
+            let _ = ctx.queues.append_custom_entry(" ", json!(null));
+            let _ = ctx.queues.append_custom_entry("named", json!(true));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn an_entry_without_a_custom_type_is_refused_as_it_is_queued_and_the_run_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("session.jsonl");
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider, vec![]);
+    config.hooks.push("blank_then_named", Arc::new(BlankThenNamed));
+    let (session, _) = session_in(&file, config).await;
+
+    let report = session.prompt("go").await.unwrap();
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
+    assert!(kinds(&file).contains(&"custom"), "{:?}", kinds(&file));
 }
 
 #[tokio::test]
@@ -253,7 +283,7 @@ impl SlashCommand for Jira {
         if args.is_empty() {
             return Err("give an issue key".to_string());
         }
-        ctx.queues.append_custom_entry("jira", json!({"key": args}));
+        ctx.queues.append_custom_entry("jira", json!({"key": args})).unwrap();
         Ok(CommandOutcome {
             lines: vec![format!("fetched {args}")],
             prompt: Some(Input::Custom(note(&format!("Issue {args}: broken")))),

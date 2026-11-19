@@ -326,8 +326,8 @@ impl Transcript {
             ),
             // A name is valid by its type, whether appended or loaded.
             Entry::SessionInfo(_) => {}
-            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
-            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
+            Entry::Custom(custom) => check_custom_type(&custom.custom_type)?,
+            Entry::CustomMessage(custom) => check_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
             Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
             Entry::Compaction(done) => self.validate_compaction(done)?,
@@ -537,10 +537,16 @@ pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Op
     }
 }
 
-/// A custom type names what an extension recorded; a blank one would name nothing.
-fn ensure_custom_type(custom_type: &str) -> Result<()> {
+/// A custom record whose custom type is blank: the type names what an extension recorded, and
+/// a blank one would name nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a custom record needs a customType")]
+pub struct BlankCustomType;
+
+/// Refuse a blank `custom_type`.
+pub(crate) fn check_custom_type(custom_type: &str) -> Result<(), BlankCustomType> {
     if custom_type.trim().is_empty() {
-        bail!("a custom record needs a customType");
+        return Err(BlankCustomType);
     }
     Ok(())
 }
