@@ -117,8 +117,10 @@ pub fn executor_tools(
     Ok(tools)
 }
 
-/// `args` as a tool's argument type; the error tells the model what was wrong.
-pub(crate) fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
+/// `args` as a tool's argument type; the error tells the model what was wrong. Public, not
+/// part of the API: zx-app's read_skill uses it.
+#[doc(hidden)]
+pub fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
     T::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))
 }
 
@@ -157,8 +159,10 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
 }
 
-/// `operation`, unless the call is cancelled first.
-pub(crate) async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
+/// `operation`, unless the call is cancelled first. Public, not part of the API: zx-app's
+/// read_skill uses it.
+#[doc(hidden)]
+pub async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
     tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => None,

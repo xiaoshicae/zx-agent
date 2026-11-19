@@ -13,6 +13,13 @@ use super::MAX_FILE_BYTES;
 /// tools.
 pub(crate) const READ_SKILL: &str = "read_skill";
 
+/// The most skills an agent registers: each one's name and description go into every request.
+const MAX_SKILLS: usize = 64;
+/// The longest skill name, in bytes.
+const MAX_SKILL_NAME_BYTES: usize = 64;
+/// The longest skill description, in bytes.
+const MAX_DESCRIPTION_BYTES: usize = 1024;
+
 /// Metadata supplied by an agent. `path` is relative to the agent file until resolved.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,27 +32,30 @@ pub(crate) struct Skill {
     pub(crate) path: PathBuf,
 }
 
-/// Check the registrations of `skills` without reading their bodies: at most 64, unique names
-/// of lowercase letters, digits and hyphens, a description, and a regular file within
-/// `MAX_FILE_BYTES` for each.
+/// Check the registrations of `skills` without reading their bodies: at most [`MAX_SKILLS`],
+/// unique names of lowercase letters, digits and hyphens, a description, and a regular file
+/// within `MAX_FILE_BYTES` for each.
 pub(crate) fn validate_skills(skills: &[Skill]) -> Result<()> {
-    ensure!(skills.len() <= 64, "at most 64 skills may be registered");
+    ensure!(
+        skills.len() <= MAX_SKILLS,
+        "at most {MAX_SKILLS} skills may be registered"
+    );
     let mut names = HashSet::new();
     for skill in skills {
         ensure!(
             !skill.name.is_empty()
-                && skill.name.len() <= 64
+                && skill.name.len() <= MAX_SKILL_NAME_BYTES
                 && skill
                     .name
                     .bytes()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
-            "invalid skill name {:?}; use 1-64 lowercase letters, digits or hyphens",
+            "invalid skill name {:?}; use 1-{MAX_SKILL_NAME_BYTES} lowercase letters, digits or hyphens",
             skill.name
         );
         ensure!(names.insert(&skill.name), "duplicate skill {:?}", skill.name);
         ensure!(
-            !skill.description.trim().is_empty() && skill.description.len() <= 1024,
-            "skill {:?} needs a description up to 1024 bytes",
+            !skill.description.trim().is_empty() && skill.description.len() <= MAX_DESCRIPTION_BYTES,
+            "skill {:?} needs a description up to {MAX_DESCRIPTION_BYTES} bytes",
             skill.name
         );
         let meta =
@@ -58,4 +68,31 @@ pub(crate) fn validate_skills(skills: &[Skill]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(path: PathBuf) -> Skill {
+        Skill {
+            name: "review".into(),
+            description: "Review code".into(),
+            path,
+        }
+    }
+
+    #[test]
+    fn invalid_metadata_and_duplicate_names_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "body").unwrap();
+        assert!(validate_skills(&[skill(path.clone()), skill(path.clone())]).is_err());
+        let mut invalid = skill(path.clone());
+        invalid.name = "../escape".into();
+        assert!(validate_skills(&[invalid]).is_err());
+        let mut invalid = skill(path);
+        invalid.description.clear();
+        assert!(validate_skills(&[invalid]).is_err());
+    }
 }

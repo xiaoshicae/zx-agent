@@ -117,7 +117,7 @@ impl ConfiguredAgent {
             api_key: api_key.clone(),
             reasoning: config.reasoning,
         })?;
-        let skills = skills_tool(&mut agent)?;
+        let skills = skills_tool(&mut agent);
         let (policies, approvals) = policies(app, &mut agent, &host, approvals);
         // The host's tools that the agent enables, as it enables the built-in ones.
         let tools = app
@@ -323,13 +323,13 @@ fn budgets(overrides: &Overrides) -> RawLimits {
 
 /// read_skill with the catalog of its skills for the prompt, when the agent enables it and
 /// has skills.
-fn skills_tool(agent: &mut AgentDefinition) -> Result<Option<(Arc<dyn Tool>, String)>> {
+fn skills_tool(agent: &mut AgentDefinition) -> Option<(Arc<dyn Tool>, String)> {
     if agent.skills.is_empty() || !agent.tools.iter().any(|name| name == READ_SKILL) {
-        return Ok(None);
+        return None;
     }
-    let tool = ReadSkillTool::new(std::mem::take(&mut agent.skills))?;
+    let tool = ReadSkillTool::new(std::mem::take(&mut agent.skills));
     let catalog = tool.catalog();
-    Ok(Some((Arc::new(tool), catalog)))
+    Some((Arc::new(tool), catalog))
 }
 
 /// The policies every session of the agent asks, in this order: the command policy, the

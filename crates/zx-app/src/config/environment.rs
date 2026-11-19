@@ -172,18 +172,23 @@ impl Config {
     /// Read and check the file at `path`; a file that does not exist is an empty one. Paths in
     /// the file are relative to its directory.
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = match std::fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RawConfig::default(),
-            _ => toml::from_str(&read_text(path)?).with_context(|| format!("invalid {}", path.display()))?,
+        let text = match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            _ => Some(read_text(path)?),
+        };
+        Self::parse(text.as_deref(), path).with_context(|| format!("invalid {}", path.display()))
+    }
+
+    /// The configuration in `text`, the file at `path`; `None` is an empty file.
+    fn parse(text: Option<&str>, path: &Path) -> Result<Self> {
+        let raw = match text {
+            Some(text) => toml::from_str(text)?,
+            None => RawConfig::default(),
         };
         // A file path always has a parent; the root stands in for one that has none.
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-        let config = raw
-            .into_config(path, parent)
-            .with_context(|| format!("invalid {}", path.display()))?;
-        config
-            .validate()
-            .with_context(|| format!("invalid {}", path.display()))?;
+        let config = raw.into_config(path, parent)?;
+        config.validate()?;
         Ok(config)
     }
 
