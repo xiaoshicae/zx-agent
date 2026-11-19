@@ -21,6 +21,18 @@ pub(super) enum RunStop {
     Failed(String),
 }
 
+/// The last message of the conversation the model reads that is not a system message.
+enum LastMessage {
+    /// None: the conversation is empty, or holds only system messages.
+    Nothing,
+    /// A prompt, a message or tool results, which the model is to answer.
+    Unanswered,
+    /// An answer that failed or was cancelled, by its entry.
+    Failed(String),
+    /// A finished answer.
+    Answered,
+}
+
 /// Why automatic compaction is paused: a paid summary request failed, and repeating it on
 /// every prompt would keep paying for the same failure. A compaction that succeeds, a manual
 /// one included, or a change of model resumes it. The Runner owns it, so the pause
@@ -106,7 +118,7 @@ impl RunScope<'_> {
             .map_err(|error| format!("{error:#}"))?;
         match begin {
             Start::Message(message) => Ok(FirstInput::Prompt(message)),
-            Start::Continue => self.continuation().await,
+            Start::Continue => self.continuation(),
         }
     }
 
@@ -142,45 +154,27 @@ impl RunScope<'_> {
     /// Omit a failed or cancelled answer at the end of the conversation with a context edit,
     /// as a retry does: the model answers again.
     async fn omit_failed_answer(&mut self) -> Result<(), String> {
-        let failed = self
-            .transcript
-            .projection()
-            .iter()
-            .rev()
-            .find(|item| !matches!(item.message, Message::System(_)))
-            .and_then(|last| match &last.message {
-                Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
-                    Some(last.entry_id.clone())
-                }
-                _ => None,
-            });
-        match failed {
-            Some(failed) => self.omit_failed_attempt(&failed).await,
-            None => Ok(()),
+        match self.last_message() {
+            LastMessage::Failed(failed) => self.omit_failed_attempt(&failed).await,
+            LastMessage::Nothing | LastMessage::Unanswered | LastMessage::Answered => Ok(()),
         }
     }
 
-    /// The input a continuation starts with, after omitting a failed answer at the end; an
-    /// error when there is nothing for the model to answer. Queued input stays in its queue:
-    /// the loop takes it as it does between steps, so that a message is taken only once it
-    /// is recorded, and what a stopped run did not take is still queued.
-    async fn continuation(&mut self) -> Result<FirstInput, String> {
-        let projection = self.transcript.projection();
-        let Some(last) = projection
-            .iter()
-            .rev()
-            .find(|item| !matches!(item.message, Message::System(_)))
-        else {
-            return Err("nothing to continue: the conversation is empty; send a prompt instead".into());
-        };
-        match &last.message {
-            Message::User { .. } | Message::ToolResult(_) => Ok(FirstInput::Conversation),
-            Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
-                let failed = last.entry_id.clone();
-                self.omit_failed_attempt(&failed).await?;
-                Ok(FirstInput::Conversation)
+    /// The input a continuation starts with, once [`omit_failed_answer`](Self::omit_failed_answer)
+    /// has left out a failed answer at the end; an error when there is nothing for the model
+    /// to answer. Queued input stays in its queue: the loop takes it as it does between steps,
+    /// so that a message is taken only once it is recorded, and what a stopped run did not
+    /// take is still queued.
+    fn continuation(&self) -> Result<FirstInput, String> {
+        match self.last_message() {
+            LastMessage::Nothing => Err("nothing to continue: the conversation is empty; send a prompt instead".into()),
+            LastMessage::Unanswered => Ok(FirstInput::Conversation),
+            // The failed answer at the end was left out already: one here would be a second in
+            // a row, which no run leaves.
+            LastMessage::Failed(_) => {
+                Err("nothing to continue: the conversation ends with a failed answer; send a prompt instead".into())
             }
-            Message::Assistant(_) => {
+            LastMessage::Answered => {
                 let queues = &self.config.queues;
                 if queues.has(Queue::Steering) {
                     // Every step takes steering first.
@@ -194,8 +188,25 @@ impl RunScope<'_> {
                     )
                 }
             }
-            Message::System(_) => Err("nothing to continue: the conversation has only system messages".into()),
         }
+    }
+
+    /// How the conversation the model reads ends: its last message that is not a system
+    /// message.
+    fn last_message(&self) -> LastMessage {
+        self.transcript
+            .projection()
+            .iter()
+            .rev()
+            .find_map(|item| match &item.message {
+                Message::System(_) => None,
+                Message::User { .. } | Message::ToolResult(_) => Some(LastMessage::Unanswered),
+                Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
+                    Some(LastMessage::Failed(item.entry_id.clone()))
+                }
+                Message::Assistant(_) => Some(LastMessage::Answered),
+            })
+            .unwrap_or(LastMessage::Nothing)
     }
 
     /// Whether automatic compaction is on for the model the run asks now: the session's
