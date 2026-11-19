@@ -21,8 +21,9 @@ use crate::backlog::{self, Backlog, Kept};
 ///   the delivery to the platform, and acknowledges at once, since platforms resend what is
 ///   not acknowledged within seconds; a message that cannot be kept leaves its delivery
 ///   unacknowledged, for the platform to deliver again;
-/// - only then it passes the delivery's events on ([`Inlet::pass`]), but not a message the
-///   backlog has already: one delivered again;
+/// - only then it passes the delivery's events on ([`Inlet::pass`]), also when the
+///   acknowledgement could not be sent, but not a message the backlog has already: one
+///   delivered again is known, so the first delivery is its only way to the server;
 /// - it passes on direct messages, messages in a group that mention the bot, and replies in
 ///   a group's threads, each with its [`ChatKind`] and [`Addressee`]; never the bot's own,
 ///   nor a message posted in a group itself that does not mention the bot. The server
