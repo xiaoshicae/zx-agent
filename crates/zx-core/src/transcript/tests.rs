@@ -446,6 +446,6 @@ async fn branches_select_a_path_and_edits_are_branch_local() {
     transcript.branch(&q).unwrap();
     assert!(
         transcript.append_context_edit(&a, None).await.is_err(),
-        "target not on the active branch"
+        "target not on the current branch"
     );
 }

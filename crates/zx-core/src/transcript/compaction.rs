@@ -21,11 +21,11 @@ use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
 
 pub(crate) use source::{summary_input, summary_messages};
 
-/// The largest serialized summary.
-pub(crate) const MAX_SUMMARY_BYTES: usize = 64 * 1024;
+/// The largest summary, serialized as JSON, in bytes.
+pub const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 
 /// The most facts, inferences or plans one summary holds.
-const MAX_STATEMENTS: usize = 128;
+pub const MAX_SUMMARY_STATEMENTS: usize = 128;
 
 /// Every fact cites only records in `ids`.
 fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
@@ -68,7 +68,8 @@ impl CompactionSummary {
         cite_only(&self.facts, ids)
     }
 
-    /// The bounds every summary keeps: at most 64 KiB and 128 statements of each kind,
+    /// The bounds every summary keeps: at most [`MAX_SUMMARY_BYTES`], and
+    /// [`MAX_SUMMARY_STATEMENTS`] statements of each kind,
     /// nothing empty, and every fact cites at least one record.
     fn validate_limits(&self) -> Result<()> {
         ensure!(
@@ -76,10 +77,10 @@ impl CompactionSummary {
             "summary exceeds {MAX_SUMMARY_BYTES} bytes"
         );
         ensure!(
-            self.facts.len() <= MAX_STATEMENTS
-                && self.inferences.len() <= MAX_STATEMENTS
-                && self.plans.len() <= MAX_STATEMENTS,
-            "too many summary statements: {} facts, {} inferences, {} plans; at most {MAX_STATEMENTS} of each",
+            self.facts.len() <= MAX_SUMMARY_STATEMENTS
+                && self.inferences.len() <= MAX_SUMMARY_STATEMENTS
+                && self.plans.len() <= MAX_SUMMARY_STATEMENTS,
+            "too many summary statements: {} facts, {} inferences, {} plans; at most {MAX_SUMMARY_STATEMENTS} of each",
             self.facts.len(),
             self.inferences.len(),
             self.plans.len()

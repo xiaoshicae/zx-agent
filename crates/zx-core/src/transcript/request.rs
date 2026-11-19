@@ -1,4 +1,4 @@
-//! Request configuration changes and per-dispatch projection checkpoints.
+//! Request configuration changes and per-request checkpoints.
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};

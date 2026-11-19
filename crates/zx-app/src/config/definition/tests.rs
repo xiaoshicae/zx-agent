@@ -526,7 +526,7 @@ fn compaction_errors_name_the_keys_of_the_agent_file() {
         ),
         (
             "[compaction]\ntriggerTokens = 10\nkeepRecentBytes = 200",
-            "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes",
+            "compaction.triggerTokens must exceed compaction.keepRecentBytes /",
         ),
         (
             "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",

@@ -13,7 +13,7 @@ use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
 use zx_agent::agent::RunLimits;
-use zx_agent::compaction::{self, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
+use zx_agent::compaction::{self, BYTES_PER_TOKEN, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";
@@ -225,7 +225,9 @@ pub(super) fn compaction_error(error: &InvalidConfig) -> anyhow::Error {
         InvalidConfig::ZeroTriggerTokens => {
             "compaction.triggerTokens must be greater than zero (0 turns the token trigger off)".to_string()
         }
-        InvalidConfig::TriggerTokensWithinKept => "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes, the tokens the kept recent messages take".to_string(),
+        InvalidConfig::TriggerTokensWithinKept => format!(
+            "compaction.triggerTokens must exceed compaction.keepRecentBytes / {BYTES_PER_TOKEN}, the tokens the kept recent messages take"
+        ),
         InvalidConfig::TriggerBytesWithinKept => {
             "compaction.triggerBytes must exceed compaction.keepRecentBytes (0 turns the byte trigger off)".to_string()
         }

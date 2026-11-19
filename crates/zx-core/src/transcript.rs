@@ -38,10 +38,10 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, SummarizedBy, SummaryFact,
-    SummaryRequest,
+    CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, MAX_SUMMARY_BYTES,
+    MAX_SUMMARY_STATEMENTS, SummarizedBy, SummaryFact, SummaryRequest,
 };
-pub(crate) use compaction::{CompactionPlan, MAX_SUMMARY_BYTES, summary_input, summary_messages};
+pub(crate) use compaction::{CompactionPlan, summary_input, summary_messages};
 pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use memory::MemoryStorage;

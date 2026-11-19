@@ -32,8 +32,8 @@ pub const MAX_SUMMARY_TOKENS: u32 = 16_384;
 /// automatic trigger; manual compaction still uses the remaining bounded settings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Serialized transcript threshold; `None` disables the byte trigger of automatic
-    /// compaction.
+    /// Bytes of the serialized context that start automatic compaction; `None` disables
+    /// the byte trigger.
     pub trigger_bytes: Option<usize>,
     /// When the estimated tokens of the context ([`context_tokens`]) run an automatic
     /// compaction. Either trigger runs one.
@@ -151,7 +151,10 @@ pub enum InvalidConfig {
     ZeroTriggerTokens,
     /// `trigger_tokens` lies within the recent messages a summary keeps, so a summary could
     /// never bring the context under it.
-    #[error("trigger_tokens must exceed a quarter of keep_recent_bytes, the tokens the kept recent messages take")]
+    #[error(
+        "trigger_tokens must exceed keep_recent_bytes / {per_token}, the tokens the kept recent messages take",
+        per_token = BYTES_PER_TOKEN
+    )]
     TriggerTokensWithinKept,
     /// `trigger_bytes` does not exceed `keep_recent_bytes`.
     #[error("trigger_bytes must exceed keep_recent_bytes (`None` disables the byte trigger)")]
@@ -173,8 +176,9 @@ pub enum InvalidConfig {
 /// one the kernel asks the model, and the request can be rebuilt from the session.
 ///
 /// The kernel stays in charge either way: when a compaction runs, which records it reads (at
-/// most 2 MiB of them), the records of its start and of its result or failure, the check that
-/// every fact cites a record the compaction read, and the bounds of time and cancellation.
+/// most [`MAX_SOURCE_BYTES`] of them), the records of its start and of its result or
+/// failure, the check that every fact cites a record the compaction read, and the bounds of
+/// time and cancellation.
 /// With a summarizer the start records its name instead of a request: how the summary was
 /// made is not in the session.
 #[async_trait]
@@ -183,10 +187,14 @@ pub trait Summarizer: Send + Sync {
     fn name(&self) -> &str;
 
     /// The summary of `source`. Every fact cites the `entry_id` of at least one record of
-    /// `source`; a summary holds at most 64 KiB and 128 statements of each kind, and must
-    /// make the context smaller. An error is why the compaction fails, which its failure
-    /// record keeps. The kernel waits at most [`Config::timeout`] and stops waiting when the
-    /// run is cancelled; a panic fails the compaction.
+    /// `source`; a summary holds at most [`MAX_SUMMARY_BYTES`] and [`MAX_SUMMARY_STATEMENTS`]
+    /// statements of each kind, and must make the context smaller. An error is why the
+    /// compaction fails, which its failure record keeps. The kernel waits at most
+    /// [`Config::timeout`] and stops waiting when the run is cancelled; a panic fails the
+    /// compaction.
+    ///
+    /// [`MAX_SUMMARY_BYTES`]: crate::transcript::MAX_SUMMARY_BYTES
+    /// [`MAX_SUMMARY_STATEMENTS`]: crate::transcript::MAX_SUMMARY_STATEMENTS
     async fn summarize(&self, source: &SummarySource<'_>) -> Result<Summarized, String>;
 }
 
@@ -356,8 +364,8 @@ pub(crate) enum Trigger {
     Automatic,
 }
 
-/// Serialized transcript bytes as a model may see them (without tool result details), not a
-/// tokenizer or a model context-window guarantee.
+/// Bytes of `messages` serialized as a model may see them (without tool result details), not
+/// a tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
     serialized_bytes(&without_details(messages))
 }
@@ -384,13 +392,13 @@ fn serialized_bytes(value: &impl serde::Serialize) -> Result<usize> {
 
 /// Bytes of serialized context that count as one token in an estimate (pi:
 /// `estimateTokens`, `Math.ceil(chars / 4)`).
-const BYTES_PER_TOKEN: usize = 4;
+pub const BYTES_PER_TOKEN: usize = 4;
 
 /// An estimate of the tokens the next request's context holds (pi:
 /// `estimateProjectedContextTokens`): the prompt and output tokens counted by the last answer
-/// whose usage still measures the context ([`Transcript::measured_context`]), plus a
-/// quarter of the bytes of the messages after it; without such an answer, a quarter of all
-/// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
+/// whose usage still measures the context ([`Transcript::measured_context`]), plus an
+/// estimate from the bytes of the messages after it; without such an answer, an estimate from
+/// all bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
 pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
     let (measured, rest) = transcript.measured_context();
@@ -475,9 +483,10 @@ mod tests {
         );
         assert!(
             !small.automatic(&window("m", 1000), "m"),
-            "nothing turns summaries on when the window is within the reserve"
+            "nothing turns automatic compaction on when the window is within the reserve"
         );
-        // 20000 - 16384 tokens would lie within the 64 KiB of recent messages a summary keeps.
+        // 20000 tokens less the default reserve would lie within the recent messages that a
+        // summary keeps by default.
         assert_eq!(
             below_window(DEFAULT_RESERVE_TOKENS).trigger_tokens_for(&window("m", 20_000), "m"),
             None,

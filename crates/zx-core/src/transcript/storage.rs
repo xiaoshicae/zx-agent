@@ -168,8 +168,8 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// What a listing shows of the session in `transcript`. A storage that keeps no summary
-    /// of its sessions builds one from a snapshot ([`Transcript::snapshot`]).
+    /// What a listing shows of the session in `transcript`. A storage that keeps no listing
+    /// of its sessions builds it from a snapshot ([`Transcript::snapshot`]).
     pub fn of(transcript: &Transcript) -> Self {
         let header = transcript.header();
         let first_prompt = transcript.entries().iter().find_map(|entry| {

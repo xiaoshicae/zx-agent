@@ -124,7 +124,7 @@ impl SessionStorage for MemoryStorage {
     }
 
     async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
-        // Copied out under the lock, summarized without it.
+        // Copied out under the lock, described without it.
         let matching: Vec<LoadedSession> = lock(&self.sessions)
             .values()
             .filter(|stored| query.matches(&stored.header))

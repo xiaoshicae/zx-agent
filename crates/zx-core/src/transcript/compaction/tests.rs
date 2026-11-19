@@ -38,7 +38,7 @@ fn summarize(messages: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
+async fn a_compaction_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
     let mut transcript = Transcript::in_memory(header());
     let first_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("preamble", "first")),
@@ -79,7 +79,7 @@ async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates()
 }
 
 #[tokio::test]
-async fn unfinished_and_failed_attempts_do_not_change_context() {
+async fn unfinished_and_failed_compactions_do_not_change_the_context() {
     let mut transcript = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut transcript).await;
     let before = transcript.messages();
@@ -126,7 +126,7 @@ async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() 
 }
 
 #[tokio::test]
-async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
+async fn compactions_are_branch_local_and_references_to_other_branches_are_rejected() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
     let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
@@ -196,7 +196,7 @@ async fn omitting_the_first_kept_message_keeps_the_summary_in_place_of_the_old_p
 }
 
 #[tokio::test]
-async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
+async fn a_compaction_cannot_finish_after_its_source_was_edited_during_the_summary_request() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
     let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
@@ -248,7 +248,7 @@ async fn an_invalid_plan_writes_nothing() {
 }
 
 #[tokio::test]
-async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
+async fn serialized_compaction_records_use_camel_case_fields_and_snake_case_tags() {
     let mut transcript = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut transcript).await;
     let started = transcript.begin_compaction(plan(&transcript, &kept)).await.unwrap();
@@ -378,9 +378,9 @@ fn exchange(id: &str) -> [Message; 2] {
     [Message::Assistant(assistant), Message::ToolResult(result)]
 }
 
-/// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
+/// A session whose latest run, for "the task", made two calls, c1 and c2, after an earlier
 /// question: the IDs of the earlier question, of the task, and of the two calls.
-async fn a_turn_with_two_calls() -> (Transcript, [String; 4]) {
+async fn a_run_with_two_calls() -> (Transcript, [String; 4]) {
     let mut transcript = Transcript::in_memory(header());
     let earlier = transcript
         .append_message(Message::user("an earlier question"))
@@ -397,8 +397,8 @@ async fn a_turn_with_two_calls() -> (Transcript, [String; 4]) {
 }
 
 #[tokio::test]
-async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
-    let (mut transcript, [earlier, task, first_call, kept]) = a_turn_with_two_calls().await;
+async fn a_compaction_inside_a_run_keeps_the_input_of_that_run_before_its_summary() {
+    let (mut transcript, [earlier, task, first_call, kept]) = a_run_with_two_calls().await;
 
     // Only the latest input before the boundary can be kept.
     let wrong = CompactionPlan {

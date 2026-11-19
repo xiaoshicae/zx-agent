@@ -528,7 +528,7 @@ impl Compactor<'_> {
     }
 
     /// Record that the open compaction failed and report it. Returns how the compaction ends:
-    /// aborted when the run was cancelled, failed otherwise, and unrecorded when the session
+    /// cancelled when the run was cancelled, failed otherwise, and unrecorded when the session
     /// could not record the result or this failure.
     async fn fail(
         &mut self,

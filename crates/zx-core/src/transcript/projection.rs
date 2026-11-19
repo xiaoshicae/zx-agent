@@ -183,17 +183,12 @@ impl Transcript {
         projected
     }
 
-    /// Latest successful, still-valid summary on the active branch.
+    /// The latest compaction on the current branch that succeeded and still holds.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        Self::latest_compaction_on(&self.branch_path())
+        Self::compaction_in_effect_on(&self.branch_path()).map(|(compaction, _)| compaction)
     }
 
-    /// The latest successful summary on `path` that still holds.
-    fn latest_compaction_on<'s>(path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
-        Self::compaction_in_effect_on(path).map(|(compaction, _)| compaction)
-    }
-
-    /// The latest successful summary on `path` that still holds, with the record of its
+    /// The latest compaction on `path` that succeeded and still holds, with the record of its
     /// start. Invalid or incomplete control records never hide original evidence, and a
     /// correction of a summary's evidence invalidates it as a whole: the projection falls
     /// back to the originals.
