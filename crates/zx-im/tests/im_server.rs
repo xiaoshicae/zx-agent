@@ -1375,6 +1375,30 @@ async fn a_status_that_cannot_be_forgotten_is_reported_and_still_replaced() {
 }
 
 #[tokio::test]
+async fn an_answer_that_cannot_replace_its_status_is_posted_instead() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        updates: Updates::Refused,
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    h.updated(&status, text("answer")).await;
+    h.posted(&thread("m1"), text("answer")).await;
+    assert_eq!(
+        h.event().await,
+        ServerEvent::Failed {
+            key: Some(key("m1")),
+            error: format!("cannot update message {}: update refused", status.id),
+        }
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn statuses_that_cannot_be_read_are_reported_and_the_server_serves() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("answer")],

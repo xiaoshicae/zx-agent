@@ -693,7 +693,8 @@ impl Worker {
                             user: user.clone(),
                             result,
                         };
-                        self.out.replace(&pending.posted, closed).await;
+                        // A card left open was reported; the decision stands either way.
+                        self.out.replace(&pending.posted, &closed).await;
                         (Some(pending.id), user)
                     }
                     // No card: nobody was asked, or posting it failed.
