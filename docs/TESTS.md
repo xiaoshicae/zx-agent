@@ -66,7 +66,7 @@
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
 | `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
-| `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放 |
+| `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放；被取消的运行为整批调用写下结果 |
 
 ## IM 服务：`crates/zx-im/tests/`
 
@@ -81,4 +81,4 @@
 
 ---
 
-TESTS.md · v0.20 · 2026年11月
+TESTS.md · v0.21 · 2026年11月
