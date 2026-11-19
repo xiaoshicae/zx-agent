@@ -21,18 +21,15 @@ use zx_agent::builtin::output_store::{
 /// to the working directory of each session.
 const DEFAULT_TOOL_OUTPUT_DIRECTORY: &str = ".zx-agent/outputs";
 
-/// Where bash and read_file run.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Execution {
-    /// On this machine, as the agent's user.
-    #[default]
-    Local,
-    /// In an isolated Docker container; see [`ContainerSettings`].
-    Container,
-}
+/// The built-in executor that runs commands on this machine, as the agent's user: the one
+/// config.toml means unless `execution` names another.
+pub const LOCAL: &str = "local";
 
-/// Container settings for `Execution::Container`, the `[container]` table; unset values use
+/// The built-in executor that runs commands in a Docker container started for each session,
+/// with the settings of [`ContainerSettings`].
+pub const CONTAINER: &str = "container";
+
+/// Container settings for `execution = "container"`, the `[container]` table; unset values use
 /// the executor defaults.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -99,9 +96,11 @@ pub struct Config {
     pub secret_files: Vec<PathBuf>,
     /// How the model is reached.
     pub provider: ProviderSettings,
-    /// Where bash and read_file run.
-    pub execution: Execution,
-    /// Used when `execution` is `Container`.
+    /// Where the tools that run commands and touch files run: the executor, by the name it is
+    /// registered under: [`LOCAL`], [`CONTAINER`], or one a host registers
+    /// ([`Application::register_executor`](crate::Application::register_executor)).
+    pub execution: String,
+    /// Used when `execution` is [`CONTAINER`].
     pub container: ContainerSettings,
     /// Where long tool results are saved when read_output is enabled.
     pub tool_output: OutputStoreConfig,
@@ -123,7 +122,7 @@ impl Default for Config {
             approval_timeout_secs: None,
             secret_files: Vec::new(),
             provider: ProviderSettings::default(),
-            execution: Execution::default(),
+            execution: LOCAL.to_string(),
             container: ContainerSettings::default(),
             tool_output: OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY),
             models: HashMap::new(),
@@ -143,8 +142,7 @@ struct RawConfig {
     secret_files: Vec<PathBuf>,
     /// The provider's table, which the provider reads but for the keys zx-app takes out.
     provider: toml::Table,
-    // Unknown backends fail to deserialize instead of being ignored.
-    execution: Option<Execution>,
+    execution: Option<String>,
     container: ContainerSettings,
     tool_output: RawToolOutput,
     models: Vec<RawModel>,
@@ -226,13 +224,14 @@ impl Config {
         ] {
             ensure!(value != Some(0), "{key} must be at least 1");
         }
+        ensure!(!self.execution.trim().is_empty(), "execution must not be empty");
         self.provider.validate()?;
         for (id, meta) in &self.models {
             check_model(id, meta)?;
         }
         self.tool_output.validate().map_err(|error| tool_output_error(&error))?;
         // Without an image no container starts, and the rest of [container] is not used.
-        if self.execution == Execution::Container || self.container.image.is_some() {
+        if self.execution == CONTAINER || self.container.image.is_some() {
             self.container.container_config()?;
         }
         self.mcp_tool_names()?;
@@ -316,7 +315,7 @@ impl RawConfig {
             approval_timeout_secs: self.approval_timeout_secs,
             secret_files: secret_files(self.secret_files, parent)?,
             provider: ProviderSettings::from_table(self.provider)?,
-            execution: self.execution.unwrap_or_default(),
+            execution: self.execution.unwrap_or_else(|| LOCAL.to_string()),
             container: self.container,
             tool_output: self.tool_output.into_config(parent)?,
             models: HashMap::new(),
@@ -419,7 +418,7 @@ mod tests {
         assert_eq!(config.provider.api, OPENAI);
         assert_eq!(config.provider.api_key_env, None);
         assert_eq!(config.provider.retry.max_retries, 3);
-        assert_eq!(config.execution, Execution::Local);
+        assert_eq!(config.execution, LOCAL);
         assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
         // In each session's working directory.
         assert_eq!(config.tool_output.directory, Path::new(".zx-agent/outputs"));
@@ -520,7 +519,7 @@ mod tests {
                 "provider.maxTokensField",
             ),
             ("[provider]\nbaseUrl = ''", "provider.baseUrl must not be empty"),
-            ("execution = 'kubernetes'", "unknown variant"),
+            ("execution = ' '", "execution must not be empty"),
         ] {
             let error = error(text);
             assert!(error.contains(expected), "{text}: {error}");
@@ -535,7 +534,7 @@ mod tests {
              pidsLimit = 64\nnetwork = 'none'\nworkspace = 'readOnly'\nroot = 'readOnly'",
         )
         .unwrap();
-        assert_eq!(config.execution, Execution::Container);
+        assert_eq!(config.execution, CONTAINER);
         assert_eq!(
             config.container,
             ContainerSettings {

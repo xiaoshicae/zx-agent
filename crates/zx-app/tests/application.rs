@@ -2,13 +2,14 @@
 //! agent parts of its own.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -16,9 +17,13 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::{SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
-use zx_app::{Application, Approvals, BuiltProvider, Overrides, ProviderFactory, ProviderInput, SessionPlace};
+use zx_app::{
+    Application, Approvals, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
+    SessionPlace,
+};
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
+use zx_util::sync::lock;
 
 /// The value of a secret file of the configuration, which tool results must not show.
 const SECRET: &str = "s3cret-value-of-the-host";
@@ -517,27 +522,133 @@ async fn the_anthropic_provider_is_built_in() {
     assert_eq!(request.body["model"], json!("configured-model"));
 }
 
-#[tokio::test]
-async fn a_provider_name_that_is_unknown_or_taken_fails_the_build() {
-    let config = with_provider("nowhere", "");
-    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
-        .await
-        .unwrap();
-    let error = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
-        .err()
-        .unwrap();
-    let expected = "provider.api \"nowhere\": no provider is registered under that name; use one of openai, anthropic";
-    assert!(format!("{error:#}").contains(expected), "{error:#}");
+/// An executor a host registers: commands run on this machine, as with `local`, and each
+/// session it starts for is noted with the variables its commands must not see. It isolates
+/// commands when it says so.
+#[derive(Default)]
+struct Noting {
+    isolates: bool,
+    started: Mutex<Vec<(String, Vec<String>)>>,
+}
 
-    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+#[async_trait]
+impl ExecutorFactory for Noting {
+    fn isolates(&self) -> bool {
+        self.isolates
+    }
+
+    async fn start(&self, session: ExecutorSession<'_>) -> anyhow::Result<Arc<dyn Executor>> {
+        lock(&self.started).push((session.id.to_string(), session.hidden_env.to_vec()));
+        Ok(Arc::new(LocalExecutor {
+            hidden_env: session.hidden_env.to_vec(),
+        }))
+    }
+}
+
+/// `configured()` whose commands run where the executor registered under `name` says.
+fn executing(name: &str) -> Config {
+    Config {
+        execution: name.into(),
+        ..configured()
+    }
+}
+
+#[tokio::test]
+async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_session() {
+    let noting = Arc::new(Noting::default());
+    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
         .await
         .unwrap()
-        .register_provider("openai", Arc::new(Scripted));
-    let error = app
+        .register_executor("noting", noting.clone());
+    let agent = app
         .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
-        .err()
         .unwrap();
-    let expected = "more than one provider is registered under the name \"openai\"";
-    assert!(format!("{error:#}").contains(expected), "{error:#}");
+    let session = agent.create(None).await.unwrap();
+    let started = lock(&noting.started).clone();
+    assert_eq!(started.len(), 1, "{started:?}");
+    let (id, hidden_env) = &started[0];
+    assert_eq!(*id, session.id());
+    // Its commands must not see the API key, wherever they run.
+    assert!(
+        hidden_env.contains(&"ZX_APPLICATION_TEST_UNUSED_KEY".to_string()),
+        "{hidden_env:?}"
+    );
+}
+
+#[tokio::test]
+async fn approving_every_call_needs_an_executor_that_isolates_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    agent_in(dir.path(), "[permissions]\napproveAll = true\nask = []");
+    for (name, isolates, built) in [
+        ("local", false, false),
+        ("plain", false, false),
+        ("sandbox", true, true),
+    ] {
+        let mut app = Application::from_config(
+            executing(name),
+            Some(dir.path().to_path_buf()),
+            Overrides::default(),
+            Builtin::Unattended,
+        )
+        .await
+        .unwrap();
+        if name != "local" {
+            app = app.register_executor(
+                name,
+                Arc::new(Noting {
+                    isolates,
+                    ..Noting::default()
+                }),
+            );
+        }
+        let result = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+        match result {
+            Ok(_) => assert!(built, "{name}"),
+            Err(error) => {
+                assert!(!built, "{name}: {error:#}");
+                assert!(
+                    format!("{error:#}").contains("permissions.approveAll needs execution = \"container\""),
+                    "{name}: {error:#}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_name_no_factory_is_registered_under_or_two_are_fails_the_build() {
+    type Registering = fn(Application) -> Application;
+    let cases: [(Config, Registering, &str); 4] = [
+        (
+            with_provider("nowhere", ""),
+            |app| app,
+            "provider.api: no provider is registered under the name \"nowhere\"; use one of openai, anthropic",
+        ),
+        (
+            executing("kubernetes"),
+            |app| app,
+            "execution: no executor is registered under the name \"kubernetes\"; use one of local, container",
+        ),
+        (
+            configured(),
+            |app| app.register_provider("openai", Arc::new(Scripted)),
+            "more than one provider is registered under the name \"openai\"",
+        ),
+        (
+            configured(),
+            |app| app.register_executor("container", Arc::new(Noting::default())),
+            "more than one executor is registered under the name \"container\"",
+        ),
+    ];
+    for (config, register, expected) in cases {
+        let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+            .await
+            .unwrap();
+        let app = register(app);
+        let error = app
+            .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }

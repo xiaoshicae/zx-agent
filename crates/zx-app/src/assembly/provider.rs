@@ -13,6 +13,7 @@ use crate::config::{ANTHROPIC, OPENAI, anthropic_config, openai_config};
 use zx_agent::ai::anthropic::AnthropicMessages;
 use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible};
 use zx_agent::ai::{Provider, Reasoning};
+use zx_util::registry::Registry;
 
 /// Builds the provider config.toml names in `provider.api`.
 pub trait ProviderFactory: Send + Sync {
@@ -44,29 +45,13 @@ pub struct BuiltProvider {
 }
 
 /// The providers every application has, by name.
-pub(super) fn built_in() -> Vec<(String, Arc<dyn ProviderFactory>)> {
-    vec![
-        (OPENAI.to_string(), Arc::new(OpenAi)),
-        (ANTHROPIC.to_string(), Arc::new(Anthropic)),
-    ]
-}
-
-/// The factory registered under `api`; the error lists the names there are.
-pub(super) fn factory<'a>(
-    registered: &'a [(String, Arc<dyn ProviderFactory>)],
-    api: &str,
-) -> Result<&'a dyn ProviderFactory> {
-    registered
-        .iter()
-        .find(|(name, _)| name == api)
-        .map(|(_, factory)| factory.as_ref())
-        .with_context(|| {
-            let names: Vec<&str> = registered.iter().map(|(name, _)| name.as_str()).collect();
-            format!(
-                "provider.api {api:?}: no provider is registered under that name; use one of {}",
-                names.join(", ")
-            )
-        })
+pub(super) fn built_in() -> Registry<dyn ProviderFactory> {
+    let openai: Arc<dyn ProviderFactory> = Arc::new(OpenAi);
+    let anthropic: Arc<dyn ProviderFactory> = Arc::new(Anthropic);
+    Registry::new(
+        "provider",
+        vec![(OPENAI.to_string(), openai), (ANTHROPIC.to_string(), anthropic)],
+    )
 }
 
 /// What a setting of the provider that `ZX_BASE_URL` may have replaced is said in.
@@ -165,7 +150,7 @@ mod tests {
 
     fn built(api: &str, text: &str, reasoning: Option<Reasoning>) -> Result<BuiltProvider> {
         let registered = built_in();
-        factory(&registered, api)?.build(ProviderInput {
+        registered.get(api).map_err(anyhow::Error::msg)?.build(ProviderInput {
             options: &options(text),
             api_key: None,
             reasoning,
@@ -173,18 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_providers_are_found_by_name_and_an_unknown_one_is_named() {
+    fn the_built_in_providers_are_found_by_name() {
         let openai = built(OPENAI, "promptCacheKey = true", None).unwrap();
         assert_eq!(openai.provider.name(), "openai-compatible");
         assert!(openai.session_cache_key);
         let anthropic = built(ANTHROPIC, "", None).unwrap();
         assert_eq!(anthropic.provider.name(), "anthropic");
         assert!(!anthropic.session_cache_key);
-        let error = format!("{:#}", built("gemini", "", None).err().unwrap());
-        assert_eq!(
-            error,
-            "provider.api \"gemini\": no provider is registered under that name; use one of openai, anthropic"
-        );
     }
 
     #[test]

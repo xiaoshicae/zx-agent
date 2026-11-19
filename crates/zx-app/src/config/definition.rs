@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::agent_file::{AgentFile, settle_token_trigger};
 use super::permissions::Permissions;
 use super::skills::{READ_SKILL, Skill, validate_skills};
-use super::{Config, Execution, context, read_text};
+use super::{Config, context, read_text};
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
 use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
@@ -180,8 +180,9 @@ impl AgentDefinition {
     }
 
     /// Check tool names, permissions and skill registrations without reading skill bodies;
-    /// the tools may be the `host`'s own, permissions may name those and the tools of its
-    /// extensions and the MCP tools of `config`, and approving every call needs its container.
+    /// the tools may be the `host`'s own, and permissions may name those and the tools of its
+    /// extensions and the MCP tools of `config`. Whether commands run where every call may be
+    /// approved is the executor's to say, which the assembly checks.
     pub(crate) fn validate(&self, config: &Config, host: &HostTools) -> Result<()> {
         let known = |name: &str| known_tool(name) || host.own.iter().any(|own| own == name);
         for name in &self.tools {
@@ -191,16 +192,10 @@ impl AgentDefinition {
         asking.extend(host.extensions.iter().cloned());
         self.permissions.validate(known, &asking)?;
         self.compaction.validate().context("invalid [compaction] settings")?;
-        if self.permissions.approve_all {
-            ensure!(
-                config.execution == Execution::Container,
-                "permissions.approveAll needs execution = \"container\" in config.toml: without the container as a sandbox, every command would run on this machine unasked"
-            );
-            ensure!(
-                self.permissions.ask.is_empty(),
-                "permissions.approveAll asks for no approval, so permissions.ask must be empty"
-            );
-        }
+        ensure!(
+            !self.permissions.approve_all || self.permissions.ask.is_empty(),
+            "permissions.approveAll asks for no approval, so permissions.ask must be empty"
+        );
         validate_skills(&self.skills)
     }
 }

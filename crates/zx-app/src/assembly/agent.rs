@@ -26,7 +26,8 @@ use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 use zx_util::env::env_value;
 
-use super::provider::{BuiltProvider, ProviderInput, factory};
+use super::execution::ExecutorFactory;
+use super::provider::{BuiltProvider, ProviderInput};
 use super::setup::{PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
@@ -80,8 +81,9 @@ impl ConfiguredAgent {
     /// `app` read and connected. Startup reads; no session exists yet.
     ///
     /// Configuration errors are reported here: an agent file or a tool setting that cannot
-    /// be used, a cost budget without prices, invalid provider settings, and a part of the
-    /// host's whose name another part goes by.
+    /// be used, a cost budget without prices, invalid provider settings, a provider or an
+    /// executor that no factory is registered for, approving every call where commands run
+    /// on this machine, and a part of the host's whose name another part goes by.
     pub(super) fn build(
         app: &Application,
         model: &str,
@@ -99,7 +101,11 @@ impl ConfiguredAgent {
             agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
             "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
         );
-        let factory = factory(&app.providers, &config.provider.api)?;
+        let executor = executor(app, &agent)?;
+        let factory = app
+            .providers
+            .get(&config.provider.api)
+            .map_err(|error| anyhow::anyhow!("provider.api: {error}"))?;
         let key_env = config.provider.api_key_env.as_deref().unwrap_or(factory.api_key_env());
         // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
         let api_key = env_value(key_env);
@@ -143,8 +149,7 @@ impl ConfiguredAgent {
                 tools: agent.tools,
                 context: agent.context,
                 skills,
-                execution: config.execution,
-                container: config.container.clone(),
+                executor,
                 hidden_env: hidden_env(app, key_env),
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
@@ -239,13 +244,8 @@ fn host_tools(app: &Application) -> HostTools {
 /// and policies may not be named like a built-in hook or policy, an extension, or another of
 /// the host's.
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
-    let mut providers = HashSet::new();
-    for (name, _) in &app.providers {
-        anyhow::ensure!(
-            providers.insert(name.as_str()),
-            "more than one provider is registered under the name {name:?}"
-        );
-    }
+    app.providers.check_names().map_err(anyhow::Error::msg)?;
+    app.executors.check_names().map_err(anyhow::Error::msg)?;
     for name in host.own.iter().chain(&host.extensions) {
         anyhow::ensure!(
             !known_tool(name),
@@ -268,6 +268,21 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The factory of the executor config.toml names in `execution`. Fails when there is none,
+/// and when `agent` approves every call but the factory does not isolate commands.
+fn executor(app: &Application, agent: &AgentDefinition) -> Result<Arc<dyn ExecutorFactory>> {
+    let name = &app.settings.config.execution;
+    let factory = app
+        .executors
+        .get(name)
+        .map_err(|error| anyhow::anyhow!("execution: {error}"))?;
+    anyhow::ensure!(
+        !agent.permissions.approve_all || factory.isolates(),
+        "permissions.approveAll needs execution = \"container\" in config.toml, or another executor that isolates commands: without a sandbox, every command would run on this machine unasked"
+    );
+    Ok(Arc::clone(factory))
 }
 
 /// The agent `app` runs, with the host's tools and budgets over it, validated: explicit

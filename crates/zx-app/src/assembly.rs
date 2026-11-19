@@ -12,7 +12,8 @@
 //! - `skills`: read_skill, which the agent registers for its skills
 //! - `setup`: what each session gets for itself: its executor, the tools on it, its store of
 //!   long tool results and the prompt sections about its directory
-//! - `execution`: where a session's commands run: this machine or a Docker container
+//! - `execution`: where a session's commands run: the executor factory registered under the
+//!   name config.toml gives, this machine or a Docker container unless a host registers another
 //! - `place`: where a host keeps the sessions: memory, one file, or the home directory
 
 mod agent;
@@ -39,8 +40,10 @@ use zx_agent::extensions::Extension;
 use zx_agent::hooks::Hook;
 use zx_agent::policy::ToolPolicy;
 use zx_agent::tools::Tool;
+use zx_util::registry::Registry;
 
 pub use agent::{Approvals, ConfiguredAgent};
+pub use execution::{ExecutorFactory, ExecutorSession};
 pub use place::SessionPlace;
 pub use provider::{BuiltProvider, ProviderFactory, ProviderInput};
 pub use settings::NoModel;
@@ -57,7 +60,7 @@ use settings::{Settings, checked_secret_files, secret_files};
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
 /// (tools, hooks, policies, extensions, prompt sections), `set_*` replaces the one there is
 /// (the summarizer, the hidden variables, the trace export), and `register_*` names one
-/// that config.toml chooses by its name (providers). They are treated as the built-in ones
+/// that config.toml chooses by its name (providers, executors). They are treated as the built-in ones
 /// are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
     settings: Settings,
@@ -86,9 +89,10 @@ pub struct Application {
     extensions: Vec<Arc<dyn Extension>>,
     /// What makes the summaries in place of the agent's model, when the host gives it.
     summarizer: Option<Arc<dyn Summarizer>>,
-    /// The providers config.toml can name in `provider.api`: the built-in ones, then the
-    /// host's.
-    providers: Vec<(String, Arc<dyn ProviderFactory>)>,
+    /// The providers config.toml can name in `provider.api`, and the executors it can name in
+    /// `execution`: the built-in ones, then the host's.
+    providers: Registry<dyn ProviderFactory>,
+    executors: Registry<dyn ExecutorFactory>,
     /// The queue of changes to each file, which the file tools of every session wait in, so
     /// that two sessions never overwrite each other's edit.
     file_queue: Arc<FileMutationQueue>,
@@ -138,6 +142,7 @@ impl Application {
     ) -> Result<Self> {
         overrides.validate()?;
         let (mcp, mut notices) = McpTools::connect(&settings).await?;
+        let executors = execution::built_in(&settings.config.container);
         for file in short_secret_files(&secret_files) {
             notices.push(format!(
                 "[secret] {}: the value is shorter than {MIN_SECRET_CHARS} characters; it is still redacted, and so is every other occurrence of the same text in tool output",
@@ -160,6 +165,7 @@ impl Application {
             extensions: Vec::new(),
             summarizer: None,
             providers: provider::built_in(),
+            executors,
             file_queue: Arc::default(),
         })
     }
@@ -222,7 +228,15 @@ impl Application {
     /// and `anthropic` are built in; it builds the provider from the keys of `[provider]`
     /// that zx-app does not read itself, and checks them.
     pub fn register_provider(mut self, name: &str, factory: Arc<dyn ProviderFactory>) -> Self {
-        self.providers.push((name.into(), factory));
+        self.providers.register(name, factory);
+        self
+    }
+
+    /// Register `factory` under `name`, the value of `execution` that chooses it. `local` and
+    /// `container` are built in; it starts the executor of each session, which the agent's
+    /// tools that run commands and touch files work through.
+    pub fn register_executor(mut self, name: &str, factory: Arc<dyn ExecutorFactory>) -> Self {
+        self.executors.register(name, factory);
         self
     }
 
@@ -237,8 +251,8 @@ impl Application {
     /// reads; each session gets its executor when it is created or opened.
     ///
     /// Fails on an agent file or a tool setting that cannot be used, a cost budget without
-    /// prices, invalid provider settings, and a part of the host's whose name another part
-    /// goes by already.
+    /// prices, invalid provider settings, a provider or an executor that no factory is
+    /// registered for, and a part of the host's whose name another part goes by already.
     pub fn build(&self, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
         ConfiguredAgent::build(self, model, place, approvals)
     }

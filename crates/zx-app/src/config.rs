@@ -32,7 +32,7 @@ use anyhow::{Result, ensure};
 pub(crate) use agent_file::cost_budget;
 pub use definition::Builtin;
 pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
-pub use environment::{Config, ContainerSettings, Execution, McpServer};
+pub use environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
 pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use provider::{anthropic_config, openai_config};
 pub(crate) use skills::{READ_SKILL, Skill, validate_skills};

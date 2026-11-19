@@ -22,6 +22,6 @@ pub mod shutdown;
 mod assembly;
 
 pub use assembly::{
-    Application, Approvals, BuiltProvider, ConfiguredAgent, NoModel, Overrides, ProviderFactory, ProviderInput,
-    SessionPlace, resolve_cwd,
+    Application, Approvals, BuiltProvider, ConfiguredAgent, ExecutorFactory, ExecutorSession, NoModel, Overrides,
+    ProviderFactory, ProviderInput, SessionPlace, resolve_cwd,
 };

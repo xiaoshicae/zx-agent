@@ -458,26 +458,16 @@ fn environment_settings_and_unsupported_extensions_are_not_agent_fields() {
 }
 
 #[test]
-fn approving_every_call_needs_the_container_and_no_tool_that_asks() {
-    let container = config("execution = 'container'\n[container]\nimage = 'x'");
-    let agent = load_with("[permissions]\napproveAll = true\nask = []", &container).unwrap();
+fn approving_every_call_needs_no_tool_that_asks() {
+    // Where commands run is the executor's: the assembly checks that one may approve all.
+    let agent = load_file("[permissions]\napproveAll = true\nask = []").unwrap();
     assert!(agent.permissions.approve_all);
     assert!(!load_file("").unwrap().permissions.approve_all);
-    for (text, config, expected) in [
-        (
-            "[permissions]\napproveAll = true",
-            &Config::default(),
-            "needs execution = \"container\"",
-        ),
-        (
-            "[permissions]\napproveAll = true\nask = ['bash']",
-            &container,
-            "permissions.ask must be empty",
-        ),
-    ] {
-        let error = format!("{:#}", load_with(text, config).unwrap_err());
-        assert!(error.contains(expected), "{text}: {error}");
-    }
+    let error = format!(
+        "{:#}",
+        load_file("[permissions]\napproveAll = true\nask = ['bash']").unwrap_err()
+    );
+    assert!(error.contains("permissions.ask must be empty"), "{error}");
 }
 
 #[test]
