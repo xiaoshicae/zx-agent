@@ -206,6 +206,7 @@ impl ConfiguredAgent {
     /// Reads the project's instructions and starts the session's executor, such as a
     /// container; one that cannot start is reported before the session's file is created.
     pub async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
+        // Resolving the directory is two synchronous reads of metadata.
         let options = SessionOptions::new(self.new_session_cwd(cwd)?);
         self.agent.create_session(options).await
     }

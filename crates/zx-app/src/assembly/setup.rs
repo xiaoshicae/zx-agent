@@ -66,7 +66,9 @@ impl SessionSetup for PerSession {
         SECTION_NAMES.map(String::from).into_iter().chain(host).collect()
     }
 
-    /// Startup reads, then the start of the session's executor, such as its container.
+    /// Each time a session is made or opened: a look at its working directory and a read of
+    /// the project's instructions, synchronous but small and bounded by the instructions' size
+    /// limit; then the start of the session's executor, such as its container.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts> {
         let cwd = Path::new(&header.cwd);
         // A new session's directory was just resolved; one that is opened again may have

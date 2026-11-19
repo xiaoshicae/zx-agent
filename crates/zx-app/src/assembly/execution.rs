@@ -78,6 +78,8 @@ impl ExecutorFactory for Container {
 
     /// Configuration errors are reported before the container starts.
     async fn start(&self, session: ExecutorSession<'_>) -> Result<Arc<dyn Executor>> {
+        // A few synchronous reads of metadata: the location's parts that do not exist yet, and
+        // the real path of the rest.
         check_session_outside(session.location, session.cwd)?;
         let config = ContainerConfig {
             label: session.id.into(),
