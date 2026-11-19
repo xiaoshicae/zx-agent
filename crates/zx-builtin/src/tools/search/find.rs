@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes, search,
+    VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, glob_of, positive, quote, ripgrep_excludes, search,
     search_path,
 };
 use crate::ai::ToolDef;
@@ -17,6 +17,10 @@ use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// Paths shown by default (pi: find's `DEFAULT_LIMIT`).
 const FIND_LIMIT: usize = 1000;
+/// In a glob, any number of directories, none included.
+const ANY_DEPTH: &str = "**/";
+/// The most [`ANY_DEPTH`] in one glob: each doubles the patterns find is given.
+const MAX_ANY_DEPTH: usize = 4;
 
 /// Finds files whose paths match a glob.
 pub struct FindTool {
@@ -46,8 +50,14 @@ struct FindArgs {
 impl FindArgs {
     fn parse(args: &Value) -> Result<Self, String> {
         let args: Self = parse_args(args)?;
-        if args.pattern.trim().is_empty() {
+        let glob = glob_of(&args.pattern);
+        if glob.is_empty() {
             return Err("pattern is empty".into());
+        }
+        if glob.matches(ANY_DEPTH).count() > MAX_ANY_DEPTH {
+            return Err(format!(
+                "pattern has more than {MAX_ANY_DEPTH} `{ANY_DEPTH}`; write one with fewer"
+            ));
         }
         positive(args.limit, FIND_LIMIT, "limit")?;
         Ok(args)
@@ -57,31 +67,55 @@ impl FindArgs {
     /// `find`, sorted, at most `limit + 1` paths.
     fn script(&self, limit: usize) -> String {
         let directory = quote(&search_path(self.path.as_deref()));
-        let pattern = self.pattern.trim();
-        // find matches a pattern without a slash against the name; one with a slash against
-        // the path from the search directory, where `*` also matches `/`, so `**/` can go.
-        let test = if pattern.contains('/') {
-            let path = pattern.trim_start_matches("./").replace("**/", "");
-            format!("-path {}", quote(&format!("./{path}")))
-        } else {
-            format!("-name {}", quote(pattern))
-        };
-        let rg = format!(
-            "rg --no-config --files --hidden --color=never --glob {} {}",
-            quote(pattern),
-            ripgrep_excludes()
-        );
-        let prune = VCS_DIRECTORIES
-            .iter()
-            .map(|directory| format!("-name {directory}"))
-            .collect::<Vec<_>>()
-            .join(" -o ");
-        let find = format!("find . \\( {prune} \\) -prune -o {test} -type f -print | sed 's|^\\./||'");
+        let glob = glob_of(&self.pattern);
         format!(
             "cd -- {directory} || exit 2; {} | LC_ALL=C sort | {}",
-            choose_engine(&rg, "find", &find),
+            choose_engine(&ripgrep(glob), "find", &posix_find(glob)),
             first_lines(limit)
         )
+    }
+}
+
+/// `rg --files` for the paths `glob` matches.
+fn ripgrep(glob: &str) -> String {
+    format!(
+        "rg --no-config --files --hidden --color=never --glob {} {}",
+        quote(glob),
+        ripgrep_excludes()
+    )
+}
+
+/// POSIX find for the paths `glob` matches, printed as ripgrep prints them, without `./`.
+fn posix_find(glob: &str) -> String {
+    // find matches a pattern without a slash against the name, one with a slash against the
+    // path from the search directory.
+    let test = if glob.contains('/') {
+        let paths: Vec<String> = find_paths(glob)
+            .iter()
+            .map(|path| format!("-path {}", quote(&format!("./{path}"))))
+            .collect();
+        format!("\\( {} \\)", paths.join(" -o "))
+    } else {
+        format!("-name {}", quote(glob))
+    };
+    let prune = VCS_DIRECTORIES
+        .iter()
+        .map(|directory| format!("-name {directory}"))
+        .collect::<Vec<_>>()
+        .join(" -o ");
+    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | sed 's|^\\./||'")
+}
+
+/// The patterns that find's `-path` takes for `glob`, which together match what it matches.
+/// In find `*` also matches `/`, so each [`ANY_DEPTH`] is either nothing or `*/`, one
+/// directory or more: twice as many patterns for each, which [`MAX_ANY_DEPTH`] bounds.
+fn find_paths(glob: &str) -> Vec<String> {
+    match glob.split_once(ANY_DEPTH) {
+        None => vec![glob.to_string()],
+        Some((before, after)) => find_paths(after)
+            .into_iter()
+            .flat_map(|rest| [format!("{before}{rest}"), format!("{before}*/{rest}")])
+            .collect(),
     }
 }
 
@@ -152,6 +186,54 @@ mod tests {
     }
 
     #[test]
+    fn a_glob_that_starts_at_the_search_directory_reaches_ripgrep_without_the_dot() {
+        let script = FindArgs::parse(&json!({"pattern": "./a/*.txt"})).unwrap().script(10);
+        assert!(script.contains("--glob 'a/*.txt'"), "{script}");
+    }
+
+    #[test]
+    fn a_glob_names_any_depth_a_few_times_at_most() {
+        let pattern = |times: usize| json!({"pattern": format!("{}x", "**/".repeat(times))});
+        assert!(FindArgs::parse(&pattern(MAX_ANY_DEPTH)).is_ok());
+        let error = FindArgs::parse(&pattern(MAX_ANY_DEPTH + 1)).err().unwrap();
+        assert_eq!(error, "pattern has more than 4 `**/`; write one with fewer");
+    }
+
+    /// The paths POSIX find prints for `glob` in a directory that holds `files`, sorted.
+    #[cfg(unix)]
+    fn found_by_find(files: &[&str], glob: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        for file in files {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let output = std::process::Command::new("sh")
+            .args(["-c", &format!("{} | LC_ALL=C sort", posix_find(glob))])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.stderr.is_empty(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_matches_a_name_under_any_number_of_directories() {
+        let files = ["b.txt", "a/b.txt", "a/x/b.txt", "a/x/c.txt", "z/b.txt"];
+        assert_eq!(
+            found_by_find(&files, "**/b.txt"),
+            ["a/b.txt", "a/x/b.txt", "b.txt", "z/b.txt"]
+        );
+        assert_eq!(found_by_find(&files, "a/**/b.txt"), ["a/b.txt", "a/x/b.txt"]);
+        assert_eq!(found_by_find(&files, "a/**/x/**/*.txt"), ["a/x/b.txt", "a/x/c.txt"]);
+    }
+
+    #[test]
     fn version_control_is_excluded_after_the_models_glob() {
         let script = FindArgs::parse(&json!({"pattern": "*"})).unwrap().script(10);
         let model = script.find("--glob '*'").unwrap();
@@ -162,6 +244,7 @@ mod tests {
     #[test]
     fn a_blank_pattern_is_refused() {
         assert!(FindArgs::parse(&json!({"pattern": " "})).is_err());
+        assert!(FindArgs::parse(&json!({"pattern": "./"})).is_err());
         assert!(FindArgs::parse(&json!({"pattern": "*.rs", "limit": 0})).is_err());
     }
 }

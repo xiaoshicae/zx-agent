@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    MAX_LINE_BYTES, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes,
-    search, search_path,
+    MAX_LINE_BYTES, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, glob_of, positive, quote,
+    ripgrep_excludes, search, search_path,
 };
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -85,7 +85,7 @@ impl GrepArgs {
         } else {
             grep.push("-E".into());
         }
-        if let Some(glob) = self.glob.as_deref().filter(|glob| !glob.trim().is_empty()) {
+        if let Some(glob) = self.glob.as_deref().map(glob_of).filter(|glob| !glob.is_empty()) {
             rg.push(format!("--glob {}", quote(glob)));
             // grep matches --include against file names only.
             let name = glob.rsplit('/').next().unwrap_or(glob);
@@ -177,6 +177,14 @@ mod tests {
         let model = script.find("--glob '*'").unwrap();
         let excluded = script.find("--glob '!.git'").unwrap();
         assert!(model < excluded, "{script}");
+    }
+
+    #[test]
+    fn a_glob_that_starts_at_the_search_directory_reaches_ripgrep_without_the_dot() {
+        let script = GrepArgs::parse(&json!({"pattern": "x", "glob": "./src/*.rs"}))
+            .unwrap()
+            .script(10);
+        assert!(script.contains("--glob 'src/*.rs'"), "{script}");
     }
 
     #[test]

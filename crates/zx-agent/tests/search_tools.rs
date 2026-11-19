@@ -191,6 +191,30 @@ async fn find_matches_names_at_any_depth_and_paths_with_a_slash() {
 }
 
 #[tokio::test]
+async fn find_matches_a_name_below_any_number_of_directories() {
+    let dir = project();
+
+    let anywhere = find(dir.path(), json!({"pattern": "**/util.rs"})).await.unwrap();
+    let below = find(dir.path(), json!({"pattern": "src/**/util.rs"})).await.unwrap();
+
+    assert_eq!(lines(&anywhere), ["src/nested/util.rs"]);
+    assert_eq!(lines(&below), ["src/nested/util.rs"]);
+}
+
+#[tokio::test]
+async fn a_glob_may_start_at_the_search_directory() {
+    let dir = project();
+
+    let found = find(dir.path(), json!({"pattern": "./src/**/*.rs"})).await.unwrap();
+    let matched = grep(dir.path(), json!({"pattern": "hello", "glob": "./src/**/*.rs"}))
+        .await
+        .unwrap();
+
+    assert_eq!(lines(&found), ["src/main.rs", "src/nested/util.rs"]);
+    assert_eq!(lines(&matched), ["src/nested/util.rs:1:pub fn hello() {}"]);
+}
+
+#[tokio::test]
 async fn find_includes_dotfiles_skips_version_control_and_shows_at_most_the_limit() {
     let dir = project();
     let all = find(dir.path(), json!({"pattern": "*"})).await.unwrap();
