@@ -14,6 +14,7 @@
 //! - `process`: exit codes, and what every subcommand writes to its outputs, about signals and
 //!   the trace export too
 //! - `render`: how calls, results, times and sessions are shown
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 
 mod acp;
 mod application;
@@ -24,6 +25,8 @@ mod render;
 mod run;
 mod session_file;
 mod sessions;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 

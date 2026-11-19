@@ -137,20 +137,14 @@ fn new_file(original: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
+    use crate::test_support;
 
     fn session(id: &str, last_activity_ms: u64) -> SessionInfo {
         SessionInfo {
-            id: id.into(),
             cwd: "/w".into(),
-            started_ms: 0,
             last_activity_ms,
-            messages: 0,
-            first_prompt: None,
-            name: None,
-            labels: BTreeMap::new(),
+            ..test_support::session(id)
         }
     }
 

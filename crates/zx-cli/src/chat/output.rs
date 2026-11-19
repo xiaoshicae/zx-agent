@@ -350,23 +350,17 @@ fn tone(severity: Severity) -> Tone {
 mod tests {
     use serde_json::{Value, json};
     use zx_agent::builtin::tools::{EDIT_FILE, PATCH_DETAIL};
+    use zx_agent::events::RunOutcome;
 
     use super::*;
+    use crate::test_support;
 
     #[test]
     fn the_turn_line_omits_tokens_the_provider_did_not_report() {
-        use zx_agent::ai::Usage;
-        use zx_agent::events::RunOutcome;
         let mut report = RunReport {
-            outcome: RunOutcome::Completed,
-            final_text: String::new(),
             model_requests: 2,
             retries: 1,
-            usage: Usage::default(),
-            tool_usage: std::collections::BTreeMap::new(),
-            denied_calls: 0,
-            error: None,
-            session_id: "session".into(),
+            ..test_support::report(RunOutcome::Completed)
         };
         assert_eq!(
             turn_line(&report, Duration::from_millis(600)),

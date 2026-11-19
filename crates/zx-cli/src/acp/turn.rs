@@ -156,18 +156,12 @@ mod tests {
 
     use super::*;
     use crate::acp::protocol_error;
+    use crate::test_support;
 
     fn report(outcome: RunOutcome, error: Option<&str>) -> RunReport {
         RunReport {
-            outcome,
-            final_text: String::new(),
-            model_requests: 1,
-            retries: 0,
-            usage: Usage::default(),
-            tool_usage: std::collections::BTreeMap::new(),
-            denied_calls: 0,
             error: error.map(str::to_string),
-            session_id: "session".into(),
+            ..test_support::report(outcome)
         }
     }
 

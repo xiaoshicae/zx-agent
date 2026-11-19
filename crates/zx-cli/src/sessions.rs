@@ -66,23 +66,16 @@ fn preview(session: &SessionInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use zx_agent::transcript::SessionName;
 
     use super::*;
+    use crate::test_support;
 
     #[test]
     fn a_preview_shows_the_first_line_and_marks_what_it_leaves_out() {
         let session = |prompt: Option<&str>| SessionInfo {
-            id: String::new(),
-            cwd: String::new(),
-            started_ms: 0,
-            last_activity_ms: 0,
-            messages: 0,
             first_prompt: prompt.map(str::to_string),
-            name: None,
-            labels: BTreeMap::new(),
+            ..test_support::session("")
         };
         assert_eq!(preview(&session(Some("fix the build"))), "fix the build");
         assert_eq!(preview(&session(Some("\nfirst\nsecond"))), "first…");
