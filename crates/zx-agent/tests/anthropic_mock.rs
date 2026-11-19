@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, DEFAULT_API_VERSION};
-use zx_agent::ai::{Message, PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
+use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::events::RunOutcome;
 use zx_testing::mock_server::{MockServer, Reply};
@@ -80,17 +80,7 @@ fn answer(parts: Vec<Vec<Value>>) -> Reply {
 
 fn error_reply(status: u16, headers: &str, kind: &str, message: &str) -> Reply {
     let body = json!({"type": "error", "error": {"type": kind, "message": message}}).to_string();
-    Reply::Raw(format!(
-        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
-        body.len()
-    ))
-}
-
-fn provider_error(runner: &zx_testing::Driven) -> ProviderError {
-    match runner.session().messages().last() {
-        Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
-        other => panic!("expected a failed assistant message: {other:?}"),
-    }
+    Reply::error(status, headers, &body)
 }
 
 #[tokio::test]
@@ -197,7 +187,7 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::Unavailable,
             status: Some(529),
@@ -218,6 +208,6 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
     let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
-    assert_eq!(provider_error(&runner).kind, ProviderErrorKind::Refused);
+    assert_eq!(runner.provider_error().kind, ProviderErrorKind::Refused);
     assert!(report.error.unwrap().contains("the model refused the request (cyber)"));
 }

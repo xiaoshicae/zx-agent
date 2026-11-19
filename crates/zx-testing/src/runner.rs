@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{Message, Provider};
+use zx_agent::ai::{Message, Provider, ProviderError};
 use zx_agent::compaction;
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_agent::input::{Input, PendingInput};
@@ -232,6 +232,15 @@ impl Driven {
         self.session
             .with_transcript(copy_of)
             .expect("the transcript is read between runs")
+    }
+
+    /// The structured error of the failed answer the session ends with. Panics when it ends
+    /// with something else.
+    pub fn provider_error(&self) -> ProviderError {
+        match self.session().messages().last() {
+            Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
+            other => panic!("expected a failed assistant message: {other:?}"),
+        }
     }
 
     /// Read `run` to its end, collecting its events and answering its approval requests.

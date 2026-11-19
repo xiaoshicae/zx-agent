@@ -72,6 +72,12 @@ pub enum Reply {
 }
 
 impl Reply {
+    /// An HTTP error `status` with the JSON `body`, after `headers`, each line of which ends
+    /// with `\r\n`, such as `retry-after: 2\r\n`.
+    pub fn error(status: u16, headers: &str, body: &str) -> Self {
+        Reply::Raw(error_response(status, headers, body))
+    }
+
     /// A plain answer that ends normally.
     pub fn text(text: &str) -> Self {
         Reply::Sse(vec![
@@ -189,11 +195,10 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             stream.shutdown().await.unwrap();
         }
         Reply::Status(code, body) => {
-            let response = format!(
-                "HTTP/1.1 {code} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            stream
+                .write_all(error_response(code, "", body).as_bytes())
+                .await
+                .unwrap();
             stream.shutdown().await.unwrap();
         }
         Reply::Raw(response) => {
@@ -206,6 +211,15 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
 
 fn sse_events(chunks: &[Value]) -> String {
     chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect()
+}
+
+/// An HTTP error response: `status`, then `headers` (lines ending with `\r\n`), then the JSON
+/// `body`, on a connection that closes after it.
+fn error_response(status: u16, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// One request, as the fake records it: `None` when the client closed the connection first.

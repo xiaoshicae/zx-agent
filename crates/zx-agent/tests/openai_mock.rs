@@ -42,20 +42,6 @@ fn setup_with_provider(server: &MockServer, mut settings: OpenAiConfig) -> Runne
     RunnerSetup::new(config)
 }
 
-fn raw_error(status: u16, headers: &str, body: &str) -> Reply {
-    Reply::Raw(format!(
-        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
-        body.len()
-    ))
-}
-
-fn provider_error(runner: &zx_testing::Driven) -> ProviderError {
-    match runner.session().messages().last() {
-        Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
-        other => panic!("expected a failed assistant message: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn response_budget_failure_is_not_retried() {
     let server = MockServer::start(vec![Reply::text(&"x".repeat(256))]).await;
@@ -76,7 +62,7 @@ async fn response_budget_failure_is_not_retried() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::ResourceLimit)
     );
     assert!(report.error.unwrap().contains("response exceeds the 64 byte limit"));
@@ -100,7 +86,7 @@ async fn sse_event_budget_is_enforced() {
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::ResourceLimit)
     );
     assert!(report.error.unwrap().contains("SSE event exceeds the 32 byte limit"));
@@ -120,7 +106,7 @@ async fn http_status_prevents_retries_from_diagnostic_words() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::Other,
             status: Some(400),
@@ -148,7 +134,7 @@ async fn quota_errors_are_not_retried() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::AccessDenied,
             status: Some(429),
@@ -160,7 +146,7 @@ async fn quota_errors_are_not_retried() {
 
 #[tokio::test]
 async fn numeric_retry_after_is_used_by_the_runner() {
-    let server = MockServer::start(vec![raw_error(
+    let server = MockServer::start(vec![Reply::error(
         429,
         "retry-after: 7\r\n",
         r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
@@ -198,7 +184,7 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 
 #[tokio::test]
 async fn large_http_errors_keep_bounded_diagnostics() {
-    let server = MockServer::start(vec![raw_error(400, "", &"x".repeat(128 * 1024))]).await;
+    let server = MockServer::start(vec![Reply::error(400, "", &"x".repeat(128 * 1024))]).await;
     let (runner, _) = setup(&server, Duration::from_secs(10)).build().await;
 
     let report = runner.run("check").await;
@@ -225,7 +211,7 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(report.final_text, "partial");
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::Protocol)
     );
 }
@@ -249,7 +235,7 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
     let error = report.error.unwrap_or_default();
     assert!(error.contains("server_interrupted"), "{error}");
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             code: Some("server_interrupted".into()),
             ..ProviderError::from(ProviderErrorKind::Refused)
@@ -558,7 +544,7 @@ async fn a_key_source_that_does_not_answer_fails_the_request_within_the_idle_tim
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
+    assert_eq!(runner.provider_error(), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error
@@ -591,7 +577,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
+    assert_eq!(runner.provider_error(), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error
