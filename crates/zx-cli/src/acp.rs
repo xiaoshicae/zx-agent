@@ -61,8 +61,6 @@ struct Host {
     /// client's approval is asked for its calls. With it, where the sessions are kept, which
     /// is the session files chat keeps too, or memory with `--no-session`.
     configured: ConfiguredAgent,
-    /// `--cwd`, the directory of a listing that names none; the current one without it.
-    cwd: Option<PathBuf>,
     /// Cancelled when the process is told to stop: every turn then cancels its run.
     stop: CancellationToken,
     /// Each turn holds a sender of this channel while it runs, and nothing is ever sent:
@@ -167,7 +165,7 @@ impl Host {
             )
             .into());
         }
-        let cwd = resolve_cwd(request.cwd.as_deref().or(self.cwd.as_deref()))?;
+        let cwd = self.configured.new_session_cwd(request.cwd.as_deref())?;
         if !self.keeps_files() {
             return Ok(Vec::new());
         }
@@ -358,7 +356,6 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     let (turns, mut turns_ended) = mpsc::channel::<()>(1);
     let connection = client_connection(Arc::new(Host {
         configured,
-        cwd: app.cwd().map(Path::to_path_buf),
         stop: stop.clone(),
         turns: turns.downgrade(),
     }));
