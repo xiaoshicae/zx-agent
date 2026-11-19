@@ -225,7 +225,9 @@ impl Default for Replies {
     }
 }
 
-/// Who may use the server, where its sessions work and how much it runs at once.
+/// Who may use the server, where its sessions work and how much it runs at once. [`Default`]
+/// sets the limits the program `zx-im` has unless its im.toml sets them
+/// (docs/CONFIGURATION.md).
 pub struct ServerConfig {
     /// Where the session of a new conversation works, and goes on working when it is
     /// opened again; the current directory by default.
@@ -238,17 +240,22 @@ pub struct ServerConfig {
     pub approvers: Vec<(String, UserId)>,
     /// Conversations that may run at once; the others wait in arrival order.
     pub max_running: NonZeroUsize,
-    /// Workers held at once, running, queued and idle included; default 128.
+    /// Conversations served at once: running, waiting for a run slot, or idle until their
+    /// session is released. A message that would start one more is not accepted
+    /// ([`Replies::overloaded`]).
     pub max_conversations: NonZeroUsize,
-    /// Pending messages from router admission through inbox, waiting, heard and steering; default 32.
+    /// Messages, other than its commands, that a conversation may have pending at once: from
+    /// their arrival until its session records them or they are dropped. One more is not
+    /// accepted.
     pub max_pending_messages: NonZeroUsize,
-    /// UTF-8 text bytes sharing that admission budget, and the largest inbound message; default 256 KiB.
+    /// UTF-8 bytes of text that a conversation's pending messages may hold together, and so
+    /// the most one message may hold.
     pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
-    /// Limit for each send or update, and for each call to [`statuses`](Self::statuses) and to
-    /// the [`backlog`](Self::backlog) but [`Backlog::keep`]; a call that takes longer counts
-    /// as failed.
+    /// Limit for each call to a channel but [`ImChannel::run`], and for each call to
+    /// [`statuses`](Self::statuses) and to the [`backlog`](Self::backlog) but
+    /// [`Backlog::keep`]; a call that takes longer counts as failed.
     pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave

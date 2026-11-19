@@ -1,4 +1,4 @@
-//! What arrives over Socket Mode, people's messages and button clicks, a thread's history,
+//! What arrives over Socket Mode, messages and button clicks, a thread's history,
 //! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};

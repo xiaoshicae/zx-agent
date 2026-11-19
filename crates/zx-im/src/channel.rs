@@ -35,8 +35,10 @@ use crate::backlog::{self, Backlog, Kept};
 /// app without the permissions, that cannot.
 #[async_trait]
 pub trait ImChannel: Send + Sync {
-    /// Name used in configuration, logs and session paths, such as `"slack"`. Unique among
-    /// the channels of one server.
+    /// Name used in configuration and logs, in the labels of the sessions of its
+    /// conversations ([`SessionKey::labels`](crate::SessionKey::labels)) and in the names of
+    /// the records the server keeps, such as `"slack"`. Unique among the channels of one
+    /// server.
     fn platform(&self) -> &str;
 
     /// Receive from the platform into `inlet` until `cancel`, reconnecting as needed.
@@ -55,9 +57,9 @@ pub trait ImChannel: Send + Sync {
     /// place, as for a message deleted since, is posted as a reply instead of lost.
     async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError>;
 
-    /// What people said in the thread `at` so far, oldest first: at most the `limit` latest
-    /// messages, without those of bots. Read when the bot is first mentioned in a thread
-    /// someone else started. The default reads nothing.
+    /// What was said in the thread `at` so far, other bots' messages included, oldest first:
+    /// at most the `limit` latest messages, without the bot's own. Read when the bot is first
+    /// mentioned in a thread someone else started. The default reads nothing.
     async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
         Ok(Vec::new())
     }
@@ -213,7 +215,8 @@ pub struct Said {
 /// An event from the platform.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inbound {
-    /// A message from a person; see [`ImChannel`] for which messages a channel passes on.
+    /// A message someone posted, a person or another bot; see [`ImChannel`] for which
+    /// messages a channel passes on.
     Message {
         id: MessageId,
         at: Destination,

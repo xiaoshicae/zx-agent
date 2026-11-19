@@ -48,8 +48,8 @@ pub(crate) const EXIT_USAGE: u8 = 2;
 /// The traces' `service.name` when the environment names no service: the program's name.
 const SERVICE_NAME: &str = "zx-im";
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`), and the
-/// messages received and not handled yet (`BacklogFiles`). The dot keeps them apart from the
-/// platform directories, whose encoded names never contain one.
+/// messages received and not handled yet (`BacklogFiles`). The leading dot keeps them apart
+/// from the directories of the sessions, whose names start with `--`.
 const RUNNING_DIR: &str = ".running";
 const BACKLOG_DIR: &str = ".backlog";
 
