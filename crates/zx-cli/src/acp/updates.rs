@@ -266,11 +266,13 @@ impl Updates {
     }
 
     /// The state of the compaction that runs as `run_id`.
-    fn compaction_update(&self, run_id: &str, status: CompactionStatus) {
-        self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
-            CompactionId::new(run_id),
-            status,
-        )));
+    fn compaction_update(&self, run_id: &str, status: CompactionStatus, error: Option<&str>) {
+        let update = CompactionUpdate::new(CompactionId::new(run_id), status);
+        let update = match error {
+            Some(error) => update.error(error.to_string()),
+            None => update,
+        };
+        self.send(SessionUpdate::CompactionUpdate(update));
     }
 }
 
@@ -338,12 +340,15 @@ impl Updates {
             EventKind::HookFailed { hook, phase, error } => {
                 self.notice(NoticeSeverity::Error, format!("Hook {hook} failed in {phase}"), error);
             }
-            EventKind::CompactionStart { .. } => self.compaction_update(&event.run_id, CompactionStatus::InProgress),
-            EventKind::CompactionEnd { .. } => self.compaction_update(&event.run_id, CompactionStatus::Completed),
-            EventKind::CompactionFailed { error, .. } => self.send(SessionUpdate::CompactionUpdate(
-                CompactionUpdate::new(CompactionId::new(event.run_id.as_str()), CompactionStatus::Failed)
-                    .error(error.clone()),
-            )),
+            EventKind::CompactionStart { .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::InProgress, None);
+            }
+            EventKind::CompactionEnd { .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::Completed, None);
+            }
+            EventKind::CompactionFailed { error, .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::Failed, Some(error));
+            }
             EventKind::RunStart { .. }
             | EventKind::RunEnd { .. }
             | EventKind::AttemptStart { .. }

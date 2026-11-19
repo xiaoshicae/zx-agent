@@ -10,10 +10,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[lib]
-name = "zx_im"
-path = "src/lib.rs"
-
 # The program is not documented: its pages would take the place of the library's of the
 # same name.
 [[bin]]

@@ -35,6 +35,7 @@ pub(super) async fn create(configured: &ConfiguredAgent, cwd: &Path) -> Result<S
 async fn locate(configured: &ConfiguredAgent, id: &SessionId, cwd: &Path) -> Result<Session> {
     let open = configured.agent().session(&id.0);
     let (id, place) = (&*id.0, configured.place());
+    // Resolving the directory is a synchronous read of its metadata.
     let cwd = resolve_cwd(Some(cwd))?;
     let directory = place.location(&cwd);
     let unknown = || {

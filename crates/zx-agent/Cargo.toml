@@ -12,10 +12,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[lib]
-name = "zx_agent"
-path = "src/lib.rs"
-
 [features]
 # The scripted provider `ai::faux::FauxProvider`, for an embedder's tests: the feature
 # `testing` of zx-ai.

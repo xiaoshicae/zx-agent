@@ -35,7 +35,8 @@ async fn held_session(place: &SessionPlace) -> Result<Option<SessionInfo>> {
 
 /// Refuse `--cwd`'s directory, `explicit`, when it is another than `session_cwd`, where the
 /// session to continue works: a session goes on in the directory it started in, and `--cwd`
-/// is where new ones work. Without `--cwd` nothing is asked.
+/// is where new ones work. Without `--cwd` nothing is asked; with it, two synchronous reads
+/// of metadata, as the subcommand starts.
 fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
     let Some(explicit) = explicit else {
         return Ok(());

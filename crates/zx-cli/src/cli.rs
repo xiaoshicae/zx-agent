@@ -64,6 +64,12 @@ pub(crate) struct RunArgs {
     pub(crate) deltas: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum OutputMode {
+    Text,
+    Jsonl,
+}
+
 #[derive(Args)]
 pub(crate) struct ChatArgs {
     #[command(flatten)]
@@ -189,12 +195,6 @@ pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs) -> Overrides {
         token_budget: budget.token_budget,
         cost_budget: budget.cost_budget,
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum OutputMode {
-    Text,
-    Jsonl,
 }
 
 #[cfg(test)]

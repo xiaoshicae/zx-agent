@@ -75,7 +75,8 @@ impl Task {
                 file,
             }),
             (None, true, Some(file)) => {
-                // Checked before anything starts: continuing a new session has nothing to answer.
+                // Checked before anything starts, a synchronous look at one path: continuing a new
+                // session has nothing to answer.
                 anyhow::ensure!(
                     file.exists(),
                     "--continue needs an existing session file; {} does not exist",

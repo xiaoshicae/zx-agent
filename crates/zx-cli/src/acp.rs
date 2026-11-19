@@ -173,7 +173,7 @@ impl Host {
                 return cx.spawn({
                     let cx = cx.clone();
                     async move {
-                        let answer = commands::name(&session, name, &cx, &session_id).await;
+                        let answer = commands::name(&cx, &session_id, &session, name).await;
                         responder.respond_with_result(answer.map_err(protocol_error))
                     }
                 });

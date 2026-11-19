@@ -339,7 +339,7 @@ impl Repl<'_> {
     fn set_model(&mut self, next: String) -> Result<Flow> {
         self.built
             .session
-            .set_model(self.built.provider.clone(), next.clone())?;
+            .set_model(Arc::clone(&self.built.provider), next.clone())?;
         self.model = next;
         Ok(self.say(Tone::Dim, &format!("[chat] model={}", visible(&self.model))))
     }

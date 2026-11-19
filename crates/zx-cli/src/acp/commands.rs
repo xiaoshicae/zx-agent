@@ -69,12 +69,13 @@ pub(super) fn offer(cx: &ConnectionTo<Client>, session_id: &SessionId) {
     );
 }
 
-/// Name `session`. The turn it answers ends at once, without a model request.
+/// Name `session`, which the client `cx` knows as `session_id`. The turn it answers ends at
+/// once, without a model request.
 pub(super) async fn name(
-    session: &Session,
-    name: SessionName,
     cx: &ConnectionTo<Client>,
     session_id: &SessionId,
+    session: &Session,
+    name: SessionName,
 ) -> Result<PromptResponse> {
     // The title `session/list` gives the session from now on.
     let title = preview_text(name.as_str());

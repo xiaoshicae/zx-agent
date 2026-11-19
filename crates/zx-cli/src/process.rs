@@ -63,7 +63,8 @@ pub(crate) fn print_json_line(value: &impl serde::Serialize) {
 }
 
 /// Print `text` and a newline on stdout, unlike `println!` without panicking when stdout is
-/// closed.
+/// closed. A synchronous write, also from async code: one line, to a terminal, a pipe or a
+/// file.
 pub(crate) fn print_line(text: &str) {
     let mut out = std::io::stdout().lock();
     // A closed stdout (for example a consumer that exited) leaves nobody to report to; the run
@@ -72,7 +73,7 @@ pub(crate) fn print_line(text: &str) {
 }
 
 /// Print `text` and a newline on stderr, unlike `eprintln!` without panicking when stderr is
-/// closed.
+/// closed. A synchronous write, as [`print_line`]'s.
 pub(crate) fn eprint_line(text: &str) {
     // A closed stderr leaves nobody to tell; the subcommand goes on, and its exit code says
     // how it ended.
