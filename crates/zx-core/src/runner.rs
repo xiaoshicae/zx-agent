@@ -47,8 +47,7 @@ pub(crate) use accounting::RunAccounting;
 pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, PERSIST_FAILED, StepLoop, record_pending_entries};
 pub(crate) use trace::{EventTarget, RunTrace};
 
-/// Bounds for one run. Defaults impose no request or time limit.
-/// Continuation is supplied by a finish_step hook.
+/// Bounds for one run. The defaults impose no request limit, time limit or budget.
 #[derive(Clone, Debug, Default)]
 pub struct RunLimits {
     /// Model requests per run, failed attempts included. `None` disables the limit;
@@ -91,8 +90,8 @@ pub(crate) struct Runner {
 }
 
 impl Runner {
-    /// Create a runner. Each step of a run is recorded in `session` before it takes effect;
-    /// its events follow.
+    /// Create a runner. Each step of a run is recorded in `transcript` before it takes
+    /// effect; its events follow.
     pub(crate) fn new(config: LoopConfig, retry: RetryPolicy, limits: RunLimits, transcript: Transcript) -> Self {
         Self {
             config,

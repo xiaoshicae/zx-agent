@@ -1,5 +1,5 @@
-//! What guards the kernel's calls into host code, such as a hook or a policy: the run's
-//! cancellation as that code sees it, and the bound every such call gets.
+//! What guards the kernel's calls into host code: the run's cancellation as that code sees
+//! it, and the bound that the calls into hooks, policies and summarizers get.
 
 use std::fmt;
 use std::future::Future;

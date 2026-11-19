@@ -1,7 +1,7 @@
 //! Kernel of zx-agent: the agent and its sessions, the runner and the step loop, and the
 //! interfaces the kernel defines for everything scenario-specific (tools, policies, hooks,
-//! session storage, session setup). The `zx-agent` crate re-exports it whole, module by
-//! module.
+//! extensions, summarizers, session storage, session setup). The `zx-agent` crate re-exports
+//! it whole, module by module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
 //! it, named in brackets where it uses any:
@@ -9,7 +9,7 @@
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
 //!   rules, the projection the model sees, and where sessions are kept (pi: SessionManager)
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
-//!   every call into host code
+//!   the calls into hooks, policies and summarizers
 //! - [`tools`]: the tool interface, the tools of a session, and which of them a run offers
 //! - [`input`] (transcript): the messages given to a run and the queues that hold them while
 //!   it runs
@@ -59,8 +59,8 @@
 //!   - records: `transcript.rs` (the rules of an edit), `transcript/projection.rs` (applying
 //!     edits)
 //!   - acts: `hooks.rs` (checking a hook's plan of edits before any is recorded),
-//!     `runner/step_loop/context.rs` (input and hook edits), `runner/run_scope.rs` (omitting
-//!     a failed answer)
+//!     `runner/step_loop/context.rs` (input and hook edits), `runner/failure.rs` (omitting a
+//!     failed answer before another attempt or a continuation)
 //! - **Session names**
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),
 //!     `transcript/storage.rs` (the name a listing shows)
@@ -86,7 +86,7 @@
 //! Embedders make an [`Agent`] from an [`AgentConfig`], ask it for a [`Session`], and read
 //! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],
 //! [`policy::ToolPolicy`], [`hooks::Hook`], [`extensions::Extension`],
-//! [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
+//! [`compaction::Summarizer`], [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
 //! [`transcript::SessionLog`]; approvals are answered through the session. The storage in
 //! memory ships with the kernel; the storage of session files, the built-in tools,
 //! executors, policies and hooks live in the `zx-builtin` crate, providers in crates such as

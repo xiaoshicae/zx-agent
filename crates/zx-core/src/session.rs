@@ -67,8 +67,10 @@ pub enum SessionError {
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
-    /// The session could not record an entry. It closes itself once this operation ends,
-    /// and the agent opens it again from its storage.
+    /// The session could not record an entry. When its storage failed, the session closes
+    /// itself once this operation ends, and the agent opens it again from its storage; an
+    /// entry it refuses before writing, such as a custom record without a custom type, leaves
+    /// it open.
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// No approval request with that ID waits for an answer: it was answered already, nobody

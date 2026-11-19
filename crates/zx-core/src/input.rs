@@ -1,4 +1,5 @@
-//! Messages injected into a running loop, and records an extension asks the loop to keep.
+//! The messages given to a run, the one that starts it and those injected while it runs, the
+//! queues that hold them, and the records an extension asks the loop to keep.
 
 use std::any::Any;
 use std::collections::VecDeque;

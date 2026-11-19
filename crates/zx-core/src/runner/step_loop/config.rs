@@ -76,7 +76,7 @@ impl LoopConfig {
         }
     }
 
-    /// The trace of the run `run_id` of `session`, cancelled by `cancel`: its hooks and
+    /// The trace of the run `run_id` of `transcript`, cancelled by `cancel`: its hooks and
     /// policies are told the session's labels and who sent its latest input, and its hooks
     /// reach this configuration's queues and tool set.
     pub(crate) fn trace(&self, transcript: &Transcript, run_id: String, cancel: CancellationToken) -> RunTrace {
