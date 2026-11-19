@@ -127,12 +127,14 @@ impl Outlet {
             .await
     }
 
-    /// Replace a posted message. A failure is reported to the operator.
-    pub(super) async fn replace(&self, posted: &MessageRef, replacement: Replacement) {
+    /// Replace a posted message; false when it was not replaced. A failure is reported to the
+    /// operator.
+    pub(super) async fn replace(&self, posted: &MessageRef, replacement: &Replacement) -> bool {
         let act = format!("update message {}", posted.id);
         self.shared
-            .bounded(Some(&self.key), &act, self.channel.update(posted, &replacement))
-            .await;
+            .bounded(Some(&self.key), &act, self.channel.update(posted, replacement))
+            .await
+            .is_some()
     }
 
     /// Open the conversation's session, or create its first one. Only that first session,
@@ -253,7 +255,8 @@ impl Outlet {
         }
     }
 
-    /// Replace the status with how the run ended, or post that when no status was posted.
+    /// Replace the status with how the run ended, or post that when no status was posted or
+    /// the status could not be replaced.
     pub(super) async fn answer(
         &self,
         ended: Result<Result<RunReport, SessionError>, JoinError>,
@@ -276,7 +279,15 @@ impl Outlet {
                 // says the work goes on, as it did before statuses were kept; the other order
                 // could have the next start replace this answer.
                 self.shared.forget_status(&self.key, &posted).await;
-                self.replace(&posted, Replacement::Text(answer)).await;
+                let replacement = Replacement::Text(answer);
+                // Forgotten, the status would say the work goes on for good. An update that
+                // failed after the platform took it, as one that timed out may have, shows
+                // the answer twice: better than never.
+                if !self.replace(&posted, &replacement).await
+                    && let Replacement::Text(answer) = replacement
+                {
+                    self.post(answer).await;
+                }
             }
             None => {
                 self.post(answer).await;

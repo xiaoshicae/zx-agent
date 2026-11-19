@@ -1375,6 +1375,30 @@ async fn a_status_that_cannot_be_forgotten_is_reported_and_still_replaced() {
 }
 
 #[tokio::test]
+async fn an_answer_that_cannot_replace_its_status_is_posted_instead() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        updates: Updates::Refused,
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    h.updated(&status, text("answer")).await;
+    h.posted(&thread("m1"), text("answer")).await;
+    assert_eq!(
+        h.event().await,
+        ServerEvent::Failed {
+            key: Some(key("m1")),
+            error: format!("cannot update message {}: update refused", status.id),
+        }
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn statuses_that_cannot_be_read_are_reported_and_the_server_serves() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("answer")],
@@ -2058,6 +2082,33 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
             "user:U-other: fixed it",
             "user:U-asker: confirm?"
         ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_heard_before_a_thread_has_a_session_is_read_with_the_thread_at_the_next_mention() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        // The thread as the platform gives it at the question: the talk heard is in it.
+        history: vec![
+            earlier("t1", OTHER, "the deploy failed"),
+            earlier("m3", OTHER, "any news?"),
+        ],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    // A mention that makes no session.
+    h.say("m2", Some("t1"), "/cancel").await;
+    h.posted(&thread("t1"), text(&h.replies.nothing_to_cancel.clone()))
+        .await;
+    h.say_as(OTHER, "m3", "t1", Addressee::Nobody, "any news?").await;
+    h.say("m4", Some("t1"), "why?").await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(
+        h.requests()[0],
+        ["user:Li: the deploy failed", "user:Li: any news?", "user:U-asker: why?"]
     );
     h.stop().await.unwrap();
 }
