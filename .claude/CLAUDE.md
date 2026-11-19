@@ -22,7 +22,7 @@
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |
 | `zx-app` | 应用层，命令行、IM 服务与其他宿主（如 Web 服务）共用：`config.toml` 与 agent 文件（`config`）、由它们装配 agent 的 `Application`、追踪导出（`otel`）、进程收尾（`shutdown`）。不知道命令行、终端与协议（ACP、IM 平台），不打印，要说的返回给宿主 |
 | `zx-cli` | 程序 `zx-agent`（代码都在库里，`main.rs` 只调用它）：参数、输出与退出码；agent 都经 `zx_app::Application` 得到 |
-| `zx-im` | 程序 `zx-im`（同上）：平台接口 `ImChannel`、按会话分派的 `Server`、各平台（Slack；⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后）、`im.toml`、参数、操作日志与退出码；agent 经 `zx_app::Application` 得到 |
+| `zx-im` | 程序 `zx-im`（同上）：平台接口 `ImChannel` 与由 `im.toml` 的段建出它的 `PlatformFactory`、按会话分派的 `Server`、各平台（Slack；⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后）、`im.toml`、参数、操作日志与退出码；agent 经 `zx_app::Application` 得到，宿主自己的程序经 `Program` 加平台与部件 |
 | `zx-testing` | 各包集成测试共用的测试设施，只作 `[dev-dependencies]`；crate 自己的单元测试不用它，它不依赖 `zx-im` |
 
 设计取舍（改动前先理解原因；括号里是 `docs/ROADMAP.md` 的决策编号）：

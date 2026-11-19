@@ -150,8 +150,9 @@ pub enum ContentBlock {
     Thinking {
         thinking: String,
         /// What the provider needs to send the block back. For OpenAI-compatible servers, the
-        /// response field the text arrived in, such as `reasoning_content`
-        /// (pi: `ThinkingContent.thinkingSignature`).
+        /// response field the text arrived in, such as `reasoning_content`; for the Anthropic
+        /// Messages API, the block's signature, or `redacted:` and the encrypted data of a
+        /// block the API redacted (pi: `ThinkingContent.thinkingSignature`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },

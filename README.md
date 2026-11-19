@@ -94,7 +94,7 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；自动放行之外的调用在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
+`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；自动放行之外的调用在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。别的平台可以在宿主自己的程序里经 `zx_im::Program` 加入（见[作为库使用](docs/LIBRARY.md#im-平台)）。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode

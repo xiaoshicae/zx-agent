@@ -38,8 +38,8 @@ pub(crate) struct Permissions {
     /// Tools denied whatever else says, and commands containing a text.
     pub(crate) deny: Vec<Entry>,
     /// Ask nobody: calls that would wait for an approval run instead, while denials and the
-    /// command policy still apply. Only with container execution, where the container is the
-    /// sandbox, and not together with `ask`.
+    /// command policy still apply. Only where the executor isolates commands, such as the
+    /// container, which the assembly checks, and not together with `ask`.
     pub(crate) approve_all: bool,
 }
 

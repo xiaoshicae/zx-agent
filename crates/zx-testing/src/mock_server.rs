@@ -1,5 +1,7 @@
-//! A local fake OpenAI-compatible server: one scripted reply per connection, every request
-//! recorded. Real HTTP and SSE, no network access or API key.
+//! A local fake model server: one scripted reply per connection, every request recorded.
+//! The replies it builds speak the OpenAI-compatible protocol; [`Reply::Sse`] streams the
+//! events a test gives, such as those of the Anthropic Messages API. Real HTTP and SSE, no
+//! network access or API key.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
