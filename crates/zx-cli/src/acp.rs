@@ -96,12 +96,12 @@ impl Host {
     /// session in it.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
         let open = self.session(id);
-        let (id, place) = (&*id.0, &self.configured.place());
+        let (id, place) = (&*id.0, self.configured.place());
         let cwd = resolve_cwd(Some(cwd))?;
         let directory = place.location(&cwd);
-        let unknown = || match &directory {
-            Some(directory) => unknown_session(id, &format!("no such session in {}", directory.display())),
-            None => unknown_session(id, &format!("no such session in {}", cwd.display())),
+        let unknown = || {
+            let searched = directory.as_deref().unwrap_or(&cwd);
+            unknown_session(id, &format!("no such session in {}", searched.display()))
         };
         if let Some(session) = open {
             // Open in this process, it is still only a session of the directory it works in.
@@ -111,13 +111,10 @@ impl Host {
                 Err(unknown().into())
             };
         }
-        let directory = directory
-            .clone()
-            .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let kept_there = place
-            .path_of(id)
-            .await?
-            .is_some_and(|path| path.parent() == Some(directory.as_path()));
+        let Some(kept) = directory.as_deref() else {
+            return Err(unknown_session(id, "the agent keeps no session files (--no-session)").into());
+        };
+        let kept_there = place.path_of(id).await?.is_some_and(|path| path.parent() == Some(kept));
         if !kept_there {
             return Err(unknown().into());
         }
