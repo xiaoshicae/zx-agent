@@ -3,8 +3,10 @@
 //! agent does and may do. Loading is synchronous, bounded startup I/O; the assembly
 //! (`crate::assembly`) makes agents from what is loaded here.
 //!
-//! - `environment`: `config.toml`: the model and its provider, where commands run, the MCP
-//!   servers, what is known about models, and where long tool results are saved
+//! - `environment`: `config.toml`: the model, where commands run, the MCP servers, what is
+//!   known about models, and where long tool results are saved
+//! - `provider`: its `[provider]` table: which provider reaches the model, and the keys of
+//!   the built-in ones
 //! - `definition`: an agent: the built-in agents, the user's files that replace them, and the
 //!   checks of the result
 //! - `agent_file`: an agent file: TOML front matter and instructions, and how it goes over the
@@ -20,6 +22,7 @@ mod context;
 mod definition;
 mod environment;
 mod permissions;
+mod provider;
 mod skills;
 
 use std::path::{Path, PathBuf};
@@ -29,7 +32,9 @@ use anyhow::{Result, ensure};
 pub(crate) use agent_file::cost_budget;
 pub use definition::Builtin;
 pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
-pub use environment::{Config, ContainerSettings, Execution, McpServer, ProviderSettings};
+pub use environment::{Config, ContainerSettings, Execution, McpServer};
+pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
+pub(crate) use provider::{anthropic_config, openai_config};
 pub(crate) use skills::{READ_SKILL, Skill, validate_skills};
 
 use zx_agent::builtin::files::read_text_file;
@@ -72,4 +77,11 @@ pub fn home() -> Result<Option<PathBuf>> {
 /// path.
 pub fn read_text(path: &Path) -> Result<String> {
     read_text_file(path, MAX_FILE_BYTES)
+}
+
+/// `value` parsed by its type, with `key` naming it in the error.
+fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) -> Result<Option<T>> {
+    value
+        .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
+        .transpose()
 }

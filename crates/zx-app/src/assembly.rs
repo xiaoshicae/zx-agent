@@ -6,6 +6,8 @@
 //! - `settings`: config.toml with the host's model and the variables over it, and the secret
 //!   files to redact
 //! - `mcp`: the MCP servers of config.toml, connected once for every session of a process
+//! - `provider`: the provider of an agent, which the factory registered under the name
+//!   config.toml gives builds
 //! - `agent`: the agent a host builds, and the sessions it creates or resumes with it
 //! - `skills`: read_skill, which the agent registers for its skills
 //! - `setup`: what each session gets for itself: its executor, the tools on it, its store of
@@ -17,6 +19,7 @@ mod agent;
 mod execution;
 mod mcp;
 mod place;
+mod provider;
 mod settings;
 mod setup;
 mod skills;
@@ -39,6 +42,7 @@ use zx_agent::tools::Tool;
 
 pub use agent::{Approvals, ConfiguredAgent};
 pub use place::SessionPlace;
+pub use provider::{BuiltProvider, ProviderFactory, ProviderInput};
 pub use settings::NoModel;
 
 use mcp::McpTools;
@@ -50,10 +54,11 @@ use settings::{Settings, checked_secret_files, secret_files};
 /// are kept in, the host's own storage among them ([`SessionPlace::from_storage`]); no
 /// session is opened at startup.
 ///
-/// A host gives its own parts with two verbs: `add_*` adds one beside the assembly's (tools,
-/// hooks, policies, extensions, prompt sections), `set_*` replaces the one there is (the
-/// summarizer, the hidden variables, the trace export). They are treated as the built-in
-/// ones are, and a name that another part goes by already fails [`build`](Self::build).
+/// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
+/// (tools, hooks, policies, extensions, prompt sections), `set_*` replaces the one there is
+/// (the summarizer, the hidden variables, the trace export), and `register_*` names one
+/// that config.toml chooses by its name (providers). They are treated as the built-in ones
+/// are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
     settings: Settings,
     /// What the host says over the agent: the working directory, the tools and the budgets.
@@ -81,6 +86,9 @@ pub struct Application {
     extensions: Vec<Arc<dyn Extension>>,
     /// What makes the summaries in place of the agent's model, when the host gives it.
     summarizer: Option<Arc<dyn Summarizer>>,
+    /// The providers config.toml can name in `provider.api`: the built-in ones, then the
+    /// host's.
+    providers: Vec<(String, Arc<dyn ProviderFactory>)>,
     /// The queue of changes to each file, which the file tools of every session wait in, so
     /// that two sessions never overwrite each other's edit.
     file_queue: Arc<FileMutationQueue>,
@@ -151,6 +159,7 @@ impl Application {
             policies: Vec::new(),
             extensions: Vec::new(),
             summarizer: None,
+            providers: provider::built_in(),
             file_queue: Arc::default(),
         })
     }
@@ -206,6 +215,14 @@ impl Application {
     /// them.
     pub fn add_extension(mut self, extension: Arc<dyn Extension>) -> Self {
         self.extensions.push(extension);
+        self
+    }
+
+    /// Register `factory` under `name`, the value of `provider.api` that chooses it. `openai`
+    /// and `anthropic` are built in; it builds the provider from the keys of `[provider]`
+    /// that zx-app does not read itself, and checks them.
+    pub fn register_provider(mut self, name: &str, factory: Arc<dyn ProviderFactory>) -> Self {
+        self.providers.push((name.into(), factory));
         self
     }
 

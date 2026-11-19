@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use async_trait::async_trait;
 use serde_json::json;
 use zx_agent::ai::ToolCall;
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -15,7 +16,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::{SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
-use zx_app::{Application, Approvals, Overrides, SessionPlace};
+use zx_app::{Application, Approvals, BuiltProvider, Overrides, ProviderFactory, ProviderInput, SessionPlace};
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
 
@@ -27,8 +28,11 @@ fn configured() -> Config {
         model: Some("configured-model".into()),
         ..Config::default()
     };
-    config.provider.openai.base_url = "http://127.0.0.1:1/v1".into();
-    config.provider.api_key_env = "ZX_APPLICATION_TEST_UNUSED_KEY".into();
+    config
+        .provider
+        .options
+        .insert("baseUrl".into(), "http://127.0.0.1:1/v1".into());
+    config.provider.api_key_env = Some("ZX_APPLICATION_TEST_UNUSED_KEY".into());
     config
 }
 
@@ -55,7 +59,10 @@ async fn host(dir: &Path, front: &str, server: &MockServer) -> Application {
     let secret = dir.join("secret.txt");
     std::fs::write(&secret, SECRET).unwrap();
     let mut config = configured();
-    config.provider.openai.base_url = server.base_url.clone();
+    config
+        .provider
+        .options
+        .insert("baseUrl".into(), server.base_url.clone().into());
     config.secret_files.push(secret);
     let overrides = Overrides {
         cwd: Some(dir.to_path_buf()),
@@ -443,4 +450,94 @@ async fn the_summarizer_a_host_sets_is_the_agents() {
         .unwrap();
     // The kernel refuses it as it makes the agent: it is the one the agent was given.
     assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
+}
+
+/// A provider a host registers: a scripted model that answers with the `answer` of its keys.
+struct Scripted;
+
+impl ProviderFactory for Scripted {
+    fn api_key_env(&self) -> &str {
+        "ZX_APPLICATION_TEST_SCRIPTED_KEY"
+    }
+
+    fn build(&self, input: ProviderInput<'_>) -> anyhow::Result<BuiltProvider> {
+        let answer = input.options["answer"].as_str().unwrap_or_default();
+        Ok(BuiltProvider {
+            provider: Arc::new(FauxProvider::new(vec![FauxStep::text(answer)])),
+            session_cache_key: false,
+        })
+    }
+}
+
+/// `configured()` whose provider is `api`, with the keys of `text`.
+fn with_provider(api: &str, text: &str) -> Config {
+    let mut config = configured();
+    config.provider.api = api.into();
+    config.provider.options = toml::from_str(text).unwrap();
+    config
+}
+
+/// The answer of the agent of `app` to one prompt.
+async fn answer_of(app: Application) -> String {
+    let agent = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    let session = agent.create(None).await.unwrap();
+    session.send("hi").unwrap().wait().await.final_text
+}
+
+#[tokio::test]
+async fn config_toml_names_the_provider_a_host_registers_and_gives_it_its_keys() {
+    let config = with_provider("scripted", "answer = 'scripted hello'");
+    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_provider("scripted", Arc::new(Scripted));
+    assert_eq!(answer_of(app).await, "scripted hello");
+}
+
+#[tokio::test]
+async fn the_anthropic_provider_is_built_in() {
+    let server = MockServer::start(vec![Reply::Sse(vec![
+        json!({"type": "message_start", "message": {"id": "m", "model": "configured-model", "usage": {"input_tokens": 3}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "from claude"}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+        json!({"type": "message_stop"}),
+    ])])
+    .await;
+    let root = server.base_url.trim_end_matches("/v1");
+    let config = with_provider("anthropic", &format!("baseUrl = '{root}'"));
+    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap();
+    assert_eq!(answer_of(app).await, "from claude");
+    let request = &server.requests()[0];
+    assert_eq!(request.headers.lines().next(), Some("post /v1/messages"));
+    assert_eq!(request.body["model"], json!("configured-model"));
+}
+
+#[tokio::test]
+async fn a_provider_name_that_is_unknown_or_taken_fails_the_build() {
+    let config = with_provider("nowhere", "");
+    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap();
+    let error = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .err()
+        .unwrap();
+    let expected = "provider.api \"nowhere\": no provider is registered under that name; use one of openai, anthropic";
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
+
+    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_provider("openai", Arc::new(Scripted));
+    let error = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .err()
+        .unwrap();
+    let expected = "more than one provider is registered under the name \"openai\"";
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
 }
