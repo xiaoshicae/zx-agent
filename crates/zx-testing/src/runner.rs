@@ -228,7 +228,7 @@ impl Driven {
     }
 
     /// A copy of the session's transcript as it is now, to read.
-    pub fn session(&self) -> Transcript {
+    pub fn transcript(&self) -> Transcript {
         self.session
             .with_transcript(copy_of)
             .expect("the transcript is read between runs")
@@ -237,7 +237,7 @@ impl Driven {
     /// The structured error of the failed answer the session ends with. Panics when it ends
     /// with something else.
     pub fn provider_error(&self) -> ProviderError {
-        match self.session().messages().last() {
+        match self.transcript().messages().last() {
             Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
             other => panic!("expected a failed assistant message: {other:?}"),
         }
@@ -394,7 +394,7 @@ pub async fn run_prompt_with(
     .build()
     .await;
     let report = runner.run(prompt).await;
-    *context = runner.session().messages();
+    *context = runner.transcript().messages();
     (report, sink)
 }
 

@@ -591,7 +591,7 @@ async fn results_of_a_batch_cancelled_at_its_first_call(mode: ExecutionMode) -> 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(act.runs.load(Ordering::SeqCst), 0);
     assert!(!hook_failed(&events.events()), "{:?}", events.events());
-    results(&session.session().messages())
+    results(&session.transcript().messages())
 }
 
 /// Every call of the answer has a result that says the run was cancelled before it started.
@@ -631,7 +631,7 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
     // so in the kernel's words, which no hook withholds.
     assert_eq!((report.outcome, report.denied_calls), (RunOutcome::Cancelled, 0));
     assert_eq!(act.calls.load(Ordering::SeqCst), 0);
-    let transcript = session.session();
+    let transcript = session.transcript();
     let started = transcript
         .entries()
         .iter()

@@ -867,7 +867,7 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
 
         let report = runner.compact().await.unwrap();
 
-        let store = &runner.session();
+        let store = &runner.transcript();
         let request_bytes = match summary_requests(store).get(sent_before) {
             Some(id) => input_bytes(store, id),
             None => 0,

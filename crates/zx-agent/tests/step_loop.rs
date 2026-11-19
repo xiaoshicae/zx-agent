@@ -108,7 +108,7 @@ async fn a_run_goes_by_what_its_tools_declared_when_the_session_was_made() {
         "the run asks the tool nothing more"
     );
     let started = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| entry.kind() == "tool_call_started")
@@ -497,7 +497,7 @@ async fn steering_enters_after_the_step_and_follow_ups_after_the_answer() {
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -525,7 +525,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -561,7 +561,7 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         )
     );
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:go", "assistant:calls[c1]", "tool:c1=ok"]
     );
     assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("also check disk")]);

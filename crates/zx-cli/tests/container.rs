@@ -510,7 +510,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
     runner.run("again").await;
 
     let results: Vec<(String, String)> = runner
-        .session()
+        .transcript()
         .messages()
         .into_iter()
         .filter_map(|message| match message {

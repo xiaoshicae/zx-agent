@@ -58,7 +58,7 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.usage.total_cost, Some(40.0), "two answers at 20 each");
     let costs: Vec<Option<f64>> = runner
-        .session()
+        .transcript()
         .messages()
         .iter()
         .filter_map(|message| match message {
@@ -159,7 +159,7 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     );
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.usage.total_cost, Some(20.0), "so is the answer");
-    let recorded = runner.session().latest_compaction().unwrap().usage.total_cost;
+    let recorded = runner.transcript().latest_compaction().unwrap().usage.total_cost;
     assert_eq!(recorded, Some(20.0), "the compaction record carries the cost");
 }
 
@@ -466,11 +466,11 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     runner.run("go").await;
     assert_eq!(provider.requests()[0].cache_key.as_deref(), Some("session-7"));
     let replayed = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .find_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(runner.session().replay_request(&started.id).unwrap().1),
+            Entry::RequestStarted(started) => Some(runner.transcript().replay_request(&started.id).unwrap().1),
             _ => None,
         })
         .unwrap();

@@ -319,7 +319,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
     assert_eq!(
         zx_testing::read_session_file(&path).unwrap().messages(),
-        runner.session().messages()
+        runner.transcript().messages()
     );
 }
 
@@ -347,10 +347,10 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
     assert!(provider.requests().is_empty());
-    assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
+    assert_eq!(summarize(&runner.transcript().messages()), ["user:go"]);
     assert!(
         !runner
-            .session()
+            .transcript()
             .entries()
             .iter()
             .any(|entry| matches!(entry, Entry::ContextEdit(_)))
@@ -382,8 +382,8 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
         (RunOutcome::Failed, 0, 0)
     );
     assert!(provider.requests().is_empty());
-    assert_eq!(runner.session().entries().len(), 2);
-    assert!(runner.session().messages().is_empty());
+    assert_eq!(runner.transcript().entries().len(), 2);
+    assert!(runner.transcript().messages().is_empty());
 }
 
 #[tokio::test]
@@ -497,7 +497,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
         let (runner, events) = RunnerSetup::new(config).build().await;
         let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
-        let serialized = serde_json::to_string(runner.session().entries()).unwrap();
+        let serialized = serde_json::to_string(runner.transcript().entries()).unwrap();
         assert!(!serialized.contains("raw-tool-secret"));
         assert!(
             !serde_json::to_string(&events.events())
@@ -990,7 +990,7 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
     });
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
-    assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
+    assert_eq!(mentions(&runner.transcript().messages(), "rotate the logs"), 0);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:next"]);
@@ -1026,7 +1026,7 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
         () = hold.holding.notified() => {}
     }
 
-    assert_eq!(mentions(&runner.session().messages(), "check the disk"), 0);
+    assert_eq!(mentions(&runner.transcript().messages(), "check the disk"), 0);
     hold.released.store(true, Ordering::SeqCst);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -1350,7 +1350,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
 
     runner.run("go").await;
 
-    let session_id = runner.session().header().id.clone();
+    let session_id = runner.transcript().header().id.clone();
     let run_id = events.envelopes()[0].run_id.clone();
     let seen = probe.seen.lock().unwrap().clone();
     let mut methods: Vec<&str> = seen.iter().map(|(method, ..)| *method).collect();

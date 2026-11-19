@@ -183,7 +183,7 @@ async fn runs_a_tool_and_answers_from_its_output() {
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     assert!(report.final_text.contains('7'), "{}", report.final_text);
-    let ran = runner.session().messages().into_iter().any(
+    let ran = runner.transcript().messages().into_iter().any(
         |message| matches!(message, Message::ToolResult(result) if !result.is_error && result.content.contains('7')),
     );
     assert!(ran, "the bash tool ran successfully");
@@ -201,7 +201,7 @@ async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
     print_usage("policy denial", &report);
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
-    let denied = runner.session().messages().into_iter().any(|message| {
+    let denied = runner.transcript().messages().into_iter().any(|message| {
         matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Not executed: approval denied"))
     });
     assert!(denied, "the model saw a policy denial");

@@ -399,7 +399,7 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
     let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     let Some(Message::Assistant(answer)) = messages.last() else {
         panic!("the aborted answer is kept: {messages:?}");
     };
@@ -602,12 +602,12 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
     // The audit replays the request with its key.
     let replayed = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .find_map(|entry| match entry {
             zx_agent::transcript::Entry::RequestStarted(started) => {
-                Some(runner.session().replay_request(&started.id).unwrap())
+                Some(runner.transcript().replay_request(&started.id).unwrap())
             }
             _ => None,
         })

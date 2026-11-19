@@ -542,7 +542,7 @@ async fn cancellation_skips_writes_and_reads() {
 
     // The hooks of a cancelled run are not called: the output is withheld, and not stored.
     assert_eq!(report.outcome, RunOutcome::Cancelled, "{report:?}");
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     let Some(Message::ToolResult(result)) = messages.last() else {
         panic!("tool result: {messages:?}");
     };

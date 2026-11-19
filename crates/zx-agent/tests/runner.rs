@@ -84,7 +84,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.session_id, runner.session().header().id);
+    assert_eq!(report.session_id, runner.transcript().header().id);
     let rows: Vec<Row> = table.try_iter().collect();
     let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(rows.len()).unwrap()).collect::<Vec<_>>());
@@ -97,7 +97,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     assert!(kinds.contains(&"tool_call_started"), "{kinds:?}");
 
     let loaded = LoadedSession {
-        header: runner.session().header().clone(),
+        header: runner.transcript().header().clone(),
         records: rows.iter().map(|row| row.json.clone()).collect(),
         incomplete_tail_bytes: 0,
     };
@@ -106,8 +106,8 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
         id: loaded.header.id.clone(),
         storage: Arc::new(LogStorage::holding(loaded, TableLog(sender))),
     };
-    let entries = runner.session().entries().to_vec();
-    let history = runner.session().messages();
+    let entries = runner.transcript().entries().to_vec();
+    let history = runner.transcript().messages();
     let next = Arc::new(FauxProvider::new([FauxStep::text("again")]));
     let (runner, _) = RunnerSetup {
         session: reloaded,
@@ -115,7 +115,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     }
     .build()
     .await;
-    assert_eq!(runner.session().entries(), entries);
+    assert_eq!(runner.transcript().entries(), entries);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let mut expected = history;
@@ -587,7 +587,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
     assert_eq!(lines[5]["targetId"], lines[4]["id"]);
     assert_eq!(lines[5]["replacement"], Value::Null);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:diagnose", "assistant:ok"]
     );
 }
@@ -705,7 +705,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
             truncated: false
         }
     );
-    assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
+    assert_eq!(summarize(&runner.transcript().messages()), ["user:go"]);
     assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("later")]);
 }
 
@@ -725,7 +725,7 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
     runner.run("diagnose").await;
 
     let edit = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .find_map(|entry| match entry {
@@ -804,7 +804,7 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     let report = runner.run("second").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    let inputs: Vec<String> = summarize(&runner.session().messages())
+    let inputs: Vec<String> = summarize(&runner.transcript().messages())
         .into_iter()
         .filter(|message| message.starts_with("user:"))
         .collect();
@@ -1138,7 +1138,7 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
     let envelopes = events.envelopes();
     let seqs: Vec<u64> = envelopes.iter().map(|event| event.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(envelopes.len()).unwrap()).collect::<Vec<_>>());
-    let session_id = runner.session().header().id.clone();
+    let session_id = runner.transcript().header().id.clone();
     for event in &envelopes {
         assert_eq!(event.schema_version, EVENT_SCHEMA_VERSION);
         assert_eq!(event.run_id, envelopes[0].run_id);
@@ -1199,7 +1199,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
         })
         .collect();
     let recorded: Vec<String> = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -1273,7 +1273,7 @@ async fn messages_and_context_edits_name_their_session_entries() {
         })
         .collect();
     let recorded: Vec<(&'static str, String)> = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(_) | Entry::ContextEdit(_)))

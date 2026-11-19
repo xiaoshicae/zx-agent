@@ -102,7 +102,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     assert_eq!(report.model_requests, 2);
     assert_eq!(report.usage.total_tokens, 30);
     assert_eq!(provider.requests().len(), 2);
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     assert_eq!(provider.requests()[1].messages, messages[..messages.len() - 1]);
     // The summary request counts against the budget, but only the task request is a step.
     let steps: Vec<_> = events
@@ -192,7 +192,7 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     assert_eq!(report.usage.total_tokens, 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
-    assert!(runner.session().latest_compaction().is_some());
+    assert!(runner.transcript().latest_compaction().is_some());
 }
 
 #[tokio::test]
@@ -227,7 +227,7 @@ async fn a_summary_request_counts_against_the_token_budget() {
     assert_eq!(report.usage.input_and_output(), 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
-    assert!(runner.session().latest_compaction().is_some());
+    assert!(runner.transcript().latest_compaction().is_some());
 }
 
 #[tokio::test]
@@ -243,7 +243,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
     assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     assert_eq!(provider.requests().len(), 1);
     // Request checkpoints are always written; no compaction record may appear.
-    assert!(runner.session().entries().iter().all(|entry| matches!(
+    assert!(runner.transcript().entries().iter().all(|entry| matches!(
         entry,
         Entry::Message(_) | Entry::RequestConfig(_) | Entry::RequestStarted(_)
     )));
@@ -347,10 +347,10 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         assert_eq!(report.retries, 0);
         assert!(report.final_text.is_empty());
         assert_eq!(provider.requests().len(), 1);
-        assert_eq!(&runner.session().raw_projection()[..before.len()], before);
-        assert!(runner.session().latest_compaction().is_none());
+        assert_eq!(&runner.transcript().raw_projection()[..before.len()], before);
+        assert!(runner.transcript().latest_compaction().is_none());
         assert!(matches!(
-            runner.session().entries().last(),
+            runner.transcript().entries().last(),
             Some(Entry::CompactionFailed(_))
         ));
     }
@@ -538,7 +538,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.model_requests, 0);
     assert!(provider.requests().is_empty());
-    assert!(matches!(&runner.session().messages()[0], Message::User{content,..} if content == &input));
+    assert!(matches!(&runner.transcript().messages()[0], Message::User{content,..} if content == &input));
 }
 
 #[tokio::test]
@@ -584,7 +584,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     let source = serde_json::to_string(&provider.requests()[0].messages).unwrap();
     assert!(source.contains("corrected corrected"));
     assert!(!source.contains("observed observed"));
-    let entries = runner.session().entries().to_vec();
+    let entries = runner.transcript().entries().to_vec();
     assert!(matches!(entries[3], Entry::ContextEdit(_)));
     assert!(matches!(entries[4], Entry::CompactionStarted(_)));
 }
@@ -646,7 +646,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
     assert!(error.contains("transform_context"), "{error}");
     assert!(!error.contains("cannot persist"), "{error}");
     assert_eq!(provider.requests().len(), 1, "only the summary request was sent");
-    let entries = runner.session().entries().to_vec();
+    let entries = runner.transcript().entries().to_vec();
     assert!(
         !entries.iter().any(|entry| matches!(entry, Entry::ContextEdit(_))),
         "no edit of the rejected plan may be written"
@@ -711,9 +711,9 @@ async fn summary_timeout_is_bounded_and_keeps_original_context() {
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("timed out"));
-    assert_eq!(runner.session().messages(), before);
+    assert_eq!(runner.transcript().messages(), before);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
 }
@@ -751,7 +751,7 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("exceeds 65536"));
-    assert!(runner.session().latest_compaction().is_none());
+    assert!(runner.transcript().latest_compaction().is_none());
 }
 
 /// Compact the seeded session once. The model answers with the blocks `answer` makes from
@@ -770,7 +770,7 @@ async fn compact_answering(answer: impl FnOnce(&str) -> Vec<ContentBlock>) -> (R
     .build()
     .await;
     let report = runner.compact().await.unwrap();
-    let summarized = runner.session().latest_compaction().is_some();
+    let summarized = runner.transcript().latest_compaction().is_some();
     (report, summarized)
 }
 
@@ -908,7 +908,7 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     assert_eq!(report.model_requests, 1);
     assert_eq!(provider.requests().len(), 1);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
 }
@@ -949,7 +949,7 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
     assert_eq!(context[2], "assistant:calls[c2]");
     assert!(context[3].starts_with("tool:c2=xxx"), "{}", context[3]);
     // The session alone rebuilds every request, the summary's and the one after it included.
-    assert_eq!(replayed_requests(&runner.session()), requests);
+    assert_eq!(replayed_requests(&runner.transcript()), requests);
 }
 
 #[tokio::test]

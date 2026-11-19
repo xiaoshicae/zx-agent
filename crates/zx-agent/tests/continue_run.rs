@@ -48,7 +48,7 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
     assert_eq!(report.final_text, "answer");
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:question"]);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:question", "assistant:answer"]
     );
 }
@@ -139,12 +139,12 @@ async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
     // The prompt is sent once, and the failed answer not at all.
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:question"]);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:question", "assistant:second try"]
     );
     // The failed answer stays in the session for the audit.
     let failed_answers = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(m) if matches!(&m.message, Message::Assistant(a) if a.stop_reason == StopReason::Error)))
