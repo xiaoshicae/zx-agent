@@ -72,9 +72,7 @@ impl StepLoop<'_> {
     /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
         let config = self.scope.config;
-        let mut events = config
-            .provider
-            .stream(request, self.scope.target.trace.cancel().clone());
+        let mut events = config.provider.stream(request, self.scope.cancel().clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
@@ -87,7 +85,7 @@ impl StepLoop<'_> {
                 StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
-        let stop = if self.scope.target.trace.cancel().is_cancelled() {
+        let stop = if self.scope.is_cancelled() {
             StopReason::Aborted
         } else {
             StopReason::Error

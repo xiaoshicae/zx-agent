@@ -6,6 +6,7 @@
 //! summarize it (pi: AgentSession writes on `message_end`).
 
 use anyhow::Context;
+use tokio_util::sync::CancellationToken;
 
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
@@ -87,7 +88,17 @@ pub(super) struct RunScope<'a> {
     pub(super) cost_budget: Option<f64>,
 }
 
-impl RunScope<'_> {
+impl<'a> RunScope<'a> {
+    /// The run's cancellation.
+    pub(super) fn cancel(&self) -> &'a CancellationToken {
+        self.target.trace.cancel()
+    }
+
+    /// Whether the run was cancelled.
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancel().is_cancelled()
+    }
+
     /// Record the custom entries extensions queued since the last step (pi: `appendEntry`),
     /// each announced as a `custom_entry` event. An error means the session could not record
     /// one.
@@ -167,6 +178,7 @@ impl RunScope<'_> {
             summarizer: self.config.summarizer.as_deref(),
             compaction: self.compaction,
             events: &self.target,
+            // The field, not `cancel()`: the transcript above is borrowed mutably.
             cancel: self.target.trace.cancel(),
             trigger,
             attempt,

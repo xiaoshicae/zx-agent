@@ -63,7 +63,7 @@ impl StepLoop<'_> {
         let authorized = self.authorize(&prepared).await;
         // Cancelled while the policies ran or the call waited for approval: the call does not
         // start, whatever their answer came to, and nobody denied it.
-        if self.scope.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Checked::NotStarted;
         }
         if let Err(text) = authorized {
@@ -82,7 +82,7 @@ impl StepLoop<'_> {
     /// result could not be told from the first call's. A cancelled run starts no call, and
     /// asks no tool, no policy and no person about one.
     async fn check_next<'c>(&mut self, call: &'c ToolCall, seen: &mut HashSet<&'c str>) -> Checked<'c> {
-        if self.scope.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Checked::NotStarted;
         }
         if seen.insert(&call.id) {
@@ -159,7 +159,7 @@ impl StepLoop<'_> {
         let asked = Instant::now();
         let answer = match self.scope.config.approvals {
             ApprovalMode::Deny => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
-            ApprovalMode::Wait(timeout) => request.answer(timeout, self.scope.target.trace.cancel()).await,
+            ApprovalMode::Wait(timeout) => request.answer(timeout, self.scope.cancel()).await,
         };
         // Withdrawn before it is reported: an answer that comes now finds no request.
         drop(request);
@@ -257,7 +257,7 @@ impl StepLoop<'_> {
         // Record starts in call order before any call runs, so that recovery after a crash
         // can tell the calls that began from those that never did. A run cancelled during
         // the checks starts none of them.
-        if !self.scope.target.trace.cancel().is_cancelled() {
+        if !self.scope.is_cancelled() {
             for (_, checked) in &slots {
                 if let Checked::Ready(runnable) = checked {
                     self.record_start(runnable).await?;
@@ -327,7 +327,7 @@ impl StepLoop<'_> {
     /// cancelled, reporting its progress on the way. A failure or a panic of the tool becomes
     /// an error result.
     async fn execute(&self, tool: &dyn Tool, effects: Effects, call: &ToolCall) -> Ended {
-        let cancel = self.scope.target.trace.cancel();
+        let cancel = self.scope.cancel();
         if cancel.is_cancelled() {
             return Ended::not_started();
         }

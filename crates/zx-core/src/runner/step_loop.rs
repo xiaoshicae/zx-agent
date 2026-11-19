@@ -127,10 +127,7 @@ impl<'a> StepLoop<'a> {
         let attempt = self.accounting.attempts;
         self.emit(EventKind::AttemptStart { attempt }).await;
 
-        let halt = self
-            .run_steps(first)
-            .await
-            .aborted_if_cancelled(self.scope.target.trace.cancel());
+        let halt = self.run_steps(first).await.aborted_if_cancelled(self.scope.cancel());
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
@@ -340,7 +337,7 @@ impl<'a> StepLoop<'a> {
 
     /// End the attempt if the run was cancelled.
     fn ensure_not_cancelled(&self) -> Result<(), Halt> {
-        if self.scope.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Err(Halt::Ended(Ending::Cancelled));
         }
         Ok(())

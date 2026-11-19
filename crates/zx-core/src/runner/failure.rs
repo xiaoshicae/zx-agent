@@ -21,7 +21,7 @@ impl Running<'_> {
         task_steps: u32,
     ) -> Result<(), RunStop> {
         let error = failed.failure_reason();
-        let cancelled = self.scope.target.trace.cancel().is_cancelled();
+        let cancelled = self.scope.is_cancelled();
         let no_further_request = self.accounting.exhausted().is_some() || cancelled;
         if is_context_overflow(failed) && self.scope.compacts_automatically() {
             // A context the model rejects as too long fails again however often it is sent:
@@ -133,7 +133,7 @@ impl RunScope<'_> {
             .await;
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = self.target.trace.cancel().cancelled() => Err(RunStop::Ended(Ending::Cancelled)),
+            () = self.cancel().cancelled() => Err(RunStop::Ended(Ending::Cancelled)),
         }
     }
 }
