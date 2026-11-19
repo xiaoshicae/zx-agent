@@ -9,32 +9,29 @@
 //! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
 //! request and what kind each is (the statuses and error types of the API) in `failure.rs`
 //! and the message built from the stream's events in `accumulate.rs`; this module holds the
-//! provider and the HTTP flow of one request, which reads the stream's events with
-//! `zx_util::sse`.
+//! provider and the HTTP flow of one request, with what the HTTP providers share
+//! (`zx-ai-http`).
 
 mod accumulate;
 mod config;
 mod failure;
 mod request;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
-use zx_ai::{ProviderErrorKind, Request, StopReason, StreamEvent, duration_ms, now_ms};
-use zx_util::sse::SseParser;
+use zx_ai::{ProviderErrorKind, Request, StreamEvent, now_ms};
+use zx_ai_http::failure::answers_json;
+use zx_ai_http::request::{api_key, send};
+use zx_ai_http::stream::{Events, end};
+use zx_ai_http::{CONNECT_TIMEOUT, Failure};
 
 use accumulate::Accumulator;
 pub use config::{AnthropicConfig, BodyOptions, DEFAULT_API_VERSION, SystemUpdates};
 use config::{KEY_HEADER, VERSION_HEADER};
-use failure::{Failure, answers_json, http_failure, json_body_failure, transport_failure};
-
-/// Longest wait for a connection to the server to be established. Fixed, unlike
-/// [`AnthropicConfig::idle_timeout`]: how long a server takes to answer varies with the model
-/// and the request, how long connecting takes does not.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+use failure::{http_failure, json_body_failure, thinking_bound_elsewhere};
 
 /// Streaming provider for the Anthropic Messages API.
 pub struct AnthropicMessages {
@@ -102,19 +99,7 @@ async fn run(
         () = cancel.cancelled() => Err(Failure::Aborted),
         result = stream_response(&mut post, &mut acc, &mut tx) => result,
     };
-
-    // Failures keep the content streamed so far.
-    let mut message = match outcome {
-        Ok(()) => acc
-            .finish()
-            .unwrap_or_else(|error| acc.failure(StopReason::Error, error, Some(ProviderErrorKind::Protocol.into()))),
-        Err(Failure::Aborted) => acc.failure(StopReason::Aborted, "Request was aborted", None),
-        Err(Failure::Closed) => return,
-        Err(Failure::Error { details, message }) => acc.failure(StopReason::Error, message, Some(details)),
-    };
-    message.duration_ms = Some(duration_ms(started.elapsed()));
-    // Once the consumer closes, a terminal event has nobody left to report to.
-    send_event(&mut tx, StreamEvent::ending(message)).await;
+    end(outcome, &acc, started, &mut tx).await;
 }
 
 /// A request ready to post: the client, the provider's settings, where it goes and its body.
@@ -151,7 +136,7 @@ async fn answered(post: &mut Post<'_>) -> Result<reqwest::Response, Failure> {
             return Ok(response);
         }
         let failure = http_failure(response, post.config).await;
-        match failure.thinking_bound_elsewhere() {
+        match thinking_bound_elsewhere(&failure) {
             Some(from) if !retried => {
                 request::drop_thinking_from(&mut post.body, from);
                 retried = true;
@@ -161,7 +146,8 @@ async fn answered(post: &mut Post<'_>) -> Result<reqwest::Response, Failure> {
     }
 }
 
-/// Post the request and wait for the response headers within the idle timeout.
+/// Post the request, with the API version and the API key in their headers, and wait for the
+/// response headers within the idle timeout.
 async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
     let config = post.config;
     let mut request = post.client.post(&post.url).json(&post.body);
@@ -169,77 +155,32 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
         request = request.header(VERSION_HEADER, config::DEFAULT_API_VERSION);
     }
     for (name, value) in &config.headers {
-        request = request.header(name.trim(), value.as_str());
+        request = request.header(name.as_str(), value.as_str());
     }
-    // Asked for on every request, so a key that expired since the last one is replaced.
-    let key = tokio::time::timeout(config.idle_timeout, config.api_key.resolve())
-        .await
-        .map_err(|_| {
-            Failure::error(
-                ProviderErrorKind::ApiKey,
-                format!(
-                    "the API key source did not answer within {}s",
-                    config.idle_timeout.as_secs()
-                ),
-            )
-        })?
-        .map_err(|error| Failure::error(ProviderErrorKind::ApiKey, format!("cannot get an API key: {error}")))?;
-    if let Some(key) = key {
+    if let Some(key) = api_key(&config.api_key, config.idle_timeout).await? {
         request = request.header(KEY_HEADER, key);
     }
-    tokio::time::timeout(config.idle_timeout, request.send())
-        .await
-        .map_err(|_| {
-            Failure::error(
-                ProviderErrorKind::Timeout,
-                format!(
-                    "request timed out after {}s waiting for response headers",
-                    config.idle_timeout.as_secs()
-                ),
-            )
-        })?
-        .map_err(|e| transport_failure("request failed", &e))
+    send(request, config.idle_timeout).await
 }
 
 /// Read the event stream into `acc`, forwarding each delta, until `message_stop` or its end.
-/// The loop of zx-ai-openai's: the providers share no crate that has an HTTP client.
+/// The loop of zx-ai-openai's, with this provider's events: sharing it would take a callback.
 async fn read_stream(
     response: reqwest::Response,
     config: &AnthropicConfig,
     acc: &mut Accumulator,
     tx: &mut EventSender,
 ) -> Result<(), Failure> {
-    let idle = config.idle_timeout;
-    let mut parser = SseParser::new(config.max_sse_event_bytes);
-    let mut body = response.bytes_stream();
-    let mut received_bytes = 0;
-    loop {
-        let next = tokio::time::timeout(idle, body.next()).await.map_err(|_| {
-            Failure::error(
-                ProviderErrorKind::Timeout,
-                format!("stream stalled: no data for {}s", idle.as_secs()),
-            )
-        })?;
-        let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|e| transport_failure("stream read failed", &e))?;
-        if chunk.len() > config.max_response_bytes.saturating_sub(received_bytes) {
-            return Err(Failure::error(
-                ProviderErrorKind::ResourceLimit,
-                format!("stream response exceeds the {} byte limit", config.max_response_bytes),
-            ));
+    let mut events = Events::new(
+        response,
+        config.idle_timeout,
+        config.max_response_bytes,
+        config.max_sse_event_bytes,
+    );
+    while let Some(data) = events.next().await? {
+        if handle_data(&data, acc, tx).await? {
+            return Ok(());
         }
-        received_bytes += chunk.len();
-        let events = parser
-            .push(&chunk)
-            .map_err(|e| Failure::error(ProviderErrorKind::ResourceLimit, e))?;
-        for data in events {
-            if handle_data(&data, acc, tx).await? {
-                return Ok(());
-            }
-        }
-    }
-    if let Some(data) = parser.finish() {
-        handle_data(&data, acc, tx).await?;
     }
     Ok(())
 }

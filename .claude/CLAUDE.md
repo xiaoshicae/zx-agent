@@ -8,14 +8,15 @@
 
 ## 架构
 
-11 个 crate，都在 `crates/<名字>`，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
+12 个 crate，都在 `crates/<名字>`，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
 
 | crate | 负责 |
 |---|---|
-| `zx-util` | 各 crate 共用的小工具：加锁、文本截短、随机数、判断默认值、读环境变量；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
+| `zx-util` | 各 crate 共用的小工具：加锁、文本截短、随机数、判断默认值、读环境变量、按名字登记；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | 消息类型、流式事件、`Provider` 契约 |
-| `zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有两个 provider 依赖 reqwest，都只依赖 `zx-ai` 与 `zx-util` |
-| `zx-ai-anthropic` | Anthropic Messages API 的 provider；依赖同上 |
+| `zx-ai-openai` | OpenAI 兼容的 provider；模型层里依赖 reqwest 的只有两个 provider 与它们共用的 `zx-ai-http`，都不依赖内核 |
+| `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |
+| `zx-ai-http` | 两个 provider 共用的 HTTP 部分：设置检查、取 key 与发请求、按限额读事件流、请求失败（`Failure`、Retry-After）；不属于 API。协议的写法与失败的归类留在各 provider |
 | `zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |
@@ -88,7 +89,7 @@
 
 | 新能力 | 做法 | 参照 |
 |---|---|---|
-| provider | 实现 `ai::Provider`，遵守不变量 1；每个失败归入 `ProviderErrorKind`，服务的状态、错误码与措辞属于哪一种只写在 provider 的 crate 里；解析与归类写单元测试。由 `config.toml` 的 `provider.api` 按名字选用的，再实现 `zx_app::ProviderFactory`，经 `Application::register_provider` 注册 | `crates/zx-agent/tests/openai_mock.rs`、`anthropic_mock.rs`；`crates/zx-app/src/assembly/provider.rs` |
+| provider | 实现 `ai::Provider`，遵守不变量 1；每个失败归入 `ProviderErrorKind`，服务的状态、错误码与措辞属于哪一种只写在 provider 的 crate 里；解析与归类写单元测试；走 HTTP 的用 `zx-ai-http` 的共用件。由 `config.toml` 的 `provider.api` 按名字选用的，再实现 `zx_app::ProviderFactory`，经 `Application::register_provider` 注册 | `crates/zx-agent/tests/openai_mock.rs`、`anthropic_mock.rs`；`crates/zx-app/src/assembly/provider.rs` |
 | 工具 | 实现 `tools::Tool`，遵守不变量 8：参数是带 `#[serde(deny_unknown_fields)]` 的结构体，不改状态的 `effects()` 返回 `Effects::ReadOnly`。共用的进 `AgentConfig::tools`，绑定会话目录或执行环境的由 `SessionSetup` 给出 | `crates/zx-builtin/src/tools/` |
 | 策略 | 实现 `policy::ToolPolicy`，经 `PolicyChain::push` 进 `AgentConfig::policies`；无法判断时返回 `Deny`，所有策略取最严的结论。钩子不做放行判断 | `crates/zx-builtin/src/policy/` |
 | 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。经 `HookChain::push(名字, Arc)` 注册；共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `crates/zx-agent/tests/hook_contract.rs` |
@@ -97,4 +98,4 @@
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer` | `crates/zx-agent/tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，自己的工具、钩子、策略、扩展与摘要器经它的 `add_*`、`set_*` 加入，由配置按名字选用的 provider 与执行环境经 `register_provider`、`register_executor` 注册（D34），信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
-| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的 `PlatformFactory` 都在这个模块里，在 `platform::built_in` 登记；可选的平台放在 cargo feature 后。库外的平台由宿主自己的程序经 `zx_im::Program::register_platform` 登记 | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |
+| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的 `PlatformFactory` 都在这个模块里，在 `platform::built_in` 登记；可选的平台放在 cargo feature 后。库外的平台由宿主自己的程序经 `zx_im::Program::register_platform` 登记，宿主的其他部件经 `Program::customize` | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |

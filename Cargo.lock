@@ -3311,12 +3311,22 @@ name = "zx-ai-anthropic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "zx-ai",
+ "zx-ai-http",
+]
+
+[[package]]
+name = "zx-ai-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "tokio",
  "zx-ai",
  "zx-util",
 ]
@@ -3326,13 +3336,13 @@ name = "zx-ai-openai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "zx-ai",
+ "zx-ai-http",
  "zx-util",
 ]
 

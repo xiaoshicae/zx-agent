@@ -268,6 +268,13 @@ impl Application {
         self.settings.config.reasoning
     }
 
+    /// The variables hidden from commands besides the API key's, as
+    /// [`set_hidden_env`](Self::set_hidden_env) gave them, for a program that hides its own
+    /// beside those a host gave.
+    pub fn hidden_env(&self) -> &[String] {
+        &self.hidden_env
+    }
+
     /// Where new sessions work unless a request names a directory: [`Overrides::cwd`];
     /// `None` for the current directory.
     pub fn cwd(&self) -> Option<&Path> {

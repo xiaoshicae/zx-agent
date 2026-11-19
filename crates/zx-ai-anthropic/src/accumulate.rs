@@ -5,8 +5,10 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, ProviderErrorKind, StopReason, ToolCall, Usage};
+use zx_ai_http::Failure;
+use zx_ai_http::stream::Answer;
 
-use crate::failure::{Failure, provider_failure};
+use crate::failure::provider_failure;
 use crate::request::REDACTED;
 
 /// One block of the answer as it streams.
@@ -188,54 +190,6 @@ impl Accumulator {
         }
     }
 
-    /// The complete message, from the stop reason. A full context window ends it as a failure
-    /// of the kind [`ProviderErrorKind::ContextOverflow`], since the conversation no longer
-    /// fits and a continuation would not either; a refusal, and a reason this provider does
-    /// not know, as one of the kind [`ProviderErrorKind::Refused`]; both with the reason as
-    /// its code. Fails on a stream that ended without a stop reason.
-    pub(crate) fn finish(&self) -> Result<AssistantMessage, String> {
-        let Some((reason, details)) = &self.stop else {
-            return Err("stream ended without a stop_reason".to_string());
-        };
-        let stop_reason = match reason.as_str() {
-            "tool_use" => StopReason::ToolUse,
-            // A paused turn ends only with server tools, which this provider does not declare.
-            "end_turn" | "stop_sequence" | "pause_turn" => StopReason::Stop,
-            "max_tokens" => StopReason::Length,
-            other => {
-                let (kind, error) = match other {
-                    "model_context_window_exceeded" => (
-                        ProviderErrorKind::ContextOverflow,
-                        "the response filled the model's context window".to_string(),
-                    ),
-                    "refusal" => (ProviderErrorKind::Refused, refusal(details)),
-                    _ => (
-                        ProviderErrorKind::Refused,
-                        format!("the API ended the response with stop_reason {other:?}"),
-                    ),
-                };
-                let details = ProviderError {
-                    kind,
-                    status: None,
-                    code: Some(other.to_string()),
-                    retry_after_ms: None,
-                };
-                return Ok(self.message(StopReason::Error, Some(error), Some(details)));
-            }
-        };
-        Ok(self.message(stop_reason, None, None))
-    }
-
-    /// The message so far, ended by `stop_reason` with `error` and its `details`.
-    pub(crate) fn failure(
-        &self,
-        stop_reason: StopReason,
-        error: impl Into<String>,
-        details: Option<ProviderError>,
-    ) -> AssistantMessage {
-        self.message(stop_reason, Some(error.into()), details)
-    }
-
     fn message(
         &self,
         stop_reason: StopReason,
@@ -281,6 +235,55 @@ impl Accumulator {
                 }
             })
             .collect()
+    }
+}
+
+impl Answer for Accumulator {
+    /// The complete message, from the stop reason. A full context window ends it as a failure
+    /// of the kind [`ProviderErrorKind::ContextOverflow`], since the conversation no longer
+    /// fits and a continuation would not either; a refusal, and a reason this provider does
+    /// not know, as one of the kind [`ProviderErrorKind::Refused`]; both with the reason as
+    /// its code. Fails on a stream that ended without a stop reason.
+    fn finish(&self) -> Result<AssistantMessage, String> {
+        let Some((reason, details)) = &self.stop else {
+            return Err("stream ended without a stop_reason".to_string());
+        };
+        let stop_reason = match reason.as_str() {
+            "tool_use" => StopReason::ToolUse,
+            // A paused turn ends only with server tools, which this provider does not declare.
+            "end_turn" | "stop_sequence" | "pause_turn" => StopReason::Stop,
+            "max_tokens" => StopReason::Length,
+            other => {
+                let (kind, error) = match other {
+                    "model_context_window_exceeded" => (
+                        ProviderErrorKind::ContextOverflow,
+                        "the response filled the model's context window".to_string(),
+                    ),
+                    "refusal" => (ProviderErrorKind::Refused, refusal(details)),
+                    _ => (
+                        ProviderErrorKind::Refused,
+                        format!("the API ended the response with stop_reason {other:?}"),
+                    ),
+                };
+                let details = ProviderError {
+                    kind,
+                    status: None,
+                    code: Some(other.to_string()),
+                    retry_after_ms: None,
+                };
+                return Ok(self.message(StopReason::Error, Some(error), Some(details)));
+            }
+        };
+        Ok(self.message(stop_reason, None, None))
+    }
+
+    fn failure(
+        &self,
+        stop_reason: StopReason,
+        error: impl Into<String>,
+        details: Option<ProviderError>,
+    ) -> AssistantMessage {
+        self.message(stop_reason, Some(error.into()), details)
     }
 }
 

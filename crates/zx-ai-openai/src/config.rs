@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use zx_ai::provider::ApiKey;
-use zx_util::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_ai_http::DEFAULT_MAX_EVENT_BYTES;
+use zx_ai_http::settings::{check_base_url, check_headers, check_limits};
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -78,18 +79,9 @@ impl OpenAiConfig {
     /// cannot send.
     pub(crate) fn check(&self) -> anyhow::Result<()> {
         check_base_url(&self.base_url)?;
-        anyhow::ensure!(
-            self.max_response_bytes > 0,
-            "max_response_bytes must be greater than zero"
-        );
-        anyhow::ensure!(
-            self.max_sse_event_bytes > 0,
-            "max_sse_event_bytes must be greater than zero"
-        );
-        // Zero would time out every request at once rather than disable the limit.
-        anyhow::ensure!(!self.idle_timeout.is_zero(), "idle_timeout must be greater than zero");
+        check_limits(self.idle_timeout, self.max_response_bytes, self.max_sse_event_bytes)?;
         self.body.check()?;
-        check_headers(&self.headers)
+        check_headers(&self.headers, "Authorization")
     }
 }
 
@@ -247,42 +239,6 @@ macro_rules! named_values {
 }
 
 named_values!(ReasoningFormat, SystemUpdates, MaxTokensField);
-
-/// Refuse an address requests cannot go to: one that is not an http or https URL, and one
-/// with a query or a fragment, which the path of a request could not follow. The address may
-/// hold a credential, so no error repeats it.
-fn check_base_url(base_url: &str) -> anyhow::Result<()> {
-    let url = reqwest::Url::parse(base_url).map_err(|error| anyhow::anyhow!("base_url is not a URL: {error}"))?;
-    anyhow::ensure!(
-        matches!(url.scheme(), "http" | "https"),
-        "base_url must be an http or https URL"
-    );
-    anyhow::ensure!(
-        url.query().is_none() && url.fragment().is_none(),
-        "base_url must end with its path, without a query or a fragment: the path of a request follows it"
-    );
-    Ok(())
-}
-
-/// Refuse headers the client cannot send: malformed ones, and `Authorization`, which the
-/// key sets.
-fn check_headers(headers: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, value) in headers {
-        anyhow::ensure!(
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok(),
-            "invalid request header name {name:?}"
-        );
-        anyhow::ensure!(
-            reqwest::header::HeaderValue::from_str(value).is_ok(),
-            "invalid value for request header {name:?}"
-        );
-        anyhow::ensure!(
-            !name.eq_ignore_ascii_case("authorization"),
-            "the Authorization header comes from the API key; it cannot be set as a request header"
-        );
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

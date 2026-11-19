@@ -1,8 +1,8 @@
 //! The program `zx-im`: reads im.toml, connects the platforms it configures, and answers
 //! their messages, one session per conversation, until a signal or a platform's failure ends
 //! it. The server itself is [`Server`]; the agent comes from `zx-app`, as the command line's
-//! do. [`Program`] is the program with the platforms a host registers besides the built-in
-//! ones.
+//! do. [`Program`] is the program with what a host adds: platforms besides the built-in ones,
+//! and its own parts of the application.
 //!
 //! - `args`: the command line
 
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
 use zx_app::config::{Builtin, read_text};
-use zx_app::otel::Telemetry;
+use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
 use zx_util::registry::Registry;
@@ -54,16 +54,19 @@ const BACKLOG_DIR: &str = ".backlog";
 
 type Conversations = Vec<(String, ConversationId)>;
 type Approvers = Vec<(String, UserId)>;
+/// What a host gives the application of the program ([`Program::customize`]).
+type Customization = Box<dyn FnOnce(Application) -> Application + Send>;
 
 /// The sections of im.toml that are the server's; each of the others configures the platform
 /// registered under its name.
 const SERVER_SECTIONS: [&str; 5] = ["access", "limits", "sessions", "replies", "cardLabels"];
 
-/// The program `zx-im` with the platforms a host registers besides Slack and Feishu: a
-/// program of the host's own runs it from its `main`, as `zx-im` does through
-/// [`main`](crate::main).
+/// The program `zx-im` with what a host adds: platforms besides Slack and Feishu, and its own
+/// parts of the application the agent is built with. A program of the host's own runs it from
+/// its `main`, as `zx-im` does through [`main`](crate::main).
 pub struct Program {
     platforms: Registry<dyn PlatformFactory>,
+    customizations: Vec<Customization>,
 }
 
 impl Default for Program {
@@ -77,6 +80,7 @@ impl Program {
     pub fn new() -> Self {
         Self {
             platforms: platform::built_in(),
+            customizations: Vec::new(),
         }
     }
 
@@ -87,11 +91,23 @@ impl Program {
         self
     }
 
+    /// Let `customize` give the application that every conversation's agent is built with
+    /// the host's own parts, with the verbs of [`Application`]: tools, hooks, policies,
+    /// extensions and prompt sections, the variables to hide from commands, and the providers
+    /// and executors config.toml chooses by name. The program's own parts come after them: the
+    /// platforms' credentials, hidden beside the host's variables, the trace export, which is
+    /// the program's, and the prompt section on how answers reach people. Each call adds one
+    /// more, applied in order.
+    pub fn customize(mut self, customize: impl FnOnce(Application) -> Application + Send + 'static) -> Self {
+        self.customizations.push(Box::new(customize));
+        self
+    }
+
     /// Run with the command line the process was started with, and return its exit code. A
     /// configuration problem found before serving started is written to stderr and exits
     /// with the code of a usage error.
     pub async fn run(self) -> ExitCode {
-        match run(Args::parse(), &self.platforms).await {
+        match run(Args::parse(), self).await {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("zx-im: {error:#}");
@@ -173,10 +189,14 @@ struct SessionsSection {
 ///
 /// Traces are exported when the environment names an OTLP endpoint ([`shutdown`]); what could
 /// not be exported is said on stderr once serving ended, and never changes the exit code.
-async fn run(args: Args, registered: &Registry<dyn PlatformFactory>) -> Result<u8> {
+async fn run(args: Args, program: Program) -> Result<u8> {
+    let Program {
+        platforms: registered,
+        customizations,
+    } = program;
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
-    let Platforms { channels, hidden_env } = platforms(&file, registered, &path)?;
+    let Platforms { channels, hidden_env } = platforms(&file, &registered, &path)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &platforms)?;
     let (code, end) =
@@ -190,11 +210,12 @@ async fn run(args: Args, registered: &Registry<dyn PlatformFactory>) -> Result<u
             let backlog = BacklogFiles::open(&backlog_dir)
                 .with_context(|| format!("cannot create the backlog {}", backlog_dir.display()))?;
             // Once for the process: every conversation's session shares the connections.
-            let app = connect(overrides)
-                .await?
-                .set_hidden_env(hidden_env)
-                .set_traces(telemetry.map(Telemetry::hook))
-                .add_prompt_section(CONVERSATION_SECTION, CONVERSATION);
+            let app = assemble(
+                connect(overrides).await?,
+                customizations,
+                hidden_env,
+                telemetry.map(Telemetry::hook),
+            );
             let agent = conversations_agent(&app, &dir).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
@@ -223,6 +244,22 @@ async fn connect(overrides: Overrides) -> Result<Application> {
         eprintln!("{notice}");
     }
     Ok(app)
+}
+
+/// `app` with the host's parts, given by `customizations` in order, then the program's own: the
+/// platforms' `credentials`, hidden beside the variables the host hides, the `traces` export,
+/// and the prompt section on how answers reach people.
+fn assemble(
+    app: Application,
+    customizations: Vec<Customization>,
+    credentials: Vec<String>,
+    traces: Option<TraceHook>,
+) -> Application {
+    let app = customizations.into_iter().fold(app, |app, customize| customize(app));
+    let hidden = app.hidden_env().iter().cloned().chain(credentials).collect();
+    app.set_hidden_env(hidden)
+        .set_traces(traces)
+        .add_prompt_section(CONVERSATION_SECTION, CONVERSATION)
 }
 
 /// `error`, or, when no model was given, the ways to give one: `--model`, over `ZX_MODEL`,
@@ -651,6 +688,24 @@ mod tests {
         let error = platform_error(&format!("[feishu]\n{SERVER}"), &platform::built_in());
         assert!(error.contains("this build of zx-im has no such platform"), "{error}");
         assert!(error.contains("[feishu]"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_hosts_parts_come_first_and_the_platforms_credentials_join_its_hidden_variables() {
+        let config = zx_app::config::Config {
+            model: Some("m".into()),
+            ..zx_app::config::Config::default()
+        };
+        let app = Application::from_config(config, None, Overrides::default(), Builtin::Assistant)
+            .await
+            .unwrap();
+        let customizations: Vec<Customization> = vec![
+            Box::new(|app: Application| app.set_hidden_env(vec!["HOST_TOKEN".into()])),
+            Box::new(|app: Application| app.add_prompt_section("host", "From the host.")),
+        ];
+        let app = assemble(app, customizations, vec!["SLACK_BOT_TOKEN".into()], None);
+        // The platforms' credentials are hidden beside the host's, not in their place.
+        assert_eq!(app.hidden_env(), ["HOST_TOKEN", "SLACK_BOT_TOKEN"]);
     }
 
     #[test]

@@ -1,0 +1,19 @@
+[package]
+name = "zx-ai-http"
+description = "What the HTTP providers of zx-agent share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zx-ai.workspace = true
+zx-util.workspace = true
+
+anyhow.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true
