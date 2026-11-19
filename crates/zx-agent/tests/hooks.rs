@@ -957,7 +957,7 @@ impl Hook for HoldInput {
     }
 }
 
-async fn holding_runner(provider: Arc<FauxProvider>) -> (zx_testing::Driven, HoldInput) {
+async fn holding_runner(provider: Arc<FauxProvider>) -> (zx_testing::Driven, Arc<zx_testing::Collect>, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
@@ -968,8 +968,8 @@ async fn holding_runner(provider: Arc<FauxProvider>) -> (zx_testing::Driven, Hol
             released: released.clone(),
         }),
     );
-    let (runner, _) = RunnerSetup::new(config).build().await;
-    (runner, HoldInput { holding, released })
+    let (runner, events) = RunnerSetup::new(config).build().await;
+    (runner, events, HoldInput { holding, released })
 }
 
 fn mentions(messages: &[Message], text: &str) -> usize {
@@ -982,7 +982,7 @@ fn mentions(messages: &[Message], text: &str) -> usize {
 #[tokio::test]
 async fn input_whose_hook_was_cancelled_is_not_recorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (runner, hold) = holding_runner(provider.clone()).await;
+    let (runner, _, hold) = holding_runner(provider.clone()).await;
 
     let (report, ()) = tokio::join!(runner.run("hold: rotate the logs"), async {
         hold.holding.notified().await;
@@ -997,9 +997,28 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
 }
 
 #[tokio::test]
+async fn a_hook_that_the_cancellation_stopped_is_not_reported_as_failed() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let (runner, events, hold) = holding_runner(provider).await;
+
+    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs"), async {
+        hold.holding.notified().await;
+        runner.cancel();
+    });
+
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
+    let failed: Vec<EventKind> = events
+        .events()
+        .into_iter()
+        .filter(|event| matches!(event, EventKind::HookFailed { .. }))
+        .collect();
+    assert!(failed.is_empty(), "{failed:?}");
+}
+
+#[tokio::test]
 async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (runner, hold) = holding_runner(provider.clone()).await;
+    let (runner, _, hold) = holding_runner(provider.clone()).await;
     runner.queues().steer("hold: check the disk");
 
     tokio::select! {
