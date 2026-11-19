@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use zx_agent::events::ApprovalResult;
 use zx_util::sync::lock;
 
-use crate::platform::{Seen, report};
+use crate::platform::report;
 use crate::{
     Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
     ThreadId, UserId,
@@ -15,8 +15,9 @@ use super::FeishuChannel;
 use super::connection::PREFIX;
 
 impl FeishuChannel {
-    /// The messages and clicks in one event.
-    pub(super) fn events(&self, payload: &[u8], seen: &mut Seen<MessageId>) -> Vec<Inbound> {
+    /// The messages and clicks in one event. A message is named by its `message_id`, which
+    /// the documentation says to deduplicate by (im.message.receive_v1).
+    pub(super) fn events(&self, payload: &[u8]) -> Vec<Inbound> {
         let value: Value = match serde_json::from_slice(payload) {
             Ok(value) => value,
             Err(error) => {
@@ -29,14 +30,14 @@ impl FeishuChannel {
         };
         match value["header"]["event_type"].as_str() {
             Some("im.message.receive_v1") => match message(&value["event"]) {
-                Some(said) if seen.insert(&said.id) => {
+                Some(said) => {
                     if said.chat == ChatKind::Direct {
                         lock(&self.direct).insert(said.at.conversation.0.clone());
                     }
                     vec![said.into_inbound()]
                 }
-                // Not for the bot, or delivered before.
-                _ => Vec::new(),
+                // Not for the bot.
+                None => Vec::new(),
             },
             Some("card.action.trigger") => decision(&value["event"]).into_iter().collect(),
             // Events this app does not subscribe to.

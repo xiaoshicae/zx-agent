@@ -87,21 +87,25 @@ impl Opened {
 pub(super) struct Asked(pub(super) PendingInput);
 
 impl Asked {
-    /// Several messages as one running prompt. Their reservations are released as they
-    /// leave pending queues; the sender of the last message is whom the answer is for.
-    pub(super) fn joined(asked: Vec<Self>) -> Input {
+    /// Several messages as one prompt, which holds what each held until the session records
+    /// it; the sender of the last message is whom the answer is for.
+    pub(super) fn joined(asked: Vec<Self>) -> PendingInput {
         let mut texts = Vec::with_capacity(asked.len());
         let mut actor = None;
+        let mut holds = Vec::with_capacity(asked.len());
         for Asked(pending) in asked {
-            if let Input::User { text, actor: sender } = pending.into_input() {
+            let (input, hold) = pending.into_parts();
+            if let Input::User { text, actor: sender } = input {
                 texts.push(text);
                 actor = sender;
             }
+            holds.extend(hold);
         }
-        Input::User {
+        let prompt = Input::User {
             text: texts.join("\n\n"),
             actor,
-        }
+        };
+        PendingInput::held(prompt, holds)
     }
 }
 
@@ -220,7 +224,7 @@ impl Outlet {
     pub(super) fn run(
         &self,
         session: &Session,
-        prompt: Input,
+        prompt: PendingInput,
         updates: &mpsc::Sender<ApprovalUpdate>,
         stop: CancellationToken,
     ) -> impl Future<Output = Result<RunReport, SessionError>> + Send + 'static {

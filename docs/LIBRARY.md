@@ -30,7 +30,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 | 让人审批 | `AgentConfig::approvals` 设为 `ApprovalMode::Wait(时长)`，回答用 `Session::resolve_approval(编号, 决定)` | 默认 `ApprovalMode::Deny`：策略询问的调用立即被拒绝。等待时运行发出带审批编号、工具名与参数的 `approval_requested`，超时或取消按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效 |
 | 观察所有运行 | 实现 `hooks::Hook::on_event` | 事件只从 `Run` 读出；不等待的钩子按顺序看到它观察的每个事件（默认不含流式增量 `message_update`，见 `Hook::observes`），被取消的运行也一样。追踪导出（`zx_app::otel::Telemetry`）就这样注册为钩子 |
 | 标明调用者 | `SessionOptions::labels`（如租户或所属对话）、`Input::User { text, actor }` | 经 `PolicyContext` 与 `HookContext` 的 `labels`、`actor` 交给策略与钩子；`actor` 是最近一条提问的发送者，扩展发的消息不改变它。内核只记录与传递，不据此判断 |
-| 限制待处理的输入 | `PendingInput::held(输入, 凭证)`，交给 `queues().steer` 或 `follow_up` | 内核的输入队列不限量，也不计配额：宿主自己计量，凭证在输入离开队列时丢弃（何时离开见 `PendingInput`），`Session::take_queued` 连同凭证一起取出。IM 服务就这样限制每个对话（`crates/zx-im/src/server/admission.rs`） |
+| 限制待处理的输入 | `PendingInput::held(输入, 凭证)`，交给 `queues().steer`、`follow_up` 或 `Session::send` | 内核的输入队列不限量，也不计配额：宿主自己计量，凭证在输入离开队列时丢弃（何时离开见 `PendingInput`），`send` 的提问写入会话后丢弃；`Session::take_queued` 连同凭证一起取出，`PendingInput::into_parts` 把凭证还给宿主。IM 服务就这样限制每个对话，并在消息写入会话后才把它从 backlog 删除（`crates/zx-im/src/server/admission.rs`） |
 | 存会话 | `AgentConfig::storage`：`transcript::MemoryStorage`（默认）、`builtin::jsonl::JsonlStorage`，或实现 `transcript::SessionStorage` 与 `SessionLog` | `open` 让 `Agent` 成为会话的写入者，`read` 是只读快照（交给 `Transcript::snapshot`）。自己实现时，列出用 `SessionList::new`、读头部用 `SessionQuery::arrange_headers` 排序与截断 |
 | 建自己的会话索引 | `Agent::session_headers` | 只读头部、不读记录，按开始时间从新到旧；打开会话时仍完整校验。读不出头部或版本不符的会话不在其中，`list_sessions` 把它们列为读不出。JSONL 存储不缓存，每次读取查询范围内每个会话文件的第一行 |
 | 按模型的上下文窗口自动摘要 | `AgentConfig::compaction` 的 `trigger_tokens` 设为 `TokenTrigger::BelowWindow { reserve_tokens }`，窗口写进 `AgentConfig::models` | 每次请求前按会话当时的模型取窗口，`Session::set_model` 换了模型就随之改变；窗口未知的模型没有 token 阈值 |
@@ -55,4 +55,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.15 · 2026年11月
+LIBRARY.md · v0.16 · 2026年11月

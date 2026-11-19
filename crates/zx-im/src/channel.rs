@@ -1,23 +1,28 @@
-//! What a chat platform does for the server, [`ImChannel`], and the words they share: who
-//! and where, what arrives and what is posted, the texts of approval cards, and why a call
-//! failed.
+//! What a chat platform does for the server, [`ImChannel`], where it puts what it receives,
+//! [`Inlet`], and the words they share: who and where, what arrives and what is posted, the
+//! texts of approval cards, and why a call failed.
 
 use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zx_agent::events::ApprovalResult;
+
+use crate::backlog::{self, Backlog, Kept};
 
 /// One chat platform, such as Slack.
 ///
 /// The implementation owns the connection and these duties:
 /// - it reconnects on its own;
-/// - it acknowledges each delivery to the platform at once and only then hands the event
-///   over, since platforms resend what is not acknowledged within seconds;
-/// - it passes each message on at most once, deduplicating redeliveries;
+/// - it keeps each message in the server's backlog ([`Inlet::keep`]) before it acknowledges
+///   the delivery to the platform, and acknowledges at once, since platforms resend what is
+///   not acknowledged within seconds; a message that cannot be kept leaves its delivery
+///   unacknowledged, for the platform to deliver again;
+/// - only then it passes the delivery's events on ([`Inlet::pass`]), but not a message the
+///   backlog has already: one delivered again;
 /// - it passes on direct messages, messages in a group that mention the bot, and replies in
 ///   a group's threads, each with its [`ChatKind`] and [`Addressee`]; never the bot's own,
 ///   nor a message posted in a group itself that does not mention the bot. The server
@@ -33,11 +38,11 @@ pub trait ImChannel: Send + Sync {
     /// the channels of one server.
     fn platform(&self) -> &str;
 
-    /// Receive from the platform into `inbound` until `cancel`, reconnecting as needed.
+    /// Receive from the platform into `inlet` until `cancel`, reconnecting as needed.
     /// Returns `Ok` soon after `cancel`, whatever it is doing, connecting included, once it
-    /// has stopped sending: the server's stop waits for it. Returns an error that retrying
-    /// cannot fix, such as rejected credentials; the server then stops.
-    async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError>;
+    /// has stopped passing events on: the server's stop waits for it. Returns an error that
+    /// retrying cannot fix, such as rejected credentials; the server then stops.
+    async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError>;
 
     /// Post `message` to `to`, as a reply in `to.thread` when it is set. Text longer than one
     /// platform message is split into several; the returned reference is the first.
@@ -66,6 +71,50 @@ pub trait ImChannel: Send + Sync {
     /// run that is already answering. The default shows nothing.
     async fn acknowledge(&self, _message: &MessageRef) -> Result<(), ImError> {
         Ok(())
+    }
+}
+
+/// Where a channel puts what it receives ([`ImChannel::run`]): each message is kept in the
+/// server's backlog first, then the events go on to the server.
+pub struct Inlet {
+    platform: String,
+    events: mpsc::Sender<Inbound>,
+    backlog: Arc<dyn Backlog>,
+}
+
+impl Inlet {
+    /// Where the channel named `platform` ([`ImChannel::platform`]) puts what it receives:
+    /// messages are kept in `backlog`, events passed on to `events`.
+    pub fn new(platform: impl Into<String>, events: mpsc::Sender<Inbound>, backlog: Arc<dyn Backlog>) -> Self {
+        Self {
+            platform: platform.into(),
+            events,
+            backlog,
+        }
+    }
+
+    /// Keep `event` in the backlog, before the channel acknowledges its delivery:
+    /// [`Kept::New`] for an event to pass on, [`Kept::Again`] for a message the backlog has
+    /// already, delivered again, which is not. A click is not kept, and is always new. An error
+    /// when the message cannot be kept: the channel then leaves the delivery unacknowledged,
+    /// for the platform to deliver it again.
+    ///
+    /// Not limited in time: a message kept after its time ran out would be known when it is
+    /// delivered again, and wait for the next start instead of being handled now.
+    pub async fn keep(&self, event: &Inbound) -> Result<Kept, ImError> {
+        let Some((key, record)) = backlog::record(&self.platform, event) else {
+            return Ok(Kept::New);
+        };
+        self.backlog
+            .keep(&key, &record)
+            .await
+            .map_err(|error| ImError::Transport(format!("cannot keep message {}: {error}", key.message)))
+    }
+
+    /// Pass `event` on to the server, once its delivery is acknowledged; false when the
+    /// server no longer reads: it is stopping.
+    pub async fn pass(&self, event: Inbound) -> bool {
+        self.events.send(event).await.is_ok()
     }
 }
 
@@ -131,7 +180,8 @@ impl MessageRef {
 }
 
 /// The kind of chat a message was posted in, which sets what one conversation is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ChatKind {
     /// One person and the bot: the whole chat is one conversation.
     Direct,
@@ -140,7 +190,8 @@ pub enum ChatKind {
 }
 
 /// Whom a message is meant for, as its mentions tell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Addressee {
     /// The bot: the message mentions it, or was posted in a direct chat.
     Bot,

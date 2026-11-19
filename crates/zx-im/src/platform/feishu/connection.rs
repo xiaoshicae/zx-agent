@@ -9,14 +9,13 @@ use std::time::Duration;
 use futures::SinkExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_util::random::random_u64;
 
-use crate::platform::{Keepalive, Next, Seen, Socket, next_message, report};
-use crate::{ImError, Inbound, MessageId};
+use crate::platform::{Keepalive, Next, Socket, keep, next_message, report};
+use crate::{ImError, Inlet};
 
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
@@ -214,8 +213,7 @@ impl FeishuChannel {
         &self,
         mut link: Link,
         config: &mut ClientConfig,
-        inbound: &mpsc::Sender<Inbound>,
-        seen: &mut Seen<MessageId>,
+        inlet: &Inlet,
         cancel: &CancellationToken,
     ) -> Ended {
         let ping_frame = Message::binary(ping(link.service).encode());
@@ -245,7 +243,7 @@ impl FeishuChannel {
                     link.keepalive.set_interval(config.ping);
                 }
                 Received::Event(frame) => {
-                    if let Err(ended) = self.deliver(&mut link, frame, inbound, seen).await {
+                    if let Err(ended) = self.deliver(&mut link, frame, inlet).await {
                         return ended;
                     }
                 }
@@ -254,28 +252,28 @@ impl FeishuChannel {
         }
     }
 
-    /// Acknowledge an event frame and pass its events on, once its message is complete.
-    /// `Err` says how the connection ended.
-    async fn deliver(
-        &self,
-        link: &mut Link,
-        mut frame: Frame,
-        inbound: &mpsc::Sender<Inbound>,
-        seen: &mut Seen<MessageId>,
-    ) -> Result<(), Ended> {
+    /// Keep the messages of an event frame, acknowledge it and pass its events on, once its
+    /// message is complete. `Err` says how the connection ended.
+    async fn deliver(&self, link: &mut Link, mut frame: Frame, inlet: &Inlet) -> Result<(), Ended> {
         // Taken out, so that a fragment is kept, and a whole message delivered, without a copy.
         let payload = std::mem::take(&mut frame.payload);
         let Some(payload) = link.fragments.add(&frame, payload, Instant::now()) else {
             return Ok(());
         };
-        // Acknowledge first: Feishu redelivers what is not acknowledged in time.
-        link.socket
-            .send(Message::binary(acknowledge(&frame).encode()))
-            .await
-            .map_err(|_| Ended::Lost)?;
-        for event in self.events(&payload, seen) {
-            // The server no longer reads: it is stopping.
-            inbound.send(event).await.map_err(|_| Ended::Cancelled)?;
+        let delivery = keep(inlet, self.events(&payload), self.config.on_error.as_ref()).await;
+        // Acknowledged before anything is handled: Feishu redelivers what is not acknowledged
+        // in time.
+        if delivery.acknowledge {
+            link.socket
+                .send(Message::binary(acknowledge(&frame).encode()))
+                .await
+                .map_err(|_| Ended::Lost)?;
+        }
+        for event in delivery.events {
+            if !inlet.pass(event).await {
+                // The server no longer reads: it is stopping.
+                return Err(Ended::Cancelled);
+            }
         }
         Ok(())
     }

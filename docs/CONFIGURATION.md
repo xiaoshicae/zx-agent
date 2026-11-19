@@ -268,7 +268,7 @@ maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条
 idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文件），默认 1800
 
 [sessions]
-dir = "/data/sessions"       # 会话文件在 <dir>/--<工作目录>--/ 下
+dir = "/data/sessions"       # 会话文件在 <dir>/--<工作目录>--/ 下；<dir>/.running 与 <dir>/.backlog 是服务自己的记录
 
 # 可选：替换默认的英文文案，全部字段与中文译文见仓库的 deploy/kubernetes/im/im.example.toml
 [replies]
@@ -281,4 +281,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.25 · 2026年11月
+CONFIGURATION.md · v0.26 · 2026年11月

@@ -91,7 +91,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
 3. 取消 `kustomization.yaml` 中 `components:` 与 `- im` 的注释，再 `apply -k`。
 
-修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
+修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
 
 ## 权限
 
@@ -129,4 +129,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.8 · 2026年11月
+`deploy/kubernetes/README.md` · v0.9 · 2026年11月

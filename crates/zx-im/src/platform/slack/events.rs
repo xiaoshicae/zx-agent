@@ -12,12 +12,12 @@ use crate::{
 
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 
-/// A message from a person, with the key that identifies it among redeliveries: a direct
-/// message, a channel message that mentions the bot, or a reply in a channel's thread.
+/// A message from a person: a direct message, a channel message that mentions the bot, or a
+/// reply in a channel's thread.
 ///
-/// A mention can arrive twice, as `app_mention` and as a channel `message`; both carry the
-/// same key, so the second is left out as a redelivery.
-pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, String), Inbound)> {
+/// A mention can arrive twice, as `app_mention` and as a channel `message`; both are the
+/// message with its channel and `ts`, which the backlog knows the second time.
+pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<Inbound> {
     // Socket Mode payloads are "identical to the typical Events API payloads", which wrap the
     // event; the page's own example shows the bare event, so both are accepted.
     let event = if payload["event"].is_object() {
@@ -51,7 +51,7 @@ pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, St
     if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
         return None;
     }
-    let inbound = Inbound::Message {
+    Some(Inbound::Message {
         id: MessageId(ts.into()),
         at: Destination {
             conversation: ConversationId(channel.into()),
@@ -61,8 +61,7 @@ pub(super) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, St
         addressee,
         sender: UserId(user.into()),
         text: unescape(&without_mention(raw, bot)),
-    };
-    Some(((channel.into(), ts.into()), inbound))
+    })
 }
 
 /// Whom a channel message is meant for, by its user mentions (`<@U…>`).

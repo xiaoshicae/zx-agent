@@ -14,7 +14,7 @@
 |---|---|
 | `crates/zx-agent/tests/step_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、取消、队列；系统提示词的记录、参数预处理，工具的进度、详情与用量 |
 | `crates/zx-agent/tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话；事件的编号与信封 |
-| `crates/zx-agent/tests/session.rs` | 共享会话：Busy、取消、`Run`（事件顺序、读才推进、丢弃即取消、多个句柄）、插话与后续消息、`take_queued`、经会话回答审批（按事件给出的审批编号；超时后迟到的回答落空）、模型与推理强度切换、起名、记录写不进去时自行关闭 |
+| `crates/zx-agent/tests/session.rs` | 共享会话：Busy、取消、`Run`（事件顺序、读才推进、丢弃即取消、多个句柄）、提问的 hold 在写入会话后才释放、插话与后续消息、`take_queued`、经会话回答审批（按事件给出的审批编号；超时后迟到的回答落空）、模型与推理强度切换、起名、记录写不进去时自行关闭 |
 | `crates/zx-agent/tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、失败的归类与重试、超时、取消、错误正文；请求头与 API key 的来源、缓存键与输出上限的字段 |
 | `crates/zx-agent/tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `crates/zx-agent/tests/continue_run.rs` | 不加新输入的续跑 |
@@ -73,11 +73,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-im/tests/im_server.rs` | IM 服务：会话划分与接话、`/new` 与 `/cancel`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止、启动时的会话索引与先读线程再建会话、重启后替换遗留的状态 |
-| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack |
-| ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台 |
-| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程 |
+| `crates/zx-im/tests/im_server.rs` | IM 服务：会话划分与接话、`/new` 与 `/cancel`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答 |
+| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递 |
+| ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台；存不进 backlog 的消息不确认投递 |
+| `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程、被 SIGKILL 结束后再启动时回答它没处理完的消息（仅 Unix） |
 
 ---
 
-TESTS.md · v0.15 · 2026年11月
+TESTS.md · v0.16 · 2026年11月

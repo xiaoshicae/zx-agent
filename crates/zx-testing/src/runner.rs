@@ -213,6 +213,7 @@ impl Driven {
 
     /// Run `message` to the end. Busy when the session already runs.
     pub async fn prompt(&self, message: impl Into<Input>) -> Result<RunReport, SessionError> {
+        let message: Input = message.into();
         Ok(self.read(self.session.send(message)?).await)
     }
 

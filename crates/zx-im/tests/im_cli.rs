@@ -1,7 +1,7 @@
 //! The program `zx-im`: configuration errors, the MCP servers it connects before serving,
 //! and the whole path against a fake Slack and a fake model: a mention, an approval card and
 //! its click, hidden and redacted Slack tokens, the session file, the operator log, the stop,
-//! and a restart after a kill.
+//! and restarts after a kill: a status replaced, and a message not handled yet answered.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
-use zx_testing::fake_slack::FakeSlack;
+use zx_testing::fake_slack::{Answer, FakeSlack};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{self, Home, fake_model_config, write_agent};
 use zx_testing::{json_lines, stderr, stdout};
@@ -363,6 +363,72 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         .unwrap()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::text("late answer")]).await;
+    let mut slack = FakeSlack::start().await;
+    // The first server waits out a rate limit reading the thread, before it makes the
+    // conversation's session: the message is kept, and nothing has handled it yet.
+    slack.script(
+        "conversations.replies",
+        vec![Answer::RateLimited { retry_after_secs: 60 }],
+    );
+    let config = write_config(
+        dir.path(),
+        &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
+    );
+    let mut first = im(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut socket = slack.socket().await;
+    // A mention in a thread someone else started, whose first session reads the thread first.
+    socket
+        .send(json!({
+            "envelope_id": "e1",
+            "type": "events_api",
+            "payload": {"type": "event_callback", "event_id": "Ev-e1", "event": {
+                "type": "app_mention", "user": "U1", "text": "<@UBOT> still there?",
+                "ts": "1700000001.000200", "thread_ts": "1700000001.000100", "channel": "C1"
+            }},
+        }))
+        .await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    slack.wait_for("conversations.replies", 1).await;
+    first.kill().await.unwrap();
+    let pending = dir.path().join("sessions/.backlog/pending");
+    let left = |dir: &Path| -> Vec<_> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    assert_eq!(left(&pending), ["slack.C1.1700000001%2E000200.json"]);
+
+    let second = im(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let updates = slack.wait_for("chat.update", 1).await;
+    assert_eq!(
+        (&updates[0].body["channel"], &updates[0].body["text"]),
+        (&json!("C1"), &json!("late answer"))
+    );
+    let pid = second.id().unwrap().to_string();
+    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
+    assert!(stopped.success());
+    let output = tokio::time::timeout(WAIT, second.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(left(&pending).is_empty(), "{:?}", left(&pending));
 }
 
 const MCP_TOKEN_VAR: &str = "ZX_IM_CLI_TEST_MCP_TOKEN";

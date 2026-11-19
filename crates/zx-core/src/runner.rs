@@ -39,7 +39,7 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 use crate::events::{Budget, Event, EventKind, RunOutcome, RunReport};
-use crate::input::Input;
+use crate::input::PendingInput;
 use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
@@ -400,8 +400,8 @@ impl Ending {
 
 /// What a run starts from.
 pub(crate) enum Start {
-    /// The person's text, or a message from an extension.
-    Message(Input),
+    /// The person's text, or a message from an extension, with the host's hold.
+    Message(PendingInput),
     /// The session as it is.
     Continue,
 }

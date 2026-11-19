@@ -3,8 +3,8 @@
 //!
 //! The long connection has no published specification. This follows the official Go SDK
 //! (`larksuite/oapi-sdk-go`, branch `v3_main` at `db9f52d0`, package `ws`), with one change:
-//! events are acknowledged on arrival, not after they are handled, because Feishu redelivers
-//! what is not acknowledged within three seconds.
+//! events are acknowledged once their messages are kept, not after they are handled, because
+//! Feishu redelivers what is not acknowledged within three seconds.
 //!
 //! The open API calls are in `api.rs`; the long connection in `connection.rs`, with its
 //! frames in `frame.rs`; what arrives over it, and the cards, in `events.rs`.
@@ -22,20 +22,16 @@ use async_trait::async_trait;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_util::sync::lock;
 
 use crate::{
-    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
+    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageId, MessageRef, Post,
     Replacement,
 };
 
-use super::{
-    Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, SEEN_CAPACITY, Seen, http_client, pause, report, secret,
-    split_text,
-};
+use super::{Backoff, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, http_client, pause, report, secret, split_text};
 use api::CallError;
 use connection::{ClientConfig, Connection, Ended, PREFIX};
 use events::{button, card, markdown, resolution, text_content, without_fences, without_mentions};
@@ -220,10 +216,8 @@ impl ImChannel for FeishuChannel {
         PLATFORM
     }
 
-    async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
+    async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut config = ClientConfig::default();
-        // The documentation says to deduplicate by `message_id` (im.message.receive_v1).
-        let mut seen = Seen::new(SEEN_CAPACITY);
         // Used while the server has set no reconnect interval.
         let mut backoff = Backoff::default();
         loop {
@@ -235,7 +229,7 @@ impl ImChannel for FeishuChannel {
             let wait = match connected {
                 Connection::Open(link) => {
                     backoff.reset();
-                    match self.receive(*link, &mut config, &inbound, &mut seen, cancel).await {
+                    match self.receive(*link, &mut config, &inlet, cancel).await {
                         Ended::Cancelled => return Ok(()),
                         // Spread reconnections out, as the server asks.
                         Ended::Lost => connection::jitter(config.nonce),

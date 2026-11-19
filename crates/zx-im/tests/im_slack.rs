@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::im::run_channel;
+use common::im::{FullBacklog, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
@@ -194,6 +194,29 @@ async fn a_redelivered_message_is_passed_on_once() {
         running.next().await,
         message("3.2", in_thread("C1", None), "U1", "next")
     );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_that_cannot_be_kept_is_reported_and_left_unacknowledged() {
+    let mut slack = FakeSlack::start().await;
+    let (channel, mut reports) = reporting(config(&slack));
+    let mut running = run_channel_with(channel, Arc::new(FullBacklog), WAIT);
+    let mut socket = slack.socket().await;
+    socket
+        .send(envelope("e1", "events_api", &mention("5.1", None, "<@UBOT> keep me")))
+        .await;
+    // An envelope with no message to keep is acknowledged; the first one was not.
+    socket
+        .send(envelope("e2", "events_api", &direct("5.2", json!({"bot_id": "BBOT"}))))
+        .await;
+    assert_eq!(socket.receive().await, json!({ "envelope_id": "e2" }));
+    let report = reports.recv().await.unwrap();
+    assert!(
+        report.contains("cannot keep message 5.1: no space left on device"),
+        "{report}"
+    );
+    assert!(running.nothing_passed());
     running.stop().await.unwrap();
 }
 

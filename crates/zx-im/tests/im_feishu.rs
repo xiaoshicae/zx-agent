@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::im::run_channel;
+use common::im::{FullBacklog, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, FeishuChannel, FeishuConfig,
@@ -235,6 +235,27 @@ async fn a_redelivered_message_is_passed_on_once() {
     }
     assert_eq!(running.next().await, direct("om_1", "once"));
     assert_eq!(running.next().await, direct("om_2", "next"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_that_cannot_be_kept_is_reported_and_left_unacknowledged() {
+    let mut fake = FakeFeishu::start(120).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let mut running = run_channel_with(channel, Arc::new(FullBacklog), WAIT);
+    let mut socket = fake.socket().await;
+    let kept = text_message("om_1", "oc_d", "p2p", None, "keep me", &json!([]));
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&kept))).await;
+    // An event with no message to keep is acknowledged; the first one was not.
+    let other = payload("im.chat.updated_v1", &json!({}));
+    socket.send(&TestFrame::event("f2", 1, 0, &other)).await;
+    assert_eq!(socket.receive_data().await.header("message_id"), Some("f2"));
+    let report = reports.recv().await.unwrap();
+    assert!(
+        report.contains("cannot keep message om_1: no space left on device"),
+        "{report}"
+    );
+    assert!(running.nothing_passed());
     running.stop().await.unwrap();
 }
 

@@ -7,10 +7,13 @@
 //! - `outlet`: where a conversation posts, and the session it holds
 //! - `approval`: approval requests of a run, as cards in the conversation
 //! - `status`: the status message of each run, kept so that a restart can replace it
+//! - `received`: each message's receipt until it is handled, and what an earlier process
+//!   left pending in the backlog
 
 mod admission;
 mod approval;
 mod outlet;
+mod received;
 mod router;
 mod status;
 mod worker;
@@ -32,7 +35,10 @@ use zx_agent::events::ApprovalResult;
 use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
-use crate::{ApprovalId, ConversationId, Destination, ImChannel, ImError, MessageRef, ThreadId, UserId};
+use crate::{
+    ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, MessageRef, ThreadId, UserId,
+};
+use received::{complete_handled, left_pending};
 use router::Router;
 use status::{left_behind, replace_left_behind};
 
@@ -167,10 +173,6 @@ pub struct Replies {
     pub failed: String,
     /// Followed by the error of a session that could not be opened.
     pub cannot_open: String,
-    /// Posted once in a thread when the server stops before running some of its messages:
-    /// those waiting for a run slot, steering the run did not take in, and those that
-    /// arrived during the stop.
-    pub stopping: String,
     /// A run that the stop cancelled.
     pub stopped: String,
     /// Replaces, as the server starts, a status that an earlier process left behind when it
@@ -183,7 +185,9 @@ impl Default for Replies {
         Self {
             working: "Working…".into(),
             queued: "Queued: as many tasks as allowed are running; this one starts when one ends.".into(),
-            overloaded: "Too many pending messages or conversations; this message was not accepted. Please try again later.".into(),
+            overloaded:
+                "Too many pending messages or conversations; this message was not accepted. Please try again later."
+                    .into(),
             unauthorized: "Not authorized: this chat is not on the service's list.".into(),
             not_approver: "Only listed approvers can allow or deny; this click has no effect.".into(),
             cancelled: "Cancelled.".into(),
@@ -197,7 +201,6 @@ impl Default for Replies {
             timed_out: "The run timed out; the task is not finished.".into(),
             failed: "The run failed: ".into(),
             cannot_open: "Cannot open the session: ".into(),
-            stopping: "The service is stopping: messages of this thread not handled yet will not be; please send them again later.".into(),
             stopped: "The service is stopping: this task was cancelled; please send it again later.".into(),
             interrupted: "The service restarted: this task did not finish; please send it again.".into(),
         }
@@ -225,8 +228,9 @@ pub struct ServerConfig {
     pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
-    /// Limit for each send or update, and for each call to [`statuses`](Self::statuses); a call
-    /// that takes longer counts as failed.
+    /// Limit for each send or update, and for each call to [`statuses`](Self::statuses) and to
+    /// the [`backlog`](Self::backlog) but [`Backlog::keep`]; a call that takes longer counts
+    /// as failed.
     pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
@@ -236,6 +240,10 @@ pub struct ServerConfig {
     /// default, keeps nothing; the program `zx-im` keeps them in files under its session
     /// directory.
     pub statuses: Option<Arc<dyn StatusStore>>,
+    /// Keeps each message from its arrival until it is handled, and knows a message delivered
+    /// again ([`Backlog`]). [`MemoryBacklog`] by default, which keeps nothing across a restart;
+    /// the program `zx-im` keeps its backlog in files under its session directory.
+    pub backlog: Arc<dyn Backlog>,
 }
 
 impl Default for ServerConfig {
@@ -252,6 +260,7 @@ impl Default for ServerConfig {
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
             statuses: None,
+            backlog: Arc::new(MemoryBacklog::default()),
         }
     }
 }
@@ -298,15 +307,16 @@ impl Server {
     /// Serve `channels` until `cancel` is triggered or a channel fails.
     ///
     /// Stopping cancels the runs and waits until each conversation has posted how it ended,
-    /// [`Replies::stopped`] for a cancelled run; a thread with messages that will not run,
-    /// including those the channels received during the stop, also gets
-    /// [`Replies::stopping`]. A channel's error is then returned. Two channels with the same
-    /// platform name are a configuration error.
+    /// [`Replies::stopped`] for a cancelled run. A message not handled by then, waiting for a
+    /// run slot, steered into a run that did not take it in, or received during the stop,
+    /// stays pending in the [`backlog`](ServerConfig::backlog). A channel's error is then
+    /// returned. Two channels with the same platform name are a configuration error.
     ///
-    /// With [`ServerConfig::statuses`], the statuses an earlier process left behind are read
-    /// before anything is received, then replaced with [`Replies::interrupted`] while the
-    /// server runs: each is tried once and then forgotten. The stop gives up on the rest,
-    /// which stay for the next start.
+    /// As the server starts, it handles what the backlog holds pending, in the order kept,
+    /// before anything new. With [`ServerConfig::statuses`], the statuses an earlier process
+    /// left behind are read before anything is received, then replaced with
+    /// [`Replies::interrupted`] while the server runs: each is tried once and then forgotten.
+    /// The stop gives up on the rest, which stay for the next start.
     pub async fn run(self, channels: Vec<Arc<dyn ImChannel>>, cancel: &CancellationToken) -> Result<(), ImError> {
         distinct_platforms(&channels)?;
         let Server {
@@ -316,10 +326,14 @@ impl Server {
         } = self;
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
-        let shared = Arc::new(Shared::new(config, agent, sink));
+        let backlog = Arc::clone(&config.backlog);
+        let timeout = config.outbound_timeout;
+        let shared = Arc::new(Shared::new(config, agent, Arc::clone(&sink)));
         shared.index_sessions().await?;
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
+        // Read before any channel runs, so that nothing kept by this process is among them.
+        let pending = left_pending(&shared, backlog.as_ref()).await;
         let stop = cancel.child_token();
         let replacing = tokio::spawn(replace_left_behind(
             left,
@@ -327,7 +341,19 @@ impl Server {
             Arc::clone(&shared),
             stop.clone(),
         ));
-        Router::new(channels, allowed, shared, stop, replacing).run().await
+        let (receipts, completing) = complete_handled(Arc::clone(&backlog), Arc::clone(&sink), timeout, stop.clone());
+        let mut router = Router::new(channels, allowed, shared, stop, replacing, receipts, &backlog);
+        router.replay(pending);
+        let result = router.run().await;
+        // Every receipt is gone with the router: the task completes what was handled before
+        // the stop, and ends.
+        if let Err(error) = completing.await {
+            sink.emit(&ServerEvent::Failed {
+                key: None,
+                error: format!("completing handled messages in the backlog failed: {error}"),
+            });
+        }
+        result
     }
 }
 
@@ -375,7 +401,8 @@ struct Shared {
 }
 
 impl Shared {
-    /// What the conversations share, from everything in `config` but the chats served.
+    /// What the conversations share, from everything in `config` but the chats served and the
+    /// backlog.
     fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let ServerConfig {
             cwd,
@@ -390,6 +417,8 @@ impl Shared {
             outbound_timeout,
             replies,
             statuses,
+            // The channels' and the receipts', through the router.
+            backlog: _,
         } = config;
         Self {
             agent,

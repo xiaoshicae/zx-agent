@@ -22,7 +22,7 @@ use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::events::Event;
 use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
-use crate::input::{Input, InputQueues, PendingInput};
+use crate::input::{InputQueues, PendingInput};
 use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
 use crate::sync::lock;
@@ -179,9 +179,11 @@ impl Session {
     }
 
     /// Start a run with `input`: the person's text, or a message from an extension (pi:
-    /// `sendMessage` with `triggerTurn` while idle). This only takes the conversation; the
-    /// returned [`Run`] makes the requests as it is read. An overlap returns Busy.
-    pub fn send(&self, input: impl Into<Input>) -> Result<Run, SessionError> {
+    /// `sendMessage` with `triggerTurn` while idle), with a hold of the host's if it has one
+    /// ([`PendingInput::held`]), which ends once the session has recorded the input, or with a
+    /// run that ends without recording it. This only takes the conversation; the returned
+    /// [`Run`] makes the requests as it is read. An overlap returns Busy.
+    pub fn send(&self, input: impl Into<PendingInput>) -> Result<Run, SessionError> {
         // The conversion is host code: it runs before the conversation is leased.
         self.start(Start::Message(input.into()))
     }

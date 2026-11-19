@@ -1,13 +1,15 @@
-//! A channel under test, running until the test stops it.
+//! A channel under test, running until the test stops it, and a backlog that cannot keep
+//! anything.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use zx_im::{ImChannel, ImError, Inbound};
+use zx_im::{Backlog, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog, MessageKey};
 
 /// A running channel: what it passes on, and how to stop it.
 pub(crate) struct Running {
@@ -17,12 +19,23 @@ pub(crate) struct Running {
     task: JoinHandle<Result<(), ImError>>,
 }
 
-/// Run `channel` in its own task; `next` waits up to `wait` for each event.
+/// Run `channel` in its own task, keeping its messages in a backlog of its own; `next` waits
+/// up to `wait` for each event.
 pub(crate) fn run_channel<C: ImChannel + ?Sized + 'static>(channel: Arc<C>, wait: Duration) -> Running {
+    run_channel_with(channel, Arc::new(MemoryBacklog::default()), wait)
+}
+
+/// Run `channel` as [`run_channel`] does, keeping its messages in `backlog`.
+pub(crate) fn run_channel_with<C: ImChannel + ?Sized + 'static>(
+    channel: Arc<C>,
+    backlog: Arc<dyn Backlog>,
+    wait: Duration,
+) -> Running {
     let (sender, inbound) = mpsc::channel(16);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
-    let task = tokio::spawn(async move { channel.run(sender, &stop).await });
+    let inlet = Inlet::new(channel.platform(), sender, backlog);
+    let task = tokio::spawn(async move { channel.run(inlet, &stop).await });
     Running {
         inbound,
         wait,
@@ -40,6 +53,11 @@ impl Running {
             .expect("the channel is running")
     }
 
+    /// Whether the channel has passed nothing on that the test has not read.
+    pub(crate) fn nothing_passed(&mut self) -> bool {
+        self.inbound.try_recv().is_err()
+    }
+
     /// Cancel the channel and return how its run ended.
     pub(crate) async fn stop(self) -> Result<(), ImError> {
         self.cancel.cancel();
@@ -49,5 +67,23 @@ impl Running {
     /// How the run ended, for a channel that stops on its own.
     pub(crate) async fn ended(self) -> Result<(), ImError> {
         self.task.await.unwrap()
+    }
+}
+
+/// A backlog whose volume refuses every write.
+pub(crate) struct FullBacklog;
+
+#[async_trait]
+impl Backlog for FullBacklog {
+    async fn keep(&self, _key: &MessageKey, _record: &str) -> Result<Kept, String> {
+        Err("no space left on device".into())
+    }
+
+    async fn complete(&self, _key: &MessageKey) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn pending(&self) -> Result<Vec<(MessageKey, String)>, String> {
+        Ok(Vec::new())
     }
 }
