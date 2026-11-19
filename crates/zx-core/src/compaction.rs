@@ -339,8 +339,8 @@ pub(crate) enum End {
     Failed(String),
     /// The run was cancelled before the compaction completed; the text says where.
     Cancelled(String),
-    /// The session could not record a step of the compaction, so a run must stop
-    /// (invariant 7).
+    /// The session could not record a step of the compaction, so a run must stop: what it
+    /// does next could not be recorded either.
     Unrecorded(anyhow::Error),
 }
 

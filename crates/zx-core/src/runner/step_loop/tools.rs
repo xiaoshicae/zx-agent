@@ -215,7 +215,7 @@ impl StepLoop<'_> {
     }
 
     /// Check, run and record the calls of one response. Each call's start is recorded before
-    /// it runs (invariant 10), and the two orders keep that true differently: in sequence,
+    /// it runs, and the two orders keep that true differently: in sequence,
     /// each call is checked, started and run before the next is checked; in parallel, every
     /// call is checked, approvals included, before any start is recorded, so that a crash
     /// while one call waits for approval leaves no start for calls that never ran. Every call
@@ -439,9 +439,9 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Answer every call of a response cut off at the output token limit without running it
-    /// (invariant 4). Calls that never ran cannot end the attempt, whatever an output hook
-    /// sets on their results.
+    /// Answer every call of a response cut off at the output token limit without running it:
+    /// its arguments may be cut off too. Calls that never ran cannot end the attempt, whatever
+    /// an output hook sets on their results.
     pub(super) async fn reject_truncated_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         for call in calls {
             self.tool_start(call).await;

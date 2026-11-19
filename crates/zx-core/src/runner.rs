@@ -357,7 +357,9 @@ impl Running<'_> {
             // cancellation from the caller's.
             Ending::Cancelled if timed_out => {
                 // Only the timer of a configured limit sets `timed_out`.
-                let limit = limits.timeout.expect("Timeout requires a configured time limit");
+                let limit = limits
+                    .timeout
+                    .expect("a timeout ends a run only when a time limit is configured");
                 (
                     RunOutcome::TimedOut,
                     Some(format!("run exceeded the {}s time limit", limit.as_secs())),
@@ -433,8 +435,9 @@ impl RunTimer {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
     use std::path::Path;
+
+    use async_trait::async_trait;
 
     use super::*;
     use crate::ai::Message;
@@ -706,7 +709,7 @@ mod tests {
     #[tokio::test]
     async fn a_context_edit_write_failure_prevents_the_request() {
         struct Rewrite;
-        #[async_trait::async_trait]
+        #[async_trait]
         impl crate::hooks::Hook for Rewrite {
             async fn on_input(
                 &self,

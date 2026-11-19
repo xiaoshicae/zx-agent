@@ -51,11 +51,16 @@ pub(super) fn final_answer(messages: &[Message]) -> String {
     joined
 }
 
-/// Length in bytes of the longest end of `previous` that `next` starts with. Matches shorter
-/// than 8 bytes are treated as coincidence, and only the last 1000 bytes are searched.
+/// The shortest overlap taken for a repeat: a shorter match is coincidence.
+const MIN_OVERLAP_BYTES: usize = 8;
+/// The longest overlap looked for, which bounds the search.
+const MAX_OVERLAP_BYTES: usize = 1000;
+
+/// Length in bytes of the longest end of `previous` that `next` starts with, from
+/// [`MIN_OVERLAP_BYTES`] to [`MAX_OVERLAP_BYTES`]; 0 when there is none.
 fn overlap(previous: &str, next: &str) -> usize {
-    let longest = previous.len().min(next.len()).min(1000);
-    (8..=longest)
+    let longest = previous.len().min(next.len()).min(MAX_OVERLAP_BYTES);
+    (MIN_OVERLAP_BYTES..=longest)
         .rev()
         .find(|&len| next.is_char_boundary(len) && previous.ends_with(&next[..len]))
         .unwrap_or(0)

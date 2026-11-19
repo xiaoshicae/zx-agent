@@ -79,9 +79,10 @@
 //!
 //! An [`Agent`] creates and opens sessions. A session holds a conversation across runs. Each
 //! [`Session::send`] starts a [`Run`], which processes one prompt and may retry a failed
-//! provider response as another loop attempt. A task step is one task response and its tool calls; a model request may also
-//! be a compaction summary, which consumes the request budget without creating a separate
-//! task step. Retries and summary requests both consume the run's model-request budget.
+//! provider response as another loop attempt. A task step is one task response and its tool
+//! calls; a model request may also be a compaction summary, which consumes the request budget
+//! without creating a separate task step. Retries and summary requests both consume the
+//! run's model-request budget.
 //!
 //! Embedders make an [`Agent`] from an [`AgentConfig`], ask it for a [`Session`], and read
 //! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],

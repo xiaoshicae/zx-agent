@@ -119,7 +119,7 @@ impl RunScope<'_> {
         failed_entry: &str,
     ) -> Result<(), RunStop> {
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        accounting.retries += 1;
+        accounting.retries = accounting.retries.saturating_add(1);
         let delay = retry.delay_for(accounting.retries, failed);
         self.target
             .emit(EventKind::RetryScheduled {
