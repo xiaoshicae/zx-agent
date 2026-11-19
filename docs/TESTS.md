@@ -59,7 +59,7 @@
 | `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、续接的会话在原目录工作 |
 | `crates/zx-cli/tests/chat_cli.rs` | chat：审批、斜杠命令、摘要、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
-| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载、续接、列出与关闭、`/name`、终止信号 |
+| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
@@ -80,4 +80,4 @@
 
 ---
 
-TESTS.md · v0.14 · 2026年11月
+TESTS.md · v0.15 · 2026年11月

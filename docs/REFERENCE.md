@@ -80,9 +80,9 @@
 ## ACP
 
 - 传输：经 stdin 与 stdout 收发 ACP v1 的 JSON-RPC 消息；stdout 只走协议，诊断在 stderr。
-- 会话：`session/new` 建会话，`cwd` 由客户端给出，会话此后一直在这个目录工作，续接后也一样；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，两者只认在所给 `cwd` 开始的会话；`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/close` 取消会话正在进行的回合，并把会话移出内存：会话文件随之关闭（有回合在跑时，等它结束），别的进程就能打开它；文件保留，可以再 `session/load` 或 `session/resume`。关闭本进程没有持有的会话也算成功。`initialize` 总会声明 `sessionCapabilities.close`（关闭也释放内存）；`loadSession` 与 `sessionCapabilities` 的 `list`、`resume` 只在保存会话文件（不加 `--no-session`）时声明。客户端不发 `session/close` 时，会话留在内存中、文件保持锁定，直到进程退出。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
-- 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/named` 等其他文本仍是普通提问。
-- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。
+- 会话：`session/new` 建会话，`cwd` 由客户端给出，会话此后一直在这个目录工作，续接后也一样；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把整段对话回放给客户端（摘要替换掉的较早部分也回放），`session/resume` 续接但不回放，两者只认在所给 `cwd` 开始的会话；`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/close` 取消会话正在进行的回合，并把会话移出内存：会话文件随之关闭（有回合在跑时，等它结束），别的进程就能打开它；文件保留，可以再 `session/load` 或 `session/resume`。关闭本进程没有持有的会话也算成功。`initialize` 总会声明 `sessionCapabilities.close`（关闭也释放内存）；`loadSession` 与 `sessionCapabilities` 的 `list`、`resume` 只在保存会话文件（不加 `--no-session`）时声明。客户端不发 `session/close` 时，会话留在内存中、文件保持锁定，直到进程退出。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
+- 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name` 与 `/compact`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/compact` 请模型摘要较早的对话，自成一个回合，可以用 `session/cancel` 取消：进度以 `compaction_update` 通知，完成时以 `end_turn` 结束，没有可摘要的部分时不发请求、发一条 `notice` 后同样以 `end_turn` 结束，取消为 `cancelled`，失败以 JSON-RPC 错误应答；带了输入时以 `-32602` 应答。`/named` 等其他文本仍是普通提问。
+- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。提问取其中的文本；`resource_link` 以一行 `[resource <URI> (<名称>)]` 交给模型，图片、音频与内嵌资源没有声明支持，收到时略去。
 - 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 附 diff、`edit_file` 附补丁。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
 - 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。等待期间再收到一次信号时，进程立即被该信号结束。
 
@@ -223,4 +223,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.9 · 2026年11月
+REFERENCE.md · v0.10 · 2026年11月
