@@ -147,6 +147,15 @@ impl Extension for Probes {
     }
 }
 
+/// An extension named `.0`, with nothing else.
+struct Named(&'static str);
+
+impl Extension for Named {
+    fn name(&self) -> &str {
+        self.0
+    }
+}
+
 /// A summarizer without a name, which the kernel refuses.
 struct Nameless;
 
@@ -390,7 +399,7 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     agent_in(&home, "tools = [\"probe\"]");
-    let cases: [(Adding, &str); 6] = [
+    let cases: [(Adding, &str); 10] = [
         (
             |app| app.add_tool(Arc::new(EchoTool::new("bash"))),
             "the host's tool \"bash\" has the name of a built-in tool",
@@ -423,6 +432,25 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
                     .add_tool(Arc::new(EchoTool::new("probe")))
             },
             "more than one tool is named \"probe\"",
+        ),
+        (
+            |app| app.add_extension(Arc::new(Named("redact_secrets"))),
+            "the extension \"redact_secrets\" has the name of a built-in hook or policy",
+        ),
+        (
+            |app| app.add_prompt_section("environment", "Elsewhere."),
+            "the host's prompt section \"environment\" has a name",
+        ),
+        (
+            |app| app.add_prompt_section("preamble", "Other instructions."),
+            "the host's prompt section \"preamble\" has a name",
+        ),
+        (
+            |app| {
+                app.add_prompt_section("notes", "One.")
+                    .add_prompt_section("notes", "Two.")
+            },
+            "the host's prompt section \"notes\" has a name",
         ),
     ];
     for (add, expected) in cases {

@@ -53,6 +53,8 @@ pub(super) struct PerSession {
 const ENVIRONMENT: &str = "environment";
 const PROJECT_CONTEXT: &str = "project_context";
 const AVAILABLE_SKILLS: &str = "available_skills";
+/// The names of those sections, in their order.
+pub(super) const SECTION_NAMES: [&str; 3] = [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS];
 /// The hook that stores a session's long tool results, named like the hooks every session
 /// shares (`agent::hooks`).
 pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
@@ -61,11 +63,7 @@ pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
 impl SessionSetup for PerSession {
     fn section_names(&self) -> Vec<String> {
         let host = self.host_sections.iter().map(|(name, _)| name.clone());
-        [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS]
-            .map(String::from)
-            .into_iter()
-            .chain(host)
-            .collect()
+        SECTION_NAMES.map(String::from).into_iter().chain(host).collect()
     }
 
     /// Startup reads, then the start of the session's executor, such as its container.

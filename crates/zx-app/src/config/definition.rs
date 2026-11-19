@@ -216,8 +216,6 @@ fn exists(path: &Path) -> Result<bool> {
     }
 }
 
-/// Whether `name` is a tool the host registers itself: one that runs on the executor,
-/// read_output, or read_skill.
 /// Whether `name` is one of the built-in tools an agent may enable.
 pub(crate) fn known_tool(name: &str) -> bool {
     EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == READ_SKILL

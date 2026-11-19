@@ -15,7 +15,7 @@ use anyhow::Result;
 
 use crate::config::{AgentDefinition, HostTools, READ_SKILL, cost_budget, known_tool};
 use crate::otel;
-use zx_agent::ai::{Provider, SystemPrompt};
+use zx_agent::ai::{PREAMBLE, Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::redact::RedactSecrets;
@@ -28,7 +28,7 @@ use zx_util::env::env_value;
 
 use super::execution::ExecutorFactory;
 use super::provider::{BuiltProvider, ProviderInput};
-use super::setup::{PerSession, SPILL_OUTPUTS};
+use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
 
@@ -194,7 +194,7 @@ impl ConfiguredAgent {
         &self.place
     }
 
-    /// Open a stored session without writing diagnostics to the process's outputs.
+    /// Open a stored session; when it cannot be opened, the error names its file.
     pub async fn open(&self, id: &str) -> Result<Session> {
         match self.agent.open_session(id).await {
             Ok(session) => Ok(session),
@@ -213,16 +213,14 @@ impl ConfiguredAgent {
     /// Create a session in `cwd`, otherwise in [`Overrides::cwd`] or the process's current
     /// directory.
     ///
-    /// Startup reads and, in container mode, starting the container. A container that cannot
-    /// start is reported before the session's file is created.
+    /// Reads the project's instructions and starts the session's executor, such as a
+    /// container; one that cannot start is reported before the session's file is created.
     pub async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
         let options = SessionOptions::new(self.new_session_cwd(cwd)?);
         self.agent.create_session(options).await
     }
 }
 
-/// Refuse request fields that the reasoning level would also set: which one the server gets
-/// would not be clear from the configuration.
 /// The names of the host's own tools and of its extensions' tools, which the agent may name.
 fn host_tools(app: &Application) -> HostTools {
     HostTools {
@@ -236,13 +234,15 @@ fn host_tools(app: &Application) -> HostTools {
     }
 }
 
-/// Refuse a part of the host's whose name another part goes by already: a provider registered
-/// under a taken name, and the following. A tool of the host
-/// or of its extensions may not be named like a built-in tool, which a session gets only when
-/// it is made; tools that share a name otherwise, and extensions that do, the kernel refuses
-/// as the agent is made. Extensions name their own hooks and policies, so the host's hooks
-/// and policies may not be named like a built-in hook or policy, an extension, or another of
-/// the host's.
+/// Refuse a part of the host's whose name another part goes by already. A provider or an
+/// executor may not be registered under a taken name. A tool of the host or of its
+/// extensions may not be named like a built-in tool, which a session gets only when it is
+/// made; tools that share a name otherwise, and extensions that do, the kernel refuses as the
+/// agent is made. Extensions name their own hooks and policies, so an extension may not be
+/// named like a built-in hook or policy, and the host's hooks and policies may not be named
+/// like one, an extension, or another of the host's. The host's prompt sections are added
+/// beside the assembly's, so none may be named like one of those, the agent's instructions
+/// or another of the host's.
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
     app.providers.check_names().map_err(anyhow::Error::msg)?;
     app.executors.check_names().map_err(anyhow::Error::msg)?;
@@ -253,18 +253,26 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
         );
     }
     let mut taken: HashSet<&str> = BUILT_IN_NAMES.into();
-    taken.extend(
-        app.mcp
-            .servers
-            .iter()
-            .chain(&app.extensions)
-            .map(|extension| extension.name()),
-    );
+    for extension in app.mcp.servers.iter().chain(&app.extensions) {
+        let name = extension.name();
+        anyhow::ensure!(
+            !BUILT_IN_NAMES.contains(&name),
+            "the extension {name:?} has the name of a built-in hook or policy"
+        );
+        taken.insert(name);
+    }
     let hooks = app.hooks.iter().map(|(name, _)| name);
     for name in hooks.chain(app.policies.iter().map(|(name, _)| name)) {
         anyhow::ensure!(
             taken.insert(name),
             "the host's hook or policy {name:?} has a name that a built-in hook or policy, an extension or another of the host's goes by"
+        );
+    }
+    let mut sections: HashSet<&str> = setup::SECTION_NAMES.into_iter().chain([PREAMBLE]).collect();
+    for (name, _) in &app.host_sections {
+        anyhow::ensure!(
+            sections.insert(name),
+            "the host's prompt section {name:?} has a name that the agent's instructions, a section of the assembly or another of the host's goes by"
         );
     }
     Ok(())
@@ -347,7 +355,6 @@ fn policies(
     approvals: Approvals<'_>,
 ) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
-    // The commands an agent allows run without asking, the others ask.
     let commands = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
     policies.push(COMMAND_POLICY, Arc::new(commands));
     let auto_approve = agent.permissions.auto_approval();
@@ -385,8 +392,7 @@ fn policies(
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
-/// `[hook]` lines show, contains `_`, which MCP server names cannot, so it never clashes with
-/// an extension's.
+/// `[hook]` lines show, is no extension's: [`check_names`] refuses one named so.
 fn hooks(app: &Application, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
     let mut hooks = HookChain::new();
     hooks.push(

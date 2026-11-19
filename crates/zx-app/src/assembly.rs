@@ -58,8 +58,8 @@ use settings::{Settings, checked_secret_files, secret_files};
 /// session is opened at startup.
 ///
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
-/// (tools, hooks, policies, extensions, prompt sections), `set_*` replaces the one there is
-/// (the summarizer, the hidden variables, the trace export), and `register_*` names one
+/// (tools, hooks, policies, extensions, prompt sections, hidden variables), `set_*` replaces
+/// the one there is (the summarizer, the trace export), and `register_*` names one
 /// that config.toml chooses by its name (providers, executors). They are treated as the built-in ones
 /// are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
