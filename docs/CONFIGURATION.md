@@ -54,7 +54,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`，`anthropic` 的 `x-api-key`） |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
-| `execution` | `local`（默认）或 `container`，见下文“容器执行” |
+| `execution` | 命令在哪里执行：`local`（默认，本机）、`container`（见下文“容器执行”），或宿主经 `register_executor` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错 |
 | `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价：`input`、`output` 必填，`cacheRead`、`cacheWrite` 默认 0；都不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
 
@@ -198,7 +198,7 @@ shortFlags = ["A"]
 | `allowExcept` | 命令中出现其中的字词（不分大小写，子串比较）时，`allow` 放行的命令仍要审批 |
 | `allowOptions.<程序>` | 该程序（一个小写的词）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名）、`shortWithValue`（带值的单字母选项，如 `-oyaml`）、`shortFlags`（不带值、须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。选项按命令的第一个词查找，所以程序须是 `allow` 中某条 `bash(...)` 的第一个词：只经 `sudo` 或带路径放行的程序得不到约束，这样的配置以退出码 2 报错 |
 | `deny` | 工具名：拒绝该工具，批准也不能覆盖。`bash(<文本>)`：拒绝任何位置含该文本的命令，不分大小写。内置的拒绝规则始终保留 |
-| `approveAll` | `true` 时不询问任何审批，拒绝规则仍然生效。只能与 `execution = "container"` 一起使用，且 `ask` 须为空（扩展 `assistant` 时写 `ask = []`） |
+| `approveAll` | `true` 时不询问任何审批，拒绝规则仍然生效。只能与隔离命令的执行环境一起使用：内置的只有 `execution = "container"`，宿主注册的执行环境自己声明是否隔离；`ask` 须为空（扩展 `assistant` 时写 `ask = []`） |
 
 没有命令白名单：只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow`，其余命令要审批，在 run 中被拒绝。条目无效（工具名不认识、为空、`bash()` 中没有文本或缺右括号）时以退出码 2 报错。
 
@@ -263,7 +263,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]

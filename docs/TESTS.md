@@ -48,7 +48,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 选用宿主注册的或内置的 provider，名字未注册或重复时 `build` 报错 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`

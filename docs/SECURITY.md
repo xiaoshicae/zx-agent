@@ -49,10 +49,10 @@
 - 容器内默认：工作目录以读写方式挂载在同一路径，改动直接作用于宿主机；容器自身的文件可写；加入 `bridge` 网络，可以联网。严格模式为 `network = "none"`、`workspace = "readOnly"`、`root = "readOnly"`。
 - 外墙：只挂载工作目录，不加 `--privileged`，不挂 Docker socket，不用宿主机的网络与 PID 命名空间，去掉全部 capability 并设 `no-new-privileges`，限制进程数与内存，命令不以 root 运行。命令不继承 agent 的环境变量，API key 不进入容器。
 - 同一容器内的调用逐个执行；每条命令前后终止命令用户的全部进程，脱离进程组的后台进程也不例外。
-- 审批照常；容器执行时 agent 可以设 `permissions.approveAll = true` 不再询问，拒绝规则仍然生效。
+- 审批照常；容器执行时 agent 可以设 `permissions.approveAll = true` 不再询问，拒绝规则仍然生效。宿主注册的执行环境声明自己隔离命令（`ExecutorFactory::isolates`）时也可以，隔离是否成立由宿主负责。
 - 可写又联网时，挂进容器的内容（代码、`.git` 中的远端地址等）可能被发送出去。工作目录整体对容器可见，所以会话文件必须在工作目录之外，否则启动时报配置错误（在主目录中运行 chat 时改用另一个 `ZX_AGENT_HOME` 或 `--no-session`）。
 - 容器中没有 agent 的环境变量，也只看得到工作目录，所以需要凭据的在线访问（如集群 API）不经容器执行。
 
 ---
 
-SECURITY.md · v0.7 · 2026年11月
+SECURITY.md · v0.8 · 2026年11月
