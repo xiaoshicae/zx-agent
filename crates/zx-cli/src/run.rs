@@ -222,7 +222,7 @@ async fn read_to_end(session: &Session, mut run: Run, cancel: &CancellationToken
 fn print_report(report: &RunReport, output: OutputMode, file: Option<&Path>) {
     match output {
         OutputMode::Text => {
-            if !report.final_text.is_empty() {
+            if answered(report.outcome) && !report.final_text.is_empty() {
                 // A terminal would run control sequences in the answer; a pipe gets the exact text.
                 if std::io::stdout().is_terminal() {
                     print_line(&visible(&report.final_text));
@@ -261,6 +261,18 @@ fn print_report(report: &RunReport, output: OutputMode, file: Option<&Path>) {
         }
         // The `run_end` event, already written, carries the report.
         OutputMode::Jsonl => {}
+    }
+}
+
+/// Whether the run ended with an answer for stdout: a complete one, or one cut off at the
+/// output token limit, which holds what was produced. The text a failed, timed-out or
+/// cancelled run, or one whose budget ran out before the model answered, left behind is no
+/// answer; it stays in the session and in jsonl's `run_end` (pi: `runPrintMode`).
+fn answered(outcome: RunOutcome) -> bool {
+    match outcome {
+        RunOutcome::Completed | RunOutcome::Truncated => true,
+        RunOutcome::BudgetExhausted { truncated, .. } => truncated,
+        RunOutcome::Failed | RunOutcome::TimedOut | RunOutcome::Cancelled => false,
     }
 }
 

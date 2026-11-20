@@ -172,6 +172,17 @@ async fn the_time_limit_exits_4() {
     assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
 }
 
+#[tokio::test]
+async fn an_answer_cut_short_by_the_time_limit_is_not_printed_as_the_answer() {
+    let server = MockServer::start(vec![Reply::Stall(vec![text_chunk("The beginning of")])]).await;
+
+    let output = run_once(&server, &["--tools", "", "--timeout-secs", "1", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    // The text stays in the session and in jsonl's run_end; stdout holds answers only.
+    assert_eq!(stdout(&output), "");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn sigterm_exits_5() {
