@@ -205,7 +205,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":13,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":14,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
@@ -213,7 +213,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
-- 只读写版本 13，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 14，其他版本的文件拒绝打开，不做升级。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；它的 `source.kind` 与 `request_start` 事件的 `kind` 一样是 `task`（任务请求）或 `summary`（摘要请求）。不记录 API key、URL 与 HTTP 头。
@@ -224,4 +224,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.21 · 2026年11月
+REFERENCE.md · v0.22 · 2026年11月

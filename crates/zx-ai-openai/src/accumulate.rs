@@ -262,6 +262,7 @@ impl Accumulator {
             duration_ms: None,
             response_id: self.response_id.clone(),
             response_model: self.response_model.clone(),
+            input_transformations: Vec::new(),
         }
     }
 }

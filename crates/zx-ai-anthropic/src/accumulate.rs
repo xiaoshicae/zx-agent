@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, ProviderErrorKind, StopReason, ToolCall, Usage};
+use zx_ai::{
+    AssistantMessage, ContentBlock, Delta, InputTransformation, ProviderError, ProviderErrorKind, StopReason, ToolCall,
+    Usage,
+};
 use zx_ai_http::Failure;
 use zx_ai_http::stream::Answer;
 
@@ -43,6 +46,8 @@ pub(crate) struct Accumulator {
     stop: Option<(String, Value)>,
     response_id: Option<String>,
     response_model: Option<String>,
+    /// What the API changed in the request, as the last event that listed it says.
+    input_transformations: Vec<InputTransformation>,
 }
 
 impl Accumulator {
@@ -58,6 +63,7 @@ impl Accumulator {
             stop: None,
             response_id: None,
             response_model: None,
+            input_transformations: Vec::new(),
         }
     }
 
@@ -74,6 +80,7 @@ impl Accumulator {
                     self.stop = Some((reason.to_string(), event["delta"]["stop_details"].clone()));
                 }
                 self.apply_usage(&event["usage"]);
+                self.apply_transformations(&event["input_transformations"]);
             }
             Some("error") => return Err(provider_failure(&event["error"])),
             // `content_block_stop`, `message_stop` and `ping` change nothing here.
@@ -89,6 +96,28 @@ impl Accumulator {
             .filter(|model| !model.is_empty() && *model != self.model)
             .map(str::to_string);
         self.apply_usage(&message["usage"]);
+        self.apply_transformations(&message["input_transformations"]);
+    }
+
+    /// Read the changes to the request that `listed` reports. The API lists them at the start
+    /// and, after a fallback to another model during the response, again in the last
+    /// `message_delta`, whose list replaces the first; a value that is not a list changes
+    /// nothing. An entry without a `type` says nothing and is passed over.
+    fn apply_transformations(&mut self, listed: &Value) {
+        let Some(entries) = listed.as_array() else {
+            return;
+        };
+        let text = |entry: &Value, field: &str| entry[field].as_str().map(str::to_string);
+        self.input_transformations = entries
+            .iter()
+            .filter_map(|entry| {
+                Some(InputTransformation {
+                    kind: text(entry, "type")?,
+                    path: text(entry, "path"),
+                    reason: text(entry, "reason"),
+                })
+            })
+            .collect();
     }
 
     fn open(&mut self, event: &Value, deltas: &mut Vec<Delta>) {
@@ -214,6 +243,7 @@ impl Accumulator {
             duration_ms: None,
             response_id: self.response_id.clone(),
             response_model: self.response_model.clone(),
+            input_transformations: self.input_transformations.clone(),
         }
     }
 

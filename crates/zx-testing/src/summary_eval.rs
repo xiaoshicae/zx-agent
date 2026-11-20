@@ -476,6 +476,7 @@ fn assistant(block: ContentBlock, stop_reason: StopReason) -> Message {
         duration_ms: None,
         response_id: None,
         response_model: None,
+        input_transformations: Vec::new(),
     })
 }
 

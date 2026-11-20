@@ -117,6 +117,21 @@ fn assistant() -> AssistantMessage {
         duration_ms: None,
         response_id: None,
         response_model: None,
+        input_transformations: Vec::new(),
+    }
+}
+
+/// An answer for which the API dropped earlier thinking from the request.
+fn answer_after_a_drop() -> AssistantMessage {
+    AssistantMessage {
+        content: vec![ContentBlock::Text { text: "Done.".into() }],
+        stop_reason: StopReason::Stop,
+        input_transformations: vec![InputTransformation {
+            kind: "thinking_dropped".into(),
+            path: Some("messages.1.content.0".into()),
+            reason: Some("prefix_binding_mismatch".into()),
+        }],
+        ..assistant()
     }
 }
 
@@ -233,6 +248,27 @@ fn messages_keep_the_session_file_format() {
         assert_eq!(serde_json::to_value(&message).unwrap(), expected);
         assert_eq!(serde_json::from_value::<Message>(expected).unwrap(), message);
     }
+}
+
+#[test]
+fn input_transformations_are_recorded_only_when_present() {
+    let recorded = json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Done."}],
+        "provider": "p",
+        "model": "m",
+        "usage": {"input": 3, "output": 2, "cacheRead": 1, "totalTokens": 5},
+        "stopReason": "stop",
+        "timestamp": 7,
+        "inputTransformations": [
+            {"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"}
+        ]
+    });
+    let message = Message::Assistant(answer_after_a_drop());
+    assert_eq!(serde_json::to_value(&message).unwrap(), recorded);
+    assert_eq!(serde_json::from_value::<Message>(recorded).unwrap(), message);
+    let without = serde_json::to_value(assistant()).unwrap();
+    assert!(without.get("inputTransformations").is_none(), "{without}");
 }
 
 #[test]
