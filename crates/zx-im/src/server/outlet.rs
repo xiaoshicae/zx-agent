@@ -2,7 +2,6 @@
 //! model reads what people said there, and the text that replaces the status message when a
 //! run ends.
 
-use std::fmt::Display;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -166,7 +165,7 @@ impl Outlet {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
             match shared.agent.open_session(&id).await {
-                Ok(session) => return self.held(Ok::<_, String>(session)),
+                Ok(session) => return Ok(self.hold(session)),
                 Err(error) if !self.still_kept(&id).await => {
                     self.failed(format!("session {id} is gone ({error:#}); a new one is made"));
                 }
@@ -207,20 +206,18 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
         };
-        let opened = self.held(self.shared.agent.create_session(options).await)?;
-        self.shared.go_on_in(&self.key, opened.session.id());
-        Ok(opened)
+        let created = self.shared.agent.create_session(options).await;
+        // The whole chain of causes.
+        let session = created.map_err(|error| format!("{error:#}"))?;
+        self.shared.go_on_in(&self.key, session.id());
+        Ok(self.hold(session))
     }
 
-    /// `session`, as the conversation holds it, or why the agent could not give one: the
-    /// whole chain of causes.
-    fn held<E: Display>(&self, session: Result<Session, E>) -> Result<Opened, String> {
-        match session {
-            Ok(session) => Ok(Opened {
-                session,
-                agent: self.shared.agent.clone(),
-            }),
-            Err(error) => Err(format!("{error:#}")),
+    /// `session`, as the conversation holds it.
+    fn hold(&self, session: Session) -> Opened {
+        Opened {
+            session,
+            agent: self.shared.agent.clone(),
         }
     }
 
@@ -228,9 +225,15 @@ impl Outlet {
     /// session the conversation holds from now on. Created at once, it is the conversation's
     /// latest session whatever happens before the next message: a conversation that is
     /// released, or a process that restarts, goes on in it. A session that cannot be created
-    /// is reported in the conversation, which then stays in `open`.
-    pub(super) async fn start_over(&self, open: Option<Opened>) -> Option<Opened> {
-        match self.create().await {
+    /// is reported in the conversation, which then stays in `open`, as it does when `stop`,
+    /// the server stopping, ends the wait.
+    pub(super) async fn start_over(&self, open: Option<Opened>, stop: &CancellationToken) -> Option<Opened> {
+        let created = tokio::select! {
+            // The command stays in the backlog, for the next start.
+            () = stop.cancelled() => return open,
+            created = self.create() => created,
+        };
+        match created {
             Ok(opened) => {
                 // The session held so far is closed here; it stays in the storage.
                 drop(open);

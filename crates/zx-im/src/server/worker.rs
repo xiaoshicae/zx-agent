@@ -382,7 +382,7 @@ impl Worker {
             Phase::Waiting(waiting) => waiting.open,
             Phase::Idle { open, .. } => open,
         };
-        let open = self.out.start_over(open).await;
+        let open = self.out.start_over(open, &self.stop).await;
         self.phase = Phase::idle(open);
     }
 
@@ -404,10 +404,7 @@ impl Worker {
                     self.out.post(self.out.replies().queued.clone()).await;
                 }
             }
-            Err(TryAcquireError::Closed) => {
-                self.phase = Phase::idle(open);
-                self.out.failed("the run slots are closed".into());
-            }
+            Err(TryAcquireError::Closed) => self.slots_closed(open),
         }
     }
 
@@ -526,12 +523,15 @@ impl Worker {
         } = waiting;
         match slot {
             Ok(slot) => self.open_and_start(open, asked, slot, trigger.as_ref()).await,
-            // The server never closes its semaphore.
-            Err(_) => {
-                self.phase = Phase::idle(open);
-                self.out.failed("the run slots are closed".into());
-            }
+            Err(_) => self.slots_closed(open),
         }
+    }
+
+    /// The server never closes its run slots; should they be closed, what was asked is dropped,
+    /// and the operator hears of it.
+    fn slots_closed(&mut self, open: Option<Opened>) {
+        self.phase = Phase::idle(open);
+        self.out.failed("the run slots are closed".into());
     }
 
     /// Post the answer of the work `running` did, then run what was asked as it ended, after
@@ -567,7 +567,7 @@ impl Worker {
         }
         let (open, leftover) = match after {
             AfterRun::Continue => (open, leftover),
-            AfterRun::Renew => (self.out.start_over(open).await, leftover),
+            AfterRun::Renew => (self.out.start_over(open, &self.stop).await, leftover),
             AfterRun::Cancel => {
                 // The run had ended on its own before the cancel reached it, so its answer
                 // does not say what the cancel did.

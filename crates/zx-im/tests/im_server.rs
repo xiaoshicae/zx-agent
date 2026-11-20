@@ -1831,6 +1831,22 @@ async fn new_reports_a_session_it_cannot_create() {
 }
 
 #[tokio::test]
+async fn the_stop_does_not_wait_for_the_session_new_is_making() {
+    let gate = Gate::new();
+    let h = start(Setup {
+        setup_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    let backlog = h.backlog.clone();
+    // The new session's setup waits at the gate, which stays shut.
+    h.say_as(ASKER, "m1", "slow-thread", Addressee::Bot, "/new").await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    tokio::time::timeout(WAIT, h.stop()).await.unwrap().unwrap();
+    // Nothing was made: the command waits for the next start.
+    assert_eq!(pending(&backlog).await, ["m1"]);
+}
+
+#[tokio::test]
 async fn new_during_a_run_cancels_it_and_then_starts_over() {
     let mut h = start(Setup {
         steps: vec![echo_call(), FauxStep::text("fresh")],
