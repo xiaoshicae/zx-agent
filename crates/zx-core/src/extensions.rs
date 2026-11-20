@@ -38,7 +38,12 @@ pub use command::{CommandContext, CommandOutcome, SlashCommand, check_command_na
 ///
 /// #[async_trait::async_trait]
 /// impl Hook for Mark {
-///     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
+///     async fn after_tool(
+///         &self,
+///         _call: &ToolCall,
+///         mut output: ToolOutput,
+///         _ctx: &HookContext,
+///     ) -> HookResult<ToolOutput> {
 ///         output.content.push_str("\n(checked)");
 ///         Ok(output)
 ///     }

@@ -52,12 +52,11 @@ pub mod fake_slack;
 pub mod http;
 pub mod mock_server;
 pub mod program;
-pub mod summary_eval;
-
 mod records;
 mod runner;
 mod sessions;
 mod stand_ins;
+pub mod summary_eval;
 
 /// How long a test waits for what only a failure keeps from coming: a request, an event, a
 /// message, a fake server's client. Reaching it fails the test.
