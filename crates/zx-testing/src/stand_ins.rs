@@ -61,7 +61,8 @@ impl Provider for NotifyingProvider {
 
 /// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs (`steer`,
 /// `follow_up`) or withdraw a queued user message (`withdraw`), report each string in
-/// `progress` as a progress update, and return `details` and `usage` as given.
+/// `progress` as a progress update, and return `details` and `usage` as given. `panic`
+/// makes it panic, `fail` fail with that text, and `terminate` ask the run to end after it.
 pub struct EchoTool {
     /// The name the model calls it by.
     pub name: &'static str,

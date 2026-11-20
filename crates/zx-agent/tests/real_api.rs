@@ -282,11 +282,11 @@ async fn an_invalid_key_fails_without_retrying() {
 }
 
 /// The scripted session of `zx_testing::summary_eval` summarized after each of its rounds.
-/// Prints each round's score and the final facts. Fails when a summary is not made, since the scores then
-/// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
-/// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`
-/// sets the output budget. The session file stays in a temporary directory, whose path is
-/// printed first.
+/// Prints each round's score and the final facts. Fails when a summary is not made, since the
+/// scores then mean nothing; otherwise asserts only what holds whatever the model answers.
+/// Each summary has the default budgets, 2048 output tokens and 2 minutes, unless
+/// `ZX_E2E_SUMMARY_TOKENS` sets the output budget. The session file stays in a temporary
+/// directory, whose path is printed first.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
 async fn summaries_over_eight_rounds_of_a_scripted_session() {

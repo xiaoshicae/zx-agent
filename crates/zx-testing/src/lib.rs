@@ -27,9 +27,9 @@
 //! - [`mock_server`]: a local fake model service ([`MockServer`](mock_server::MockServer)):
 //!   SSE, HTTP errors, a stream that stalls after some data or ends when told, and waiting
 //!   for a number of requests
-//! - [`fake_mcp`]: an MCP server written from the specification, without rmcp
-//! - [`fake_slack`], [`fake_feishu`]: the fake chat platforms
 //! - [`http`]: reading and answering one HTTP request, and a listener that never answers
+//! - [`fake_mcp`] (http): an MCP server written from the specification, without rmcp
+//! - [`fake_slack`], [`fake_feishu`] (http): the fake chat platforms
 //! - [`program`]: a program a test runs, such as the compiled `zx-agent` or `zx-im`: the
 //!   command that starts it apart from the developer's environment, the zx-agent home a
 //!   test gives it, how it ended, and what it leaves behind; its [`stdout`], [`stderr`] and
@@ -41,8 +41,9 @@
 //! turn it on is in `docs/TESTS.md`), `MemoryStorage` for session storage without files, what
 //! only the program's tests can have (`crates/zx-cli/tests/common/`: the compiled `zx-agent`,
 //! and a pseudo-terminal in `pty.rs`), running a chat channel
-//! (`crates/zx-im/tests/common/im.rs`), and the unit tests' own `test_support` modules in
-//! `zx-core`'s `transcript` and `zx-builtin`'s `jsonl`.
+//! (`crates/zx-im/tests/common/im.rs`), and the unit tests' own `test_support` modules:
+//! `zx-core`'s in `transcript`, and `zx-builtin`'s at its root (FIFOs) and in `jsonl` and
+//! `policy`.
 
 pub mod fake_feishu;
 pub mod fake_mcp;

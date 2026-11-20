@@ -1,7 +1,7 @@
 //! A scripted troubleshooting session for evaluating context summaries over several rounds of
-//! compaction. Each round runs a
-//! few commands; the commands, their output and what the assistant says plant facts among
-//! routine noise. The round ends with the user's next request, and a summary follows.
+//! compaction. Each round runs a few commands; the commands, their output and what the
+//! assistant says plant facts among routine noise. The round ends with the user's next
+//! request, and a summary follows.
 //!
 //! Each summary is scored by the planted facts that still hold and that its facts state; by
 //! the replaced ones that it gives only the old value of; and by the replaced ones that some
@@ -32,7 +32,7 @@ const TASK: &str = "Checkout in namespace shop has been failing and slow since a
 
 /// A fact planted in the records of one round.
 pub struct Planted {
-    /// What [`planted`] finds it by, such as `F1`.
+    /// Its name, such as `F1`, by which the script refers to it.
     pub id: &'static str,
     /// The round whose records first state it.
     pub round: usize,
@@ -58,7 +58,7 @@ impl Planted {
     }
 
     /// Whether the fact holds after `round`: stated by then, and not yet replaced.
-    pub fn holds_after(&self, round: usize) -> bool {
+    fn holds_after(&self, round: usize) -> bool {
         self.round <= round && self.replacement().is_none_or(|by| by.round > round)
     }
 
@@ -81,7 +81,7 @@ impl Planted {
 }
 
 /// The planted fact with this ID.
-pub fn planted(id: &str) -> &'static Planted {
+fn planted(id: &str) -> &'static Planted {
     PLANTED
         .iter()
         .find(|fact| fact.id == id)

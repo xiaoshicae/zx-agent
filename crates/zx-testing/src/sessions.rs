@@ -228,7 +228,7 @@ pub struct LogStorage {
 
 impl LogStorage {
     /// A storage of a session with `header` and no records yet, which records to `log`.
-    pub fn new(header: SessionHeader, log: impl SessionLog + 'static) -> Self {
+    fn new(header: SessionHeader, log: impl SessionLog + 'static) -> Self {
         let loaded = LoadedSession {
             header,
             records: Vec::new(),
