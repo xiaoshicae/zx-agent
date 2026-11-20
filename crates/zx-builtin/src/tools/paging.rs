@@ -223,13 +223,7 @@ mod tests {
     async fn a_fifo_is_refused_without_waiting_for_a_writer() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::test_support::make_fifo(&fifo);
 
         // A read that waited for a writer would never end: nothing writes.
         let read = tokio::time::timeout(std::time::Duration::from_secs(5), read_text(&fifo, 10, Links::Follow)).await;

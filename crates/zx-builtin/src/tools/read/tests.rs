@@ -73,14 +73,7 @@ async fn refuses_named_pipes() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fifo");
-    assert!(
-        tokio::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .await
-            .unwrap()
-            .success()
-    );
+    crate::test_support::make_fifo(&path);
     let writer_path = path.clone();
     // This writer also lets the old implementation complete, so a failing regression
     // test never leaves a blocking read behind during runtime shutdown.
@@ -109,14 +102,7 @@ async fn refusing_a_named_pipe_does_not_open_it() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fifo");
-    assert!(
-        tokio::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .await
-            .unwrap()
-            .success()
-    );
+    crate::test_support::make_fifo(&path);
     let writer_path = path.clone();
     // Opening a FIFO for writing waits until something opens it for reading: the writer
     // is released only if the reader opens the FIFO it refuses, as opening a device would

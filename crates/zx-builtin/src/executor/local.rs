@@ -196,19 +196,6 @@ mod tests {
     /// ends by itself.
     const PROMPTLY: Duration = Duration::from_secs(5);
 
-    #[cfg(unix)]
-    fn fifo(dir: &Path) -> std::path::PathBuf {
-        let path = dir.join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
-        path
-    }
-
     /// Open `path`'s other end without blocking, which ends an open of it that waits.
     #[cfg(unix)]
     fn release(path: &Path, read: bool) {
@@ -225,7 +212,8 @@ mod tests {
     #[tokio::test]
     async fn a_fifo_in_place_of_a_checked_file_is_refused_without_waiting_for_a_writer() {
         let dir = tempfile::tempdir().unwrap();
-        let path = fifo(dir.path());
+        let path = dir.path().join("fifo");
+        crate::test_support::make_fifo(&path);
 
         let opened = tokio::time::timeout(PROMPTLY, open_regular_file(&path)).await;
         release(&path, false);
@@ -238,7 +226,8 @@ mod tests {
     #[tokio::test]
     async fn a_fifo_in_place_of_a_checked_file_is_not_written_and_not_waited_on() {
         let dir = tempfile::tempdir().unwrap();
-        let path = fifo(dir.path());
+        let path = dir.path().join("fifo");
+        crate::test_support::make_fifo(&path);
         let target = path.clone();
 
         let written = tokio::time::timeout(

@@ -418,6 +418,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::test_support::make_fifo;
 
     #[tokio::test]
     async fn a_named_pipe_in_place_of_an_output_is_refused() {
@@ -427,14 +428,7 @@ mod tests {
         std::fs::create_dir_all(&outputs).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let path = outputs.join(format!("{id}.txt"));
-        assert!(
-            tokio::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
+        make_fifo(&path);
         let writer_path = path.clone();
         // A reader that waits for a writer gets this one and then reads what it wrote, so
         // that such a reader fails the test instead of blocking it.

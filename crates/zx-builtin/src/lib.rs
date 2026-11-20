@@ -16,6 +16,8 @@
 //!   show
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by
 //!   default
+//! - `test_support`, compiled for tests on Unix only: the FIFOs that tests put where a file
+//!   is expected
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai as ai;
@@ -32,4 +34,6 @@ pub mod mcp;
 pub mod output_store;
 pub mod policy;
 pub mod redact;
+#[cfg(all(test, unix))]
+mod test_support;
 pub mod tools;
