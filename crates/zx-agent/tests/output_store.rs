@@ -426,8 +426,12 @@ fn a_result_not_stored_in_time_stays_inline() {
         let (release, released) = std::sync::mpsc::channel::<()>();
         let occupied = tokio::task::spawn_blocking(move || released.recv());
         let dir = tempfile::tempdir().unwrap();
-        let (hook, _) = parts(dir.path());
-        let hook = hook.write_timeout(std::time::Duration::ZERO);
+        let config = OutputStoreConfig {
+            write_timeout: std::time::Duration::ZERO,
+            ..settings()
+        };
+        let store = OutputStore::new(dir.path(), config).unwrap();
+        let (hook, _) = SpillOutputs::with_reader(store, Vec::new());
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),

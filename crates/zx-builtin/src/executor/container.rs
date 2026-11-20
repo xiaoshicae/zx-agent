@@ -575,11 +575,12 @@ fn run_args(config: &ContainerConfig, workspace: &Path, name: &str) -> Vec<Strin
 
 /// Check that the `bytes` read from `path` are within `max_bytes`.
 fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), String> {
-    let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-    if read > max_bytes {
-        return Err(over_limit_error(path, max_bytes));
+    // A length that does not fit in a u64 is over any limit.
+    if u64::try_from(bytes.len()).is_ok_and(|read| read <= max_bytes) {
+        Ok(())
+    } else {
+        Err(over_limit_error(path, max_bytes))
     }
-    Ok(())
 }
 
 /// Client output for an error message: lossy UTF-8, trimmed, or a note that there was none.

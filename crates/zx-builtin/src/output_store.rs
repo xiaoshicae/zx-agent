@@ -32,6 +32,9 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub const MIN_THRESHOLD_BYTES: usize = 256;
 /// The threshold by default, and the size of a page when nothing is stored.
 pub const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
+/// How long storing one result may take by default: under the default hook timeout, so that
+/// a slow disk keeps the result inline rather than losing it to that timeout.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Written into the output directory when the store creates it: stored results may contain
 /// sensitive data, and the directory may lie inside a working tree under version control.
 const GITIGNORE: &str = "# Stored tool results may contain sensitive data.\n*\n";
@@ -49,16 +52,23 @@ pub struct OutputStoreConfig {
     /// Hard file size limit, at most [`MAX_FILE_BYTES`]. It applies to both writes and actual
     /// reads.
     pub max_file_bytes: usize,
+    /// How long storing one result may take before it stays inline instead. Keep it below the
+    /// timeout the spill hook is registered with
+    /// ([`DEFAULT_HOOK_TIMEOUT`](zx_core::hooks::DEFAULT_HOOK_TIMEOUT) by default): when that
+    /// one fires first, the tool's output is withheld. A write that runs out of time may still
+    /// finish later and leave its file behind.
+    pub write_timeout: Duration,
 }
 
 impl OutputStoreConfig {
     /// Settings that store results in `directory`: those over [`DEFAULT_PAGE_BYTES`], up to
-    /// [`MAX_FILE_BYTES`] each.
+    /// [`MAX_FILE_BYTES`] each, within [`DEFAULT_WRITE_TIMEOUT`].
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
             threshold_bytes: Some(DEFAULT_PAGE_BYTES),
             max_file_bytes: MAX_FILE_BYTES,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 
@@ -204,7 +214,7 @@ impl OutputStore {
     }
 
     /// Store `text` in a new file and return its output ID.
-    async fn write(&self, text: &str) -> HookResult<String> {
+    async fn write(&self, text: &str) -> Result<String, String> {
         if text.len() > self.config.max_file_bytes {
             return Err(format!(
                 "tool result is {} bytes, over the {} byte limit",
@@ -252,8 +262,8 @@ impl OutputStore {
     /// directory can put one there, and it would lead to any file this process can read.
     async fn read(&self, path: &Path) -> Result<String, String> {
         self.check_directory().await?;
-        let max = u64::try_from(self.config.max_file_bytes)
-            .map_err(|error| format!("output byte limit is out of range: {error}"))?;
+        // A limit beyond a u64 does not limit what a file can hold.
+        let max = u64::try_from(self.config.max_file_bytes).unwrap_or(u64::MAX);
         read_text(path, max, Links::Refuse).await
     }
 
@@ -267,11 +277,6 @@ impl OutputStore {
     }
 }
 
-/// How long storing one result may take before the result stays inline instead. It is under
-/// the default hook timeout, so a slow disk keeps the result rather than losing it to that
-/// timeout.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// The hook that stores a long tool result as a file and leaves its first page in its
 /// place, as [`ReadOutputTool`] would return it: with a footer that says how to read on.
 ///
@@ -280,7 +285,6 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,
-    write_timeout: Duration,
 }
 
 impl SpillOutputs {
@@ -291,18 +295,8 @@ impl SpillOutputs {
         let hook = Self {
             store: store.clone(),
             exempt_tools,
-            write_timeout: WRITE_TIMEOUT,
         };
         (hook, ReadOutputTool::new(store))
-    }
-
-    /// Keep a result inline when storing it takes longer than `timeout` (3 seconds by
-    /// default). Keep it below the timeout this hook is registered with (5 seconds by
-    /// default): when that one fires first, the tool's output is withheld. A write that runs
-    /// out of time may still finish later and leave its file behind.
-    pub fn write_timeout(mut self, timeout: Duration) -> Self {
-        self.write_timeout = timeout;
-        self
     }
 }
 
@@ -321,9 +315,10 @@ impl Hook for SpillOutputs {
                 .threshold_bytes
                 .is_some_and(|limit| output.content.len() > limit)
         {
-            let stored = match tokio::time::timeout(self.write_timeout, self.store.write(&output.content)).await {
+            let limit = self.store.config.write_timeout;
+            let stored = match tokio::time::timeout(limit, self.store.write(&output.content)).await {
                 Ok(stored) => stored,
-                Err(_) => Err(format!("storing took longer than {:?}", self.write_timeout)),
+                Err(_) => Err(format!("storing took longer than {limit:?}")),
             };
             match stored {
                 // The first page, not only a reference: the model sees how the result starts

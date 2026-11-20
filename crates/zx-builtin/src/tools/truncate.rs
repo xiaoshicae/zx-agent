@@ -10,7 +10,7 @@ use crate::text::prefix_within;
 
 /// Truncated text and what was cut.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Truncated {
+pub(crate) struct Truncated {
     pub text: String,
     pub truncated: bool,
     pub total_lines: usize,
@@ -19,7 +19,7 @@ pub struct Truncated {
 }
 
 /// Keep the beginning. Suits file reads and search results.
-pub fn truncate_head(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
+pub(crate) fn truncate_head(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let mut out = String::new();
     let mut kept = 0;

@@ -1,10 +1,10 @@
 //! Exact-text replacement for `edit_file`, with a tolerant fallback, and the unified patch of
 //! a change (pi: coding-agent/src/core/tools/edit-diff.ts).
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// One replacement the model asked for.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct Edit {
     pub old_text: String,

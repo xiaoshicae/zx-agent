@@ -45,7 +45,7 @@ const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
 const LINE_TRUNCATED: &str = " [line truncated]";
 
 /// `text` as one single-quoted shell word: nothing in it is interpreted.
-pub(crate) fn quote(text: &str) -> String {
+pub(super) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
