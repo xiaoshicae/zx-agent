@@ -133,7 +133,8 @@ impl Provider for FauxProvider {
         lock(&self.requests).push(request);
         let (mut tx, rx) = event_channel();
         // Not awaited: the task ends with the response, at its final event, when the
-        // receiver is dropped or when `cancel` fires (the `Provider` contract).
+        // receiver is dropped or when `cancel` fires (the `Provider` contract); a `Hang` step
+        // ends only when `cancel` fires.
         tokio::spawn(async move {
             if let Some(event) = event_for(step, &model, &cancel, &mut tx).await {
                 // A failed terminal send only means its consumer has gone away.

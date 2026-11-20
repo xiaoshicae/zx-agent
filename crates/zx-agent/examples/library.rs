@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
+
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::SystemPrompt;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
@@ -28,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let task = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "Report disk and memory usage.".to_string());
-    let model = std::env::var("ZX_MODEL")?;
+    let model = std::env::var("ZX_MODEL").context("ZX_MODEL must name the model")?;
     let cwd = std::env::current_dir()?;
     // Read-only diagnostics only: other commands ask, and nobody is there to approve them.
     // `ps` is left out: on Linux, `ps e` can print the environment of the user's processes,
@@ -74,8 +76,7 @@ async fn main() -> anyhow::Result<()> {
         limits: RunLimits {
             max_model_requests: Some(30),
             timeout: Some(Duration::from_secs(15 * 60)),
-            token_budget: None,
-            cost_budget: None,
+            ..RunLimits::default()
         },
         ..AgentConfig::new(Arc::new(provider), model)
     };

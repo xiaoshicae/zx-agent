@@ -42,6 +42,8 @@ pub struct Usage {
     /// Reasoning tokens, counted within `output` (pi: `reasoning`).
     #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
     pub reasoning: u64,
+    /// All tokens of the response: the total the server reports, or input plus output where
+    /// it reports none.
     pub total_tokens: u64,
     /// What the response cost by the configured prices ([`ModelCost`]), in their unit;
     /// absent without prices. A sum adds the known costs (pi: `cost.total`).
@@ -99,9 +101,12 @@ pub struct ModelMeta {
 pub struct ModelCost {
     /// Prompt tokens neither served from nor written to the cache.
     pub input: f64,
+    /// Output tokens, reasoning included.
     pub output: f64,
+    /// Prompt tokens served from the cache.
     #[serde(default)]
     pub cache_read: f64,
+    /// Prompt tokens written to the cache.
     #[serde(default)]
     pub cache_write: f64,
 }
@@ -500,8 +505,11 @@ pub fn api_identifier(text: &str) -> String {
 
 /// Tool declaration sent to the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDef {
+    /// The name the model calls the tool by.
     pub name: String,
+    /// What the tool does, for the model to choose it by.
     pub description: String,
     /// JSON Schema of the arguments object.
     pub parameters: Value,
@@ -514,6 +522,9 @@ pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
+    /// The most tokens the answer may take. `None` leaves it to the provider: the
+    /// OpenAI-compatible one sends no limit, and the Anthropic one, whose API requires a limit,
+    /// sends a default of its own.
     pub max_tokens: Option<u32>,
     /// How hard a reasoning model should think. `None` sends nothing, leaving the server's
     /// default; each provider maps a level to its own settings.

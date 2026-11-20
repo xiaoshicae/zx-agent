@@ -43,13 +43,16 @@ pub(crate) fn request_options(options: &BodyOptions) -> Value {
     serde_json::to_value(record).expect("strings, numbers, booleans and a JSON map serialize")
 }
 
-/// Rebuild a Chat Completions JSON body from a persisted RequestConfig and Request.
-/// Credentials, URLs and HTTP headers are intentionally absent. Rejects an unknown option
-/// format, any version but the current one and an option it does not know, rather than
-/// silently applying a different conversion policy.
+/// Rebuild the JSON body of a Chat Completions request from a recorded request and the
+/// options recorded with it, for the request audit. Credentials, URLs and HTTP headers are
+/// not in it. Rejects another conversion, any version but this one and an option it does not
+/// know, rather than apply a different conversion.
 pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
     let Conversion { format, version } = Conversion::deserialize(options)?;
-    anyhow::ensure!(format == FORMAT, "unsupported request conversion format");
+    anyhow::ensure!(
+        format == FORMAT,
+        "request conversion format {format:?} is not supported; only {FORMAT:?} can be replayed"
+    );
     anyhow::ensure!(
         version == VERSION,
         "request conversion version {version} is not supported; only version {VERSION} can be replayed"
