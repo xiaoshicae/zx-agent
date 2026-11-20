@@ -27,7 +27,7 @@ use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::{ExecutionMode, Tool};
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, ended, ended_output};

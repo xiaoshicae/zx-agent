@@ -19,7 +19,7 @@ use crate::ai::{Message, ModelMeta, Usage};
 use crate::guard::CancelSignal;
 use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without_details};
 
-pub(crate) use compactor::Compactor;
+pub(crate) use self::compactor::Compactor;
 
 /// The most bytes of original records one compaction reads.
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;

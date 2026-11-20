@@ -33,9 +33,9 @@ use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
 use crate::{ImChannel, ImError, Server, ServerConfig};
 
-pub(crate) use args::Args;
-use config_file::{ConfigFile, access, read_file, server_config};
-use log::{Log, failure_log};
+pub(crate) use self::args::Args;
+use self::config_file::{ConfigFile, access, read_file, server_config};
+use self::log::{Log, failure_log};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
 /// asked, a platform failed while serving, or the configuration or the credentials were
@@ -318,9 +318,9 @@ fn serve_exit_code(served: Result<(), ImError>) -> u8 {
 mod tests {
     use async_trait::async_trait;
 
+    use self::config_file::SERVER;
     use super::*;
     use crate::{Destination, Inlet, MessageRef, Post, Replacement};
-    use config_file::SERVER;
 
     #[cfg(unix)]
     #[test]

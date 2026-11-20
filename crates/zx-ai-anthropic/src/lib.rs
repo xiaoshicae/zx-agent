@@ -30,11 +30,11 @@ use zx_ai_http::request::{api_key, send};
 use zx_ai_http::stream::{Events, end};
 use zx_ai_http::{CONNECT_TIMEOUT, Failure};
 
-use accumulate::Accumulator;
-pub use config::{AnthropicConfig, BodyOptions, DEFAULT_API_VERSION, SystemUpdates};
-use config::{KEY_HEADER, VERSION_HEADER};
-use failure::{http_failure, json_body_failure};
-pub use request::replay_body;
+use self::accumulate::Accumulator;
+pub use self::config::{AnthropicConfig, BodyOptions, DEFAULT_API_VERSION, SystemUpdates};
+use self::config::{KEY_HEADER, VERSION_HEADER};
+use self::failure::{http_failure, json_body_failure};
+pub use self::request::replay_body;
 
 /// Streaming provider for the Anthropic Messages API.
 pub struct AnthropicMessages {

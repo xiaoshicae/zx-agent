@@ -36,9 +36,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use signal::Signal;
-pub use signal::TraceHook;
-use spans::{Runs, export};
+use self::signal::Signal;
+pub use self::signal::TraceHook;
+use self::spans::{Runs, export};
 use zx_util::env::env_value;
 
 /// Either variable turns the trace export on. As the OTLP specification has it, the first is

@@ -42,14 +42,14 @@ use zx_agent::policy::ToolPolicy;
 use zx_agent::tools::Tool;
 use zx_util::registry::Registry;
 
-pub use agent::{Approvals, ConfiguredAgent};
-pub use execution::{ExecutorFactory, ExecutorSession};
-pub use place::SessionPlace;
-pub use provider::{BuiltProvider, ProviderFactory, ProviderInput};
-pub use settings::NoModel;
+pub use self::agent::{Approvals, ConfiguredAgent};
+pub use self::execution::{ExecutorFactory, ExecutorSession};
+pub use self::place::SessionPlace;
+pub use self::provider::{BuiltProvider, ProviderFactory, ProviderInput};
+pub use self::settings::NoModel;
 
-use mcp::McpTools;
-use settings::{Settings, checked_secret_files, secret_files};
+use self::mcp::McpTools;
+use self::settings::{Settings, checked_secret_files, secret_files};
 
 /// What the agents of a process share, read and connected once: the settings with what the
 /// host says over them, the MCP servers, the secret files to redact, the variables commands

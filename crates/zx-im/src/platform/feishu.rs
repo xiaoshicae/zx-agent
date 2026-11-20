@@ -32,13 +32,13 @@ use crate::{
     CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageId, MessageRef, Post, Replacement,
 };
 
+use self::api::CallError;
+use self::connection::{ClientConfig, PREFIX};
+use self::events::{button, card, card_request, markdown, resolution, text_content};
 use super::{
     Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, FEISHU, MAX_TEXT_CHARS, Pacer, PlatformFactory,
     PlatformInput, http_client, pause, report, secret, split_text,
 };
-use api::CallError;
-use connection::{ClientConfig, PREFIX};
-use events::{button, card, card_request, markdown, resolution, text_content};
 
 /// Where the open API lives.
 const DEFAULT_API_BASE: &str = "https://open.feishu.cn";

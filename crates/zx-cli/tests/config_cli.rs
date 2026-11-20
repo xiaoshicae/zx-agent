@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, write_config};
 use zx_testing::stderr;

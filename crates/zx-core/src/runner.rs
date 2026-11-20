@@ -34,9 +34,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use final_answer::{cut_off, final_answer};
-use run_scope::{CompactionPause, RunScope, RunStop};
+use self::final_answer::{cut_off, final_answer};
+use self::run_scope::{CompactionPause, RunScope, RunStop};
 
+pub(crate) use self::accounting::{Exhausted, RunAccounting};
+use self::run_scope::PERSIST_FAILED;
+pub(crate) use self::step_loop::{FirstInput, Halt, LoopConfig, StepLoop};
+pub(crate) use self::trace::{EventTarget, RunTrace};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Initiative};
@@ -45,10 +49,6 @@ use crate::input::PendingInput;
 use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
-pub(crate) use accounting::{Exhausted, RunAccounting};
-use run_scope::PERSIST_FAILED;
-pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, StepLoop};
-pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. The defaults impose no request limit, time limit or budget.
 #[derive(Clone, Debug, Default)]

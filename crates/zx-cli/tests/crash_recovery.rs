@@ -27,7 +27,7 @@ use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Entry;
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
 use zx_testing::{

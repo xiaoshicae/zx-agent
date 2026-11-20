@@ -7,7 +7,7 @@ use std::path::Path;
 use serde_json::json;
 use tokio::process::Command;
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, fake_model_config, write_config};
 use zx_testing::{stderr, stdout};

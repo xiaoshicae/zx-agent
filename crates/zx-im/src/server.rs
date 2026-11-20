@@ -36,16 +36,16 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
 use zx_agent::events::ApprovalResult;
 
+use self::received::{complete_handled, left_pending};
+use self::router::{Router, RouterSetup};
+use self::shared::{Shared, group, timed};
+use self::status::{left_behind, replace_left_behind};
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
-use received::{complete_handled, left_pending};
-use router::{Router, RouterSetup};
-use shared::{Shared, group, timed};
-use status::{left_behind, replace_left_behind};
 
-pub use replies::Replies;
-pub(crate) use replies::{CONVERSATION, CONVERSATION_SECTION};
-pub(crate) use status::StatusFiles;
-pub use status::StatusStore;
+pub use self::replies::Replies;
+pub(crate) use self::replies::{CONVERSATION, CONVERSATION_SECTION};
+pub(crate) use self::status::StatusFiles;
+pub use self::status::StatusStore;
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
 const DEFAULT_MAX_CONVERSATIONS: NonZeroUsize = NonZeroUsize::new(128).expect("128 is not zero");

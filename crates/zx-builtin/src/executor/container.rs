@@ -37,9 +37,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
-pub use config::{Access, ContainerConfig, InvalidContainerConfig, Network, UnusableWorkspace};
-use config::{Platform, check_workspace, container_section, parse_platform};
-use scripts::{
+pub use self::config::{Access, ContainerConfig, InvalidContainerConfig, Network, UnusableWorkspace};
+use self::config::{Platform, check_workspace, container_section, parse_platform};
+use self::scripts::{
     EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
     PROBE_NO_WORKSPACE, PROBE_READ_ONLY, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
 };

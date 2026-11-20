@@ -29,8 +29,8 @@ use crate::sync::lock;
 use crate::tools::ActiveTools;
 use crate::transcript::{CustomMessage, SessionName, Transcript};
 
-use run::EVENT_BUFFER;
-pub use run::Run;
+use self::run::EVENT_BUFFER;
+pub use self::run::Run;
 
 /// What a new session starts with.
 #[derive(Clone, Debug)]

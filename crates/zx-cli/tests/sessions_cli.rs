@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, ended_output, fake_model_config, seed_session, session_files, write_config};

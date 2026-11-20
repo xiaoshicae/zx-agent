@@ -30,10 +30,10 @@ use zx_ai_http::request::{api_key, send};
 use zx_ai_http::stream::{Events, end};
 use zx_ai_http::{CONNECT_TIMEOUT, Failure};
 
-use accumulate::Accumulator;
-pub use config::{BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
-use failure::{error_object, http_failure, json_body_failure, provider_failure};
-pub use request::replay_body;
+use self::accumulate::Accumulator;
+pub use self::config::{BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
+use self::failure::{error_object, http_failure, json_body_failure, provider_failure};
+pub use self::request::replay_body;
 
 /// Streaming provider for the OpenAI Chat Completions protocol.
 pub struct OpenAiCompatible {

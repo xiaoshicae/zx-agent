@@ -63,18 +63,18 @@ pub mod summary_eval;
 pub const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(unix)]
-pub use program::signal;
-pub use program::{stderr, stdout};
-pub use records::{
+pub use self::program::signal;
+pub use self::program::{stderr, stdout};
+pub use self::records::{
     answer_reporting, json_lines, note, read_lines, replayed_requests, request_ids, summarize, summary_json,
     summary_of_the_source, tool_call, tool_call_answer, tool_call_block,
 };
-pub use runner::{
+pub use self::runner::{
     Approver, Asked, Collect, Driven, RunnerSetup, config, fast_retry, refusal, run_approved, run_prompt,
     run_prompt_with, take_queued_inputs, test_limits,
 };
-pub use sessions::{
+pub use self::sessions::{
     LogStorage, RefusingLog, Seed, Start, create_session_file, header, header_in, open_session_file, read_session_file,
     seeded_session,
 };
-pub use stand_ins::{EchoTool, NotifyingProvider, hook_context, tool_context};
+pub use self::stand_ins::{EchoTool, NotifyingProvider, hook_context, tool_context};

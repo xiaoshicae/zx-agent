@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
 use zx_testing::{stderr, summary_json};

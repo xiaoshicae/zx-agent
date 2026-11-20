@@ -52,8 +52,8 @@ use crate::application::connect;
 use crate::cli::{self, AcpArgs};
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
 
-use commands::Command;
-use turn::{Running, Turn, prompt_text};
+use self::commands::Command;
+use self::turn::{Running, Turn, prompt_text};
 
 struct Host {
     /// The agent of every session, which also holds the sessions the client has open: the

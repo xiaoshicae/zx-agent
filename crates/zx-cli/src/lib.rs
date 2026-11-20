@@ -34,8 +34,8 @@ use clap::Parser;
 
 use zx_util::stdio::eprint_line;
 
-use cli::{Cli, Command};
-use process::EXIT_USAGE;
+use self::cli::{Cli, Command};
+use self::process::EXIT_USAGE;
 
 /// Run the command line the process was started with, and return its exit code. An error
 /// that ends a subcommand, such as a configuration problem found before it started or an

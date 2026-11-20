@@ -20,7 +20,7 @@ pub mod config;
 pub mod otel;
 pub mod shutdown;
 
-pub use assembly::{
+pub use self::assembly::{
     Application, Approvals, BuiltProvider, ConfiguredAgent, ExecutorFactory, ExecutorSession, NoModel, Overrides,
     ProviderFactory, ProviderInput, SessionPlace, resolve_cwd,
 };

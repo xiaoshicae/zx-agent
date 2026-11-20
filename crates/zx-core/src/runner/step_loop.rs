@@ -30,8 +30,8 @@ use crate::runner::final_answer::cut_off;
 use crate::runner::run_scope::RunScope;
 use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
 
-pub(crate) use config::LoopConfig;
-use step::{AfterTools, NextInput, StepResponse};
+pub(crate) use self::config::LoopConfig;
+use self::step::{AfterTools, NextInput, StepResponse};
 
 /// Why the loop stops. Every part of a step returns it as its error, so `?` ends the attempt
 /// wherever a step stops it, and [`StepLoop::run`] returns the one that did. What the

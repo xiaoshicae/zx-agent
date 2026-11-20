@@ -23,8 +23,8 @@ use zx_core::transcript::{
     Unreadable,
 };
 
+use self::file::JsonlFile;
 use crate::calendar::civil_from_days;
-use file::JsonlFile;
 
 /// What session files end in.
 const EXTENSION: &str = "jsonl";

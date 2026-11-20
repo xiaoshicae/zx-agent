@@ -29,12 +29,12 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
-pub use bash::BashTool;
-pub use edit::EditFileTool;
-pub use mutation::FileMutationQueue;
-pub use read::ReadFileTool;
-pub use search::{FindTool, GrepTool, LsTool};
-pub use write::WriteFileTool;
+pub use self::bash::BashTool;
+pub use self::edit::EditFileTool;
+pub use self::mutation::FileMutationQueue;
+pub use self::read::ReadFileTool;
+pub use self::search::{FindTool, GrepTool, LsTool};
+pub use self::write::WriteFileTool;
 
 use crate::executor::Executor;
 use zx_core::tools::{Tool, ToolContext};

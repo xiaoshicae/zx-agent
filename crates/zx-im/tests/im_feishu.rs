@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::im::{FullBacklog, at, run_channel, run_channel_with};
+use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,

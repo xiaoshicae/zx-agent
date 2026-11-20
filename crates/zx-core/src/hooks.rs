@@ -22,7 +22,7 @@ use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
 use crate::transcript::{context_edit_refusal, replace_text};
 
-pub use chain::HookChain;
+pub use self::chain::HookChain;
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);

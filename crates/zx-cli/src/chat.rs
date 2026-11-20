@@ -38,13 +38,13 @@ use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
 use crate::render::visible;
 
-use commands::Command;
-use info::{About, banner, help, status};
-use input::Line;
-use output::Output;
-use storage::{Keeping, Storage, opening};
-use term::Tone;
-use turn::{Operation, TurnIo, drive_turn};
+use self::commands::Command;
+use self::info::{About, banner, help, status};
+use self::input::Line;
+use self::output::Output;
+use self::storage::{Keeping, Storage, opening};
+use self::term::Tone;
+use self::turn::{Operation, TurnIo, drive_turn};
 
 /// A second Ctrl+C within this long, while idle, exits.
 const QUIT_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);

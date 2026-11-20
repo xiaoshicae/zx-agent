@@ -22,9 +22,9 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
+pub use self::report::{Budget, RunOutcome, RunReport};
 use crate::ai::{Delta, Message, Role, Usage};
 use crate::policy::PolicyDecision;
-pub use report::{Budget, RunOutcome, RunReport};
 
 /// Where the events of a run go, for the kernel's own objects below the run, such as the
 /// compactor: the run implements it, stamping each event, handing it to the run's reader and

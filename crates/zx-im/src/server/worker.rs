@@ -29,14 +29,14 @@ use zx_agent::transcript::CustomMessage;
 
 use crate::{Addressee, ApprovalId, Choice, ImChannel, MessageRef, UserId};
 
+use self::cards::Card;
+pub(super) use self::commands::Command;
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Finished, Opened, Outlet};
 use super::received::Receipt;
 use super::render::answer_of;
 use super::{ServerEvent, SessionKey, Shared};
-use cards::Card;
-pub(super) use commands::Command;
 
 /// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
 const UPDATE_CAPACITY: usize = 16;

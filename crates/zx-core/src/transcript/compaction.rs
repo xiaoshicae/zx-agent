@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
 
-pub(crate) use source::{summary_input, summary_messages};
+pub(crate) use self::source::{summary_input, summary_messages};
 
 /// The largest summary, serialized as JSON, in bytes.
 pub const MAX_SUMMARY_BYTES: usize = 64 * 1024;

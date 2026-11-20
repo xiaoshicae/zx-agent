@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
-pub use find::FindTool;
-pub use grep::GrepTool;
-pub use ls::LsTool;
+pub use self::find::FindTool;
+pub use self::grep::GrepTool;
+pub use self::ls::LsTool;
 
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};

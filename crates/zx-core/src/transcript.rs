@@ -37,22 +37,24 @@ mod storage;
 mod test_support;
 #[cfg(test)]
 mod tests;
-pub use compaction::{
+pub use self::compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, MAX_SUMMARY_BYTES,
     MAX_SUMMARY_STATEMENTS, SummarizedBy, SummaryFact, SummaryRequest,
 };
-pub(crate) use compaction::{CompactionPlan, summary_input, summary_messages};
-pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
-pub use log::{LoadedSession, LogRecord, SessionLog};
-pub use memory::MemoryStorage;
-pub use name::{SessionInfoEntry, SessionName};
-pub use projection::ProjectedMessage;
-pub(crate) use projection::{replace_text, without_details};
-pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
-pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
-pub use storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
+pub(crate) use self::compaction::{CompactionPlan, summary_input, summary_messages};
+pub use self::entry::{
+    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader,
+};
+pub use self::log::{LoadedSession, LogRecord, SessionLog};
+pub use self::memory::MemoryStorage;
+pub use self::name::{SessionInfoEntry, SessionName};
+pub use self::projection::ProjectedMessage;
+pub(crate) use self::projection::{replace_text, without_details};
+pub use self::recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
+pub use self::request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
+pub use self::storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
 #[cfg(test)]
-pub(crate) use test_support::{FailingWriter, WriterLog};
+pub(crate) use self::test_support::{FailingWriter, WriterLog};
 
 use std::collections::HashMap;
 use std::path::Path;

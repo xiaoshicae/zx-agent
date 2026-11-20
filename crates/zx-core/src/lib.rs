@@ -113,6 +113,6 @@ mod test_support;
 pub mod tools;
 pub mod transcript;
 
-pub use agent::{Agent, AgentConfig};
-pub use guard::CancelSignal;
-pub use session::{Run, Session, SessionOptions};
+pub use self::agent::{Agent, AgentConfig};
+pub use self::guard::CancelSignal;
+pub use self::session::{Run, Session, SessionOptions};

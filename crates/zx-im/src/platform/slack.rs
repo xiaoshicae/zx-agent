@@ -24,12 +24,12 @@ use crate::{
     UserId,
 };
 
+use self::api::CallError;
+use self::events::{Me, button, card_request, escape, history, resolution, section, split};
 use super::{
     Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
     PlatformInput, RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
 };
-use api::CallError;
-use events::{Me, button, card_request, escape, history, resolution, section, split};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";

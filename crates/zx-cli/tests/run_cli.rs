@@ -19,7 +19,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
-use common::zx_agent_in;
+use self::common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_agent::transcript::SessionHeader;
 use zx_testing::http::{Request, read_request, silent_listener};

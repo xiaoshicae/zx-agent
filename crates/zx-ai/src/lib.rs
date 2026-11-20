@@ -25,8 +25,8 @@ pub mod retry;
 mod system_prompt;
 mod types;
 
-pub use provider::{
+pub use self::provider::{
     ABORTED_MESSAGE, ApiKey, ApiKeySource, EventReceiver, EventSender, Provider, event_channel, send_event,
 };
-pub use system_prompt::{PREAMBLE, SectionChange, SystemMessage, SystemPrompt};
-pub use types::*;
+pub use self::system_prompt::{PREAMBLE, SectionChange, SystemMessage, SystemPrompt};
+pub use self::types::*;
