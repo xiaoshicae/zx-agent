@@ -70,7 +70,7 @@ pub(super) struct WorkerSetup {
     pub(super) shared: Arc<Shared>,
     pub(super) inbox: mpsc::Receiver<WorkerInput>,
     pub(super) budget: Arc<InputBudget>,
-    pub(super) retire: mpsc::Sender<Retire>,
+    pub(super) retire_to: mpsc::Sender<Retire>,
     pub(super) stop: CancellationToken,
 }
 
@@ -293,21 +293,21 @@ enum OpenFailure {
 }
 
 /// A card waiting for its result.
-struct Pending {
+struct Card {
     id: ApprovalId,
     /// What the card shows, shown again once it is closed.
-    card: ApprovalCard,
+    shown: ApprovalCard,
     /// The card as posted.
     posted: MessageRef,
-    decision: Decision,
+    state: CardState,
 }
 
 /// How far a card's decision has come.
-enum Decision {
+enum CardState {
     /// Nobody has clicked yet; the first approver's click decides.
     Open,
     /// Who decided.
-    By(UserId),
+    DecidedBy(UserId),
     /// A click came after the run stopped waiting; the card closes without a decider.
     Lapsed,
 }
@@ -324,7 +324,7 @@ struct Worker {
     updated: mpsc::Receiver<ApprovalUpdate>,
     lifecycle: Lifecycle,
     phase: Phase,
-    pending: Vec<Pending>,
+    cards: Vec<Card>,
     /// The person whose message the bot took last, as long as nobody else spoke since: their
     /// next message is meant for the bot even without a mention.
     answering: Option<UserId>,
@@ -340,7 +340,7 @@ impl Worker {
             shared,
             inbox,
             budget,
-            retire,
+            retire_to,
             stop,
         } = setup;
         let (updates, updated) = mpsc::channel(UPDATE_CAPACITY);
@@ -354,13 +354,13 @@ impl Worker {
             inbox,
             budget,
             received: 0,
-            retire_to: retire,
+            retire_to,
             stop,
             updates,
             updated,
             lifecycle: Lifecycle::Serving,
             phase: Phase::idle(None),
-            pending: Vec::new(),
+            cards: Vec::new(),
             answering: None,
             heard: Vec::new(),
         }
@@ -669,7 +669,7 @@ impl Worker {
     }
 
     async fn decide(&mut self, user: UserId, approval: ApprovalId, choice: Choice) {
-        let Some(index) = self.pending.iter().position(|pending| pending.id == approval) else {
+        let Some(index) = self.cards.iter().position(|card| card.id == approval) else {
             // The card was closed already; a late click changes nothing.
             return;
         };
@@ -678,7 +678,7 @@ impl Worker {
             return;
         }
         // The first approver's click decides; later clicks on the card change nothing.
-        if !matches!(self.pending[index].decision, Decision::Open) {
+        if !matches!(self.cards[index].state, CardState::Open) {
             return;
         }
         let decision = match choice {
@@ -687,14 +687,14 @@ impl Worker {
         };
         // The run may have stopped waiting (timeout or cancellation); its approval_resolved
         // event then closes the card without a decider.
-        self.pending[index].decision = match self.answer(&approval, decision) {
-            Ok(()) => Decision::By(user),
-            Err(_) => Decision::Lapsed,
+        self.cards[index].state = match self.resolve(&approval, decision) {
+            Ok(()) => CardState::DecidedBy(user),
+            Err(_) => CardState::Lapsed,
         };
     }
 
-    /// Answer the approval request `id` of the run in progress.
-    fn answer(&self, id: &ApprovalId, decision: ApprovalDecision) -> Result<(), SessionError> {
+    /// Resolve the approval request `id` of the run in progress with `decision`.
+    fn resolve(&self, id: &ApprovalId, decision: ApprovalDecision) -> Result<(), SessionError> {
         match &self.phase {
             Phase::Running(running) => running.open.session.resolve_approval(&id.0, decision),
             // Without a run, no request waits.
@@ -704,54 +704,54 @@ impl Worker {
 
     /// A call waits for approval: post its card. Without a card nobody can decide, so the
     /// call is denied, and the model hears why.
-    async fn ask(&mut self, id: ApprovalId, card: ApprovalCard) {
+    async fn post_card(&mut self, id: ApprovalId, shown: ApprovalCard) {
         let request = Post::ApprovalRequest {
             id: id.clone(),
-            card: card.clone(),
+            card: shown.clone(),
         };
-        match self.out.ask(&request).await {
-            Ok(posted) => self.pending.push(Pending {
+        match self.out.post_card(&request).await {
+            Ok(posted) => self.cards.push(Card {
                 id,
-                card,
+                shown,
                 posted,
-                decision: Decision::Open,
+                state: CardState::Open,
             }),
             Err(error) => {
                 // The request may have ended meanwhile; then there is nothing to deny.
-                drop(self.answer(&id, ApprovalDecision::Deny(error)));
+                drop(self.resolve(&id, ApprovalDecision::Deny(error)));
             }
         }
     }
 
     async fn approval(&mut self, update: ApprovalUpdate) {
         match update {
-            ApprovalUpdate::Requested { id, card } => self.ask(id, card).await,
+            ApprovalUpdate::Requested { id, card } => self.post_card(id, card).await,
             ApprovalUpdate::Resolved {
                 id,
                 tool_call_id,
                 tool,
                 result,
             } => {
-                let pending = self
-                    .pending
+                let card = self
+                    .cards
                     .iter()
-                    .position(|pending| Some(&pending.id) == id.as_ref())
-                    .map(|index| self.pending.swap_remove(index));
-                let (approval, user) = match pending {
-                    Some(pending) => {
-                        let user = match pending.decision {
-                            Decision::By(user) => Some(user),
-                            Decision::Open | Decision::Lapsed => None,
+                    .position(|card| Some(&card.id) == id.as_ref())
+                    .map(|index| self.cards.swap_remove(index));
+                let (approval, user) = match card {
+                    Some(card) => {
+                        let user = match card.state {
+                            CardState::DecidedBy(user) => Some(user),
+                            CardState::Open | CardState::Lapsed => None,
                         };
                         let closed = Replacement::ApprovalResolved {
-                            id: pending.id.clone(),
-                            card: pending.card,
+                            id: card.id.clone(),
+                            card: card.shown,
                             user: user.clone(),
                             result,
                         };
                         // A card left open was reported; the decision stands either way.
-                        self.out.replace(&pending.posted, &closed).await;
-                        (Some(pending.id), user)
+                        self.out.replace(&card.posted, &closed).await;
+                        (Some(card.id), user)
                     }
                     // No card: nobody was asked, or posting it failed.
                     None => (None, None),

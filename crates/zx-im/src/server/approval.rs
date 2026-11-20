@@ -1,7 +1,7 @@
-//! Approvals in the chat: a card with buttons, answered by an approver's click.
+//! Approvals in the chat: a card with buttons, decided by an approver's click.
 //!
 //! The task that reads a run passes its approval events on to the worker
-//! ([`ApprovalEvents`]): the worker posts a card for each request, answers the request when
+//! ([`ApprovalEvents`]): the worker posts a card for each request, resolves the request when
 //! an approver clicks, and closes the card when the run reports how the approval ended.
 
 use std::sync::Arc;

@@ -197,9 +197,9 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     } = program;
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
-    let Platforms { channels, hidden_env } = platforms(&file, &registered, &path)?;
-    let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
-    let (conversations, approvers) = access(&file.access, &platforms)?;
+    let BuiltChannels { channels, hidden_env } = build_channels(&file, &registered, &path)?;
+    let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
+    let (conversations, approvers) = access(&file.access, &names)?;
     let (code, end) =
         shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| -> Result<u8> {
             if telemetry.is_some() {
@@ -289,7 +289,7 @@ async fn conversations_agent(app: &Application, dir: &Path) -> Result<Configured
 }
 
 /// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
-/// approvals in the conversation: the server answers each request with an approver's click
+/// approvals in the conversation: the server resolves each request with an approver's click
 /// on the card it posts.
 fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
@@ -314,15 +314,15 @@ async fn serve(config: ServerConfig, agent: &ConfiguredAgent, channels: Vec<Arc<
     serve_exit_code(served)
 }
 
-/// The configured IM platforms: a channel for each, and the environment variables that hold
+/// The channels of the configured IM platforms, and the environment variables that hold
 /// their secrets, which commands must not see.
 #[derive(Default)]
-struct Platforms {
+struct BuiltChannels {
     channels: Vec<Arc<dyn ImChannel>>,
     hidden_env: Vec<String>,
 }
 
-impl Platforms {
+impl BuiltChannels {
     /// Add a platform's channel and the variables holding its secrets.
     fn add(&mut self, built: BuiltChannel) {
         self.channels.push(built.channel);
@@ -330,12 +330,12 @@ impl Platforms {
     }
 }
 
-/// The platforms `file` configures, each built by the factory `registered` under its
-/// section's name. An error when it configures none, when no factory or two are registered
-/// under a name, and when a channel goes by another name than its section's.
-fn platforms(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path: &Path) -> Result<Platforms> {
+/// The channels of the platforms `file` configures, each built by the factory `registered`
+/// under its section's name. An error when it configures none, when no factory or two are
+/// registered under a name, and when a channel goes by another name than its section's.
+fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path: &Path) -> Result<BuiltChannels> {
     registered.check_names().map_err(anyhow::Error::msg)?;
-    let mut platforms = Platforms::default();
+    let mut channels = BuiltChannels::default();
     for (name, section) in &file.platforms {
         let factory = registered
             .get(name)
@@ -352,14 +352,14 @@ fn platforms(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path
             platform == name,
             "[{name}]: its channel goes by the platform {platform:?}; a channel goes by the name its platform is registered under"
         );
-        platforms.add(built);
+        channels.add(built);
     }
     ensure!(
-        !platforms.channels.is_empty(),
+        !channels.channels.is_empty(),
         "{}: no IM platform is configured; add the section of one, such as [slack]",
         path.display()
     );
-    Ok(platforms)
+    Ok(channels)
 }
 
 /// Create the session directory `dir` and the directory of the runs in progress under it,
@@ -596,7 +596,10 @@ mod tests {
     /// The error of the platforms of the file `text`, with `registry`.
     fn platform_error(text: &str, registry: &Registry<dyn PlatformFactory>) -> String {
         let file = ConfigFile::parse(text).unwrap();
-        format!("{:#}", platforms(&file, registry, Path::new("im.toml")).err().unwrap())
+        format!(
+            "{:#}",
+            build_channels(&file, registry, Path::new("im.toml")).err().unwrap()
+        )
     }
 
     #[test]
@@ -674,7 +677,7 @@ mod tests {
     #[test]
     fn a_section_configures_the_platform_registered_under_its_name() {
         let file = ConfigFile::parse(&format!("[teams]\n{SERVER}")).unwrap();
-        let built = platforms(&file, &with_teams(), Path::new("im.toml")).unwrap();
+        let built = build_channels(&file, &with_teams(), Path::new("im.toml")).unwrap();
         let names: Vec<&str> = built.channels.iter().map(|channel| channel.platform()).collect();
         assert_eq!(names, ["teams"]);
         assert_eq!(built.hidden_env, ["TEAMS_TOKEN"]);

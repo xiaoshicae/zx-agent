@@ -296,7 +296,7 @@ impl Default for ServerConfig {
 /// the sessions in its storage, where [`SessionKey::labels`] marks those of a conversation.
 /// Their approvals must wait for the host
 /// ([`ApprovalMode::Wait`](zx_agent::policy::ApprovalMode::Wait)): the server posts a card for
-/// each request in the conversation and answers it when an approver clicks. A session that
+/// each request in the conversation and resolves it when an approver clicks. A session that
 /// cannot be opened is reported to the conversation after [`Replies::cannot_open`]; the next
 /// message tries again.
 ///

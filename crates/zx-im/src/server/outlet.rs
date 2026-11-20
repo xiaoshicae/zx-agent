@@ -254,7 +254,7 @@ impl Outlet {
     }
 
     /// Post the card of an approval request. An error says why nobody can decide.
-    pub(super) async fn ask(&self, card: &Post) -> Result<MessageRef, String> {
+    pub(super) async fn post_card(&self, card: &Post) -> Result<MessageRef, String> {
         let post = self.channel.send(&self.to, card);
         timed(self.shared.outbound_timeout, "post the approval request", post).await
     }

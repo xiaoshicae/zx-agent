@@ -132,7 +132,7 @@ pub(super) struct Router {
     /// What the channels receive, tagged with the channel's index.
     inbound: mpsc::Receiver<(usize, Inbound)>,
     channel_tasks: JoinSet<(usize, Result<(), ImError>)>,
-    retire: mpsc::Sender<Retire>,
+    retire_to: mpsc::Sender<Retire>,
     retired: mpsc::Receiver<Retire>,
     workers: HashMap<SessionKey, WorkerHandle>,
     tasks: JoinSet<()>,
@@ -169,7 +169,7 @@ impl Router {
                 stop.clone(),
             ));
         }
-        let (retire, retired) = mpsc::channel(RETIRE_CAPACITY);
+        let (retire_to, retired) = mpsc::channel(RETIRE_CAPACITY);
         Self {
             channels,
             allowed,
@@ -177,7 +177,7 @@ impl Router {
             stop,
             inbound,
             channel_tasks,
-            retire,
+            retire_to,
             retired,
             workers: HashMap::new(),
             tasks: JoinSet::new(),
@@ -357,7 +357,7 @@ impl Router {
             shared: Arc::clone(&self.shared),
             inbox: receiver,
             budget: Arc::clone(&budget),
-            retire: self.retire.clone(),
+            retire_to: self.retire_to.clone(),
             stop: self.stop.clone(),
         }));
         self.conversations.insert(task.id(), key.clone());

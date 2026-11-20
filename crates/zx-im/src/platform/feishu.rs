@@ -268,9 +268,9 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(posted)
             }
-            Post::ApprovalRequest { id, card: asked } => {
+            Post::ApprovalRequest { id, card: request } => {
                 let labels = &self.config.labels;
-                let request = shown(labels, asked);
+                let text = shown(labels, request);
                 // The click carries everything needed to find the conversation.
                 let value = |choice: &str| {
                     json!({
@@ -281,7 +281,7 @@ impl ImChannel for FeishuChannel {
                     })
                 };
                 let card = card(&[
-                    markdown(&request),
+                    markdown(&text),
                     button(&labels.allow_once, "primary", &value("allow_once")),
                     button(&labels.deny, "danger", &value("deny")),
                 ]);
@@ -312,14 +312,14 @@ impl ImChannel for FeishuChannel {
                 Ok(())
             }
             Replacement::ApprovalResolved {
-                card: asked,
+                card: request,
                 user,
                 result,
                 ..
             } => {
                 let labels = &self.config.labels;
                 let elements = vec![
-                    markdown(&shown(labels, asked)),
+                    markdown(&shown(labels, request)),
                     markdown(&resolution(labels, user.as_ref(), *result)),
                 ];
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
