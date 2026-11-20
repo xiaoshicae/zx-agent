@@ -1,5 +1,6 @@
 //! The Slack channel against a fake Slack: Socket Mode messages and clicks, acknowledgement,
 //! deduplication, reconnection, credential errors, posting, cards, rate limits and the stop.
+
 mod common;
 
 use std::sync::Arc;

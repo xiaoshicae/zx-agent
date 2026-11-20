@@ -273,6 +273,7 @@ impl TestFrame {
                 out.push(byte | 0x80);
             }
         }
+
         fn field(out: &mut Vec<u8>, number: u64, bytes: &[u8]) {
             varint(out, number << 3 | 2);
             varint(out, bytes.len() as u64);
@@ -315,6 +316,7 @@ impl TestFrame {
                 shift += 7;
             }
         }
+
         fn chunk<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
             let length = usize::try_from(varint(bytes)).unwrap();
             let (field, rest) = bytes.split_at(length);

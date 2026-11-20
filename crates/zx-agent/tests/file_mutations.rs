@@ -1,4 +1,5 @@
 //! File coordination across cancellation and independently built sessions.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

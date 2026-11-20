@@ -1,5 +1,5 @@
-//! Run-level behavior: retries, limits, continuation of cut-off answers, persistence, and
-//! resumed sessions.
+//! Run-level behavior: the kernel's neutral defaults, retries, limits and cancellation,
+//! continuation of cut-off answers, persistence, and resumed sessions.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -130,10 +130,6 @@ fn limits(max_model_requests: u32, timeout: Option<Duration>) -> RunLimits {
         ..RunLimits::default()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Neutral kernel defaults
-// ---------------------------------------------------------------------------
 
 #[test]
 fn default_limits_have_no_deadline() {
@@ -391,10 +387,6 @@ async fn an_unlimited_budget_can_explicitly_enable_continuation() {
         (2, "part one, part two")
     );
 }
-
-// ---------------------------------------------------------------------------
-// Retries
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn retries_transient_errors_without_repeating_the_prompt() {
@@ -795,10 +787,6 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     assert_eq!(inputs, ["user:first", "user:queued", "user:second"]);
 }
 
-// ---------------------------------------------------------------------------
-// RunLimits and cancellation
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn a_run_stops_at_the_step_limit() {
     let provider = provider((0..10).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "loop"}))));
@@ -856,10 +844,6 @@ async fn the_caller_can_cancel_a_waiting_run() {
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
 }
-
-// ---------------------------------------------------------------------------
-// Answers cut off at the output token limit
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn continues_a_truncated_answer_and_joins_the_parts() {
@@ -983,10 +967,6 @@ async fn a_cut_off_answer_that_the_token_budget_leaves_no_continuation_for_says_
         "{error}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Persistence and resumed sessions
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn events_are_forwarded_after_persistence() {
@@ -1224,6 +1204,7 @@ async fn each_attempt_reports_how_it_ended() {
 }
 
 struct Uppercase;
+
 #[async_trait]
 impl Hook for Uppercase {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {

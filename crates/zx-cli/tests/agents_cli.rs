@@ -1,6 +1,7 @@
 //! Agents through the real CLI and the shared local HTTP fixture: the user's agent files,
 //! which replace the built-in agents, the command line over them, project context, skills,
 //! tool rules and their audit.
+
 mod common;
 
 use std::path::Path;
@@ -49,12 +50,14 @@ fn system(server: &MockServer, index: usize) -> String {
 fn tool_result(server: &MockServer, index: usize) -> String {
     server.requests()[index].tool_result_texts().remove(0)
 }
+
 /// Write the agent that `run` in `dir` uses: `agents/unattended.md` in its zx-agent home,
 /// with `front` over the built-in agent its `extends` names, the unattended one when it names
 /// none, and the instructions of that agent.
 fn agent(dir: &Path, front: &str) {
     agent_as(dir, "unattended", front, "");
 }
+
 /// Write `agents/<builtin>.md` in the zx-agent home of runs in `dir`, with `front` (extending
 /// `builtin` unless it says otherwise) and `body`.
 fn agent_as(dir: &Path, builtin: &str, front: &str, body: &str) {
@@ -65,17 +68,21 @@ fn agent_as(dir: &Path, builtin: &str, front: &str, body: &str) {
     };
     write_agent_file(&agent_home(dir), builtin, &agent_text(&front, body));
 }
+
 /// The zx-agent home of [`command`] run in `dir`: `.zx-agent` in its home directory.
 fn agent_home(dir: &Path) -> std::path::PathBuf {
     dir.join(".home/.zx-agent")
 }
+
 /// Write the config.toml of runs in `dir`: `top`, then the provider settings of these tests.
 fn config(dir: &Path, top: &str) {
     write_config(&agent_home(dir), &fake_model_config(KEY_VAR, top, ""));
 }
+
 fn skill_reply() -> Reply {
     Reply::tool_call("skill-call", "read_skill", &json!({"name": "review"}))
 }
+
 /// An agent with `extra` and the skill `review`, whose body is `SKILL.md` in `dir`: paths
 /// in an agent file are relative to its directory, `agents/` in the zx-agent home.
 fn register_skill(dir: &Path, extra: &str) {
@@ -641,6 +648,7 @@ async fn a_project_context_error_names_the_option_that_skips_it() {
     assert!(stderr(&output).contains("discover = false"), "{}", stderr(&output));
     assert!(server.requests().is_empty());
 }
+
 #[tokio::test]
 async fn a_users_agent_replaces_the_built_in_one_and_other_files_are_ignored() {
     let dir = tempfile::tempdir().unwrap();

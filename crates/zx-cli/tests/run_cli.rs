@@ -2,11 +2,13 @@
 //! modes and their escaping, the session and `--continue`, provider and reasoning settings,
 //! budgets, denied calls, trace export, and the wiring that only main.rs does. No network or
 //! API key needed.
+
 mod common;
 #[cfg(unix)]
 #[path = "common/pty.rs"]
 mod pty;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,8 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 
 use common::zx_agent_in;
+use zx_agent::ai::Message;
+use zx_agent::transcript::SessionHeader;
 use zx_testing::http::{Request, read_request, silent_listener};
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{
@@ -41,7 +45,7 @@ const GO: [&str; 3] = ["--tools", "", "go"];
 /// A zx-agent home in `dir`: a config.toml for the fake model, with `top` before its
 /// `[provider]` table and `rest` after the test's provider keys.
 fn home(dir: &Path, top: &str, rest: &str) -> PathBuf {
-    let home = dir.join(".home");
+    let home = dir.join(".zx-agent-home");
     write_config(&home, &fake_model_config(KEY_VAR, top, rest));
     home
 }
@@ -92,10 +96,6 @@ async fn streaming_resource_limits_reach_the_provider() {
 
 #[tokio::test]
 async fn repaired_session_tails_are_reported_on_stderr() {
-    use std::io::Write;
-    use zx_agent::ai::Message;
-    use zx_agent::transcript::SessionHeader;
-
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path(), MODEL))
@@ -134,10 +134,6 @@ async fn repaired_session_tails_are_reported_on_stderr() {
         serde_json::from_str::<Value>(line).unwrap();
     }
 }
-
-// ---------------------------------------------------------------------------
-// Exit codes
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_completed_run_prints_the_answer_and_exits_0() {
@@ -240,10 +236,6 @@ async fn a_truncated_answer_is_printed_and_exits_6() {
     assert_eq!(stdout(&output), "Part\n");
 }
 
-// ---------------------------------------------------------------------------
-// Input and output
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
     let server = MockServer::start(vec![Reply::text("All good.")]).await;
@@ -278,10 +270,6 @@ async fn a_dash_reads_the_prompt_from_stdin() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(sent_messages(&server, 0).last().unwrap()["content"], "from stdin");
 }
-
-// ---------------------------------------------------------------------------
-// Wiring done in main.rs
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn bash_commands_cannot_read_the_api_key() {
@@ -328,7 +316,7 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
     // Changing the agent's instructions changes the preamble.
     for instructions in ["Answer briefly.", "Answer at length."] {
         let agent = agent_text("extends = \"unattended\"", instructions);
-        write_agent_file(&dir.path().join(".home"), "unattended", &agent);
+        write_agent_file(&dir.path().join(".zx-agent-home"), "unattended", &agent);
         let output = run_with_home(
             &server,
             dir.path(),
@@ -442,10 +430,6 @@ async fn a_session_whose_directory_is_gone_is_not_continued() {
     assert!(error.contains(&first.display().to_string()), "{error}");
     assert_eq!(server.requests().len(), 1);
 }
-
-// ---------------------------------------------------------------------------
-// Output, sessions, settings, budgets and traces
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn an_answer_written_to_a_pipe_keeps_its_exact_text() {

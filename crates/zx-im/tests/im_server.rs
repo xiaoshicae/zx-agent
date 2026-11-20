@@ -433,6 +433,13 @@ impl ServerSink for Events {
     }
 }
 
+/// A sink for a server whose events no test reads.
+struct NullServerSink;
+
+impl ServerSink for NullServerSink {
+    fn emit(&self, _event: &ServerEvent) {}
+}
+
 struct Setup {
     steps: Vec<FauxStep>,
     config: ServerConfig,
@@ -1696,12 +1703,6 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
     let result = server.run(vec![channel(), channel()], &CancellationToken::new()).await;
     assert!(matches!(result, Err(ImError::Config(error)) if error.contains("fake")));
     h.stop().await.unwrap();
-}
-
-struct NullServerSink;
-
-impl ServerSink for NullServerSink {
-    fn emit(&self, _event: &ServerEvent) {}
 }
 
 #[tokio::test]

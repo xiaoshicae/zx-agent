@@ -1,4 +1,5 @@
 //! Interactive frontend contracts against the local fake HTTP service; no paid APIs.
+
 mod common;
 #[cfg(unix)]
 #[path = "common/pty.rs"]
@@ -66,6 +67,43 @@ async fn seed_context(dir: &Path, bytes: usize) -> String {
     let id = seed.append_message(Message::user("x".repeat(bytes))).await.unwrap();
     seed.append_message(Message::user("recent input")).await.unwrap();
     id
+}
+
+/// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
+/// context window of `mock-model`.
+fn window_agent(dir: &Path, window: u64, extra: &str) {
+    config(
+        dir,
+        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
+    );
+    agent(dir, extra);
+}
+
+/// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
+fn agent(dir: &Path, front: &str) {
+    write_agent(&agent_home(dir), "assistant", front);
+}
+
+/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
+fn agent_home(dir: &Path) -> std::path::PathBuf {
+    dir.join(".home/.zx-agent")
+}
+
+/// The config.toml of these tests: the key in [`KEY_VAR`], `retries` retries, a 10-second
+/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
+fn base_config(retries: u32, top: &str, rest: &str) -> String {
+    retrying_fake_model_config(KEY_VAR, retries, top, &format!("idleTimeoutSecs = 10\n{rest}"))
+}
+
+/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
+/// [`base_config`] places them.
+fn configure(dir: &Path, top: &str, rest: &str) {
+    write_config(&agent_home(dir), &base_config(0, top, rest));
+}
+
+/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
+fn config(dir: &Path, tables: &str) {
+    configure(dir, "", tables);
 }
 
 #[tokio::test]
@@ -1582,41 +1620,4 @@ async fn after_a_model_switch_the_token_trigger_follows_the_window_of_the_new_mo
     let requests = server.requests();
     assert_eq!(requests.len(), 2, "the summary request, then the task request");
     assert_eq!(requests[0].body["model"], "small-model");
-}
-
-/// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
-/// context window of `mock-model`.
-fn window_agent(dir: &Path, window: u64, extra: &str) {
-    config(
-        dir,
-        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
-    );
-    agent(dir, extra);
-}
-
-/// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
-fn agent(dir: &Path, front: &str) {
-    write_agent(&agent_home(dir), "assistant", front);
-}
-
-/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
-fn agent_home(dir: &Path) -> std::path::PathBuf {
-    dir.join(".home/.zx-agent")
-}
-
-/// The config.toml of these tests: the key in [`KEY_VAR`], `retries` retries, a 10-second
-/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
-fn base_config(retries: u32, top: &str, rest: &str) -> String {
-    retrying_fake_model_config(KEY_VAR, retries, top, &format!("idleTimeoutSecs = 10\n{rest}"))
-}
-
-/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
-/// [`base_config`] places them.
-fn configure(dir: &Path, top: &str, rest: &str) {
-    write_config(&agent_home(dir), &base_config(0, top, rest));
-}
-
-/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
-fn config(dir: &Path, tables: &str) {
-    configure(dir, "", tables);
 }

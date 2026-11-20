@@ -1,6 +1,7 @@
 //! `config.toml` through the compiled program: where it is found, that its values are used,
 //! and how `--model`, `ZX_MODEL` and `ZX_BASE_URL` go over it. Every test has its own home
 //! directory.
+
 mod common;
 
 use std::path::Path;

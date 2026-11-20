@@ -32,6 +32,7 @@ fn settings() -> OutputStoreConfig {
         ..OutputStoreConfig::new(OUTPUTS)
     }
 }
+
 /// The tools the command line exempts from storing: each pages its own output.
 const PAGING_TOOLS: [&str; 3] = [READ_OUTPUT, "read_skill", "read_file"];
 

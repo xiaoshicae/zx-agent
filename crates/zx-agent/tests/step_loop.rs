@@ -1,4 +1,6 @@
-//! Loop semantics, mirroring pi's agent-loop behavior.
+//! Loop semantics, mirroring pi's agent-loop behavior: steps and tool execution, provider
+//! failures and cancellation, the system prompt, and the preparation of arguments, progress
+//! and details.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -56,10 +58,6 @@ async fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, A
     echo.feeds(runner.queues());
     (runner, events)
 }
-
-// ---------------------------------------------------------------------------
-// Steps and tool execution
-// ---------------------------------------------------------------------------
 
 /// Counts how often it is asked how it runs and what it changes.
 struct Described(std::sync::atomic::AtomicUsize);
@@ -305,8 +303,6 @@ async fn one_sequential_tool_makes_the_batch_sequential() {
     );
 }
 
-struct DenyEcho;
-
 struct PanickingPolicy;
 
 #[async_trait]
@@ -371,6 +367,8 @@ async fn cancellation_interrupts_a_waiting_policy() {
     assert_eq!(result.outcome, RunOutcome::Cancelled);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
+
+struct DenyEcho;
 
 #[async_trait]
 impl ToolPolicy for DenyEcho {
@@ -569,10 +567,6 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
     assert_eq!(steps, ["step_start", "step_end"]);
 }
 
-// ---------------------------------------------------------------------------
-// Provider failures and cancellation
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
     let config = config(
@@ -654,10 +648,6 @@ async fn a_stream_without_a_final_event_fails_for_the_model_it_asked() {
     assert_eq!(answer.model, "other-model");
 }
 
-// ---------------------------------------------------------------------------
-// System prompt
-// ---------------------------------------------------------------------------
-
 fn prompt(started: &str) -> SystemPrompt {
     SystemPrompt::default()
         .with_section(PREAMBLE, "Do the task.")
@@ -699,10 +689,6 @@ async fn an_unchanged_prompt_adds_no_system_message() {
     run_with_prompt(&mut context, prompt("t1"), "b", "two").await;
     assert_eq!(summarize(&context)[3..], ["user:b", "assistant:two"]);
 }
-
-// ---------------------------------------------------------------------------
-// Argument preparation, progress and details
-// ---------------------------------------------------------------------------
 
 /// Takes `text` and accepts the older name `cmd` for it. `boom` makes the preparation panic.
 #[derive(Default)]

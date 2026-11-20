@@ -157,6 +157,7 @@ async fn dropping_a_prompt_cancels_the_provider_and_returns_ownership() {
 #[tokio::test]
 async fn panic_during_prompt_conversion_returns_ownership() {
     struct PanicPrompt;
+
     impl From<PanicPrompt> for Input {
         fn from(_: PanicPrompt) -> Self {
             panic!("host prompt bug")
@@ -440,11 +441,13 @@ struct GatedTool {
     started: Notify,
     release: Notify,
 }
+
 #[async_trait]
 impl Tool for GatedTool {
     fn name(&self) -> &str {
         "gate"
     }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "gate".into(),
@@ -452,6 +455,7 @@ impl Tool for GatedTool {
             parameters: json!({"type": "object"}),
         }
     }
+
     async fn execute(&self, _args: Value, context: &ToolContext) -> Result<ToolOutput, String> {
         self.started.notify_one();
         tokio::select! {
@@ -542,13 +546,16 @@ async fn concurrent_callers_share_one_running_prompt() {
 }
 
 struct Ask;
+
 #[async_trait]
 impl ToolPolicy for Ask {
     async fn check(&self, _call: &zx_agent::ai::ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         PolicyDecision::Ask("review".into())
     }
 }
+
 struct CountingApprover(AtomicUsize);
+
 #[async_trait]
 impl zx_testing::Approver for CountingApprover {
     async fn confirm(&self, _request: &zx_testing::Asked) -> Option<ApprovalDecision> {

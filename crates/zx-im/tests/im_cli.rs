@@ -73,7 +73,7 @@ fn only_session(sessions: &Path) -> String {
     let files: Vec<_> = std::fs::read_dir(sessions)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .flat_map(|directory| zx_testing::program::session_files(&directory))
+        .flat_map(|directory| program::session_files(&directory))
         .collect();
     assert_eq!(files.len(), 1, "{files:?}");
     std::fs::read_to_string(&files[0]).unwrap()
@@ -471,7 +471,7 @@ const MCP_TOKEN: &str = "mcp-im-secret-5678";
 /// config.toml has one MCP server at `url`, where `query` runs without approval and `range`
 /// asks.
 fn mcp_home(dir: &Path, url: &str) -> PathBuf {
-    let home = dir.join(".zx-agent");
+    let home = dir.join(".zx-agent-home");
     write_agent(
         &home,
         "assistant",

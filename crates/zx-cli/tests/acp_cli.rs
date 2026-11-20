@@ -1,6 +1,7 @@
 //! The `acp` subcommand against the local fake model, driven by a hand-written ACP client:
 //! JSON-RPC over the process's stdio, one message per line, so the wire format is what a real
 //! client sees. No paid APIs.
+
 mod common;
 
 use std::collections::VecDeque;

@@ -58,7 +58,7 @@ fn run_bash(server: &MockServer, dir: &Path) -> Command {
 /// `zx-agent run` with bash against `server`, in `dir`, with `secret_files` in the
 /// `secretFiles` of a config.toml in a zx-agent home of `dir`.
 fn run_bash_redacting(server: &MockServer, dir: &Path, secret_files: &[&Path]) -> Command {
-    let home = dir.join(".home");
+    let home = dir.join(".zx-agent-home");
     let files: Vec<String> = secret_files
         .iter()
         .map(|path| format!("{:?}", path.display().to_string()))

@@ -126,6 +126,7 @@ async fn automatic_compaction_counts_against_task_request_budget_and_usage() {
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
     struct SteerAfterSummary;
+
     #[async_trait]
     impl Hook for SteerAfterSummary {
         async fn on_event(&self, event: &Event, ctx: &HookContext) -> Result<(), String> {
@@ -439,6 +440,7 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
 async fn the_pause_survives_a_run_whose_future_is_dropped() {
     /// Holds the input "hold" forever, after telling the test it is waiting.
     struct Hold(Arc<tokio::sync::Notify>);
+
     #[async_trait]
     impl Hook for Hold {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> Result<String, String> {
@@ -545,6 +547,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
 #[tokio::test]
 async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     struct Correct;
+
     #[async_trait]
     impl Hook for Correct {
         async fn transform_context(
@@ -593,6 +596,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
 #[tokio::test]
 async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_written() {
     struct EditInputThenSummary;
+
     #[async_trait]
     impl Hook for EditInputThenSummary {
         async fn transform_context(

@@ -3,6 +3,7 @@
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
 //! cannot be used stops startup. The IM service's test of the same is with its program
 //! (`crates/zx-im/tests/im_cli.rs`).
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ async fn prom() -> FakeMcp {
 /// A zx-agent home in `dir` whose agents enable `builtin_tools`, and whose config.toml has one
 /// MCP server, where `query` runs without approval and `range` asks.
 fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
-    let home = dir.join(".zx-agent");
+    let home = dir.join(".zx-agent-home");
     for builtin in ["unattended", "assistant"] {
         write_agent(
             &home,

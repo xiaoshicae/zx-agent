@@ -1,6 +1,7 @@
 //! The container executor. Tests with a fake `docker` program always run and need no Docker.
 //! Tests against real Docker run only when `ZX_DOCKER_TEST_IMAGE` names a local image that
-//! has bash; CI pulls one on Linux. Without it they print a note and return.
+//! has bash; CI pulls one on Linux. Without it they print a note and return. The last part of
+//! the file runs the program in container mode.
 
 #![cfg(unix)]
 
@@ -31,10 +32,6 @@ use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, ended, ended_output};
 use zx_testing::{RunnerSetup, config, read_session_file, stderr};
-
-// ---------------------------------------------------------------------------
-// Fake docker
-// ---------------------------------------------------------------------------
 
 /// Logs every invocation's arguments to `calls/` and answers from files next to it:
 /// `run.fail` (docker run fails with this message), `probe.code` and `probe.err` (the start-up
@@ -671,10 +668,6 @@ async fn dropping_the_executor_ends_the_docker_run_client() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Real Docker (ZX_DOCKER_TEST_IMAGE)
-// ---------------------------------------------------------------------------
-
 /// The image for real Docker tests, or None to skip them.
 fn docker_image() -> Option<String> {
     let image = std::env::var("ZX_DOCKER_TEST_IMAGE")
@@ -993,10 +986,6 @@ fn session_containers(session: &Path) -> String {
     let id = read_session_file(session).unwrap().header().id.clone();
     format!("label=zx-agent.session={id}")
 }
-
-// ---------------------------------------------------------------------------
-// The CLI in container mode
-// ---------------------------------------------------------------------------
 
 /// `zx-agent run` in `dir` against the mock server. `docker_dir` goes first on PATH, so that
 /// its `docker` replaces the real one.

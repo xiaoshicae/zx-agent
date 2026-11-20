@@ -1,6 +1,7 @@
 //! The Feishu channel against a fake open platform: the long connection (pings, pongs,
 //! acknowledgements, fragments, redeliveries, reconnection), messages and card clicks,
 //! tokens, replies in topics, edits, cards, rate limits and the stop.
+
 mod common;
 
 use std::sync::Arc;

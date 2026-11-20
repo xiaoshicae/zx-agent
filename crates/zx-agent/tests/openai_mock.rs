@@ -9,7 +9,9 @@ use serde_json::json;
 use zx_agent::Session;
 use zx_agent::ai::openai::{BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{ApiKey, Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt};
+use zx_agent::ai::{
+    ApiKey, ApiKeySource, Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt,
+};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind, RunOutcome};
@@ -481,7 +483,7 @@ struct RotatingKeys {
 }
 
 #[async_trait::async_trait]
-impl zx_agent::ai::ApiKeySource for RotatingKeys {
+impl ApiKeySource for RotatingKeys {
     async fn api_key(&self) -> Result<String, String> {
         let n = self.issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if n > self.until {
@@ -498,7 +500,7 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
         &server,
         OpenAiConfig {
             headers: vec![("X-Route".into(), "blue".into())],
-            api_key: zx_agent::ai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+            api_key: ApiKey::Dynamic(Arc::new(RotatingKeys {
                 issued: Default::default(),
                 until: 9,
             })),
@@ -527,7 +529,7 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
 struct SilentKeys;
 
 #[async_trait::async_trait]
-impl zx_agent::ai::ApiKeySource for SilentKeys {
+impl ApiKeySource for SilentKeys {
     async fn api_key(&self) -> Result<String, String> {
         std::future::pending().await
     }
@@ -572,7 +574,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
         ..setup_with_provider(
             &server,
             OpenAiConfig {
-                api_key: zx_agent::ai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+                api_key: ApiKey::Dynamic(Arc::new(RotatingKeys {
                     issued: Default::default(),
                     until: 0,
                 })),

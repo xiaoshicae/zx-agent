@@ -55,15 +55,19 @@ impl Tool for StartProbe {
     fn name(&self) -> &str {
         self.name
     }
+
     fn definition(&self) -> ToolDef {
         definition(self.name)
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     fn execution_mode(&self) -> ExecutionMode {
         self.mode
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         let text = std::fs::read_to_string(&self.session).map_err(|error| error.to_string())?;
         let starts = text
@@ -110,12 +114,15 @@ impl Tool for Counted {
     fn name(&self) -> &str {
         self.name
     }
+
     fn definition(&self) -> ToolDef {
         definition(self.name)
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::ok("ran"))
@@ -142,12 +149,15 @@ impl Tool for Hang {
     fn name(&self) -> &str {
         "hang"
     }
+
     fn definition(&self) -> ToolDef {
         definition("hang")
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.started.notify_one();
         std::future::pending().await
@@ -648,7 +658,7 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
 /// `zx-agent run` with bash against the mock server, without retries.
 fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
     const KEY_VAR: &str = "ZX_RECOVERY_TEST_KEY";
-    let home = dir.join(".home");
+    let home = dir.join(".zx-agent-home");
     write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
