@@ -1,7 +1,8 @@
 //! Persistent, bounded tool results and a UUID-only paging tool.
 //!
-//! Install the spill hook after redaction. Stored text is the tool's already bounded
-//! result, not data discarded by that tool's own truncation. Files are not auto-deleted.
+//! The spill hook stores what redaction left: it runs at the storage stage, after redaction,
+//! however it is registered. Stored text is the tool's already bounded result, not data
+//! discarded by that tool's own truncation. Files are not auto-deleted.
 //! When storing fails, the result stays inline: storage is an optimisation, not a filter.
 //!
 //! Only the agent stores results, but the host may put their directory in the working
@@ -273,8 +274,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// The hook that stores a long tool result as a file and leaves its first page in its
 /// place, as [`ReadOutputTool`] would return it: with a footer that says how to read on.
 ///
-/// Register it after secret filtering, and exempt the tools that page their own output, so
-/// that a page is not stored again; the hook chain bounds and cancels its I/O.
+/// Exempt the tools that page their own output, so that a page is not stored again. It runs
+/// after secret filtering by its stage, and the hook chain bounds and cancels its I/O.
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,

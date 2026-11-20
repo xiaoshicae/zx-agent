@@ -14,7 +14,7 @@
 //! that user owns (`kill -1`): children that left the process group with `setsid` are
 //! stopped too, nothing the command can write decides what is stopped, and the root processes
 //! that keep the container alive cannot be signalled. Because a sweep would also stop a
-//! concurrent call, the executor runs one command or file read at a time.
+//! concurrent call, the executor runs one command, file read or file write at a time.
 //!
 //! - `config`: how the container is started and described: its settings and their checks
 //!   (with what the start found about the workspace), its network, and the prompt section
@@ -114,8 +114,8 @@ impl Target {
     }
 }
 
-/// Runs commands and reads files in one container that lives as long as this value. Commands
-/// run with the image's `bash`, which the start checks for.
+/// Runs commands, and reads and writes files, in one container that lives as long as this
+/// value. Commands run with the image's `bash`, which the start checks for.
 pub struct ContainerExecutor {
     target: Target,
     /// What the container was started with, which its prompt section describes.

@@ -1,4 +1,4 @@
-//! Where built-in tools run commands and read files.
+//! Where built-in tools run commands and read and write files.
 //!
 //! Tools keep their arguments, result format and truncation; an executor only runs a
 //! command, reads a file or writes one, and says where it does so. [`LocalExecutor`] uses
@@ -63,7 +63,7 @@ pub struct CommandOutput {
     pub end: CommandEnd,
 }
 
-/// Runs commands and reads files for the built-in tools.
+/// Runs commands, and reads and writes files, for the built-in tools.
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Whether calls may run at the same time.

@@ -16,7 +16,7 @@ use super::{CommandOutput, Executor, SHELL, ShellCommand, check_read_within, dir
 use crate::files::{Links, open_without_blocking, read_bounded};
 
 /// Runs commands as child processes of the agent, with the `bash` found on `PATH`, and reads
-/// files directly.
+/// and writes files directly.
 ///
 /// Each command leads its own process group, which is killed when the command ends, times out
 /// or is cancelled. A process that leaves the group, for example with `setsid` or by
