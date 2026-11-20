@@ -30,6 +30,7 @@ apiKeyEnv = "LLM_API_KEY"          # 存放 API key 的环境变量名，不是 
 id = "my-model"
 contextWindow = 128000
 cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的单价
+input = ["text", "image"]                                  # 这个模型能看图
 ```
 
 模型取 `--model` > `ZX_MODEL` > `model`，服务地址取 `ZX_BASE_URL` > `provider.baseUrl` > 默认值；其余键没有命令行参数。这两个变量与 `ZX_AGENT_HOME` 为空或不是 UTF-8 时视为没设。三处都没有模型时以退出码 2 报错。
@@ -55,7 +56,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
 | `execution` | 命令在哪里执行：`local`（默认，本机）、`container`（见下文“容器执行”），或宿主经 `register_executor` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错 |
-| `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价：`input`、`output` 必填，`cacheRead`、`cacheWrite` 默认 0；都不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
+| `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价：`input`、`output` 必填，`cacheRead`、`cacheWrite` 默认 0；都不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）、`input`（模型收的输入，`["text"]` 或 `["text", "image"]`，默认只有文本，必须含 `"text"`；不含 `"image"` 时，发给它的图片换成一句说明，见 [REFERENCE.md](REFERENCE.md#图片)）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
 
 `reasoning`、`maxTokens` 与 provider 中决定请求体写法的键（`systemUpdates`、`reasoningFormat`、`maxTokensField`、`fillMissingReasoning`、`promptCacheKey`、`requestFields`）随请求记入会话；服务地址、`headers` 与 API key 不记录。宿主注册的 provider 记录什么由它自己决定。
@@ -311,4 +312,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.32 · 2026年11月
+CONFIGURATION.md · v0.33 · 2026年11月

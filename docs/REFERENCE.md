@@ -136,15 +136,25 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 续接会话的目录 | 记录的目录已不存在时报错（见 `--cwd`），不询问是否改在当前目录继续 |
 | 参数校验 | 严格按 JSON Schema，不转换类型；改写只在工具的 `prepare_arguments` 中 |
 | 中断的工具调用 | 有副作用的调用执行前先记录开始；恢复时补写“结果未知”或“未执行”，不重放 |
-| 工具结果 | 只有文本 `content`，另有不发给模型的 `details` 与 `usage`；没有图片、`structuredContent`、`runToolCall` |
+| 工具结果 | 文本 `content` 与图片 `images`，另有不发给模型的 `details` 与 `usage`；没有 `structuredContent`、`runToolCall` |
+| 图片 | 用户消息与工具结果的图片在文本旁的 `images` 里，不与文本穿插；pi 的内容是文本块与图片块的数组 |
 | 失败分类 | provider 判断失败的种类，运行只按种类决定重试或摘要（见[模型请求失败](#模型请求失败)）；pi 按错误文本判断 |
 | 上下文过长 | 只按错误识别（HTTP 413、错误码、通用措辞），不按服务推断 |
 | 摘要 | 每次重新读取原始记录，不输入上一份摘要；每条事实引用来源条目。宿主要自己做摘要时实现独立的接口 `Summarizer`，钩子不提供摘要 |
 | 续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 |
 | `prepare_request` | 只能替换模型与推理强度，不能改上下文 |
 | 推理写法 | OpenAI 兼容服务由 `provider.reasoningFormat` 在三种中显式选择；Anthropic 写成自适应思考加 `output_config.effort` |
-| 模型元数据 | 只有 `[[models]]` 给出的上下文窗口与单价，没有内置模型表 |
+| 模型元数据 | 只有 `[[models]]` 给出的上下文窗口、单价与能否看图（`input`），没有内置模型表 |
 | 界面 | 没有 TUI，交互界面交给 ACP 客户端 |
+
+### 图片
+
+- 用户消息与工具结果可以带图片。提问的图片来自 ACP 客户端、`run` 的 `@文件` 与 IM 附件；工具结果的图片来自 `read_file` 读到的 PNG、JPEG、GIF、WebP 文件与 MCP 工具的结果。
+- 图片进入会话前按 pi 的上限适配：每边不超过 2000 像素、base64 不超过 4.5 MiB 的原样保留；更大的缩小后重新编码，先试 PNG，再按质量 80、85、70、55、40 试 JPEG，仍放不下就每次缩到四分之三。解不开的文件在这里被拒，不进会话；解码一张至多用 256 MiB 内存。`read_file` 读到缩小过的图片时，结果写明原尺寸与换算比例。
+- 只有 `[[models]]` 的 `input` 含 `"image"` 的模型收到图片；发给其他模型时，provider 把一条消息的图片换成一句说明（用户消息为 `(image omitted: model does not support images)`，工具结果为 `(tool image omitted: model does not support images)`），会话里仍存原图。
+- 用户消息的图片在文本之前，工具结果的图片在文本之后。OpenAI 兼容服务的工具消息只收文本，图片在这批结果之后以一条用户消息发出（开头一行 `Attached image(s) from tool result:`）；Anthropic 不收失败结果里的图片，它们放在这一轮全部结果之后，前面一行写明来自哪次调用。
+- 估算上下文大小时，每张图片按 4800 字节（约 1200 token）计，与数据大小无关；摘要请求只读到图片的类型，读不到内容。
+- 图片不经脱敏（见 [SECURITY.md](SECURITY.md#密钥)），以 base64 存进会话文件，也在事件的消息里。
 
 ### 模型请求失败
 
@@ -205,7 +215,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":14,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":15,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
@@ -213,7 +223,8 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
-- 只读写版本 14，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 15，其他版本的文件拒绝打开，不做升级。
+- 用户消息与工具结果可以带 `images`：每项是 `mimeType` 与 base64 的 `data`，没有图片时不写这个字段。`request_config` 记下请求的模型能否看图（`takesImages`，不能时不写），还原的请求与当时发出的相同。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；它的 `source.kind` 与 `request_start` 事件的 `kind` 一样是 `task`（任务请求）或 `summary`（摘要请求）。不记录 API key、URL 与 HTTP 头。
@@ -224,4 +235,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.22 · 2026年11月
+REFERENCE.md · v0.23 · 2026年11月
