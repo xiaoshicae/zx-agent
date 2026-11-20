@@ -354,12 +354,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reports_invalid_tool_arguments_and_missing_finish_reason() {
+    /// An answer whose tool call broke off in its arguments, before a finish reason came.
+    fn cut_off_call() -> Accumulator {
         let mut acc = Accumulator::new("p", "m", 1);
         acc.apply(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}));
-        assert!(acc.finish().is_err());
-        let failed = acc.failure(StopReason::Error, "cut off", None);
+        acc
+    }
+
+    #[test]
+    fn a_stream_without_a_finish_reason_does_not_finish() {
+        assert!(cut_off_call().finish().is_err());
+    }
+
+    #[test]
+    fn a_call_whose_arguments_broke_off_carries_an_arguments_error() {
+        let failed = cut_off_call().failure(StopReason::Error, "cut off", None);
         assert!(failed.tool_calls()[0].arguments_error.is_some());
     }
 

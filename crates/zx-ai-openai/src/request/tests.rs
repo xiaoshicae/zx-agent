@@ -35,8 +35,11 @@ fn provider(body: BodyOptions) -> OpenAiCompatible {
 
 #[test]
 fn body_pairs_tool_calls_with_results() {
-    let assistant = AssistantMessage {
-        content: vec![
+    let assistant = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::ToolUse,
+        vec![
             ContentBlock::ToolCall(ToolCall {
                 id: "a".into(),
                 name: "bash".into(),
@@ -50,8 +53,7 @@ fn body_pairs_tool_calls_with_results() {
                 arguments_error: None,
             }),
         ],
-        ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
-    };
+    );
     let result = |id: &str| {
         Message::ToolResult(ToolResultMessage {
             tool_call_id: id.into(),
@@ -96,15 +98,17 @@ fn body_pairs_tool_calls_with_results() {
 
 #[test]
 fn tool_result_details_stay_out_of_the_body() {
-    let assistant = AssistantMessage {
-        content: vec![ContentBlock::ToolCall(ToolCall {
+    let assistant = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::ToolUse,
+        vec![ContentBlock::ToolCall(ToolCall {
             id: "a".into(),
             name: "bash".into(),
             arguments: json!({}),
             arguments_error: None,
         })],
-        ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
-    };
+    );
     let request = Request {
         model: "m".into(),
         messages: vec![
@@ -230,10 +234,7 @@ fn thinking(text: &str) -> ContentBlock {
 }
 
 fn reply(model: &str, content: Vec<ContentBlock>) -> Message {
-    Message::Assistant(AssistantMessage {
-        content,
-        ..AssistantMessage::failure("p", model, StopReason::Stop, "")
-    })
+    Message::Assistant(AssistantMessage::new("p", model, StopReason::Stop, content))
 }
 
 fn text(text: &str) -> ContentBlock {
@@ -420,7 +421,7 @@ fn replay_rejects_unknown_conversion_options() {
         Value::Null,
         json!({"format": "other", "version": 2, "systemUpdates": "collapse"}),
         json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse"}),
-        // Version 1, from before filling missing reasoning was an option, is not replayed.
+        // An older version is not replayed either.
         json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
         json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "sideways"}),
         json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "extra": 1}),

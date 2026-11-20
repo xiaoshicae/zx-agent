@@ -133,9 +133,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_key_is_no_key_and_a_key_is_never_shown() {
+    fn a_key_is_fixed_unless_it_is_empty() {
         assert!(matches!(ApiKey::fixed(""), ApiKey::None));
         assert!(matches!(ApiKey::from(Some("k".to_string())), ApiKey::Fixed(key) if key == "k"));
+    }
+
+    #[test]
+    fn a_key_is_never_shown() {
         assert_eq!(format!("{:?}", ApiKey::fixed("sk-secret")), "[REDACTED]");
     }
 }

@@ -243,16 +243,19 @@ mod tests {
 
     use super::*;
 
-    async fn events(provider: &FauxProvider) -> Vec<StreamEvent> {
-        let request = Request {
+    fn request() -> Request {
+        Request {
             model: "m".into(),
             messages: vec![],
             tools: vec![],
             max_tokens: None,
             reasoning: None,
             cache_key: None,
-        };
-        provider.stream(request, CancellationToken::new()).collect().await
+        }
+    }
+
+    async fn events(provider: &FauxProvider) -> Vec<StreamEvent> {
+        provider.stream(request(), CancellationToken::new()).collect().await
     }
 
     #[tokio::test]
@@ -323,15 +326,7 @@ mod tests {
             blocks,
             stop: StopReason::Stop,
         }]);
-        let request = Request {
-            model: "m".into(),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: None,
-            reasoning: None,
-            cache_key: None,
-        };
-        let mut receiver = provider.stream(request, CancellationToken::new());
+        let mut receiver = provider.stream(request(), CancellationToken::new());
         let mut deltas = 0;
         let mut final_text = None;
         while let Some(event) = receiver.next().await {

@@ -269,14 +269,21 @@ mod tests {
     }
 
     #[test]
-    fn a_header_names_the_api_version_and_debug_output_hides_the_key() {
+    fn a_header_names_the_api_version() {
         let config = AnthropicConfig {
-            api_key: ApiKey::fixed("sk-ant-secret"),
             headers: vec![("Anthropic-Version".into(), "2023-06-01".into())],
             ..AnthropicConfig::default()
         };
         assert!(config.names_version());
         assert!(!AnthropicConfig::default().names_version());
+    }
+
+    #[test]
+    fn debug_output_hides_the_key() {
+        let config = AnthropicConfig {
+            api_key: ApiKey::fixed("sk-ant-secret"),
+            ..AnthropicConfig::default()
+        };
         assert!(!format!("{config:?}").contains("sk-ant-secret"));
     }
 }

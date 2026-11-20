@@ -18,10 +18,7 @@ fn system(changes: &[(&str, Option<&str>)]) -> Message {
 
 /// An answer of the provider `p` with `content`.
 fn answer(content: Vec<ContentBlock>) -> Message {
-    Message::Assistant(AssistantMessage {
-        content,
-        ..AssistantMessage::failure("p", "m", StopReason::Stop, "")
-    })
+    Message::Assistant(AssistantMessage::new("p", "m", StopReason::Stop, content))
 }
 
 fn call(id: &str) -> ContentBlock {
@@ -109,8 +106,9 @@ fn a_conversation_becomes_alternating_turns_with_its_end_cached() {
     );
 }
 
-#[test]
-fn a_call_without_a_result_gets_one_and_a_result_without_its_call_is_left_out() {
+/// The tool results of a body whose answer called `a` and `b`, with a result for `a` and
+/// one for a call `z` that the answer did not make.
+fn results_of_unpaired_calls() -> Vec<Value> {
     let body = body_of(
         &request(vec![
             Message::user("go"),
@@ -121,20 +119,35 @@ fn a_call_without_a_result_gets_one_and_a_result_without_its_call_is_left_out() 
         ]),
         SystemUpdates::Collapse,
     );
-    let results: Vec<(&str, &str)> = body["messages"][2]["content"]
+    body["messages"][2]["content"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|block| block["type"] == "tool_result")
-        .map(|block| {
-            (
-                block["tool_use_id"].as_str().unwrap(),
-                block["content"].as_str().unwrap(),
-            )
-        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_call_without_a_result_gets_an_error_result() {
+    let results = results_of_unpaired_calls();
+    assert_eq!(
+        (
+            &results[1]["tool_use_id"],
+            &results[1]["content"],
+            &results[1]["is_error"]
+        ),
+        (&json!("b"), &json!(MISSING_TOOL_RESULT), &json!(true))
+    );
+}
+
+#[test]
+fn a_result_without_its_call_is_left_out() {
+    let ids: Vec<Value> = results_of_unpaired_calls()
+        .iter()
+        .map(|result| result["tool_use_id"].clone())
         .collect();
-    assert_eq!(results, [("a", "ok"), ("b", MISSING_TOOL_RESULT)]);
-    assert_eq!(body["messages"][2]["content"][1]["is_error"], json!(true));
+    assert_eq!(ids, [json!("a"), json!("b")]);
 }
 
 #[test]
@@ -151,13 +164,15 @@ fn thinking_goes_back_with_its_signature_only_to_its_provider_and_model() {
         ContentBlock::Text { text: "done".into() },
     ]);
     let other_source = |provider: &str, model: &str| {
-        Message::Assistant(AssistantMessage {
-            content: vec![
+        Message::Assistant(AssistantMessage::new(
+            provider,
+            model,
+            StopReason::Stop,
+            vec![
                 thinking("other", Some("sig-2")),
                 ContentBlock::Text { text: "theirs".into() },
             ],
-            ..AssistantMessage::failure(provider, model, StopReason::Stop, "")
-        })
+        ))
     };
     let body = body_of(
         &request(vec![
@@ -271,14 +286,15 @@ fn a_reasoning_level_sets_adaptive_thinking_at_an_effort_or_turns_thinking_off()
     assert!(unset.get("thinking").is_none() && unset.get("output_config").is_none());
 }
 
-#[test]
-fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
+/// The body of a request with two tools, an output limit, and a call whose id the API
+/// does not take as it is.
+fn body_with_tools() -> Value {
     let tool = |name: &str| ToolDef {
         name: name.into(),
         description: format!("{name} things"),
         parameters: json!({"type": "object", "properties": {}}),
     };
-    let body = build_body(
+    build_body(
         &Request {
             tools: vec![tool("read"), tool("write")],
             max_tokens: Some(500),
@@ -290,8 +306,17 @@ fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
         },
         &BodyOptions::default(),
         "p",
-    );
-    assert_eq!(body["max_tokens"], json!(500));
+    )
+}
+
+#[test]
+fn a_requests_output_limit_is_sent() {
+    assert_eq!(body_with_tools()["max_tokens"], json!(500));
+}
+
+#[test]
+fn tools_are_declared_with_the_last_one_a_cache_breakpoint() {
+    let body = body_with_tools();
     assert_eq!(
         body["tools"],
         json!([
@@ -300,6 +325,11 @@ fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
              "cache_control": {"type": "ephemeral"}},
         ])
     );
+}
+
+#[test]
+fn call_ids_take_the_form_the_api_takes() {
+    let body = body_with_tools();
     assert_eq!(body["messages"][1]["content"][0]["id"], json!("call_1_x"));
     assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], json!("call_1_x"));
 }

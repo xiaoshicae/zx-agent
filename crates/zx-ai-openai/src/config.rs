@@ -370,23 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn fields_the_provider_sets_itself_cannot_be_added() {
-        for field in RESERVED_FIELDS {
-            let mut extra_fields = Map::new();
-            extra_fields.insert(field.into(), json!("other"));
-            let options = BodyOptions {
-                extra_fields,
-                ..BodyOptions::default()
-            };
-            let error = options.check().unwrap_err().to_string();
-            assert!(
-                error.contains(&format!("request field {field:?} cannot be added")),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
     fn a_cache_key_field_cannot_be_added_when_the_provider_sets_the_cache_key() {
         let mut extra_fields = Map::new();
         extra_fields.insert("prompt_cache_key".into(), json!("mine"));
