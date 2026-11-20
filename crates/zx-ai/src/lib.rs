@@ -4,8 +4,7 @@
 //! Every crate of the zx-agent workspace builds on this one except `zx-util`, which is below
 //! it and holds the helpers every layer shares, such as the lock and text bounds. The
 //! `zx-agent` crate re-exports it as `zx_agent::ai`. Providers live in crates of their own,
-//! such as `zx-ai-openai`, so that an embedder of the kernel does not compile an HTTP client
-//! it does not use.
+//! such as `zx-ai-openai`, so that a host does not compile an HTTP client it does not use.
 //!
 //! The types and the provider contract are at the crate root:
 //! - `types`: messages, usage and prices, the events of a streamed response, and how a

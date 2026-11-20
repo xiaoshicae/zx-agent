@@ -85,7 +85,7 @@
 //! without creating a separate task step. Retries and summary requests both consume the
 //! run's model-request budget.
 //!
-//! Embedders make an [`Agent`] from an [`AgentConfig`], ask it for a [`Session`], and read
+//! A host makes an [`Agent`] from an [`AgentConfig`], asks it for a [`Session`], and reads
 //! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],
 //! [`policy::ToolPolicy`], [`hooks::Hook`], [`extensions::Extension`],
 //! [`compaction::Summarizer`], [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its

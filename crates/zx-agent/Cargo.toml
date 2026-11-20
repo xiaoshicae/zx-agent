@@ -13,7 +13,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-# The scripted provider `ai::faux::FauxProvider`, for an embedder's tests: the feature
+# The scripted provider `ai::faux::FauxProvider`, for a host's tests: the feature
 # `testing` of zx-ai.
 testing = ["zx-ai/testing"]
 

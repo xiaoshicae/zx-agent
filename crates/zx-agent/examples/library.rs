@@ -1,4 +1,4 @@
-//! Embedding zx-agent as a library. The embedder chooses the instructions, tools, rules and
+//! zx-agent as a library. The host, this program, chooses the instructions, tools, rules and
 //! limits: the kernel has no scenario of its own, and its default limits are unlimited.
 //!
 //! Run: ZX_BASE_URL=http://127.0.0.1:11434/v1 ZX_MODEL=<model> cargo run --example library -- "task"
@@ -20,7 +20,7 @@ use zx_agent::events::EventKind;
 use zx_agent::policy::PolicyDecision;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 
-/// This embedder's scenario: a bounded, read-only report about the machine it runs on.
+/// This host's scenario: a bounded, read-only report about the machine it runs on.
 const INSTRUCTIONS: &str = "You are an agent running without a human operator. Use only the tools \
 provided and only read-only commands. Finish with a short report: what you found, and the commands \
 whose output shows it.";
