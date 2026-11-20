@@ -126,10 +126,20 @@ apiKeyEnv = "OPENROUTER_API_KEY"
 [[models]]
 id = "anthropic/claude-haiku-5.5"
 input = ["text", "image"]
-cost = { input = 0.10, output = 0.50 }   # 美元每百万 token
+cost = { input = 0.10, output = 0.50, cacheRead = 0.01, cacheWrite = 0.125 }   # 美元每百万 token
 ```
 
-模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key。它的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）按文档以 `Authorization: Bearer` 认证，`anthropic` provider 只发 `x-api-key`，所以经 OpenRouter 调 Claude 用 `openai` provider。这个示例在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节。
+模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key。这个示例在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；当时 `cost` 只写了 `input` 与 `output`，缓存的读写单价（`input_cache_read`、`input_cache_write`）是事后按价目补的。`[[models]]` 不写缓存单价时按 0 计，读写缓存的请求算出的花费就偏低，花费预算也随之失准。提示词达到 10 万 token 时，OpenRouter 按更高一档的单价计费（`pricing.overrides`），`[[models]]` 只有一档。
+
+调 Claude 也可以用 `anthropic` provider，经 OpenRouter 的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）。这个接口按其文档以 `Authorization: Bearer` 认证，所以要设 `apiKeyHeader`；`model` 与 `[[models]]` 同上：
+
+```toml
+[provider]
+api = "anthropic"
+baseUrl = "https://openrouter.ai/api"
+apiKeyEnv = "OPENROUTER_API_KEY"
+apiKeyHeader = "authorization"
+```
 
 ### 容器执行
 
@@ -334,4 +344,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.34 · 2026年11月
+CONFIGURATION.md · v0.35 · 2026年11月
