@@ -19,5 +19,5 @@ paths:
 ## MSRV 与依赖的 API
 
 - let chains 在 1.88 稳定，可以用（clippy 的 `collapsible_if` 会建议）。
-- 依赖的 API 以 `Cargo.lock` 锁定的版本（`cargo tree -i reqwest`）和本项目启用的 feature 为准：各 crate 给 reqwest 只启用 `json`、`stream`、`rustls`，代码不用 `reqwest::blocking`（只在依赖 `zx-app` 的构建里由 `opentelemetry-otlp` 打开）；tokio 没有启用 `io-std`，没有 `tokio::io::stdin`。
+- 依赖的 API 以 `Cargo.lock` 锁定的版本（`cargo tree -i reqwest`）和本项目启用的 feature 为准：各 crate 给 reqwest 只启用 `json`、`rustls`：代码读响应用 `Response::chunk()`，不用 feature `stream` 的 `bytes_stream`（只在带 MCP 的构建里由 rmcp 打开），也不用 `reqwest::blocking`（只在依赖 `zx-app` 的构建里由 `opentelemetry-otlp` 打开）；tokio 没有启用 `io-std`，没有 `tokio::io::stdin`。
 - serde_json 在根目录 `Cargo.toml` 开了 `preserve_order`，单独编译一个 crate 时 `serde_json::Map` 也按插入序；比较 JSON 字符串的断言按写入顺序写。
