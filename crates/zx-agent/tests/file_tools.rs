@@ -34,6 +34,30 @@ async fn edit(dir: &Path, args: Value) -> Result<ToolOutput, String> {
 }
 
 #[tokio::test]
+async fn results_name_the_path_as_the_tools_read_it() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let written = write(dir.path(), json!({"path": " @notes.txt ", "content": "one"}))
+        .await
+        .unwrap();
+    let edited = edit(
+        dir.path(),
+        json!({"path": "@notes.txt", "edits": [{"oldText": "one", "newText": "two"}]}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(written.content, "Wrote 3 bytes to notes.txt.");
+    assert_eq!(edited.content, "Replaced 1 block in notes.txt.");
+    assert!(
+        edited.details.unwrap()["patch"]
+            .as_str()
+            .unwrap()
+            .starts_with("--- notes.txt\n")
+    );
+}
+
+#[tokio::test]
 async fn write_file_creates_missing_directories_and_replaces_an_existing_file() {
     let dir = tempfile::tempdir().unwrap();
 

@@ -56,7 +56,7 @@ const START_POLL: Duration = Duration::from_millis(100);
 /// Longest wait for one readiness probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest wait for one sweep of the command user's processes.
-const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+const SWEEP_TIMEOUT: Duration = Duration::from_secs(10);
 /// The user that PID 1 and its `cat` run as: root without capabilities, so that commands,
 /// which must not run as root, cannot signal the processes that keep the container alive.
 const KEEPER_USER: &str = "0:0";
@@ -108,7 +108,8 @@ impl Target {
     async fn sweep(&self) {
         let mut command = self.exec(None, Input::Closed, SWEEP, "zx-agent-sweep", std::iter::empty::<&str>());
         command.stdout(Stdio::null()).stderr(Stdio::null());
-        let _ = tokio::time::timeout(KILL_TIMEOUT, command.status()).await;
+        // A sweep that fails or does not end in time leaves the processes as described above.
+        let _ = tokio::time::timeout(SWEEP_TIMEOUT, command.status()).await;
     }
 }
 

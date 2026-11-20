@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
-use super::{check_path, parse_args, resolve, unless_cancelled};
+use super::{check_path, parse_args, path_text, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
@@ -94,7 +94,9 @@ impl Tool for WriteFileTool {
             turn,
         )
         .await?;
-        Ok(ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", args.path.trim()))
-            .with_details(json!({ "path": path.display().to_string(), "bytes": bytes })))
+        Ok(
+            ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", path_text(&args.path)))
+                .with_details(json!({ "path": path.display().to_string(), "bytes": bytes })),
+        )
     }
 }

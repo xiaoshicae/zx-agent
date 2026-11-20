@@ -72,13 +72,13 @@ impl BashTool {
     }
 }
 
-/// Of the output budget, the share stderr keeps when both streams are long: the answer is
-/// usually on stdout. Room one stream leaves unused goes to the other.
-const STDERR_SHARE: usize = 4;
+/// When both streams are long, stderr keeps the output budget divided by this, a quarter: the
+/// answer is usually on stdout. Room one stream leaves unused goes to the other.
+const STDERR_DIVISOR: usize = 4;
 
 /// Split `budget` between stdout and stderr, which need `stdout` and `stderr` of it.
 fn split(budget: usize, stdout: usize, stderr: usize) -> (usize, usize) {
-    let for_stderr = stderr.min((budget / STDERR_SHARE).max(budget.saturating_sub(stdout)));
+    let for_stderr = stderr.min((budget / STDERR_DIVISOR).max(budget.saturating_sub(stdout)));
     (budget - for_stderr, for_stderr)
 }
 

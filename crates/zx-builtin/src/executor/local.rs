@@ -113,7 +113,7 @@ impl Executor for LocalExecutor {
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
         let display = path.display();
         match tokio::fs::metadata(path).await {
-            Ok(meta) => regular_file(path, &meta)?,
+            Ok(meta) => check_regular_file(path, &meta)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
                     tokio::fs::create_dir_all(parent)
@@ -151,13 +151,13 @@ fn overwrite_regular_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     options.custom_flags(libc::O_NONBLOCK);
     let mut file = options.open(path).map_err(unwritable)?;
-    regular_file(path, &file.metadata().map_err(unwritable)?)?;
+    check_regular_file(path, &file.metadata().map_err(unwritable)?)?;
     file.set_len(0).map_err(unwritable)?;
     file.write_all(bytes).map_err(unwritable)
 }
 
 /// Refuse to write what is not a regular file, with a hint for directories.
-fn regular_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+fn check_regular_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if meta.is_dir() {
         return Err(directory_write_error(path));
     }

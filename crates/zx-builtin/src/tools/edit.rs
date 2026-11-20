@@ -8,7 +8,9 @@ use serde_json::{Map, Value, json};
 
 use super::edit_text::{Edit, NO_EDITS, apply_edits, lf_endings, split_bom, unified_patch};
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
-use super::{DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, resolve, unless_cancelled};
+use super::{
+    DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, path_text, resolve, unless_cancelled,
+};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
@@ -124,16 +126,16 @@ impl Tool for EditFileTool {
             changed = true;
         }
         if let (Some(Value::String(_)), Some(Value::String(_))) = (object.get("oldText"), object.get("newText")) {
-            let mut legacy = Map::new();
+            let mut top_level = Map::new();
             for key in ["oldText", "newText"] {
                 if let Some(value) = object.remove(key) {
-                    legacy.insert(key.into(), value);
+                    top_level.insert(key.into(), value);
                 }
             }
             match object.get_mut("edits") {
-                Some(Value::Array(edits)) => edits.push(Value::Object(legacy)),
+                Some(Value::Array(edits)) => edits.push(Value::Object(top_level)),
                 _ => {
-                    object.insert("edits".into(), Value::Array(vec![Value::Object(legacy)]));
+                    object.insert("edits".into(), Value::Array(vec![Value::Object(top_level)]));
                 }
             }
             changed = true;
@@ -147,7 +149,7 @@ impl Tool for EditFileTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args = Args::parse(&args)?;
-        let shown = args.path.trim();
+        let shown = path_text(&args.path);
         let path = resolve(&ctx.cwd, &args.path)?;
         let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
