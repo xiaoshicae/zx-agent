@@ -18,7 +18,8 @@ use zx_agent::transcript::Entry;
 
 use zx_testing::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use zx_testing::{
-    EchoTool, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
+    EchoTool, NotifyingProvider, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session,
+    summarize, summary_json,
 };
 
 fn budget() -> Config {
@@ -656,7 +657,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
 #[tokio::test]
 async fn pending_compaction_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let (seed, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, events) = RunnerSetup {
         session: seed.into(),
         compaction: budget(),
@@ -665,7 +666,7 @@ async fn pending_compaction_shares_busy_cancel_and_drop_reuse_with_prompt() {
     .build()
     .await;
     let mut compact = Box::pin(session.compact());
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
+    provider.wait_for_start(&mut compact).await;
     assert!(events.kinds().contains(&"compaction_start"));
     assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
     assert!(matches!(session.compact().await, Err(SessionError::Busy)));
@@ -677,17 +678,16 @@ async fn pending_compaction_shares_busy_cancel_and_drop_reuse_with_prompt() {
 #[tokio::test]
 async fn cancelling_compaction_records_failure_and_the_session_is_immediately_reusable() {
     let (seed, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, _) = RunnerSetup {
         session: seed.into(),
         compaction: budget(),
-        ..RunnerSetup::new(config(provider, vec![]))
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
     .await;
-    let compact = session.compact();
-    tokio::pin!(compact);
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
+    let mut compact = Box::pin(session.compact());
+    provider.wait_for_start(&mut compact).await;
     assert!(session.cancel());
     assert_eq!(compact.await.unwrap().outcome, Outcome::Cancelled);
     assert_eq!(session.prompt("next").await.unwrap().final_text, "reused");

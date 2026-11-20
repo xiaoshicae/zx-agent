@@ -157,10 +157,7 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("later")]));
     let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! {
-        () = provider.started.notified() => {}
-        _ = &mut running => panic!("must be running"),
-    }
+    provider.wait_for_start(&mut running).await;
     assert_eq!(session.branch(None), Err(SessionError::Busy));
     assert_eq!(
         session.with_transcript(|transcript| transcript.entries().len()).err(),

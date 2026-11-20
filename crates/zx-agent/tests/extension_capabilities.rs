@@ -419,10 +419,7 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
     );
 
     let mut running = Box::pin(session.prompt("go"));
-    tokio::select! {
-        () = provider.started.notified() => {}
-        _ = &mut running => panic!("must be running"),
-    }
+    provider.wait_for_start(&mut running).await;
     assert_eq!(
         session.append_custom_entry("state", json!(2)).await,
         Err(SessionError::Busy)

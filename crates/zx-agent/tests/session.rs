@@ -81,7 +81,7 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
 async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let (session, provider, _) = setup([FauxStep::Hang]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     session.queues().steer("queued");
     assert_eq!(take_queued_inputs(&session), Err(SessionError::Busy));
     assert!(session.cancel());
@@ -93,7 +93,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
 async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("resumed")]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     let rejected = tokio::time::timeout(Duration::from_secs(1), session.prompt("must not enter history"))
         .await
         .unwrap();
@@ -113,7 +113,7 @@ async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
 async fn cancelling_a_run_ends_only_that_run() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("next answer")]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     let next = session.prompt("second").await.unwrap();
@@ -144,7 +144,7 @@ async fn reading_the_session_leaves_nothing_to_cancel() {
 async fn dropping_a_prompt_cancels_the_provider_and_returns_ownership() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     drop(running);
     assert!(provider.token.lock().unwrap().as_ref().unwrap().is_cancelled());
     assert!(
@@ -250,7 +250,7 @@ async fn a_prompt_s_hold_ends_once_the_session_has_recorded_the_prompt() {
     assert!(!ended.load(Ordering::SeqCst), "a run not read yet has recorded nothing");
 
     // The prompt is recorded before the first request.
-    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
+    provider.wait_for_start(read_all(&mut run)).await;
     assert!(ended.load(Ordering::SeqCst));
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:go"]);
 }
@@ -273,7 +273,7 @@ async fn a_prompt_s_hold_ends_with_a_run_that_never_recorded_it() {
 async fn dropping_a_run_cancels_it_and_frees_the_session() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]).await;
     let mut run = session.send("first").unwrap();
-    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
+    provider.wait_for_start(read_all(&mut run)).await;
 
     drop(run);
 
@@ -290,7 +290,7 @@ async fn one_handle_cancels_the_run_that_another_reads() {
     let (session, provider, _) = setup([FauxStep::Hang]).await;
     let other = Session::clone(&session);
     let mut run = session.send("first").unwrap();
-    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
+    provider.wait_for_start(read_all(&mut run)).await;
 
     assert!(matches!(other.send("second"), Err(SessionError::Busy)));
     assert!(other.cancel());
@@ -377,7 +377,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
 async fn a_running_session_rejects_a_reasoning_change() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
@@ -391,7 +391,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
     let name = |text| SessionName::new(text).unwrap();
     session.set_name(name("triage")).await.unwrap();
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     assert_eq!(session.set_name(name("renamed")).await, Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
@@ -412,7 +412,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
 async fn a_running_session_rejects_model_changes_without_changing_the_provider() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("old provider")]).await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    provider.wait_for_start(&mut running).await;
     let next = Arc::new(FauxProvider::new([FauxStep::text("must not run")]));
     assert_eq!(session.set_model(next.clone(), "next"), Err(SessionError::Busy));
     session.cancel();
@@ -476,7 +476,7 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
         .build()
         .await;
     let mut running = Box::pin(session.prompt("go"));
-    tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
+    tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.queues().steer("steering");
     session.queues().follow_up("follow-up");
     gate.release.notify_one();

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ProviderErrorKind, StopReason, ToolCall};
-use zx_agent::events::{EventKind, RunOutcome};
+use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
@@ -16,8 +16,8 @@ use zx_agent::tools::Tool;
 use zx_agent::transcript::{CustomMessage, Entry};
 
 use zx_testing::{
-    Collect, Driven, EchoTool, RunnerSetup, Seed, Start, config, header, summarize, take_queued_inputs,
-    tool_call_answer,
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, summarize,
+    take_queued_inputs, tool_call_answer,
 };
 
 async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
@@ -274,20 +274,10 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
 
 #[tokio::test]
 async fn a_running_session_refuses_to_continue() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
-    let (session, events) = runner(&provider, Start::default()).await;
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
-    // Wait until the request is in flight.
-    while !events
-        .events()
-        .iter()
-        .any(|event| matches!(event, EventKind::RequestStart { .. }))
-    {
-        tokio::select! {
-            () = tokio::task::yield_now() => {}
-            _ = &mut running => panic!("must still be running"),
-        }
-    }
+    provider.wait_for_start(&mut running).await;
 
     assert_eq!(session.continue_run().await.err(), Some(SessionError::Busy));
     session.cancel();

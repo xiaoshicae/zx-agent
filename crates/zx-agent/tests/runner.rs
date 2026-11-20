@@ -28,10 +28,7 @@ async fn dropping_a_run_cancels_its_provider() {
     let probe = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build().await;
     let mut running = Box::pin(runner.run("go"));
-    tokio::select! {
-        () = probe.started.notified() => {}
-        _ = &mut running => panic!("the provider must still be running"),
-    }
+    probe.wait_for_start(&mut running).await;
 
     drop(running);
 

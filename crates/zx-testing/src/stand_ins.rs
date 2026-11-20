@@ -29,6 +29,15 @@ pub struct NotifyingProvider {
 }
 
 impl NotifyingProvider {
+    /// Wait until a request starts; panic if `running`, which makes the request, ends first.
+    /// A test that needs a run under way waits for this rather than a fixed time.
+    pub async fn wait_for_start(&self, running: impl Future) {
+        tokio::select! {
+            () = self.started.notified() => {}
+            _ = running => panic!("the run ended before its request started"),
+        }
+    }
+
     /// `provider`, saying when each of its requests starts.
     pub fn new(provider: impl Provider + 'static) -> Arc<Self> {
         Arc::new(Self {
