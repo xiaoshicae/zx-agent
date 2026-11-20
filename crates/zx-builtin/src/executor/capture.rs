@@ -12,7 +12,7 @@ use super::{Captured, CommandEnd, CommandOutput};
 use crate::sync::{AbortOnDrop, lock};
 
 /// Bytes kept per stream while reading. Older output is dropped; only the tail is returned.
-const CAPTURE_LIMIT: usize = 1024 * 1024;
+pub(crate) const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// How long to wait for output pipes after the process ends. Background children that
 /// inherited the pipes could otherwise keep them open forever.
 const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);

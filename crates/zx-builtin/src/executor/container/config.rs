@@ -9,10 +9,16 @@ use std::str::FromStr;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use crate::executor::environment::{current_time, pretty_name};
+use crate::executor::environment::{OPENED_LABEL, OS_LABEL, WORKING_DIRECTORY_LABEL, current_time, pretty_name};
 
 /// The user commands run as when the agent itself runs as root, or off Unix: nobody.
 pub(super) const NOBODY: &str = "65534:65534";
+/// The prefix of the line of the start-up probe's output that holds `uname -m`.
+pub(super) const ARCH_FIELD: &str = "arch=";
+/// The prefix of the line of the start-up probe's output that holds `uname -r`.
+pub(super) const KERNEL_FIELD: &str = "kernel=";
+/// The line of the start-up probe's output after which the image's `/etc/os-release` follows.
+pub(super) const OS_RELEASE_HEADER: &str = "--- os-release";
 
 /// Whether the container may change a part of its file system. In configuration files,
 /// `readWrite` or `readOnly`.
@@ -53,10 +59,16 @@ pub struct ContainerConfig {
 }
 
 impl ContainerConfig {
+    /// The memory limit by default, in Docker's syntax.
+    pub const DEFAULT_MEMORY: &'static str = "1g";
+    /// The limit on processes by default.
+    pub const DEFAULT_PIDS_LIMIT: u32 = 256;
+
     /// Settings for `image` with the defaults: a writable workspace and root, the `bridge`
     /// network, the agent's own `uid:gid` (so that files written in the workspace belong to
-    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix), 1 GiB
-    /// of memory, 256 processes, no label, and the `docker` client found on `PATH`.
+    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix),
+    /// [`Self::DEFAULT_MEMORY`] of memory, [`Self::DEFAULT_PIDS_LIMIT`] processes, no label,
+    /// and the `docker` client found on `PATH`.
     pub fn new(image: impl Into<String>) -> Self {
         Self {
             image: image.into(),
@@ -65,8 +77,8 @@ impl ContainerConfig {
             root_access: Access::ReadWrite,
             network: Network::Bridge,
             user: default_user(),
-            memory: "1g".into(),
-            pids_limit: 256,
+            memory: Self::DEFAULT_MEMORY.into(),
+            pids_limit: Self::DEFAULT_PIDS_LIMIT,
             label: String::new(),
         }
     }
@@ -270,8 +282,11 @@ fn default_user() -> String {
     NOBODY.into()
 }
 
+/// The platform the start-up probe printed in `output`.
 pub(super) fn parse_platform(output: &str) -> Platform {
-    let (head, os_release) = output.split_once("--- os-release\n").unwrap_or((output, ""));
+    let (head, os_release) = output
+        .split_once(&format!("{OS_RELEASE_HEADER}\n"))
+        .unwrap_or((output, ""));
     let field = |key: &str| {
         head.lines()
             .find_map(|line| line.strip_prefix(key))
@@ -281,8 +296,8 @@ pub(super) fn parse_platform(output: &str) -> Platform {
     };
     Platform {
         os_release: os_release.to_string(),
-        kernel: field("kernel="),
-        arch: field("arch="),
+        kernel: field(KERNEL_FIELD),
+        arch: field(ARCH_FIELD),
     }
 }
 
@@ -298,13 +313,13 @@ pub(super) fn container_section(config: &ContainerConfig, workspace: &Path, plat
     };
     let (directories, mounted) = if cwd == workspace {
         (
-            format!("Working directory: {} ({access})", cwd.display()),
+            format!("{WORKING_DIRECTORY_LABEL}{} ({access})", cwd.display()),
             "the working directory",
         )
     } else {
         (
             format!(
-                "Working directory: {}\nWorkspace: {} ({access})",
+                "{WORKING_DIRECTORY_LABEL}{}\nWorkspace: {} ({access})",
                 cwd.display(),
                 workspace.display()
             ),
@@ -320,7 +335,7 @@ pub(super) fn container_section(config: &ContainerConfig, workspace: &Path, plat
         Access::ReadOnly => format!("outside {mounted} only /tmp is writable"),
     };
     format!(
-        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nSession opened: {}\n{directories}\n\
+        "{OS_LABEL}{name}, Linux kernel {} ({}), in a container from image {}\n{OPENED_LABEL}{}\n{directories}\n\
          Isolation: commands run as user {} {network}; {files}.",
         platform.kernel,
         platform.arch,

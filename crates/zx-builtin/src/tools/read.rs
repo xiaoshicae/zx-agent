@@ -15,6 +15,7 @@ use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 /// Reads text files in pages of bounded size.
 pub struct ReadFileTool {
     /// Larger files are refused; the model should use `bash` with head, tail, or grep.
+    /// [`DEFAULT_MAX_FILE_BYTES`](super::DEFAULT_MAX_FILE_BYTES) by default.
     pub max_file_bytes: u64,
     /// Where files are read. Defaults to this machine.
     pub executor: Arc<dyn Executor>,

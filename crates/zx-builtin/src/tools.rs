@@ -67,7 +67,7 @@ pub const EXECUTOR_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FIL
 
 /// The largest file edit_file edits and, by default, read_file reads: enough for any source
 /// file, and far more than one call can show.
-const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Build the tools of [`EXECUTOR_TOOL_NAMES`] named in `names`, in the given order, without
 /// duplicates, running commands and reading and writing files through `executor`, which also
@@ -198,6 +198,13 @@ mod tests {
         let requested = ["read_file", " bash ", "read_file", ""].map(String::from);
         let tools = executor_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
         assert_eq!(names(&tools), ["read_file", "bash"]);
+    }
+
+    #[test]
+    fn every_executor_tool_name_builds_its_tool() {
+        let requested: Vec<String> = EXECUTOR_TOOL_NAMES.iter().map(ToString::to_string).collect();
+        let tools = executor_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
+        assert_eq!(names(&tools), EXECUTOR_TOOL_NAMES);
     }
 
     #[test]

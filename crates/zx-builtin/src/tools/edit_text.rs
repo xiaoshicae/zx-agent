@@ -83,6 +83,9 @@ fn which(index: usize, total: usize, single: &str) -> String {
     }
 }
 
+/// The error of an edit_file call without edits.
+pub(super) const NO_EDITS: &str = "edits must contain at least one replacement";
+
 /// Apply `edits` to `text`, which has no byte order mark; lines that end with `\r\n` are
 /// matched as if they ended with `\n`, and keep their ending.
 /// Every edit is matched against the original content, must match once, and must not
@@ -92,7 +95,7 @@ fn which(index: usize, total: usize, single: &str) -> String {
 /// tell the model how to fix the call.
 pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<String, String> {
     if edits.is_empty() {
-        return Err("edits must contain at least one replacement".into());
+        return Err(NO_EDITS.into());
     }
     // Matched with `\n` line endings, as the model writes them; written back with the
     // endings each line had.

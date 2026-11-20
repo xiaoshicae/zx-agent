@@ -31,7 +31,7 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 /// included, and the footer alone takes about a hundred bytes.
 pub const MIN_THRESHOLD_BYTES: usize = 256;
 /// The threshold by default, and the size of a page when nothing is stored.
-const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
+pub const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
 /// Written into the output directory when the store creates it: stored results may contain
 /// sensitive data, and the directory may lie inside a working tree under version control.
 const GITIGNORE: &str = "# Stored tool results may contain sensitive data.\n*\n";
@@ -52,7 +52,8 @@ pub struct OutputStoreConfig {
 }
 
 impl OutputStoreConfig {
-    /// Settings that store results in `directory`: those over 8 KiB, up to 1 MiB each.
+    /// Settings that store results in `directory`: those over [`DEFAULT_PAGE_BYTES`], up to
+    /// [`MAX_FILE_BYTES`] each.
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),

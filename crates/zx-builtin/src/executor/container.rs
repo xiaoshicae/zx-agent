@@ -41,7 +41,7 @@ pub use config::{Access, ContainerConfig, InvalidContainerConfig, Network, Unusa
 use config::{Platform, check_workspace, container_section, parse_platform};
 use scripts::{
     EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
-    PROBE_NO_WORKSPACE, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
+    PROBE_NO_WORKSPACE, PROBE_READ_ONLY, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
 };
 
 use super::capture::{Capture, await_end, collect};
@@ -51,8 +51,6 @@ use super::{
 };
 use zx_core::tools::ExecutionMode;
 
-/// Longest wait for a new container to accept commands.
-const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pause between readiness probes while the container starts.
 const START_POLL: Duration = Duration::from_millis(100);
 /// Longest wait for one readiness probe.
@@ -136,11 +134,14 @@ pub struct ContainerExecutor {
 }
 
 impl ContainerExecutor {
+    /// The longest wait for a new container to accept commands.
+    pub const START_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Start a container with `config` that mounts `workspace` at the same path, and check
     /// that it can run commands. Fails, and removes the container, when the settings are
     /// invalid ([`ContainerConfig::validate`], whose error the result holds), the workspace is
     /// not an absolute path that Docker can mount, Docker cannot run, the image is not present
-    /// locally, the container does not accept commands within 60 seconds, the image lacks a
+    /// locally, the container does not accept commands within [`Self::START_TIMEOUT`], the image lacks a
     /// required program, commands would run as root, or the command user cannot use the
     /// workspace ([`UnusableWorkspace`], which the result holds too).
     ///
@@ -181,8 +182,9 @@ impl ContainerExecutor {
                 Probe::NotReady(reason) => reason,
             };
             ensure!(
-                started.elapsed() < START_TIMEOUT,
-                "container {name} did not accept commands within {START_TIMEOUT:?}: {reason}"
+                started.elapsed() < Self::START_TIMEOUT,
+                "container {name} did not accept commands within {:?}: {reason}",
+                Self::START_TIMEOUT
             );
             tokio::time::sleep(START_POLL).await;
         };
@@ -203,30 +205,31 @@ impl ContainerExecutor {
     }
 }
 
-/// A file operation: the words that name it in errors, and the longest wait for it.
+/// The longest wait for one file read or write: a FIFO swapped in after the checks would
+/// otherwise block it.
+const FILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A file operation, by the words that name it in errors.
 struct FileOperation {
     /// Such as `read`.
     verb: &'static str,
     /// Such as `reading`.
     doing: &'static str,
-    timeout: Duration,
 }
 
-/// Reading one file. A FIFO swapped in after the checks would otherwise block.
+/// Reading one file.
 const READING: FileOperation = FileOperation {
     verb: "read",
     doing: "reading",
-    timeout: Duration::from_secs(30),
 };
 
-/// Writing one file, with a time limit for the same reason.
+/// Writing one file.
 const WRITING: FileOperation = FileOperation {
     verb: "write",
     doing: "writing",
-    timeout: Duration::from_secs(30),
 };
 
-/// Run the file script `command` for `path`, within the time `operation` allows. `transfer`
+/// Run the file script `command` for `path`, within [`FILE_TIMEOUT`]. `transfer`
 /// takes the pipes it needs from the started script and moves the file's bytes through them;
 /// then the script's exit status and error output are collected. Returns the status, what
 /// `transfer` returned and the error output.
@@ -253,12 +256,11 @@ where
             .map_err(|e| format!("cannot {} {}: {e}", operation.verb, path.display()))?;
         Ok((status, moved, stderr.finish().await.bytes))
     };
-    tokio::time::timeout(operation.timeout, script).await.map_err(|_| {
+    tokio::time::timeout(FILE_TIMEOUT, script).await.map_err(|_| {
         format!(
-            "{} {} in the container took longer than {:?}",
+            "{} {} in the container took longer than {FILE_TIMEOUT:?}",
             operation.doing,
-            path.display(),
-            operation.timeout
+            path.display()
         )
     })?
 }
@@ -485,7 +487,7 @@ async fn probe(target: &Target, config: &ContainerConfig, workspace: &Path) -> P
             workspace.as_os_str(),
             OsStr::new(match config.workspace_access {
                 Access::ReadWrite => "rw",
-                Access::ReadOnly => "ro",
+                Access::ReadOnly => PROBE_READ_ONLY,
             }),
         ],
     );
@@ -587,10 +589,18 @@ fn text(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::config::{ARCH_FIELD, KERNEL_FIELD, OS_RELEASE_HEADER};
     use super::*;
 
     /// The workspace the containers of these tests mount.
     const WORK: &str = "/work";
+
+    #[test]
+    fn the_probe_prints_the_lines_the_platform_is_read_from() {
+        for line in [ARCH_FIELD, KERNEL_FIELD, OS_RELEASE_HEADER] {
+            assert!(PROBE.contains(&format!("echo \"{line}")), "{line}");
+        }
+    }
 
     fn config() -> ContainerConfig {
         ContainerConfig {

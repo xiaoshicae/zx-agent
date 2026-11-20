@@ -22,8 +22,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use environment::WORKING_DIRECTORY_LABEL;
 use zx_core::tools::ExecutionMode;
 
+pub(crate) use capture::CAPTURE_LIMIT;
 pub use container::{Access, ContainerConfig, ContainerExecutor, InvalidContainerConfig, Network, UnusableWorkspace};
 pub use local::LocalExecutor;
 
@@ -87,7 +89,7 @@ pub trait Executor: Send + Sync {
     ///
     /// Called when a session is set up; reading a few small local files there is fine.
     fn environment_section(&self, cwd: &Path) -> String {
-        format!("Working directory: {}", cwd.display())
+        format!("{WORKING_DIRECTORY_LABEL}{}", cwd.display())
     }
 
     /// Run `command` with the executor's shell until it exits, its timeout passes, or

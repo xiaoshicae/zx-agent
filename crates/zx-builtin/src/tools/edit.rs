@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::edit_text::{Edit, apply_edits, lf_endings, split_bom, unified_patch};
+use super::edit_text::{Edit, NO_EDITS, apply_edits, lf_endings, split_bom, unified_patch};
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
 use super::{DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
@@ -18,7 +18,8 @@ use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOu
 /// dropped whole, so a long patch is cut to leave room for the other fields.
 const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
-/// Replaces exact, unique, non-overlapping pieces of text in one file of at most 10 MiB.
+/// Replaces exact, unique, non-overlapping pieces of text in one file of at most
+/// [`DEFAULT_MAX_FILE_BYTES`](super::DEFAULT_MAX_FILE_BYTES) bytes.
 pub struct EditFileTool {
     /// Where files are read and written. Defaults to this machine.
     pub executor: Arc<dyn Executor>,
@@ -47,7 +48,7 @@ impl Args {
     fn parse(args: &Value) -> Result<Self, String> {
         let args: Self = parse_args(args)?;
         if args.edits.is_empty() {
-            return Err("edits must contain at least one replacement".into());
+            return Err(NO_EDITS.into());
         }
         check_path(&args.path)?;
         Ok(args)

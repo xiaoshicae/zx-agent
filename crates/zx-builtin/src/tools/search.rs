@@ -25,7 +25,7 @@ pub use ls::LsTool;
 
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
-use crate::executor::{CommandEnd, Executor, ShellCommand};
+use crate::executor::{CAPTURE_LIMIT, CommandEnd, Executor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
 use zx_core::tools::{ToolContext, ToolOutput};
 
@@ -58,6 +58,10 @@ pub(crate) fn quote(text: &str) -> String {
 fn first_lines(shown: usize) -> String {
     format!("head -n {} | LC_ALL=C cut -c 1-{}", shown + 1, MAX_LINE_BYTES + 1)
 }
+
+// What `first_lines` keeps of a search that shows the most lines, each with its newline, fits
+// in what the executor keeps.
+const _: () = assert!((MAX_LINES + 1) * (MAX_LINE_BYTES + 2) <= CAPTURE_LIMIT);
 
 /// The filter that drops the `./` before each path, as ripgrep and grep print the paths
 /// under `.`, the directory they search by default. `sed` reads bytes in the C locale: where

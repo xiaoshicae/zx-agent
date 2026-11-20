@@ -6,6 +6,10 @@ pub(super) const PROBE_MISSING: i32 = 91;
 pub(super) const PROBE_NO_WORKSPACE: i32 = 93;
 pub(super) const PROBE_READ_ONLY_WORKSPACE: i32 = 98;
 
+/// The probe's third argument when the workspace is mounted read-only; any other value means
+/// writable.
+pub(super) const PROBE_READ_ONLY: &str = "ro";
+
 /// Checks that commands run as a non-root user, that the image has the required programs
 /// and that the user can read the workspace, and write it when it is mounted writable; prints
 /// the platform. Arguments: the shell commands run with, the workspace, and `rw` or `ro`.
@@ -60,3 +64,47 @@ if [ ! -e "$1" ]; then exit 95; fi
 if [ ! -f "$1" ]; then exit 96; fi
 if [ ! -r "$1" ]; then exit 97; fi
 exec head -c "$2" -- "$1""#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The codes other than 0 that `script` exits with.
+    fn exit_codes(script: &str) -> Vec<i32> {
+        let words: Vec<&str> = script
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        let mut codes: Vec<i32> = words
+            .windows(2)
+            .filter(|pair| pair[0] == "exit")
+            .filter_map(|pair| pair[1].parse().ok())
+            .filter(|code| *code != 0)
+            .collect();
+        codes.sort_unstable();
+        codes
+    }
+
+    #[test]
+    fn the_scripts_exit_with_the_codes_the_executor_reads() {
+        for (script, mut codes) in [
+            (
+                PROBE,
+                vec![PROBE_ROOT, PROBE_MISSING, PROBE_NO_WORKSPACE, PROBE_READ_ONLY_WORKSPACE],
+            ),
+            (WRITE, vec![EXIT_NO_DIRECTORY, EXIT_DIRECTORY, EXIT_SPECIAL]),
+            (READ, vec![EXIT_DIRECTORY, EXIT_MISSING, EXIT_SPECIAL, EXIT_DENIED]),
+        ] {
+            codes.sort_unstable();
+            assert_eq!(exit_codes(script), codes, "{script}");
+        }
+    }
+
+    #[test]
+    fn the_probe_tells_a_read_only_workspace_by_its_argument() {
+        assert!(
+            PROBE.contains(&format!("[ \"$access\" = {PROBE_READ_ONLY} ]")),
+            "{PROBE}"
+        );
+    }
+}
