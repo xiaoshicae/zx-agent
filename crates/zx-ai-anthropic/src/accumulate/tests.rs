@@ -5,9 +5,9 @@ use super::*;
 fn apply_all(acc: &mut Accumulator, events: &[Value]) -> Vec<Delta> {
     events
         .iter()
-        .flat_map(|event| match acc.apply(event) {
-            Ok(deltas) => deltas,
-            Err(_) => panic!("unexpected failure at {event}"),
+        .flat_map(|event| {
+            acc.apply(event)
+                .unwrap_or_else(|failure| panic!("{failure:?} at {event}"))
         })
         .collect()
 }
@@ -190,8 +190,8 @@ fn a_stream_without_a_stop_reason_or_with_an_error_event_fails() {
     );
 
     let error = json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}});
-    match acc.apply(&error) {
-        Err(Failure::Error { details, .. }) => assert_eq!(details.kind, ProviderErrorKind::Unavailable),
-        _ => panic!("an error event fails the response"),
-    }
+    let Failure::Error { details, .. } = acc.apply(&error).unwrap_err() else {
+        panic!("an error event fails the response");
+    };
+    assert_eq!(details.kind, ProviderErrorKind::Unavailable);
 }

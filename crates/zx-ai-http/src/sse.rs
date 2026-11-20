@@ -12,12 +12,6 @@ pub(crate) struct SseParser {
     max_event_bytes: usize,
 }
 
-impl Default for SseParser {
-    fn default() -> Self {
-        Self::new(DEFAULT_MAX_EVENT_BYTES)
-    }
-}
-
 impl SseParser {
     /// Limit each event, including unterminated lines and multi-line data fields.
     pub(crate) fn new(max_event_bytes: usize) -> Self {
@@ -91,7 +85,7 @@ mod tests {
 
     #[test]
     fn splits_events_across_chunks() {
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::new(DEFAULT_MAX_EVENT_BYTES);
         assert!(parser.push(b"data: {\"a\":").unwrap().is_empty());
         assert_eq!(
             parser.push(b"1}\n\ndata: [DONE]\n\n").unwrap(),
@@ -102,14 +96,14 @@ mod tests {
     #[test]
     fn keeps_multibyte_characters_split_across_chunks() {
         let bytes = "data: 中文\n\n".as_bytes();
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::new(DEFAULT_MAX_EVENT_BYTES);
         assert!(parser.push(&bytes[..8]).unwrap().is_empty());
         assert_eq!(parser.push(&bytes[8..]).unwrap(), vec!["中文"]);
     }
 
     #[test]
     fn ignores_comments_and_handles_crlf_and_unterminated_tail() {
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::new(DEFAULT_MAX_EVENT_BYTES);
         assert_eq!(
             parser.push(b": keep-alive\r\ndata: x\r\n\r\ndata: y").unwrap(),
             vec!["x"]

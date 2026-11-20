@@ -193,21 +193,19 @@ mod tests {
         let mut acc = Accumulator::new("p", "m", 1);
         let (mut tx, _rx) = event_channel();
         let chunk = r#"{"error":{"message":"overloaded","code":"server_overloaded"}}"#;
-        match handle_data(chunk, &mut acc, &mut tx).await {
-            Err(Failure::Error { details, message }) => {
-                // The code is not a known one, so the wording says what kind of failure it is.
-                assert_eq!(
-                    details,
-                    zx_ai::ProviderError {
-                        kind: ProviderErrorKind::Unavailable,
-                        status: None,
-                        code: Some("server_overloaded".into()),
-                        retry_after_ms: None,
-                    }
-                );
-                assert_eq!(message, "provider error: overloaded");
+        let Failure::Error { details, message } = handle_data(chunk, &mut acc, &mut tx).await.unwrap_err() else {
+            panic!("expected a provider error");
+        };
+        // The code is not a known one, so the wording says what kind of failure it is.
+        assert_eq!(
+            details,
+            zx_ai::ProviderError {
+                kind: ProviderErrorKind::Unavailable,
+                status: None,
+                code: Some("server_overloaded".into()),
+                retry_after_ms: None,
             }
-            Err(Failure::Aborted | Failure::Closed) | Ok(_) => panic!("expected a provider error"),
-        }
+        );
+        assert_eq!(message, "provider error: overloaded");
     }
 }
