@@ -296,18 +296,9 @@ impl Outlet {
         }
     }
 
-    /// Replace the status with how the work ended, or post that when no status was posted or
-    /// the status could not be replaced.
-    pub(super) async fn answer(&self, ended: Result<Finished, String>, status: Option<MessageRef>, closing: bool) {
-        let replies = self.replies();
-        let answer = match ended {
-            // The stop cancels runs through their token. A `/cancel` just before the stop ends
-            // the same way and is told the same.
-            Ok(finished) if closing && finished.cancelled() => replies.stopped.clone(),
-            Ok(Finished::Run(report)) => render(&report, replies),
-            Ok(Finished::Compaction(report)) => render_compaction(&report, replies),
-            Err(error) => format!("{}{error}", replies.failed),
-        };
+    /// Replace the status with `answer`, how the work ended, or post it when no status was
+    /// posted or the status could not be replaced.
+    pub(super) async fn answer(&self, answer: String, status: Option<MessageRef>) {
         match status {
             Some(posted) => {
                 // Forgotten first: should the process end between the two, the status still
@@ -402,6 +393,16 @@ pub(super) fn said(content: String) -> CustomMessage {
         content,
         display: true,
         details: None,
+    }
+}
+
+/// The text that replaces the status message once the work `ended`: its answer, or why it
+/// gave none.
+pub(super) fn answer_of(ended: Result<Finished, String>, replies: &Replies) -> String {
+    match ended {
+        Ok(Finished::Run(report)) => render(&report, replies),
+        Ok(Finished::Compaction(report)) => render_compaction(&report, replies),
+        Err(error) => format!("{}{error}", replies.failed),
     }
 }
 
