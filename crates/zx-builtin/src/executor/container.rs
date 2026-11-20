@@ -49,6 +49,7 @@ use super::{
     Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, directory_read_error, directory_write_error,
     over_limit_error, special_file_error,
 };
+use crate::text::clip;
 use zx_core::tools::ExecutionMode;
 
 /// Pause between readiness probes while the container starts.
@@ -580,10 +581,20 @@ fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), St
     }
 }
 
-/// Client output for an error message: lossy UTF-8, trimmed, or a note that there was none.
+/// The most characters of a client's output that an error message quotes: Docker's errors
+/// take a line, and a script may print any amount, which goes to the model in a tool's error.
+const MAX_QUOTED_CHARS: usize = 2000;
+
+/// Client output for an error message: lossy UTF-8, trimmed and clipped to
+/// [`MAX_QUOTED_CHARS`], or a note that there was none.
 fn text(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).trim().to_string();
-    if text.is_empty() { "(no output)".into() } else { text }
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim();
+    if text.is_empty() {
+        "(no output)".into()
+    } else {
+        clip(text, MAX_QUOTED_CHARS)
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +604,14 @@ mod tests {
 
     /// The workspace the containers of these tests mount.
     const WORK: &str = "/work";
+
+    #[test]
+    fn quoted_output_is_trimmed_and_bounded() {
+        let long = "x".repeat(MAX_QUOTED_CHARS + 10);
+        assert_eq!(text(long.as_bytes()), format!("{}...", &long[..MAX_QUOTED_CHARS]));
+        assert_eq!(text(b" refused \n"), "refused");
+        assert_eq!(text(b" \n"), "(no output)");
+    }
 
     #[test]
     fn the_probe_prints_the_lines_the_platform_is_read_from() {
