@@ -271,6 +271,24 @@ pub(crate) fn preview_text(text: &str) -> String {
     visible(&shown)
 }
 
+/// `cost` in the prices' unit, whatever the currency: four decimals, and for a cost below a
+/// thousandth of a unit as many more as its first two digits need, up to eight. A request to
+/// a low-cost model costs about a ten-thousandth of a dollar, which four decimals show as
+/// nothing.
+pub(crate) fn cost_text(cost: f64) -> String {
+    let mut decimals = 4;
+    // The cost in units of the last decimal shown.
+    let mut shown = cost * 10_000.0;
+    while cost > 0.0 && shown < 10.0 && decimals < MAX_COST_DECIMALS {
+        shown *= 10.0;
+        decimals += 1;
+    }
+    format!("{cost:.decimals$}")
+}
+
+/// The most decimals a cost is shown with.
+const MAX_COST_DECIMALS: usize = 8;
+
 /// Escape control characters, including bidirectional overrides, so that text from models,
 /// tools or servers cannot drive the terminal.
 pub(crate) fn visible(text: &str) -> String {
@@ -292,6 +310,19 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_cost_below_a_thousandth_keeps_its_first_two_digits() {
+        // One request to a model at $0.10 per million input tokens.
+        assert_eq!(cost_text(0.000_101_1), "0.00010");
+        assert_eq!(cost_text(0.000_059_6), "0.000060");
+        assert_eq!(cost_text(0.000_000_000_001), "0.00000000");
+        assert_eq!(cost_text(0.0), "0.0000");
+        // A thousandth and more, as before: four decimals.
+        assert_eq!(cost_text(0.001), "0.0010");
+        assert_eq!(cost_text(0.0123), "0.0123");
+        assert_eq!(cost_text(1.5), "1.5000");
+    }
 
     #[test]
     fn escapes_terminal_controls_and_bidi_markers_but_preserves_normal_unicode() {

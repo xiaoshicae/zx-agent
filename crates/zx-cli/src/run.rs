@@ -20,7 +20,7 @@ use zx_util::stdio::{eprint_line, print_line};
 use crate::application::{connect, open_or_create};
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, exit_code, with_telemetry};
-use crate::render::{answer_end_line, progress_line, visible};
+use crate::render::{answer_end_line, cost_text, progress_line, visible};
 use crate::session_file;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
@@ -241,7 +241,7 @@ fn print_report(report: &RunReport, output: OutputMode, file: Option<&Path>) {
             };
             let cost = usage
                 .total_cost
-                .map(|cost| format!(" cost={cost:.4}"))
+                .map(|cost| format!(" cost={}", cost_text(cost)))
                 .unwrap_or_default();
             let session = file
                 .map(|path| format!(" session={}", path.display()))

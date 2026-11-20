@@ -14,7 +14,7 @@ use zx_util::text::clip;
 use super::term::{Style, Terminal, Tone, elapsed_text};
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, print_json_line};
-use crate::render::{Severity, answer_end_line, call_label, patch_of, progress_line, visible};
+use crate::render::{Severity, answer_end_line, call_label, cost_text, patch_of, progress_line, visible};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;
@@ -287,14 +287,13 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
         };
         format!(" · {} in · {} out{cached}", report.usage.input, report.usage.output)
     };
-    let cost = report.usage.total_cost.map(cost_text).unwrap_or_default();
+    let cost = report.usage.total_cost.map(cost_part).unwrap_or_default();
     format!("[turn] {requests}{retries}{usage}{cost} · {}", elapsed_text(elapsed))
 }
 
-/// ` · cost 0.0123`, in the prices' unit, whatever the currency: four decimals, since a turn
-/// costs a small fraction of a unit.
-pub(super) fn cost_text(total_cost: f64) -> String {
-    format!(" · cost {total_cost:.4}")
+/// ` · cost 0.0123`, in the prices' unit, shown as [`cost_text`] shows costs.
+pub(super) fn cost_part(total_cost: f64) -> String {
+    format!(" · cost {}", cost_text(total_cost))
 }
 
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its
