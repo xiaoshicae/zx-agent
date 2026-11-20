@@ -1,6 +1,5 @@
 //! What extensions can do at run time: send the model messages, record state,
-//! change the tools the model is offered, register commands; and how queued input is taken
-//! (item 9).
+//! change the tools the model is offered, register commands; and how queued input is taken.
 
 use std::path::Path;
 use std::sync::Arc;

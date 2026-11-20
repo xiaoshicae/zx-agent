@@ -1,4 +1,4 @@
-//! Request audit (G3): every model request can be rebuilt from the session file.
+//! Request audit: every model request can be rebuilt from the session file.
 
 use std::path::Path;
 use std::sync::Arc;

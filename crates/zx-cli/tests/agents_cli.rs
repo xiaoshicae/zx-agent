@@ -319,7 +319,7 @@ async fn an_agent_file_gives_the_instructions_and_resolves_paths_relative_to_its
 }
 
 #[tokio::test]
-async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file() {
+async fn a_command_line_limit_overrides_the_agent_file_even_at_its_usual_value() {
     let dir = tempfile::tempdir().unwrap();
     agent(
         dir.path(),

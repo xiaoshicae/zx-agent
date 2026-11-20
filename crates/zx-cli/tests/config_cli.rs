@@ -121,7 +121,7 @@ async fn the_model_comes_from_the_flag_then_the_variable_then_the_file_and_the_b
 }
 
 #[tokio::test]
-async fn the_former_command_line_settings_are_read_from_config_toml() {
+async fn the_model_settings_without_a_command_line_option_are_read_from_config_toml() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let home = AgentHome::new(&format!(
         "model = 'file-model'\nmaxTokens = 77\nreasoning = 'low'\n[provider]\nbaseUrl = '{}'\n\

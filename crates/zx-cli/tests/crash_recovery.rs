@@ -647,7 +647,7 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
 
 /// `zx-agent run` with bash against the mock server, without retries.
 fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
-    const KEY_VAR: &str = "ZX_P6_RECOVERY_TEST_KEY";
+    const KEY_VAR: &str = "ZX_RECOVERY_TEST_KEY";
     let home = dir.join(".home");
     write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_agent_in(dir, Home::Agent(&home));
@@ -655,7 +655,7 @@ fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
         .args(["run", "--model", "mock", "--tools", "bash"])
         .args(args)
         .env("ZX_BASE_URL", &server.base_url)
-        .env(KEY_VAR, "sk-p6-test")
+        .env(KEY_VAR, "sk-recovery-test")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command

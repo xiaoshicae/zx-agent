@@ -14,8 +14,8 @@ use zx_testing::{stderr, stdout};
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
-    const KEY: &str = "sk-p1-test-secret";
-    const KEY_VAR: &str = "ZX_P1_TEST_KEY";
+    const KEY: &str = "sk-hooks-test-secret";
+    const KEY_VAR: &str = "ZX_HOOKS_TEST_KEY";
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("session.jsonl");
     std::fs::write(dir.path().join("credentials.txt"), format!("token={KEY}\n")).unwrap();

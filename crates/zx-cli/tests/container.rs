@@ -1006,7 +1006,7 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home
         .args(["run", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(args)
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .stdin(Stdio::null());
     if let Some(docker_dir) = docker_dir {
         let path = std::env::var("PATH").unwrap_or_default();
@@ -1086,7 +1086,7 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &st
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap()])
-        .env("OPENAI_API_KEY", "sk-p10-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .env("PATH", format!("{}:{path}", fake.dir.path().display()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1315,8 +1315,8 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
 }
 
 /// Guards the behavior, not one mechanism: the Docker clients run in their own process group,
-/// and on 2026-11-01 an attached `docker run --sig-proxy=false` client also kept running after
-/// SIGINT on its own, so this test passes even without the separate group.
+/// and an attached `docker run --sig-proxy=false` client has also been seen to keep running
+/// after SIGINT on its own, so this test passes even without the separate group.
 #[tokio::test]
 async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let Some(image) = docker_image() else { return };
@@ -1338,7 +1338,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
         .args(["--tools", "read_file"])
         // The session file would have to be outside the workspace; this test needs none.
         .arg("--no-session")
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1392,7 +1392,7 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap(), "go"])
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
