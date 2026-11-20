@@ -6,7 +6,7 @@ use zx_agent::input::Input;
 use crate::Addressee;
 use crate::server::outlet::{Asked, said};
 
-use super::{AfterRun, CANCEL_COMMAND, COMPACT_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
+use super::{AfterRun, CANCEL_COMMAND, COMPACT_COMMAND, Incoming, NEW_COMMAND, Phase, Running, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -69,20 +69,20 @@ impl Worker {
         let taken = match &mut self.phase {
             // A run that `/cancel` or `/new` stopped takes no more input: what is asked now
             // runs next.
-            Phase::Running {
+            Phase::Running(Running {
                 after: AfterRun::Cancel | AfterRun::Renew,
                 asked: later,
                 ..
-            } => {
+            }) => {
                 later.push(asked);
                 true
             }
-            Phase::Running { open, .. } => {
-                open.session.queues().steer(asked.0);
+            Phase::Running(running) => {
+                running.open.session.queues().steer(asked.0);
                 true
             }
-            Phase::Waiting { asked: waiting, .. } => {
-                waiting.push(asked);
+            Phase::Waiting(waiting) => {
+                waiting.asked.push(asked);
                 false
             }
             Phase::Idle { open, .. } => {
@@ -118,7 +118,7 @@ impl Worker {
             }
             // Dropping them returns their share of the budget and takes them out of the backlog.
             Phase::Idle { .. } => self.heard.clear(),
-            Phase::Waiting { .. } | Phase::Running { .. } => {}
+            Phase::Waiting(_) | Phase::Running(_) => {}
         }
     }
 

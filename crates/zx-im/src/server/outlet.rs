@@ -224,6 +224,26 @@ impl Outlet {
         }
     }
 
+    /// A new session in place of `open`, the one held so far, said in the conversation: the
+    /// session the conversation holds from now on. Created at once, it is the conversation's
+    /// latest session whatever happens before the next message: a conversation that is
+    /// released, or a process that restarts, goes on in it. A session that cannot be created
+    /// is reported in the conversation, which then stays in `open`.
+    pub(super) async fn start_over(&self, open: Option<Opened>) -> Option<Opened> {
+        match self.create().await {
+            Ok(opened) => {
+                // The session held so far is closed here; it stays in the storage.
+                drop(open);
+                self.post(self.replies().new_session.clone()).await;
+                Some(opened)
+            }
+            Err(error) => {
+                self.cannot_open(&error).await;
+                open
+            }
+        }
+    }
+
     /// Tell the conversation, and the operator, that its session could not be opened.
     pub(super) async fn cannot_open(&self, error: &str) {
         self.post(format!("{}{error}", self.replies().cannot_open)).await;
@@ -278,12 +298,7 @@ impl Outlet {
 
     /// Replace the status with how the work ended, or post that when no status was posted or
     /// the status could not be replaced.
-    pub(super) async fn answer(
-        &self,
-        ended: Result<Finished, String>,
-        status: Option<MessageRef>,
-        closing: bool,
-    ) {
+    pub(super) async fn answer(&self, ended: Result<Finished, String>, status: Option<MessageRef>, closing: bool) {
         let replies = self.replies();
         let answer = match ended {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
