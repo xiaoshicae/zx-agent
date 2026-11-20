@@ -109,6 +109,27 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 
 思考模式默认开启，`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
 
+⚑ D:5/CHINA FLAG: `deepseek-flash` 收图片（[Vision 指南](https://api-docs.deepseek.com/guides/vision)），要发图片时在 `[[models]]` 写 `input = ["text", "image"]`；⚑ D:5/CHINA FLAG: `deepseek-v4-pro` 不收（[价格页](https://api-docs.deepseek.com/quick_start/pricing)）。`deepseek-flash` 收发图片在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；`deepseek-v4-pro` 不收图片只依据文档。
+
+### provider 示例：OpenRouter
+
+经 OpenRouter 调用各家的模型，用它的 OpenAI 兼容接口与默认的 `openai` provider：
+
+```toml
+model = "anthropic/claude-haiku-5.5"
+
+[provider]
+baseUrl = "https://openrouter.ai/api/v1"
+apiKeyEnv = "OPENROUTER_API_KEY"
+
+[[models]]
+id = "anthropic/claude-haiku-5.5"
+input = ["text", "image"]
+cost = { input = 0.10, output = 0.50 }   # 美元每百万 token
+```
+
+模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key。它的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）按文档以 `Authorization: Bearer` 认证，`anthropic` provider 只发 `x-api-key`，所以经 OpenRouter 调 Claude 用 `openai` provider。这个示例在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节。
+
 ### 容器执行
 
 `execution = "container"` 时 bash、read_file、edit_file、write_file 与搜索工具（grep、find、ls）在 Docker 容器中执行；行为与安全边界见 [SECURITY.md](SECURITY.md#容器执行)。
@@ -312,4 +333,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.33 · 2026年11月
+CONFIGURATION.md · v0.34 · 2026年11月
