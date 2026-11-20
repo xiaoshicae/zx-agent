@@ -46,13 +46,14 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKeyEnv`、`maxRetries` 以外的键 |
 | `provider.baseUrl` | 服务的地址，请求的路径接在它后面：`openai` 不含 `/chat/completions`，默认 `https://api.openai.com/v1`；`anthropic` 不含 `/v1/messages`，默认 `https://api.anthropic.com`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
 | `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认为 provider 自己的：`openai` 是 `OPENAI_API_KEY`，`anthropic` 是 `ANTHROPIC_API_KEY`；变量没有值时请求不带认证头 |
+| `provider.apiKeyHeader` | 仅 `anthropic`。API key 放在哪个请求头：`x-api-key`（默认，Anthropic API 的写法）或 `authorization`（发 `Authorization: Bearer <key>`，如 OpenRouter 的 Anthropic Messages 兼容接口 `https://openrouter.ai/api/v1/messages`，`baseUrl` 写 `https://openrouter.ai/api`）。不按服务地址推断 |
 | `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的系统提示词；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
 | `provider.reasoningFormat` | 仅 `openai`。`reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
 | `provider.maxTokensField` | 仅 `openai`。输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
 | `provider.fillMissingReasoning` | 仅 `openai`。`true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
 | `provider.promptCacheKey` | 仅 `openai`。`true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
 | `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 ⚑ D:5/CHINA FLAG: DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking` 与 `output_config.effort`） |
-| `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`，`anthropic` 的 `x-api-key`） |
+| `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`；`anthropic` 的由 `apiKeyHeader` 定，默认 `x-api-key`） |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
 | `execution` | 命令在哪里执行：`local`（默认，本机）、`container`（见下文“容器执行”），或宿主经 `register_executor` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错 |
@@ -312,4 +313,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.33 · 2026年11月
+CONFIGURATION.md · v0.34 · 2026年11月
