@@ -31,10 +31,15 @@ impl FeishuChannel {
         match value["header"]["event_type"].as_str() {
             Some("im.message.receive_v1") => match message(&value["event"]) {
                 Some(said) => {
-                    if said.chat == ChatKind::Direct {
-                        lock(&self.direct).insert(said.at.conversation.0.clone());
+                    if let Inbound::Message {
+                        chat: ChatKind::Direct,
+                        at,
+                        ..
+                    } = &said
+                    {
+                        lock(&self.direct).insert(at.conversation.0.clone());
                     }
-                    vec![said.into_inbound()]
+                    vec![said]
                 }
                 // Not for the bot.
                 None => Vec::new(),
@@ -46,33 +51,10 @@ impl FeishuChannel {
     }
 }
 
-/// A text message from a person, as [`Inbound::Message`] carries it.
-struct Said {
-    id: MessageId,
-    at: Destination,
-    chat: ChatKind,
-    addressee: Addressee,
-    sender: UserId,
-    text: String,
-}
-
-impl Said {
-    fn into_inbound(self) -> Inbound {
-        Inbound::Message {
-            id: self.id,
-            at: self.at,
-            chat: self.chat,
-            addressee: self.addressee,
-            sender: self.sender,
-            text: self.text,
-        }
-    }
-}
-
 /// A text message from a person: in a direct chat, in a group with a bot mentioned, or a
 /// reply in a group's thread. Replies that do not mention the bot arrive only with the
 /// permission to read every group message (`im:message.group_msg`).
-fn message(event: &Value) -> Option<Said> {
+fn message(event: &Value) -> Option<Inbound> {
     if event["sender"]["sender_type"] != "user" {
         return None;
     }
@@ -107,7 +89,7 @@ fn message(event: &Value) -> Option<Said> {
     // The content of a text message is a JSON object with `text`; anything else is not text
     // this channel reads.
     let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    Some(Said {
+    Some(Inbound::Message {
         id: MessageId(message["message_id"].as_str()?.into()),
         at: Destination {
             conversation: ConversationId(message["chat_id"].as_str()?.into()),
