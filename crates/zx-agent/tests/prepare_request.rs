@@ -14,13 +14,13 @@ use zx_agent::tools::Tool;
 use zx_testing::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 
 /// Uses `model` with high reasoning on the first step only, and records what it saw.
-struct FirstTurnUpgrade {
+struct FirstStepUpgrade {
     model: &'static str,
     seen: Arc<Mutex<Vec<(u32, RequestSettings, usize)>>>,
 }
 
 #[async_trait]
-impl Hook for FirstTurnUpgrade {
+impl Hook for FirstStepUpgrade {
     async fn prepare_request(&self, plan: &RequestPlan<'_>, _ctx: &HookContext) -> HookResult<Option<RequestSettings>> {
         self.seen
             .lock()
@@ -55,18 +55,18 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         FauxStep::text("done"),
     ]));
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
-    let mut loop_config = config(provider.clone(), tools);
+    let mut agent_config = config(provider.clone(), tools);
     let seen = Arc::new(Mutex::new(Vec::new()));
-    loop_config.hooks.push(
+    agent_config.hooks.push(
         "first_turn_upgrade",
-        Arc::new(FirstTurnUpgrade {
+        Arc::new(FirstStepUpgrade {
             model: "big-model",
             seen: seen.clone(),
         }),
     );
     let (runner, events) = RunnerSetup {
         session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
-        ..RunnerSetup::new(loop_config)
+        ..RunnerSetup::new(agent_config)
     }
     .build()
     .await;
@@ -109,16 +109,16 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
 #[tokio::test]
 async fn hooks_chain_their_changes_in_order() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.hooks.push(
+    let mut agent_config = config(provider.clone(), vec![]);
+    agent_config.hooks.push(
         "first_turn_upgrade",
-        Arc::new(FirstTurnUpgrade {
+        Arc::new(FirstStepUpgrade {
             model: "big-model",
             seen: Arc::default(),
         }),
     );
-    loop_config.hooks.push("lower", Arc::new(Lower));
-    let (runner, _) = RunnerSetup::new(loop_config).build().await;
+    agent_config.hooks.push("lower", Arc::new(Lower));
+    let (runner, _) = RunnerSetup::new(agent_config).build().await;
 
     runner.run("go").await;
 
@@ -159,11 +159,11 @@ async fn a_failing_hook_or_an_empty_model_ends_the_run_before_the_request_withou
         (Broken::EmptyModel, "prepare_request failed: chose an empty model"),
     ] {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
-        let mut loop_config = config(provider.clone(), vec![]);
-        loop_config.hooks.push("hook", Arc::new(hook));
+        let mut agent_config = config(provider.clone(), vec![]);
+        agent_config.hooks.push("hook", Arc::new(hook));
         let (runner, _) = RunnerSetup {
             retry: fast_retry(3),
-            ..RunnerSetup::new(loop_config)
+            ..RunnerSetup::new(agent_config)
         }
         .build()
         .await;
@@ -194,9 +194,9 @@ impl Hook for Panics {
 #[tokio::test]
 async fn a_panicking_hook_stops_the_attempt_without_crashing_the_run() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
-    let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.hooks.push("panics", Arc::new(Panics));
-    let (runner, _) = RunnerSetup::new(loop_config).build().await;
+    let mut agent_config = config(provider.clone(), vec![]);
+    agent_config.hooks.push("panics", Arc::new(Panics));
+    let (runner, _) = RunnerSetup::new(agent_config).build().await;
 
     let report = runner.run("go").await;
 

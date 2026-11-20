@@ -851,8 +851,8 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
             seed.append_message(message).await.unwrap();
         }
         let sent_before = summary_requests(&seed).len();
-        let mut loop_config = config(Arc::clone(&provider), vec![]);
-        loop_config.model = model.into();
+        let mut agent_config = config(Arc::clone(&provider), vec![]);
+        agent_config.model = model.into();
         let (runner, _) = RunnerSetup {
             session: seed.into(),
             compaction: Config {
@@ -860,7 +860,7 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
                 keep_recent_bytes: 1,
                 ..budget
             },
-            ..RunnerSetup::new(loop_config)
+            ..RunnerSetup::new(agent_config)
         }
         .build()
         .await;

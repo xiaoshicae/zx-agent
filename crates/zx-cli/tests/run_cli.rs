@@ -171,7 +171,7 @@ async fn a_provider_error_exits_1() {
 }
 
 #[tokio::test]
-async fn the_turn_limit_exits_3() {
+async fn the_model_request_limit_exits_3() {
     let server = MockServer::start(vec![Reply::bash("c1", "echo hi")]).await;
 
     let output = run_once(&server, &["--tools", "bash", "--max-model-requests", "1", "check"]).await;

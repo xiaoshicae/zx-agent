@@ -125,7 +125,7 @@ async fn cancelling_a_run_ends_only_that_run() {
 }
 
 #[tokio::test]
-async fn aborting_an_idle_session_has_no_effect_on_the_next_prompt() {
+async fn cancelling_an_idle_session_has_no_effect_on_the_next_prompt() {
     let (session, _, _) = setup([FauxStep::text("done")]).await;
     assert!(!session.cancel());
     assert_eq!(session.prompt("go").await.unwrap().outcome, RunOutcome::Completed);
@@ -336,11 +336,11 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
         FauxStep::text("two"),
         FauxStep::text("three"),
     ]));
-    let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.reasoning = Some(Reasoning::Low);
+    let mut agent_config = config(provider.clone(), vec![]);
+    agent_config.reasoning = Some(Reasoning::Low);
     let (session, _) = RunnerSetup {
         session: zx_testing::create_session_file(&file, header()).await.unwrap().into(),
-        ..RunnerSetup::new(loop_config)
+        ..RunnerSetup::new(agent_config)
     }
     .build()
     .await;

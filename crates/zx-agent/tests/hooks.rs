@@ -830,21 +830,21 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
 }
 
-struct NextTurn(StepDecision);
+struct NextStep(StepDecision);
 #[async_trait]
-impl Hook for NextTurn {
+impl Hook for NextStep {
     async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Ok(self.0.clone())
     }
 }
 
 #[tokio::test]
-async fn a_hook_follow_up_obeys_the_step_budget() {
+async fn a_hook_follow_up_obeys_the_model_request_limit() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config
         .hooks
-        .push("next_turn", Arc::new(NextTurn(StepDecision::FollowUp("next".into()))));
+        .push("next_step", Arc::new(NextStep(StepDecision::FollowUp("next".into()))));
     let (runner, _) = RunnerSetup {
         limits: RunLimits {
             max_model_requests: Some(1),

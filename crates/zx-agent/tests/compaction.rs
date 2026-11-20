@@ -77,7 +77,7 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
 }
 
 #[tokio::test]
-async fn automatic_summary_counts_against_task_request_budget_and_usage() {
+async fn automatic_compaction_counts_against_task_request_budget_and_usage() {
     let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
@@ -654,7 +654,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
 }
 
 #[tokio::test]
-async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
+async fn pending_compaction_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, events) = RunnerSetup {
@@ -675,7 +675,7 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
 }
 
 #[tokio::test]
-async fn aborting_summary_records_failure_and_the_session_is_immediately_reusable() {
+async fn cancelling_compaction_records_failure_and_the_session_is_immediately_reusable() {
     let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, _) = RunnerSetup {
@@ -694,7 +694,7 @@ async fn aborting_summary_records_failure_and_the_session_is_immediately_reusabl
 }
 
 #[tokio::test]
-async fn summary_timeout_is_bounded_and_keeps_original_context() {
+async fn compaction_timeout_is_bounded_and_keeps_original_context() {
     let (seed, _) = seeded_session().await;
     let before = seed.messages();
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));

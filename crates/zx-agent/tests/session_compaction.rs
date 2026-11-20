@@ -77,9 +77,9 @@ fn exchange(id: &str) -> [Message; 2] {
     [Message::Assistant(assistant), Message::ToolResult(result)]
 }
 
-/// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
+/// A session whose latest prompt, "the task", ran two calls, c1 and c2, after an earlier
 /// question: the IDs of the earlier question, of the task, and of the two calls.
-async fn a_turn_with_two_calls() -> (Seed, [String; 4]) {
+async fn a_prompt_with_two_calls() -> (Seed, [String; 4]) {
     let mut seed = Seed::in_memory(header()).await;
     let earlier = seed.append_message(Message::user("an earlier question")).await.unwrap();
     let task = seed.append_message(Message::user("the task")).await.unwrap();
@@ -157,7 +157,7 @@ async fn a_context_plan_that_ends_a_summary_still_edits_the_messages_it_named() 
             })
         }
     }
-    let (mut transcript, [_, task, first_call, second_call]) = a_turn_with_two_calls().await;
+    let (mut transcript, [_, task, first_call, second_call]) = a_prompt_with_two_calls().await;
     record_compaction(&mut transcript, &second_call, &task, &first_call).await;
     assert!(transcript.latest_compaction().is_some(), "the summary stands in for c1");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
