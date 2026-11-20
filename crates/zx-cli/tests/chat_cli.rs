@@ -160,6 +160,30 @@ async fn an_oversized_input_line_is_rejected_and_the_conversation_continues() {
 }
 
 #[tokio::test]
+async fn a_compaction_that_fails_after_its_request_says_why_once_and_counts_in_status() {
+    let dir = tempfile::tempdir().unwrap();
+    // An old message shorter than any summary of it: the summary cannot reduce the context.
+    let id = seed_context(dir.path(), 10).await;
+    agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
+    let server = MockServer::start(vec![Reply::text(&summary_json(&id))]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--session", "chat.jsonl"],
+        "/compact\n/status\n/quit\n",
+    )
+    .await;
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert_eq!(err.matches("summary did not reduce the context").count(), 1, "{err}");
+    // The summary request used the fake's usage: 10 tokens in, 2 out.
+    assert!(
+        err.contains("[status] this conversation: 0 turn(s) · 1 request(s) · 10 in · 2 out · 0 cached"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     let dir = tempfile::tempdir().unwrap();
     let id = seed_context(dir.path(), 10_000).await;
