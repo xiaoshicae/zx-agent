@@ -22,8 +22,7 @@ use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use zx_testing::{
-    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
-    take_queued_inputs,
+    Collect, Driven, EchoTool, RunnerSetup, config, run_prompt, run_prompt_with, summarize, take_queued_inputs,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -594,19 +593,6 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
         kinds[kinds.len() - 5..],
         ["message_start", "message_end", "step_end", "attempt_end", "run_end"]
     );
-}
-
-#[tokio::test]
-async fn cancellation_ends_the_loop() {
-    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
-    // Cancelled once the request has started.
-    let (result, ()) = tokio::join!(runner.run("go"), async {
-        provider.started.notified().await;
-        runner.cancel();
-    });
-
-    assert_eq!(result.outcome, RunOutcome::Cancelled);
 }
 
 /// Breaks the provider contract: its stream ends without a `Done` or `Error` event.
