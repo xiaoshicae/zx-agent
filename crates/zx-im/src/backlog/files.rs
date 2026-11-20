@@ -144,8 +144,11 @@ impl Backlog for BacklogFiles {
     async fn pending(&self) -> Result<Vec<(MessageKey, String)>, String> {
         let (pending, handled) = (self.pending.clone(), self.handled.clone());
         let kept = blocking(FILES, move || {
+            // Read first: a record left beside its mark, by a process that ended between the
+            // two steps of `complete`, is known as handled by the mark, however old it is.
+            let kept = read_pending(&pending, &handled)?;
             prune_marks(&handled);
-            read_pending(&pending, &handled)
+            Ok(kept)
         })
         .await?;
         *lock(&self.pruned) = Instant::now();
@@ -308,6 +311,28 @@ mod tests {
         assert!(restarted.pending().await.unwrap().is_empty());
         assert!(names(&dir.path().join("pending")).is_empty());
         assert_eq!(restarted.keep(&key("m1"), "one").await, Ok(Kept::Again));
+    }
+
+    #[tokio::test]
+    async fn a_message_marked_handled_a_day_ago_but_still_recorded_is_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let backlog = BacklogFiles::open(dir.path()).unwrap();
+        backlog.keep(&key("m1"), "one").await.unwrap();
+        // The process ended between marking the message and removing its record, and the next
+        // start came more than a day later.
+        let mark = mark_path(&dir.path().join("handled"), &key("m1"));
+        write_mark(&mark).unwrap();
+        let marked = SystemTime::now() - HANDLED_FOR - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(&mark)
+            .unwrap()
+            .set_modified(marked)
+            .unwrap();
+
+        let restarted = BacklogFiles::open(dir.path()).unwrap();
+        assert!(restarted.pending().await.unwrap().is_empty());
+        assert!(names(&dir.path().join("pending")).is_empty());
     }
 
     #[tokio::test]
