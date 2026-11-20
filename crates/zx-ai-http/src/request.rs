@@ -10,9 +10,11 @@ use crate::failure::{Failure, transport_failure};
 
 /// The key `api_key` gives for this request, asked for on every request so that a key that
 /// expired since the last one is replaced; `None` when there is none to send. Fails when its
-/// source does not answer within `idle_timeout` or cannot give one: the request is not sent.
+/// source does not answer within `idle_timeout` or cannot give one, and when the key cannot be
+/// a header value, as with a line break in it: the request is not sent, and asking again does
+/// not help.
 pub async fn api_key(api_key: &ApiKey, idle_timeout: Duration) -> Result<Option<String>, Failure> {
-    tokio::time::timeout(idle_timeout, api_key.resolve())
+    let key = tokio::time::timeout(idle_timeout, api_key.resolve())
         .await
         .map_err(|_| {
             Failure::error(
@@ -20,7 +22,17 @@ pub async fn api_key(api_key: &ApiKey, idle_timeout: Duration) -> Result<Option<
                 format!("the API key source did not answer within {idle_timeout:?}"),
             )
         })?
-        .map_err(|error| Failure::error(ProviderErrorKind::ApiKey, format!("cannot get an API key: {error}")))
+        .map_err(|error| Failure::error(ProviderErrorKind::ApiKey, format!("cannot get an API key: {error}")))?;
+    if let Some(key) = &key
+        && reqwest::header::HeaderValue::from_str(key).is_err()
+    {
+        // The error does not quote the key.
+        return Err(Failure::error(
+            ProviderErrorKind::ApiKey,
+            "the API key holds a character a request header cannot carry, such as a line break",
+        ));
+    }
+    Ok(key)
 }
 
 /// Send `request` and wait for the response headers within `idle_timeout`.
@@ -34,4 +46,20 @@ pub async fn send(request: reqwest::RequestBuilder, idle_timeout: Duration) -> R
             )
         })?
         .map_err(|error| transport_failure("request failed", &error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_key_a_header_cannot_carry_fails_before_anything_is_sent() {
+        let Err(Failure::Error { details, message }) =
+            api_key(&ApiKey::fixed("sk-line\nbreak"), Duration::from_secs(1)).await
+        else {
+            panic!("the key was accepted");
+        };
+        assert_eq!(details.kind, ProviderErrorKind::ApiKey);
+        assert!(!message.contains("sk-line"), "{message}");
+    }
 }

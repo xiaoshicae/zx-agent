@@ -22,9 +22,13 @@ const OVERFLOW_TEXT: &[&str] = &[
     "too many tokens",
 ];
 
+/// The `error.details.error_code` of a 429 that the organization's monthly spend cap caused:
+/// unlike rate limiting, asking again fails until access resumes.
+const SPEND_CAP: &str = "enforced_spend_limit_reached";
+
 /// The failure of a response with an error status, of the kind its status and error type say
-/// ([`of_status`]), with the server's Retry-After hint. A body that cannot be read only loses
-/// its text; the status still decides.
+/// ([`of_status`]), or access denied when the spend cap was reached, with the server's
+/// Retry-After hint. A body that cannot be read only loses its text; the status still decides.
 pub(crate) async fn http_failure(response: reqwest::Response, config: &AnthropicConfig) -> Failure {
     let status = response.status().as_u16();
     let retry_after_ms = retry_after_ms(response.headers(), SystemTime::now());
@@ -37,8 +41,13 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &Anthropic
         .and_then(Value::as_str)
         .map_or_else(|| String::from_utf8_lossy(&bytes).into_owned(), str::to_string);
     let text = excerpt(&text);
+    let kind = if reached_spend_cap(error) {
+        ProviderErrorKind::AccessDenied
+    } else {
+        of_status(status, code.as_deref(), &text)
+    };
     let details = ProviderError {
-        kind: of_status(status, code.as_deref(), &text),
+        kind,
         status: Some(status),
         code,
         retry_after_ms,
@@ -87,6 +96,14 @@ pub(crate) fn provider_failure(error: &Value) -> Failure {
 
 fn error_type(error: &Value) -> Option<String> {
     error.get("type").and_then(Value::as_str).map(str::to_string)
+}
+
+/// Whether the error object `error` says that the spend cap was reached ([`SPEND_CAP`]).
+fn reached_spend_cap(error: Option<&Value>) -> bool {
+    error
+        .and_then(|error| error.pointer("/details/error_code"))
+        .and_then(Value::as_str)
+        == Some(SPEND_CAP)
 }
 
 /// The kind of failure a response's status says, with its error type and wording where the

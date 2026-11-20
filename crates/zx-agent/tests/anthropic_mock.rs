@@ -168,6 +168,28 @@ async fn thinking_bound_to_another_conversation_fails_the_request_as_the_api_ans
 }
 
 #[tokio::test]
+async fn a_spend_cap_denies_access_and_is_not_retried() {
+    let body = json!({"type": "error", "error": {
+        "type": "rate_limit_error",
+        "message": "You have reached your monthly spend limit.",
+        "details": {"error_code": "enforced_spend_limit_reached"},
+    }});
+    let server = MockServer::start(vec![Reply::error(429, "", &body.to_string())]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(2),
+        ..setup(&server)
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert_eq!(runner.provider_error().kind, ProviderErrorKind::AccessDenied);
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused() {
     let server = MockServer::start(vec![error_reply(
         529,
