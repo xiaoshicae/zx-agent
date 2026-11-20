@@ -14,10 +14,10 @@ use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES};
-use zx_core::tools::{Tool, ToolContext, ToolOutput};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Matches shown by default (pi: grep's `DEFAULT_LIMIT`).
-const GREP_LIMIT: usize = 100;
+const DEFAULT_LIMIT: usize = 100;
 /// The most context lines on each side.
 const MAX_CONTEXT: usize = 10;
 
@@ -38,7 +38,7 @@ impl Default for GrepTool {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct GrepArgs {
+struct Args {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
@@ -54,8 +54,9 @@ struct GrepArgs {
     limit: Option<usize>,
 }
 
-impl GrepArgs {
-    fn parse(args: &Value) -> Result<Self, String> {
+impl Args {
+    /// The arguments of a call, checked, and the most matches it shows.
+    fn parse(args: &Value) -> Result<(Self, usize), String> {
         let args: Self = parse_args(args)?;
         if args.pattern.is_empty() {
             return Err("pattern is empty".into());
@@ -63,8 +64,8 @@ impl GrepArgs {
         if args.context > MAX_CONTEXT {
             return Err(format!("context must be at most {MAX_CONTEXT}"));
         }
-        positive(args.limit, GREP_LIMIT, "limit")?;
-        Ok(args)
+        let limit = positive(args.limit, DEFAULT_LIMIT, "limit")?;
+        Ok((args, limit))
     }
 
     /// The shell script: ripgrep when installed, otherwise POSIX grep, each line cut, at most
@@ -111,7 +112,9 @@ impl GrepArgs {
 
 #[async_trait]
 impl Tool for GrepTool {
-    search_tool_basics!(crate::tools::GREP);
+    fn name(&self) -> &str {
+        crate::tools::GREP
+    }
 
     fn definition(&self) -> ToolDef {
         ToolDef {
@@ -119,7 +122,7 @@ impl Tool for GrepTool {
             description: format!(
                 "Search file contents for a pattern; returns matching lines as path:line:text. Searches the working \
                  directory unless path names a directory or file. The pattern is a regular expression unless literal \
-                 is true; respects .gitignore when ripgrep is installed. Shows at most {GREP_LIMIT} matches by default \
+                 is true; respects .gitignore when ripgrep is installed. Shows at most {DEFAULT_LIMIT} matches by default \
                  and {MAX_LINES} lines or {}KB; lines over {MAX_LINE_BYTES} bytes are cut. Read-only.",
                 MAX_BYTES / 1024
             ),
@@ -132,7 +135,7 @@ impl Tool for GrepTool {
                     "ignoreCase": { "type": "boolean", "description": "Match regardless of case (default: false)" },
                     "literal": { "type": "boolean", "description": "Treat the pattern as plain text (default: false)" },
                     "context": { "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT, "description": "Lines to show before and after each match (default: 0)" },
-                    "limit": { "type": "integer", "minimum": 1, "description": format!("Most matches to show (default: {GREP_LIMIT})") }
+                    "limit": { "type": "integer", "minimum": 1, "description": format!("Most matches to show (default: {DEFAULT_LIMIT})") }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -140,13 +143,20 @@ impl Tool for GrepTool {
         }
     }
 
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
+    }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        GrepArgs::parse(args).map(|_| ())
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args = GrepArgs::parse(&args)?;
-        let limit = positive(args.limit, GREP_LIMIT, "limit")?;
+        let (args, limit) = Args::parse(&args)?;
         // A match with its context, and the separator between groups of them.
         let lines = limit.saturating_mul(2 * args.context + 2).min(MAX_LINES);
         let searched = search(self.executor.as_ref(), &args.script(lines), ctx).await?;
@@ -171,9 +181,7 @@ mod tests {
 
     #[test]
     fn version_control_is_excluded_after_the_models_glob() {
-        let script = GrepArgs::parse(&json!({"pattern": "x", "glob": "*"}))
-            .unwrap()
-            .script(10);
+        let script = Args::parse(&json!({"pattern": "x", "glob": "*"})).unwrap().0.script(10);
         let model = script.find("--glob '*'").unwrap();
         let excluded = script.find("--glob '!.git'").unwrap();
         assert!(model < excluded, "{script}");
@@ -181,17 +189,18 @@ mod tests {
 
     #[test]
     fn a_glob_that_starts_at_the_search_directory_reaches_ripgrep_without_the_dot() {
-        let script = GrepArgs::parse(&json!({"pattern": "x", "glob": "./src/*.rs"}))
+        let script = Args::parse(&json!({"pattern": "x", "glob": "./src/*.rs"}))
             .unwrap()
+            .0
             .script(10);
         assert!(script.contains("--glob 'src/*.rs'"), "{script}");
     }
 
     #[test]
     fn limits_and_context_are_checked() {
-        assert!(GrepArgs::parse(&json!({"pattern": "x", "limit": 0})).is_err());
-        assert!(GrepArgs::parse(&json!({"pattern": "x", "context": MAX_CONTEXT + 1})).is_err());
-        assert!(GrepArgs::parse(&json!({"pattern": ""})).is_err());
-        assert!(GrepArgs::parse(&json!({"pattern": "x", "ignoreCase": true, "context": 2})).is_ok());
+        assert!(Args::parse(&json!({"pattern": "x", "limit": 0})).is_err());
+        assert!(Args::parse(&json!({"pattern": "x", "context": MAX_CONTEXT + 1})).is_err());
+        assert!(Args::parse(&json!({"pattern": ""})).is_err());
+        assert!(Args::parse(&json!({"pattern": "x", "ignoreCase": true, "context": 2})).is_ok());
     }
 }

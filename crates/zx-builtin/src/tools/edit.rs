@@ -42,6 +42,18 @@ struct Args {
     edits: Vec<Edit>,
 }
 
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        if args.edits.is_empty() {
+            return Err("edits must contain at least one replacement".into());
+        }
+        check_path(&args.path)?;
+        Ok(args)
+    }
+}
+
 #[async_trait]
 impl Tool for EditFileTool {
     fn name(&self) -> &str {
@@ -129,15 +141,11 @@ impl Tool for EditFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args: Args = parse_args(args)?;
-        if args.edits.is_empty() {
-            return Err("edits must contain at least one replacement".into());
-        }
-        check_path(&args.path)
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = parse_args(&args)?;
+        let args = Args::parse(&args)?;
         let shown = args.path.trim();
         let path = resolve(&ctx.cwd, &args.path)?;
         let cancelled = || "edit cancelled before the file was changed".to_string();

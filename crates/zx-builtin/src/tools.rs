@@ -1,4 +1,6 @@
-//! Built-in tools (pi: coding-agent/src/core/tools).
+//! Built-in tools (pi: coding-agent/src/core/tools). Each reads and checks its arguments in
+//! one `Args::parse`: before policy and approval, in `validate_arguments`, and again in
+//! `execute`, which a host may call directly.
 //!
 //! - `bash`: run a shell command
 //! - `read`, `write` and `edit`: read a file in pages, write a whole file, replace exact text;

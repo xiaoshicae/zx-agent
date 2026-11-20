@@ -36,6 +36,15 @@ struct Args {
     content: String,
 }
 
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        check_path(&args.path)?;
+        Ok(args)
+    }
+}
+
 #[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
@@ -67,12 +76,11 @@ impl Tool for WriteFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args: Args = parse_args(args)?;
-        check_path(&args.path)
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = parse_args(&args)?;
+        let args = Args::parse(&args)?;
         let path = resolve(&ctx.cwd, &args.path)?;
         let cancelled = || "write cancelled before it started".to_string();
         let turn = unless_cancelled(ctx, self.queue.turn(&path))

@@ -11,7 +11,7 @@ use super::parse_args;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::ai::ToolDef;
 use crate::executor::{Captured, CommandEnd, Executor, LocalExecutor, ShellCommand};
-use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
+use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// The timeout of a call that sets none, unless the host configures another.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -46,6 +46,21 @@ struct Args {
     command: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
+}
+
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        if args.command.trim().is_empty() {
+            return Err("command is empty".to_string());
+        }
+        // A zero limit would end the command before it could run.
+        if args.timeout_secs == Some(0) {
+            return Err("timeoutSecs must be at least 1; omit it to use the default timeout".to_string());
+        }
+        Ok(args)
+    }
 }
 
 impl BashTool {
@@ -112,32 +127,10 @@ fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
     }
 }
 
-/// The same checks run before policy and approval, and again for direct SDK calls.
-fn parse(args: &Value) -> Result<Args, String> {
-    let args: Args = parse_args(args)?;
-    if args.command.trim().is_empty() {
-        return Err("command is empty".to_string());
-    }
-    // A zero limit would end the command before it could run.
-    if args.timeout_secs == Some(0) {
-        return Err("timeoutSecs must be at least 1; omit it to use the default timeout".to_string());
-    }
-    Ok(args)
-}
-
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
         super::BASH
-    }
-
-    fn execution_mode(&self) -> ExecutionMode {
-        self.executor.execution_mode()
-    }
-
-    /// Commands can change anything the process can reach, so every call is a side effect.
-    fn effects(&self) -> Effects {
-        Effects::SideEffects
     }
 
     fn definition(&self) -> ToolDef {
@@ -164,12 +157,16 @@ impl Tool for BashTool {
         }
     }
 
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
+    }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        parse(args).map(|_| ())
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args = parse(&args)?;
+        let args = Args::parse(&args)?;
         let limit = self.timeout_for(args.timeout_secs);
         let request = ShellCommand {
             command: &args.command,

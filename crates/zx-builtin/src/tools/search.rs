@@ -11,9 +11,17 @@
 //! bounding and reporting the result, and the pieces of the scripts. Each tool is in a module
 //! of its own.
 
+mod find;
+mod grep;
+mod ls;
+
 use std::time::Duration;
 
 use serde_json::json;
+
+pub use find::FindTool;
+pub use grep::GrepTool;
+pub use ls::LsTool;
 
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
@@ -35,32 +43,6 @@ const RIPGREP: &str = "rg";
 const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
 /// The note after a line cut to [`MAX_LINE_BYTES`].
 const LINE_CUT: &str = " [line cut]";
-
-/// Shared tool plumbing: read-only, and running one at a time when the executor does.
-macro_rules! search_tool_basics {
-    ($name:expr) => {
-        fn name(&self) -> &str {
-            $name
-        }
-
-        fn execution_mode(&self) -> ::zx_core::tools::ExecutionMode {
-            self.executor.execution_mode()
-        }
-
-        fn effects(&self) -> ::zx_core::tools::Effects {
-            ::zx_core::tools::Effects::ReadOnly
-        }
-    };
-}
-
-// The tools use the macro, which is in scope only after its definition.
-mod find;
-mod grep;
-mod ls;
-
-pub use find::FindTool;
-pub use grep::GrepTool;
-pub use ls::LsTool;
 
 /// `text` as one single-quoted shell word: nothing in it is interpreted.
 pub(crate) fn quote(text: &str) -> String {
