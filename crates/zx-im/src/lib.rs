@@ -20,6 +20,7 @@
 //! - `files`: one record per file, as the program's stores on disk write them
 //! - `program`: the program ([`Program`]): im.toml, its command line, the platforms it
 //!   configures, the operator log and the exit codes
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 
 mod backlog;
 mod channel;
@@ -27,6 +28,8 @@ mod files;
 mod platform;
 mod program;
 mod server;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 

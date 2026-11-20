@@ -1,7 +1,6 @@
 //! The backlog of the program `zx-im` ([`BacklogFiles`]): a file per message pending, and
 //! an empty one per message handled lately.
 
-use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -13,7 +12,9 @@ use zx_agent::ai::now_ms;
 use zx_agent::builtin::files::create_private_dir;
 use zx_util::sync::lock;
 
-use crate::files::{RECORD, blocking, record_paths, remove_record, segment, write_record};
+use crate::files::{
+    RECORD, blocking, create_private_file, read_record, record_paths, remove_record, segment, write_record,
+};
 use crate::{ConversationId, MessageId};
 
 use super::{Backlog, Kept, MessageKey};
@@ -114,13 +115,11 @@ impl Backlog for BacklogFiles {
             order: self.next_order(),
             record: record.to_string(),
         };
-        let text = serde_json::to_string(&stored)
-            .map_err(|error| format!("cannot encode the record of {}: {error}", path.display()))?;
         blocking(FILES, move || {
             if exists(&path)? || exists(&mark)? {
                 return Ok(Kept::Again);
             }
-            write_record(&path, &text)?;
+            write_record(&path, &stored)?;
             Ok(Kept::New)
         })
         .await
@@ -164,14 +163,9 @@ fn exists(path: &Path) -> Result<bool, String> {
         .map_err(|error| format!("cannot look for {}: {error}", path.display()))
 }
 
-/// Mark a message handled with an empty file at `path`.
+/// Mark a message handled with an empty file at `path`, which only the owner may read.
 fn write_mark(path: &Path) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(path)
+    create_private_file(path)
         .map(drop)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
@@ -200,10 +194,7 @@ fn prune_marks(handled: &Path) {
 fn read_pending(pending: &Path, handled: &Path) -> Result<Vec<Stored>, String> {
     let mut kept = Vec::new();
     for path in record_paths(pending)? {
-        let text =
-            std::fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let stored: Stored = serde_json::from_str(&text)
-            .map_err(|error| format!("{} is not a backlog record: {error}", path.display()))?;
+        let stored: Stored = read_record(&path, "backlog")?;
         if exists(&mark_path(handled, &stored.key()))? {
             remove_record(&path)?;
             continue;
@@ -247,23 +238,7 @@ mod tests {
     use std::fs::File;
 
     use super::*;
-
-    fn key(message: &str) -> MessageKey {
-        MessageKey {
-            platform: "slack".into(),
-            conversation: ConversationId("C1".into()),
-            message: MessageId(message.into()),
-        }
-    }
-
-    fn names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
+    use crate::test_support::{message_key as key, names};
 
     #[tokio::test]
     async fn what_is_pending_comes_back_after_a_restart_in_the_order_kept() {

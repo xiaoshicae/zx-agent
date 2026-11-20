@@ -215,14 +215,7 @@ pub(crate) fn message(key: &MessageKey, record: &str) -> Result<Inbound, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(message: &str) -> MessageKey {
-        MessageKey {
-            platform: "slack".into(),
-            conversation: ConversationId("C1".into()),
-            message: MessageId(message.into()),
-        }
-    }
+    use crate::test_support::message_key as key;
 
     #[tokio::test]
     async fn a_message_is_kept_once_and_known_after_it_is_handled() {

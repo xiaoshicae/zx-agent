@@ -1,14 +1,16 @@
 //! Statuses of runs in progress, kept so that the next start can replace those a crash left
 //! behind.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use zx_agent::builtin::files::create_private_dir;
 
-use crate::files::{RECORD, blocking, record_paths, remove_record, segment, write_record};
+use crate::files::{RECORD, blocking, read_record, record_paths, remove_record, segment, write_record};
 use crate::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, ThreadId};
 
 use super::{SessionKey, Shared};
@@ -44,9 +46,11 @@ pub(crate) struct StatusFiles {
 }
 
 impl StatusFiles {
-    /// Keep statuses in `dir`, which must exist and hold nothing else.
-    pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+    /// Keep statuses in `dir`, which holds nothing else and is created when it is missing,
+    /// readable only by this user. Fails when it cannot be.
+    pub(crate) fn open(dir: &Path) -> io::Result<Self> {
+        create_private_dir(dir)?;
+        Ok(Self { dir: dir.to_path_buf() })
     }
 
     /// `<platform>.<conversation>.<message>.json`, each part encoded ([`segment`]) so that it
@@ -65,9 +69,8 @@ impl StatusFiles {
 impl StatusStore for StatusFiles {
     async fn insert(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
         let path = self.path(key, status);
-        let text = serde_json::to_string(&Record::new(key, status))
-            .map_err(|error| format!("cannot encode the record of {}: {error}", path.display()))?;
-        blocking(FILES, move || write_record(&path, &text)).await
+        let record = Record::new(key, status);
+        blocking(FILES, move || write_record(&path, &record)).await
     }
 
     async fn remove(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
@@ -86,10 +89,7 @@ fn read_records(dir: &Path) -> Result<Vec<(SessionKey, MessageRef)>, String> {
     let paths = record_paths(dir)?;
     let mut kept = Vec::with_capacity(paths.len());
     for path in paths {
-        let text =
-            std::fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let record: Record = serde_json::from_str(&text)
-            .map_err(|error| format!("{} is not a status record: {error}", path.display()))?;
+        let record: Record = read_record(&path, "status")?;
         kept.push(record.into_parts());
     }
     Ok(kept)
@@ -194,6 +194,7 @@ pub(super) async fn replace_left_behind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::names;
 
     fn key(platform: &str, conversation: &str, thread: &str) -> SessionKey {
         SessionKey {
@@ -210,19 +211,10 @@ mod tests {
         }
     }
 
-    fn names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
-
     #[tokio::test]
     async fn a_kept_status_is_listed_until_it_is_removed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path());
+        let store = StatusFiles::open(dir.path()).unwrap();
         let key = key("slack", "C1", "1700000000.000100");
         let posted = status(&key, "1700000000.000200");
         store.insert(&key, &posted).await.unwrap();
@@ -237,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn a_record_is_one_json_file_named_after_its_message() {
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path());
+        let store = StatusFiles::open(dir.path()).unwrap();
         let key = key("slack", "C1", "1700000000.000100");
         let posted = MessageRef {
             at: Destination {
@@ -266,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn ids_cannot_leave_the_directory_or_collide() {
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path());
+        let store = StatusFiles::open(dir.path()).unwrap();
         let odd = key("..", "a/b.c", "t");
         let plain = key("a", "b", "t");
         store.insert(&odd, &status(&odd, "../x")).await.unwrap();
@@ -281,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_cut_short_is_passed_over_and_a_broken_record_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path());
+        let store = StatusFiles::open(dir.path()).unwrap();
         std::fs::write(dir.path().join("slack.C1.m1.partial"), "{\"platform\":").unwrap();
         assert!(store.list().await.unwrap().is_empty());
         std::fs::write(dir.path().join("slack.C1.m2.json"), "{\"platform\":").unwrap();
@@ -295,7 +287,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path());
+        let store = StatusFiles::open(dir.path()).unwrap();
         let key = key("slack", "C1", "t");
         store.insert(&key, &status(&key, "m")).await.unwrap();
         let mode = std::fs::metadata(dir.path().join("slack.C1.m.json"))
@@ -306,9 +298,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_directory_is_an_error() {
+    async fn a_store_whose_directory_is_gone_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let store = StatusFiles::new(dir.path().join("missing"));
+        let running = dir.path().join("running");
+        let store = StatusFiles::open(&running).unwrap();
+        std::fs::remove_dir(&running).unwrap();
         let key = key("slack", "C1", "t");
         assert!(
             store

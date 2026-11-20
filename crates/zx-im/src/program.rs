@@ -206,10 +206,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 eprintln!("[otel] exporting traces over OTLP/HTTP");
             }
             let dir = file.sessions.dir;
-            let running = create_session_dirs(&dir)?;
-            let backlog_dir = dir.join(BACKLOG_DIR);
-            let backlog = BacklogFiles::open(&backlog_dir)
-                .with_context(|| format!("cannot create the backlog {}", backlog_dir.display()))?;
+            let (statuses, backlog) = open_stores(&dir)?;
             // Once for the process: every conversation's session shares the connections.
             let app = assemble(
                 connect(overrides).await?,
@@ -220,8 +217,9 @@ async fn run(args: Args, program: Program) -> Result<u8> {
             let agent = conversations_agent(&app, &dir).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
+                statuses: Some(Arc::new(statuses)),
                 backlog: Arc::new(backlog),
-                ..server_config(&file.limits, file.replies, running, conversations, approvers)
+                ..server_config(&file.limits, file.replies, conversations, approvers)
             };
             Ok(serve(config, &agent, channels, &dir).await)
         })
@@ -362,14 +360,18 @@ fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>,
     Ok(channels)
 }
 
-/// Create the session directory `dir` and the directory of the runs in progress under it,
-/// readable only by this user, as the session files are. Returns the latter. A startup write;
-/// nothing runs concurrently yet.
-fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
+/// The stores under the session directory `dir`: the statuses of runs in progress, kept so
+/// that a crash or a kill cannot leave threads saying the work goes on, and the backlog. The
+/// directories are created readable only by this user, as the session files are. A startup
+/// write; nothing runs concurrently yet.
+fn open_stores(dir: &Path) -> Result<(StatusFiles, BacklogFiles)> {
     create_private_dir(dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
     let running = dir.join(RUNNING_DIR);
-    create_private_dir(&running).with_context(|| format!("cannot create {}", running.display()))?;
-    Ok(running)
+    let statuses = StatusFiles::open(&running).with_context(|| format!("cannot create {}", running.display()))?;
+    let backlog_dir = dir.join(BACKLOG_DIR);
+    let backlog = BacklogFiles::open(&backlog_dir)
+        .with_context(|| format!("cannot create the backlog {}", backlog_dir.display()))?;
+    Ok((statuses, backlog))
 }
 
 /// The IM service configuration file at `path`, read as config.toml is: a regular UTF-8 file
@@ -392,13 +394,11 @@ fn access(section: &AccessSection, platforms: &HashSet<&str>) -> Result<(Convers
     Ok((conversations, approvers))
 }
 
-/// The server's settings: the file's limits over the defaults, with the statuses of runs in
-/// progress kept in `running`, so that a crash or a kill cannot leave threads saying the work
-/// goes on.
+/// The server's settings that the file gives: its limits over the defaults, its texts, and
+/// who may use the server.
 fn server_config(
     limits: &LimitsSection,
     replies: Replies,
-    running: PathBuf,
     conversations: Conversations,
     approvers: Approvers,
 ) -> ServerConfig {
@@ -406,7 +406,6 @@ fn server_config(
         conversations,
         approvers,
         replies,
-        statuses: Some(Arc::new(StatusFiles::new(running))),
         ..ServerConfig::default()
     };
     if let Some(running) = limits.max_running {
@@ -543,8 +542,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join("sessions");
-        let running = create_session_dirs(&sessions).unwrap();
-        for path in [&sessions, &running] {
+        open_stores(&sessions).unwrap();
+        for path in [&sessions, &sessions.join(RUNNING_DIR), &sessions.join(BACKLOG_DIR)] {
             let mode = std::fs::metadata(path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{}", path.display());
         }
