@@ -338,6 +338,60 @@ fn a_reasoning_level_keeps_the_other_thinking_settings_of_the_extra_fields() {
 }
 
 #[test]
+fn the_fields_a_reasoning_level_sets_are_those_extra_fields_must_not_set() {
+    for reasoning in Reasoning::ALL {
+        let mut body = json!({});
+        apply_reasoning(&mut body, reasoning);
+        for (object, fields) in body.as_object().unwrap() {
+            for key in fields.as_object().unwrap().keys() {
+                assert!(
+                    crate::config::REASONING_FIELDS
+                        .iter()
+                        .any(|&(reserved, field)| reserved == object && field == key),
+                    "{reasoning}: {object}.{key}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn replayed_bodies_match_the_live_body_in_both_system_update_modes() {
+    let request = request(vec![
+        system(&[("preamble", Some("Be brief."))]),
+        Message::user("first"),
+        system(&[("environment", Some("changed"))]),
+        Message::user("second"),
+    ]);
+    let mut extra_fields = Map::new();
+    extra_fields.insert("metadata".into(), json!({"user_id": "u"}));
+    for system_updates in [SystemUpdates::Collapse, SystemUpdates::Inline] {
+        let options = BodyOptions {
+            system_updates,
+            extra_fields: extra_fields.clone(),
+        };
+        let replayed = replay_body(&request, "p", &request_options(&options)).unwrap();
+        assert_eq!(replayed, build_body(&request, &options, "p"), "{system_updates:?}");
+    }
+}
+
+#[test]
+fn replay_refuses_another_conversion_and_options_it_does_not_know() {
+    let request = request(vec![Message::user("hi")]);
+    for options in [
+        Value::Null,
+        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "collapse"}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "sideways"}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extra": 1}),
+        json!({"format": "anthropic-messages", "version": 1}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extraFields": {"model": "x"}}),
+    ] {
+        assert!(replay_body(&request, "p", &options).is_err(), "{options}");
+    }
+}
+
+#[test]
 fn the_record_names_the_conversion_and_its_options() {
     let options = BodyOptions {
         system_updates: SystemUpdates::Inline,

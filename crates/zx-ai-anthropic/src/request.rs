@@ -1,7 +1,7 @@
 //! The JSON body of a Messages request, and the conversion options recorded with each request
 //! (pi: anthropic-messages.ts).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef, api_identifier};
 
@@ -9,7 +9,7 @@ use crate::config::{BodyOptions, SystemUpdates};
 
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "anthropic-messages";
-/// The version of this conversion in the recorded options.
+/// The version of this conversion in the recorded options, the only one replayed.
 const VERSION: u32 = 1;
 
 /// The output limit of a request that sets none, which the API requires: room for long
@@ -42,6 +42,39 @@ pub(crate) fn request_options(options: &BodyOptions) -> Value {
         options,
     };
     serde_json::to_value(record).expect("strings and a JSON map serialize")
+}
+
+/// The conversion a record names. Read apart from the options, which refuse a field they do
+/// not know: serde cannot do that for a flattened value.
+#[derive(Deserialize)]
+struct Conversion {
+    format: String,
+    version: u32,
+}
+
+/// Rebuild the JSON body of a Messages request from a recorded request and the options
+/// recorded with it, for the request audit; as zx-ai-openai's `replay_body` does for its
+/// conversion. Credentials, URLs and HTTP headers are not in it. Rejects another conversion,
+/// any version but this one and an option it does not know, rather than apply a different
+/// conversion.
+pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
+    let Conversion { format, version } = Conversion::deserialize(options)?;
+    anyhow::ensure!(
+        format == FORMAT,
+        "request conversion format {format:?} is not supported; only {FORMAT:?} can be replayed"
+    );
+    anyhow::ensure!(
+        version == VERSION,
+        "request conversion version {version} is not supported; only version {VERSION} can be replayed"
+    );
+    let mut options = options.clone();
+    if let Some(recorded) = options.as_object_mut() {
+        recorded.remove("format");
+        recorded.remove("version");
+    }
+    let options: BodyOptions = serde_json::from_value(options)?;
+    options.check()?;
+    Ok(build_body(request, &options, provider))
 }
 
 /// The JSON body of a streaming Messages request to `provider`, the name its answers are

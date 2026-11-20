@@ -32,6 +32,7 @@ use accumulate::Accumulator;
 pub use config::{AnthropicConfig, BodyOptions, DEFAULT_API_VERSION, SystemUpdates};
 use config::{KEY_HEADER, VERSION_HEADER};
 use failure::{http_failure, json_body_failure};
+pub use request::replay_body;
 
 /// Streaming provider for the Anthropic Messages API.
 pub struct AnthropicMessages {

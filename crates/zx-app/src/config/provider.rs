@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::anthropic::AnthropicConfig;
-use zx_agent::ai::openai::{BodyOptions, OpenAiConfig};
+use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
 
 use super::parsed;
@@ -181,27 +181,15 @@ pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>)
     if let Some(secs) = keys.idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
-    if reasoning.is_some() {
-        check_reasoning_fields(&config.body)?;
-    }
-    Ok(config)
-}
-
-/// Refuse request fields that the reasoning level sets, with the format the settings write
-/// it in: which of the two would reach the server is not for the provider to choose.
-fn check_reasoning_fields(body: &BodyOptions) -> Result<()> {
-    if let Some(field) = body
-        .reasoning_format
-        .fields()
-        .iter()
-        .find(|field| body.extra_fields.contains_key(**field))
+    if reasoning.is_some()
+        && let Some(field) = config.body.reasoning_overlap()
     {
         anyhow::bail!(
             "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
-            body.reasoning_format
+            config.body.reasoning_format
         );
     }
-    Ok(())
+    Ok(config)
 }
 
 /// The settings of the Anthropic Messages API provider that `options` give, over its
@@ -224,28 +212,12 @@ pub(crate) fn anthropic_config(options: &toml::Table, reasoning: Option<Reasonin
     if let Some(secs) = keys.idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
-    if reasoning.is_some() {
-        check_thinking_fields(&config.body.extra_fields)?;
+    if reasoning.is_some()
+        && let Some(field) = config.body.reasoning_overlap()
+    {
+        anyhow::bail!("provider.requestFields.{field} conflicts with reasoning, which sets it; use one of them");
     }
     Ok(config)
-}
-
-/// Refuse request fields that the reasoning level sets, `thinking.type`, `thinking.display`
-/// and `output_config.effort`, as [`check_reasoning_fields`] does for the OpenAI-compatible
-/// provider. The other settings of `thinking` and `output_config` go with the level's, such
-/// as `thinking.block_binding`.
-fn check_thinking_fields(fields: &Map<String, Value>) -> Result<()> {
-    for (field, key) in [
-        ("thinking", "type"),
-        ("thinking", "display"),
-        ("output_config", "effort"),
-    ] {
-        ensure!(
-            fields.get(field).and_then(|value| value.get(key)).is_none(),
-            "provider.requestFields.{field}.{key} conflicts with reasoning, which sets it; use one of them"
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

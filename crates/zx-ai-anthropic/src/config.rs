@@ -29,6 +29,15 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// cannot replace them.
 pub(crate) const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "system", "tools", "max_tokens", "stream"];
 
+/// What a request's reasoning level sets in the body, as an object and a key in it. The other
+/// settings of `thinking` and `output_config` go with the level's, such as
+/// `thinking.block_binding`.
+pub(crate) const REASONING_FIELDS: [(&str, &str); 3] = [
+    ("thinking", "type"),
+    ("thinking", "display"),
+    ("output_config", "effort"),
+];
+
 /// Connection settings for the Anthropic Messages API, or a server that offers the same
 /// protocol. Debug output redacts the API key.
 #[derive(Clone)]
@@ -140,6 +149,22 @@ impl BodyOptions {
         }
         Ok(())
     }
+
+    /// The first extra field that a request's reasoning level sets too, as a dotted path such
+    /// as `thinking.type`: `thinking.type`, `thinking.display` or `output_config.effort`.
+    /// Which of the two reaches the server is not for the provider to choose, so a host that
+    /// sets a level refuses such a field.
+    pub fn reasoning_overlap(&self) -> Option<String> {
+        REASONING_FIELDS
+            .iter()
+            .find(|(object, key)| {
+                self.extra_fields
+                    .get(*object)
+                    .and_then(|value| value.get(key))
+                    .is_some()
+            })
+            .map(|(object, key)| format!("{object}.{key}"))
+    }
 }
 
 /// How system prompt changes after the first one are sent.
@@ -183,6 +208,29 @@ mod tests {
         assert_eq!("collapse".parse(), Ok(SystemUpdates::Collapse));
         let error = "merge".parse::<SystemUpdates>().unwrap_err();
         assert!(error.contains("`collapse`") && error.contains("`inline`"), "{error}");
+    }
+
+    #[test]
+    fn the_extra_field_a_reasoning_level_also_sets_is_named() {
+        let overlap = |fields: Value| {
+            BodyOptions {
+                extra_fields: fields.as_object().unwrap().clone(),
+                ..BodyOptions::default()
+            }
+            .reasoning_overlap()
+        };
+        assert_eq!(
+            overlap(json!({"thinking": {"type": "enabled"}})),
+            Some("thinking.type".into())
+        );
+        assert_eq!(
+            overlap(json!({"output_config": {"effort": "max"}})),
+            Some("output_config.effort".into())
+        );
+        assert_eq!(
+            overlap(json!({"thinking": {"block_binding": {}}, "metadata": {}})),
+            None
+        );
     }
 
     #[test]

@@ -153,6 +153,17 @@ impl BodyOptions {
         }
         Ok(())
     }
+
+    /// The first extra field that a request's reasoning level sets too, in the format these
+    /// options write it in, such as `reasoning_effort`. Which of the two reaches the server is
+    /// not for the provider to choose, so a host that sets a level refuses such a field.
+    pub fn reasoning_overlap(&self) -> Option<String> {
+        self.reasoning_format
+            .fields()
+            .iter()
+            .find(|field| self.extra_fields.contains_key(**field))
+            .map(ToString::to_string)
+    }
 }
 
 /// How a request's reasoning level is written into the body.
@@ -177,7 +188,7 @@ pub enum ReasoningFormat {
 
 impl ReasoningFormat {
     /// The request body fields this format writes, which extra fields must not also set.
-    pub fn fields(self) -> &'static [&'static str] {
+    pub(crate) fn fields(self) -> &'static [&'static str] {
         match self {
             ReasoningFormat::Effort => &["reasoning_effort"],
             ReasoningFormat::Thinking => &["thinking", "reasoning_effort"],
@@ -247,6 +258,28 @@ mod tests {
 
     use super::*;
     use crate::OpenAiCompatible;
+
+    #[test]
+    fn the_extra_field_a_reasoning_level_also_sets_is_named_by_the_format() {
+        let options = |reasoning_format, field: &str| {
+            let mut extra_fields = Map::new();
+            extra_fields.insert(field.into(), json!(1));
+            BodyOptions {
+                reasoning_format,
+                extra_fields,
+                ..BodyOptions::default()
+            }
+        };
+        assert_eq!(
+            options(ReasoningFormat::Effort, "reasoning_effort").reasoning_overlap(),
+            Some("reasoning_effort".into())
+        );
+        assert_eq!(
+            options(ReasoningFormat::Thinking, "thinking").reasoning_overlap(),
+            Some("thinking".into())
+        );
+        assert_eq!(options(ReasoningFormat::Effort, "thinking").reasoning_overlap(), None);
+    }
 
     #[test]
     fn debug_output_never_contains_the_api_key() {
