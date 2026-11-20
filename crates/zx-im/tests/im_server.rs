@@ -2637,7 +2637,7 @@ async fn talk_refused_for_capacity_gets_no_reply_and_a_request_does() {
     );
     let refused = events
         .iter()
-        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("capacity exceeded")))
+        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("max_pending_messages")))
         .count();
     assert_eq!(refused, 2, "the operator hears of both: {events:?}");
 }

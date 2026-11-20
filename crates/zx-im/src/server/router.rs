@@ -13,7 +13,7 @@ use crate::{
     MessageKey, MessageRef, Post, ThreadId,
 };
 
-use super::admission::InputBudget;
+use super::admission::{InputBudget, Limit};
 use super::received::Receipts;
 use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{SessionKey, Shared};
@@ -98,7 +98,7 @@ impl WorkerHandle {
             if !is_control(&incoming.text) {
                 incoming.permit = self.budget.try_reserve(incoming.text.len());
                 if incoming.permit.is_none() {
-                    return Forward::Full;
+                    return Forward::OverBudget;
                 }
             }
         }
@@ -117,10 +117,27 @@ impl WorkerHandle {
 enum Forward {
     /// The worker has it.
     Sent,
+    /// The conversation's budget has no room for the message, so it is dropped.
+    OverBudget,
     /// Its inbox is full, so the input is dropped.
     Full,
     /// The worker has ended, after a panic: the input comes back.
     Ended(WorkerInput),
+}
+
+/// What a router is made of.
+pub(super) struct RouterSetup {
+    pub(super) channels: Vec<Arc<dyn ImChannel>>,
+    /// The chats served, by platform.
+    pub(super) allowed: HashMap<String, HashSet<ConversationId>>,
+    pub(super) shared: Arc<Shared>,
+    pub(super) stop: CancellationToken,
+    /// Replaces the statuses an earlier process left behind.
+    pub(super) replacing: JoinHandle<()>,
+    /// Makes the receipt each message carries until it is handled.
+    pub(super) receipts: Receipts,
+    /// Where the channels keep their messages.
+    pub(super) backlog: Arc<dyn Backlog>,
 }
 
 /// Passes what the channels receive to the conversations' workers, and ends them.
@@ -147,24 +164,25 @@ pub(super) struct Router {
 }
 
 impl Router {
-    /// Start receiving from `channels`, which keep their messages in `backlog`; nothing is
-    /// routed before [`replay`](Self::replay) or [`run`](Self::run).
-    pub(super) fn new(
-        channels: Vec<Arc<dyn ImChannel>>,
-        allowed: HashMap<String, HashSet<ConversationId>>,
-        shared: Arc<Shared>,
-        stop: CancellationToken,
-        replacing: JoinHandle<()>,
-        receipts: Receipts,
-        backlog: &Arc<dyn Backlog>,
-    ) -> Self {
+    /// Start receiving from the channels of `setup`; nothing is routed before
+    /// [`replay`](Self::replay) or [`run`](Self::run).
+    pub(super) fn new(setup: RouterSetup) -> Self {
+        let RouterSetup {
+            channels,
+            allowed,
+            shared,
+            stop,
+            replacing,
+            receipts,
+            backlog,
+        } = setup;
         let (tagged, inbound) = mpsc::channel(INBOUND_CAPACITY);
         let mut channel_tasks = JoinSet::new();
         for (index, channel) in channels.iter().enumerate() {
             channel_tasks.spawn(receive(
                 index,
                 Arc::clone(channel),
-                Arc::clone(backlog),
+                Arc::clone(&backlog),
                 tagged.clone(),
                 stop.clone(),
             ));
@@ -326,25 +344,21 @@ impl Router {
             return;
         }
         if incoming.text.len() > self.shared.max_pending_bytes.get() && !is_control(&incoming.text) {
-            self.over_capacity(channel, &key, addressee);
-            return;
+            return self.over_capacity(channel, &key, addressee, Limit::MessageBytes);
         }
         let input = WorkerInput::Message(incoming);
         let input = match self.workers.get_mut(&key) {
             Some(worker) => match worker.forward(input) {
                 Forward::Sent => return,
-                Forward::Full => {
-                    self.over_capacity(channel, &key, addressee);
-                    return;
-                }
+                Forward::OverBudget => return self.over_capacity(channel, &key, addressee, Limit::Pending),
+                Forward::Full => return self.over_capacity(channel, &key, addressee, Limit::Inbox),
                 // A new worker takes over.
                 Forward::Ended(input) => input,
             },
             None => input,
         };
-        if self.tasks.len() >= self.shared.max_conversations {
-            self.over_capacity(channel, &key, addressee);
-            return;
+        if self.tasks.len() >= self.shared.max_conversations.get() {
+            return self.over_capacity(channel, &key, addressee, Limit::Conversations);
         }
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
         let budget = Arc::new(InputBudget::new(
@@ -366,9 +380,13 @@ impl Router {
             budget,
             forwarded: 0,
         };
-        // A new inbox has room for one message.
+        // A new inbox has room for one message, and a new budget for one that is not longer
+        // than it all, which was refused above.
         if !matches!(worker.forward(input), Forward::Sent) {
-            self.dropped(&key);
+            self.shared.failed(
+                Some(&key),
+                "a message was dropped: the conversation started for it did not take it".into(),
+            );
         }
         self.workers.insert(key, worker);
     }
@@ -379,21 +397,18 @@ impl Router {
         let full = match self.workers.get_mut(key) {
             Some(worker) => match worker.forward(input) {
                 Forward::Full => true,
-                // A worker that has ended took its approvals with it.
-                Forward::Sent | Forward::Ended(_) => false,
+                // A click takes no share of the budget, and a worker that has ended took its
+                // approvals with it.
+                Forward::Sent | Forward::OverBudget | Forward::Ended(_) => false,
             },
             None => false,
         };
         if full {
-            self.dropped(key);
+            self.shared.failed(
+                Some(key),
+                "an approval click was dropped: the conversation's inbox is full".into(),
+            );
         }
-    }
-
-    fn dropped(&self, key: &SessionKey) {
-        self.shared.failed(
-            Some(key),
-            "too many messages wait in this conversation; one was dropped".into(),
-        );
     }
 
     /// Answer a chat the server does not serve, without holding up the router.
@@ -401,14 +416,11 @@ impl Router {
         self.reply(channel, to, self.shared.replies.unauthorized.clone());
     }
 
-    /// Refuse a message for want of capacity. The operator hears of every one; the
-    /// conversation only of one meant for the bot, so that the bot never speaks up in talk
-    /// among people.
-    fn over_capacity(&mut self, channel: Arc<dyn ImChannel>, key: &SessionKey, addressee: Addressee) {
-        self.shared.failed(
-            Some(key),
-            "conversation capacity exceeded; message was not accepted".into(),
-        );
+    /// Refuse a message that met `limit`. The operator hears of every one, and of the limit;
+    /// the conversation only of one meant for the bot, so that the bot never speaks up in
+    /// talk among people.
+    fn over_capacity(&mut self, channel: Arc<dyn ImChannel>, key: &SessionKey, addressee: Addressee, limit: Limit) {
+        self.shared.failed(Some(key), limit.refusal().into());
         if addressee == Addressee::Bot {
             self.reply(channel, key.destination(), self.shared.replies.overloaded.clone());
         }
@@ -416,7 +428,7 @@ impl Router {
 
     fn reply(&mut self, channel: Arc<dyn ImChannel>, to: Destination, text: String) {
         // Even rejection replies have a bound, so a busy platform cannot accumulate tasks.
-        if self.refusals.len() >= self.shared.max_conversations {
+        if self.refusals.len() >= self.shared.max_conversations.get() {
             return;
         }
         let shared = Arc::clone(&self.shared);

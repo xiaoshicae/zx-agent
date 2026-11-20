@@ -1,7 +1,8 @@
 //! A conversation's share of pending input: how many messages, and how many bytes of text,
 //! may wait for its session at once. A message reserves its share when the router takes it
 //! and keeps it through the worker's queues into the session's, held with its receipt from
-//! the backlog, until the session records it or it is dropped.
+//! the backlog, until the session records it or it is dropped. What the operator is told of a
+//! message that is not accepted names the limit it met.
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,35 @@ impl InputBudget {
     fn reserved(&self) -> (usize, usize) {
         let used = lock(&self.used);
         (used.messages, used.bytes)
+    }
+}
+
+/// Which limit a message that is not accepted met.
+#[derive(Clone, Copy)]
+pub(super) enum Limit {
+    /// The message alone has more text than `max_pending_bytes`.
+    MessageBytes,
+    /// The conversation has `max_pending_messages` messages pending, or no room for the
+    /// message's text within `max_pending_bytes`.
+    Pending,
+    /// The conversation's inbox is full: its worker takes input in slower than it comes.
+    Inbox,
+    /// `max_conversations` conversations are served.
+    Conversations,
+}
+
+impl Limit {
+    /// What the operator is told of a message not accepted for this limit, which names the
+    /// setting of [`ServerConfig`](super::ServerConfig) that sets it.
+    pub(super) fn refusal(self) -> &'static str {
+        match self {
+            Self::MessageBytes => "message not accepted: its text is longer than max_pending_bytes",
+            Self::Pending => {
+                "message not accepted: the conversation has max_pending_messages messages, or max_pending_bytes bytes, pending"
+            }
+            Self::Inbox => "message not accepted: the conversation's inbox is full",
+            Self::Conversations => "message not accepted: max_conversations conversations are served",
+        }
     }
 }
 

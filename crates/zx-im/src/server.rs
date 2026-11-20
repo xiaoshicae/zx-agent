@@ -39,7 +39,7 @@ use crate::{
     ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, MessageRef, ThreadId, UserId,
 };
 use received::{complete_handled, left_pending};
-use router::Router;
+use router::{Router, RouterSetup};
 use status::{left_behind, replace_left_behind};
 
 pub(crate) use status::StatusFiles;
@@ -367,7 +367,15 @@ impl Server {
             stop.clone(),
         ));
         let (receipts, completing) = complete_handled(Arc::clone(&backlog), Arc::clone(&sink), timeout, stop.clone());
-        let mut router = Router::new(channels, allowed, shared, stop, replacing, receipts, &backlog);
+        let mut router = Router::new(RouterSetup {
+            channels,
+            allowed,
+            shared,
+            stop,
+            replacing,
+            receipts,
+            backlog,
+        });
         router.replay(pending);
         let result = router.run().await;
         // Every receipt is gone with the router: the task completes what was handled before
@@ -406,7 +414,7 @@ struct Shared {
     sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
     replies: Replies,
-    max_conversations: usize,
+    max_conversations: NonZeroUsize,
     max_pending_messages: NonZeroUsize,
     max_pending_bytes: NonZeroUsize,
     idle: Duration,
@@ -454,7 +462,7 @@ impl Shared {
             idle,
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
-            max_conversations: max_conversations.get(),
+            max_conversations,
             max_pending_messages,
             max_pending_bytes,
             statuses,

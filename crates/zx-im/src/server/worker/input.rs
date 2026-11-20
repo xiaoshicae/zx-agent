@@ -4,6 +4,7 @@ use zx_agent::Session;
 use zx_agent::input::{Input, PendingInput};
 
 use crate::Addressee;
+use crate::server::admission::Limit;
 use crate::server::outlet::{Asked, said};
 
 use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
@@ -41,8 +42,7 @@ impl Worker {
             None => self.budget.try_reserve(content.len()),
         };
         let Some(permit) = permit else {
-            self.out
-                .failed("pending input capacity exceeded; message was not accepted".into());
+            self.out.failed(Limit::Pending.refusal().into());
             // Talk the bot only records is refused without a word in the conversation.
             if answer {
                 self.out.post(self.out.replies().overloaded.clone()).await;
