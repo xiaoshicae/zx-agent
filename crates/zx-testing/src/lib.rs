@@ -57,6 +57,10 @@ mod runner;
 mod sessions;
 mod stand_ins;
 
+/// How long a test waits for what only a failure keeps from coming: a request, an event, a
+/// message, a fake server's client. Reaching it fails the test.
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(unix)]
 pub use program::signal;
 pub use program::{stderr, stdout};

@@ -14,13 +14,12 @@ use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
     MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, ThreadId, UserId,
 };
+use zx_testing::WAIT;
 use zx_testing::fake_slack::{Answer, FakeSlack};
 use zx_testing::http::silent_listener;
 
 const APP_TOKEN: &str = "xapp-test";
 const BOT_TOKEN: &str = "xoxb-test";
-/// Only reached when an expected event never comes.
-const WAIT: Duration = Duration::from_secs(10);
 
 fn config(slack: &FakeSlack) -> SlackConfig {
     let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());

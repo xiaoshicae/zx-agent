@@ -13,7 +13,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::http::{WAIT, read_request, response};
+use crate::WAIT;
+use crate::http::{read_request, response};
 
 /// One API call.
 #[derive(Clone, Debug)]

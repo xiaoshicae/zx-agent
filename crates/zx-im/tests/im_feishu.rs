@@ -15,11 +15,9 @@ use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, FeishuChannel, FeishuConfig,
     ImChannel, ImError, Inbound, MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
 };
+use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use zx_testing::http::silent_listener;
-
-/// Only reached when an expected event never comes.
-const WAIT: Duration = Duration::from_secs(10);
 
 fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());

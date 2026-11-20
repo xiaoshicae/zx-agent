@@ -12,8 +12,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{FileMutationQueue, WriteFileTool, executor_tools};
 use zx_agent::tools::{Tool, ToolContext};
-
-const WAIT: Duration = Duration::from_secs(5);
+use zx_testing::WAIT;
 
 /// Holds the first operation after it has started; cancellation cannot interrupt its write.
 #[derive(Default)]

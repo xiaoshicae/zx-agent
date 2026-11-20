@@ -149,14 +149,24 @@ impl MockServer {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Wait until at least `count` requests have arrived.
+    /// Wait until at least `count` requests have arrived; panic, naming them, when they have
+    /// not within [`WAIT`](crate::WAIT).
     pub async fn wait_for_requests(&self, count: usize) {
-        loop {
-            let notified = self.received.notified();
-            if self.requests.lock().unwrap().len() >= count {
-                return;
+        let arrived = async {
+            loop {
+                let notified = self.received.notified();
+                if self.requests.lock().unwrap().len() >= count {
+                    return;
+                }
+                notified.await;
             }
-            notified.await;
+        };
+        if tokio::time::timeout(crate::WAIT, arrived).await.is_err() {
+            panic!(
+                "the mock model service got {} of {count} requests within {:?}",
+                self.requests.lock().unwrap().len(),
+                crate::WAIT
+            );
         }
     }
 }

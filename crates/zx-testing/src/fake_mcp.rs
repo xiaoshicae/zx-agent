@@ -12,7 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
-use crate::http::{WAIT, read_request, response};
+use crate::WAIT;
+use crate::http::{read_request, response};
 
 /// The session the 2025-11-25 server assigns.
 pub const SESSION: &str = "session-1";

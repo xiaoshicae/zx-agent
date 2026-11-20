@@ -32,7 +32,7 @@ use zx_im::{
     Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
     ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_testing::{EchoTool, config, fast_retry, summarize, test_limits};
+use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -41,8 +41,6 @@ const DIRECT: &str = "D1";
 const ASKER: &str = "U-asker";
 const APPROVER: &str = "U-approver";
 const OTHER: &str = "U-other";
-/// Only reached when an expected message never comes.
-const WAIT: Duration = Duration::from_secs(10);
 
 /// What the server asked the channel to do.
 #[derive(Debug, PartialEq)]

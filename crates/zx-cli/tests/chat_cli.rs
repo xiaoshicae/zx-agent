@@ -254,9 +254,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     let mut stdin = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     stdin.write_all(b"/compact\n").await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), server.wait_for_requests(1))
-        .await
-        .unwrap();
+    server.wait_for_requests(1).await;
     signal(&child, "-INT").await;
     let compact = read_event_until(&mut events, |event| event["type"] == "compaction_report").await;
     assert_eq!(compact["report"]["outcome"], "cancelled");
