@@ -254,7 +254,6 @@ named_values!(ReasoningFormat, SystemUpdates, MaxTokensField);
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use zx_ai::Reasoning;
 
     use super::*;
     use crate::OpenAiCompatible;
@@ -293,85 +292,44 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_idle_timeout_is_rejected() {
-        let config = OpenAiConfig {
-            idle_timeout: Duration::ZERO,
-            ..OpenAiConfig::default()
-        };
-        let error = OpenAiCompatible::new(config).err().expect("a zero timeout is rejected");
-        assert!(
-            error.to_string().contains("timeout must be greater than zero"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn a_base_url_is_an_http_address_that_a_path_can_follow() {
-        for (base_url, expected) in [
-            ("gateway.example.com/v1", "is not a URL"),
-            ("localhost:8000/v1", "http or https"),
-            ("ftp://gateway.example.com/v1", "http or https"),
-            ("https://gateway.example.com/v1?version=1", "query"),
-            ("https://gateway.example.com/v1#part", "fragment"),
-        ] {
-            let config = OpenAiConfig {
-                base_url: base_url.into(),
-                ..OpenAiConfig::default()
-            };
-            let error = OpenAiCompatible::new(config).err().expect("the address is refused");
-            assert!(error.to_string().contains(expected), "{base_url}: {error}");
-            // The address may hold a credential, so the error does not repeat it.
-            assert!(!error.to_string().contains("gateway"), "{error}");
-        }
-        for base_url in [
-            "http://127.0.0.1:11434/v1",
-            "http://localhost:8000",
-            "https://api.openai.com/v1/",
-        ] {
-            let config = OpenAiConfig {
-                base_url: base_url.into(),
-                ..OpenAiConfig::default()
-            };
-            assert!(OpenAiCompatible::new(config).is_ok(), "{base_url}");
-        }
-    }
-
-    #[test]
-    fn zero_stream_budgets_are_rejected() {
+    fn building_the_provider_runs_the_shared_checks_of_its_settings() {
         for config in [
             OpenAiConfig {
-                max_response_bytes: 0,
+                base_url: "ftp://example.com".into(),
                 ..OpenAiConfig::default()
             },
             OpenAiConfig {
-                max_sse_event_bytes: 0,
+                idle_timeout: Duration::ZERO,
+                ..OpenAiConfig::default()
+            },
+            OpenAiConfig {
+                headers: vec![("bad name".into(), "x".into())],
                 ..OpenAiConfig::default()
             },
         ] {
-            let error = OpenAiCompatible::new(config).err().expect("a zero budget is rejected");
-            assert!(error.to_string().contains("must be greater than zero"), "{error}");
+            assert!(OpenAiCompatible::new(config).is_err());
         }
     }
 
     #[test]
-    fn reasoning_levels_and_formats_parse_by_name() {
-        for level in Reasoning::ALL {
-            assert_eq!(level.as_str().parse::<Reasoning>(), Ok(level));
-        }
-        assert_eq!(" HIGH ".parse::<Reasoning>(), Ok(Reasoning::High));
-        assert!(
-            "max"
-                .parse::<Reasoning>()
-                .unwrap_err()
-                .contains("off, minimal, low, medium, high, xhigh")
-        );
+    fn the_authorization_header_comes_from_the_api_key() {
+        let error = OpenAiCompatible::new(OpenAiConfig {
+            headers: vec![("Authorization".into(), "Bearer x".into())],
+            ..OpenAiConfig::default()
+        })
+        .err()
+        .expect("the header is refused");
+        assert!(error.to_string().contains("Authorization"), "{error}");
+    }
+
+    #[test]
+    fn reasoning_formats_parse_by_name() {
         assert_eq!("Thinking".parse::<ReasoningFormat>(), Ok(ReasoningFormat::Thinking));
         assert_eq!(
             "reasoning-object".parse::<ReasoningFormat>(),
             Ok(ReasoningFormat::ReasoningObject)
         );
         assert!("other".parse::<ReasoningFormat>().is_err());
-        assert_eq!(serde_json::to_value(Reasoning::Xhigh).unwrap(), "xhigh");
     }
 
     /// Check that each of `values` displays the name its record holds and parses from it.
@@ -429,35 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn headers_are_checked_when_the_provider_is_built() {
-        let build = |headers: Vec<(&str, &str)>| {
-            OpenAiCompatible::new(OpenAiConfig {
-                base_url: "https://example.invalid/v1".into(),
-                headers: headers
-                    .into_iter()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
-                    .collect(),
-                ..OpenAiConfig::default()
-            })
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-        };
-        assert_eq!(build(vec![("X-Route", "blue"), ("x-tenant", "a b")]), Ok(()));
-        assert!(
-            build(vec![("Authorization", "Bearer x")])
-                .unwrap_err()
-                .contains("Authorization")
-        );
-        assert!(
-            build(vec![("bad name", "x")])
-                .unwrap_err()
-                .contains("invalid request header name")
-        );
-        assert!(
-            build(vec![("x-a", "line\nbreak")])
-                .unwrap_err()
-                .contains("invalid value")
-        );
+    fn a_cache_key_field_cannot_be_added_when_the_provider_sets_the_cache_key() {
         let mut extra_fields = Map::new();
         extra_fields.insert("prompt_cache_key".into(), json!("mine"));
         let error = OpenAiCompatible::new(OpenAiConfig {

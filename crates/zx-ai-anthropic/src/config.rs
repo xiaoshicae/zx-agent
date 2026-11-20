@@ -234,49 +234,38 @@ mod tests {
     }
 
     #[test]
-    fn settings_the_client_cannot_use_are_refused() {
-        let refused = |config: AnthropicConfig| config.check().unwrap_err().to_string();
-        assert!(
-            refused(AnthropicConfig {
+    fn the_check_runs_the_shared_checks_of_the_settings() {
+        for config in [
+            AnthropicConfig {
                 base_url: "ftp://example.com".into(),
                 ..AnthropicConfig::default()
-            })
-            .contains("http or https")
-        );
-        assert!(
-            refused(AnthropicConfig {
-                base_url: "https://example.com/?key=secret".into(),
-                ..AnthropicConfig::default()
-            })
-            .contains("without a query")
-        );
-        assert!(
-            refused(AnthropicConfig {
+            },
+            AnthropicConfig {
                 idle_timeout: Duration::ZERO,
                 ..AnthropicConfig::default()
-            })
-            .contains("idle_timeout")
-        );
-        assert!(
-            refused(AnthropicConfig {
+            },
+            AnthropicConfig {
                 headers: vec![("X-Api-Key".into(), "k".into())],
                 ..AnthropicConfig::default()
-            })
-            .contains("comes from the API key")
-        );
+            },
+        ] {
+            assert!(config.check().is_err());
+        }
+        AnthropicConfig::default().check().unwrap();
+    }
+
+    #[test]
+    fn fields_the_provider_sets_itself_cannot_be_added() {
         let mut extra_fields = Map::new();
         extra_fields.insert("max_tokens".into(), json!(1));
-        assert!(
-            refused(AnthropicConfig {
-                body: BodyOptions {
-                    extra_fields,
-                    ..BodyOptions::default()
-                },
-                ..AnthropicConfig::default()
-            })
-            .contains("\"max_tokens\"")
-        );
-        AnthropicConfig::default().check().unwrap();
+        let config = AnthropicConfig {
+            body: BodyOptions {
+                extra_fields,
+                ..BodyOptions::default()
+            },
+            ..AnthropicConfig::default()
+        };
+        assert!(config.check().unwrap_err().to_string().contains("\"max_tokens\""));
     }
 
     #[test]

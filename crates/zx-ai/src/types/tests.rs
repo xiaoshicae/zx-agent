@@ -4,6 +4,22 @@ use super::*;
 use crate::{SectionChange, SystemMessage};
 
 #[test]
+fn reasoning_levels_parse_from_the_names_they_are_recorded_by() {
+    for level in Reasoning::ALL {
+        assert_eq!(level.as_str().parse::<Reasoning>(), Ok(level));
+        assert_eq!(serde_json::to_value(level).unwrap(), level.as_str());
+        assert_eq!(level.to_string(), level.as_str());
+    }
+    assert_eq!(" HIGH ".parse::<Reasoning>(), Ok(Reasoning::High));
+}
+
+#[test]
+fn an_unknown_reasoning_level_is_refused_with_the_levels_there_are() {
+    let error = "max".parse::<Reasoning>().unwrap_err();
+    assert!(error.contains("off, minimal, low, medium, high, xhigh"), "{error}");
+}
+
+#[test]
 fn stop_reason_names_are_the_ones_json_gives() {
     for reason in [
         StopReason::Stop,
