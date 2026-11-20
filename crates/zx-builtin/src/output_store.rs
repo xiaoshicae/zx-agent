@@ -10,7 +10,6 @@
 //! or stored that a link there leads to: not a file that is one, and not a directory that
 //! is reached through one below the working directory.
 
-use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -97,33 +96,21 @@ impl OutputStoreConfig {
 /// A setting of an [`OutputStoreConfig`] that cannot be used. `Display` names the field as the
 /// struct does; a host that reads the settings from a file of its own matches the variant to
 /// name its own key.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidOutputStoreConfig {
     /// `directory` is empty.
+    #[error("directory is empty")]
     EmptyDirectory,
     /// `max_file_bytes`, given here, is zero or over [`MAX_FILE_BYTES`].
+    #[error("max_file_bytes is {0}; it must be 1..={max}", max = MAX_FILE_BYTES)]
     MaxFileBytes(usize),
     /// `threshold_bytes` is under [`MIN_THRESHOLD_BYTES`] or over `max_file_bytes`.
+    #[error(
+        "threshold_bytes is {threshold}; it must be {min}..={max_file_bytes} (max_file_bytes), or None to store nothing",
+        min = MIN_THRESHOLD_BYTES
+    )]
     ThresholdBytes { threshold: usize, max_file_bytes: usize },
 }
-
-impl fmt::Display for InvalidOutputStoreConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyDirectory => f.write_str("directory is empty"),
-            Self::MaxFileBytes(bytes) => write!(f, "max_file_bytes is {bytes}; it must be 1..={MAX_FILE_BYTES}"),
-            Self::ThresholdBytes {
-                threshold,
-                max_file_bytes,
-            } => write!(
-                f,
-                "threshold_bytes is {threshold}; it must be {MIN_THRESHOLD_BYTES}..={max_file_bytes} (max_file_bytes), or None to store nothing"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for InvalidOutputStoreConfig {}
 
 /// The paths on the way from `cwd` to `cwd.join(below)` that are below `cwd`, as `below`
 /// names them. A `..` back to `cwd` is followed, as the directories after it are below it

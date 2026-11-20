@@ -17,3 +17,7 @@ zx-util.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# A unit test of `request` runs on Tokio's test runtime.
+tokio = { workspace = true, features = ["macros", "rt"] }
