@@ -33,11 +33,11 @@ use crate::{
 };
 
 use super::{
-    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, FEISHU, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput,
-    http_client, pause, report, secret, split_text,
+    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, FEISHU, MAX_TEXT_CHARS, Pacer, PlatformFactory,
+    PlatformInput, http_client, pause, report, secret, split_text,
 };
 use api::CallError;
-use connection::{ClientConfig, Connection, Ended, PREFIX};
+use connection::{ClientConfig, PREFIX};
 use events::{button, card, card_request, markdown, resolution, text_content};
 
 /// Where the open API lives.
@@ -223,16 +223,18 @@ impl ImChannel for FeishuChannel {
             let wait = match connected {
                 Connection::Open(link) => {
                     backoff.reset();
-                    match self.receive(*link, &mut config, &inlet, cancel).await {
+                    let why = match self.receive(*link, &mut config, &inlet, cancel).await {
                         Ended::Cancelled => return Ok(()),
-                        // Spread reconnections out, as the server asks.
-                        Ended::Lost => connection::jitter(config.nonce),
-                        Ended::Silent(silence) => {
-                            let silent = format!("{PREFIX}: silent for {silence:?}; opening it again");
-                            report(self.config.on_error.as_ref(), &ImError::Transport(silent));
-                            connection::jitter(config.nonce)
-                        }
+                        Ended::Closed => None,
+                        Ended::Lost(why) => Some(format!("lost ({why})")),
+                        Ended::Silent(silence) => Some(format!("silent for {silence:?}")),
+                    };
+                    if let Some(why) = why {
+                        let reconnecting = format!("{PREFIX}: {why}; opening it again");
+                        report(self.config.on_error.as_ref(), &ImError::Transport(reconnecting));
                     }
+                    // Spread reconnections out, as the server asks.
+                    connection::jitter(config.nonce)
                 }
                 Connection::Later(reason) => {
                     report(self.config.on_error.as_ref(), &ImError::Transport(reason));

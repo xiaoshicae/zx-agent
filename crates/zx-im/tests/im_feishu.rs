@@ -363,6 +363,21 @@ async fn a_silent_connection_is_reported_and_opened_again() {
 }
 
 #[tokio::test]
+async fn a_lost_connection_is_reported_and_opened_again() {
+    let mut fake = FakeFeishu::start(120).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let running = run_channel(channel, WAIT);
+    // Gone without a close frame.
+    drop(fake.socket().await);
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("lost"), "{report}");
+    let second = fake.socket().await;
+    assert_eq!(fake.calls("endpoint").len(), 2);
+    drop(second);
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn text_in_a_thread_is_a_reply_in_its_topic() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);

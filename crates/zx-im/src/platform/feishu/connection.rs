@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_util::random::random_u64;
 
-use crate::platform::{Halted, Keepalive, Next, Socket, keep, next_message, report};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
 use crate::{ImError, Inlet};
 
 use super::frame::Frame;
@@ -85,25 +85,8 @@ impl ClientConfig {
     }
 }
 
-pub(super) enum Ended {
-    Cancelled,
-    /// The connection dropped.
-    Lost,
-    /// Nothing came over the connection for this long, not even answers to the pings.
-    Silent(Duration),
-}
-
-/// How an attempt to open the long connection went.
-pub(super) enum Connection {
-    /// The link is boxed: the other variant is a short reason.
-    Open(Box<Link>),
-    /// A failure worth retrying, with the reason; the address, which carries a ticket, is
-    /// never in it.
-    Later(String),
-}
-
 /// A failure worth retrying: `reason` after [`PREFIX`].
-fn later(reason: impl Display) -> Connection {
+fn later(reason: impl Display) -> Connection<Link> {
     Connection::Later(format!("{PREFIX}: {reason}"))
 }
 
@@ -143,7 +126,7 @@ enum Received {
 impl FeishuChannel {
     /// Ask for the long connection's address and open it. An error is a failure that
     /// retrying cannot fix.
-    pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection, ImError> {
+    pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection<Link>, ImError> {
         let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
         let body = json!({
             "AppID": self.config.app_id,
@@ -181,7 +164,7 @@ impl FeishuChannel {
     /// Open the WebSocket at `address`, to be pinged every `ping`. A refused handshake is a
     /// configuration error when the platform says the app may not connect, or has too many
     /// connections.
-    async fn open_socket(&self, address: &str, ping: Duration) -> Result<Connection, ImError> {
+    async fn open_socket(&self, address: &str, ping: Duration) -> Result<Connection<Link>, ImError> {
         let service = service_id(address);
         match tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(address)).await {
             Ok(Ok((socket, _))) => Ok(Connection::Open(Box::new(Link::new(socket, service, ping)))),
@@ -223,7 +206,8 @@ impl FeishuChannel {
                 Next::Message(Message::Binary(bytes)) => bytes,
                 // The Go SDK reads only binary messages; anything else still shows life.
                 Next::Message(Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
-                Next::Message(Message::Close(_)) | Next::Lost => return Ended::Lost,
+                Next::Message(Message::Close(_)) => return Ended::Closed,
+                Next::Lost(why) => return Ended::Lost(why),
                 Next::Silent(silence) => return Ended::Silent(silence),
                 Next::Cancelled => return Ended::Cancelled,
             };
@@ -265,13 +249,7 @@ impl FeishuChannel {
         // Acknowledged before anything is handled: Feishu redelivers what is not acknowledged
         // in time.
         let acknowledgement = link.socket.send(Message::binary(acknowledge(frame).encode()));
-        delivery
-            .finish(inlet, acknowledgement)
-            .await
-            .map_err(|halted| match halted {
-                Halted::ServerStopped => Ended::Cancelled,
-                Halted::Unacknowledged => Ended::Lost,
-            })
+        delivery.finish(inlet, acknowledgement).await
     }
 }
 

@@ -14,6 +14,7 @@ mod feishu;
 mod slack;
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -212,34 +213,30 @@ struct Delivery {
     acknowledge: bool,
 }
 
-/// Why a connection stops after a delivery.
-#[derive(Debug, PartialEq, Eq)]
-enum Halted {
-    /// The server no longer reads: it is stopping.
-    ServerStopped,
-    /// The acknowledgement could not be sent: the connection is lost.
-    Unacknowledged,
-}
-
 impl Delivery {
     /// Finish the delivery: send its acknowledgement with `acknowledge`, unless it may not be
     /// acknowledged, then pass its events on to the server. They are passed on also when the
     /// acknowledgement cannot be sent: the platform then delivers the messages again, but
-    /// the backlog knows them by then, and nobody would pass them on.
-    async fn finish<E>(self, inlet: &Inlet, acknowledge: impl Future<Output = Result<(), E>>) -> Result<(), Halted> {
-        // Why it could not be sent does not matter here: the connection is lost either way,
-        // and its owner reconnects.
-        let acknowledged = !self.acknowledge || acknowledge.await.is_ok();
+    /// the backlog knows them by then, and nobody would pass them on. `Err` says how the
+    /// connection ended: lost when the acknowledgement could not be sent, cancelled when the
+    /// server no longer reads.
+    async fn finish<E: Display>(
+        self,
+        inlet: &Inlet,
+        acknowledge: impl Future<Output = Result<(), E>>,
+    ) -> Result<(), Ended> {
+        let acknowledged = if self.acknowledge {
+            let sent = acknowledge.await;
+            sent.map_err(|error| format!("cannot acknowledge a delivery: {error}"))
+        } else {
+            Ok(())
+        };
         for event in self.events {
             if !inlet.pass(event).await {
-                return Err(Halted::ServerStopped);
+                return Err(Ended::Cancelled);
             }
         }
-        if acknowledged {
-            Ok(())
-        } else {
-            Err(Halted::Unacknowledged)
-        }
+        acknowledged.map_err(Ended::Lost)
     }
 }
 
@@ -415,12 +412,35 @@ impl Keepalive {
     }
 }
 
+/// How an attempt to open a platform's connection went.
+enum Connection<L> {
+    /// The connection, boxed: the other variant is a short reason.
+    Open(Box<L>),
+    /// A failure worth retrying, with the reason, which never shows a secret, such as an
+    /// address that carries a ticket.
+    Later(String),
+}
+
+/// How a platform's connection ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// The server is stopping: `cancel` was triggered, or the server no longer reads.
+    Cancelled,
+    /// The platform closed it, or asked for another: a new one is opened.
+    Closed,
+    /// It failed, for this reason: a new one is opened, and the operator hears why.
+    Lost(String),
+    /// Nothing came over it for this long, not even answers to the pings.
+    Silent(Duration),
+}
+
 /// What came next over a connection ([`next_message`]).
 enum Next {
     /// `cancel` was triggered; the connection was closed.
     Cancelled,
-    /// The connection failed or ended without a close frame, or a ping could not be sent.
-    Lost,
+    /// The connection failed or ended without a close frame, or a ping could not be sent:
+    /// why.
+    Lost(String),
     /// Nothing came for this long, not even answers to the pings: the connection counts as
     /// dead.
     Silent(Duration),
@@ -447,8 +467,8 @@ async fn next_message(
                 return Next::Cancelled;
             }
             () = tokio::time::sleep_until(keepalive.next_ping()) => {
-                if socket.send(ping.clone()).await.is_err() {
-                    return Next::Lost;
+                if let Err(error) = socket.send(ping.clone()).await {
+                    return Next::Lost(format!("cannot send a ping: {error}"));
                 }
                 keepalive.pinged();
             }
@@ -457,7 +477,8 @@ async fn next_message(
                 keepalive.alive();
                 return match message {
                     Some(Ok(message)) => Next::Message(message),
-                    Some(Err(_)) | None => Next::Lost,
+                    Some(Err(error)) => Next::Lost(format!("cannot read: {error}")),
+                    None => Next::Lost("it ended without a close frame".into()),
                 };
             }
         }
@@ -555,14 +576,17 @@ mod tests {
         let inlet = Inlet::new("slack", events, Arc::new(MemoryBacklog::default()));
 
         let delivery = keep(&inlet, vec![message("m1")], None).await;
-        let finished = delivery.finish(&inlet, async { Err::<(), ()>(()) }).await;
+        let finished = delivery.finish(&inlet, async { Err::<(), _>("closed") }).await;
 
-        assert_eq!(finished, Err(Halted::Unacknowledged));
+        assert_eq!(
+            finished,
+            Err(Ended::Lost("cannot acknowledge a delivery: closed".into()))
+        );
         assert_eq!(passed.try_recv().ok(), Some(message("m1")));
         // The platform delivers what was not acknowledged again: known by then, it is not
         // passed on a second time, so the first delivery was its only way to the server.
         let again = keep(&inlet, vec![message("m1")], None).await;
-        assert_eq!(again.finish(&inlet, async { Ok::<(), ()>(()) }).await, Ok(()));
+        assert_eq!(again.finish(&inlet, async { Ok::<(), &str>(()) }).await, Ok(()));
         assert!(passed.try_recv().is_err());
     }
 
@@ -579,7 +603,7 @@ mod tests {
         let finished = delivery
             .finish(&inlet, async {
                 acknowledged.set(true);
-                Ok::<(), ()>(())
+                Ok::<(), &str>(())
             })
             .await;
 

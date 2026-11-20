@@ -25,11 +25,10 @@ use crate::{
 };
 
 use super::{
-    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput,
-    RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
+    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
+    PlatformInput, RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
 };
 use api::CallError;
-use connection::{Ended, connection_url};
 use events::{Me, button, card_request, escape, history, resolution, section, split};
 
 /// Where the Web API lives.
@@ -220,41 +219,33 @@ impl ImChannel for SlackChannel {
         };
         let me = self.me.get_or_init(|| me);
         loop {
-            let opened = self
-                .call_unless_cancelled("apps.connections.open", &self.config.app_token, cancel)
-                .await;
-            let url = match opened.map(|answer| answer.and_then(|answer| connection_url(&answer))) {
-                None => return Ok(()),
-                Some(Ok(url)) => Some(url),
-                Some(Err(error @ ImError::Config(_))) => return Err(error),
-                Some(Err(error @ ImError::Transport(_))) => {
-                    report(self.config.on_error.as_ref(), &error);
-                    None
-                }
+            let connected = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(()),
+                connected = self.connect() => connected?,
             };
-            let ended = match url {
-                Some(url) => self.receive(&url, &inlet, me, cancel).await,
-                None => Ended::Failed,
-            };
-            match ended {
-                Ended::Cancelled => return Ok(()),
-                // Slack refreshes connections every few hours; reconnect at once.
-                Ended::Lost => backoff.reset(),
-                Ended::Silent(silence) => {
-                    report(
-                        self.config.on_error.as_ref(),
-                        &ImError::Transport(format!(
-                            "slack: the Socket Mode connection was silent for {silence:?}; opening it again"
-                        )),
-                    );
-                    backoff.reset();
-                }
-                Ended::Failed => {
+            let socket = match connected {
+                Connection::Open(socket) => socket,
+                Connection::Later(reason) => {
+                    report(self.config.on_error.as_ref(), &ImError::Transport(reason));
                     if !backoff.wait(cancel).await {
                         return Ok(());
                     }
+                    continue;
                 }
+            };
+            let why = match self.receive(*socket, &inlet, me, cancel).await {
+                Ended::Cancelled => return Ok(()),
+                // Slack refreshes connections every few hours; reconnect at once.
+                Ended::Closed => None,
+                Ended::Lost(why) => Some(format!("was lost ({why})")),
+                Ended::Silent(silence) => Some(format!("was silent for {silence:?}")),
+            };
+            if let Some(why) = why {
+                let reconnecting = format!("slack: the Socket Mode connection {why}; opening it again");
+                report(self.config.on_error.as_ref(), &ImError::Transport(reconnecting));
             }
+            backoff.reset();
         }
     }
 

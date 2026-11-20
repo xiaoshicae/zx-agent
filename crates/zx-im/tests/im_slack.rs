@@ -604,6 +604,21 @@ async fn a_silent_connection_is_reported_and_opened_again() {
 }
 
 #[tokio::test]
+async fn a_lost_connection_is_reported_and_opened_again() {
+    let mut slack = FakeSlack::start().await;
+    let (channel, mut reports) = reporting(config(&slack));
+    let running = run_channel(channel, WAIT);
+    // Gone without a close frame.
+    drop(slack.socket().await);
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("was lost"), "{report}");
+    let second = slack.socket().await;
+    assert_eq!(slack.calls("apps.connections.open").len(), 2);
+    drop(second);
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_message_without_text_is_not_passed_on() {
     let mut slack = FakeSlack::start().await;
     let mut running = run_channel(channel(&slack), WAIT);
