@@ -14,9 +14,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zx_util::sync::lock;
 
-use crate::{Addressee, ChatKind, ConversationId, Destination, Inbound, MessageId, ThreadId, UserId};
-
 pub(crate) use self::files::BacklogFiles;
+use crate::{Addressee, ChatKind, ConversationId, Destination, Inbound, MessageId, ThreadId, UserId};
 
 /// Handled messages a [`MemoryBacklog`] remembers, to know them when they are delivered
 /// again: platforms redeliver only for a short while, and this covers far more messages than

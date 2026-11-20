@@ -12,7 +12,6 @@ use agent_client_protocol::v1::schema::{
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::Value;
-
 use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, Role, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,

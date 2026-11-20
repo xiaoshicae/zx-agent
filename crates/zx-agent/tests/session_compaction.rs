@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, Message, StopReason, ToolResultMessage, Usage, now_ms};
 use zx_agent::events::RunOutcome;
@@ -15,7 +14,6 @@ use zx_agent::transcript::{
     CompactionEntry, CompactionStartedEntry, CompactionSummary, Entry, SESSION_VERSION, SummarizedBy, SummaryFact,
     SummaryRequest,
 };
-
 use zx_testing::{RunnerSetup, Seed, config, header, summarize};
 
 fn summary(id: &str) -> CompactionSummary {

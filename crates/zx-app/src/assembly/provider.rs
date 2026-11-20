@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-use super::settings::BASE_URL_ENV;
-use crate::config::{ANTHROPIC, OPENAI, anthropic_config, openai_config};
 use zx_agent::ai::anthropic::AnthropicMessages;
 use zx_agent::ai::openai::OpenAiCompatible;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_util::registry::Registry;
+
+use super::settings::BASE_URL_ENV;
+use crate::config::{ANTHROPIC, OPENAI, anthropic_config, openai_config};
 
 /// Builds the provider config.toml names in `provider.api`.
 pub trait ProviderFactory: Send + Sync {

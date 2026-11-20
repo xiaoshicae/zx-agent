@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;

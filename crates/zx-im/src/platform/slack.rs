@@ -19,16 +19,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said, ThreadId,
-    UserId,
-};
-
 use self::api::CallError;
 use self::events::{Me, button, card_request, escape, history, resolution, section, split};
 use super::{
     Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
     PlatformInput, RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
+};
+use crate::{
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said, ThreadId,
+    UserId,
 };
 
 /// Where the Web API lives.

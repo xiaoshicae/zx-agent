@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use zx_agent::agent::RunLimits;
+use zx_agent::compaction::{self, BYTES_PER_TOKEN, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
-use zx_agent::agent::RunLimits;
-use zx_agent::compaction::{self, BYTES_PER_TOKEN, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";

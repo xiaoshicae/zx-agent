@@ -11,14 +11,12 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, executor_tools};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-
 use zx_testing::{RunnerSetup, Start, config, tool_context};
 
 async fn write(dir: &Path, args: Value) -> Result<ToolOutput, String> {

@@ -7,10 +7,9 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use super::FeishuChannel;
 use crate::ImError;
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
-
-use super::FeishuChannel;
 
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);

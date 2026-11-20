@@ -11,11 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-
-use crate::config::{
-    AgentDefinition, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
-};
-use crate::otel;
 use zx_agent::ai::{PREAMBLE, Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
@@ -32,6 +27,10 @@ use super::provider::{BuiltProvider, ProviderInput};
 use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
+use crate::config::{
+    AgentDefinition, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
+};
+use crate::otel;
 
 /// The names of the hooks and policies the assembly registers, which `hook_failed` events,
 /// traces and policy errors show.

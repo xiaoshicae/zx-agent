@@ -11,9 +11,8 @@ use tokio::sync::mpsc;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_util::text::clip;
 
-use crate::{ApprovalCard, ApprovalId};
-
 use super::{ServerEvent, ServerSink, SessionKey};
+use crate::{ApprovalCard, ApprovalId};
 
 /// Longest command or argument text shown on a card; longer text ends with "...". A card is
 /// for deciding at a glance; the full call is in the session file.

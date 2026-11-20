@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::OwnedMutexGuard;
+use zx_core::tools::ToolContext;
 
 use crate::executor::Executor;
 use crate::sync::lock;
-use zx_core::tools::ToolContext;
 
 /// Serializes the changes to each file among the tools that share it, such as every session of
 /// a process: its host hands one queue to all of them. Changes to different files run at the

@@ -3,11 +3,10 @@
 use zx_agent::Session;
 use zx_agent::input::{Input, PendingInput};
 
+use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
 use crate::Addressee;
 use crate::server::admission::Limit;
 use crate::server::outlet::{Asked, said};
-
-use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {

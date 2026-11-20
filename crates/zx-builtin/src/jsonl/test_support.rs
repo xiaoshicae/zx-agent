@@ -3,8 +3,9 @@
 
 use std::path::Path;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 use zx_core::transcript::{SessionHeader, Transcript};
+
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
 pub(super) fn header() -> SessionHeader {
     SessionHeader::new(Path::new("/tmp"), "m")

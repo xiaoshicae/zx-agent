@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};

@@ -41,19 +41,17 @@ use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Re
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::Session;
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace};
 
+use self::commands::Command;
+use self::turn::{Running, Turn, prompt_text};
 use crate::application::connect;
 use crate::cli::{self, AcpArgs};
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
-
-use self::commands::Command;
-use self::turn::{Running, Turn, prompt_text};
 
 struct Host {
     /// The agent of every session, which also holds the sessions the client has open: the

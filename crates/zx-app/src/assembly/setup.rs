@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-
-use crate::config::{ProjectContext, READ_SKILL};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, SpillOutputs};
 use zx_agent::builtin::tools::{self, EXECUTOR_TOOL_NAMES, FileMutationQueue, READ_OUTPUT};
@@ -19,6 +17,7 @@ use zx_agent::transcript::SessionHeader;
 
 use super::SessionPlace;
 use super::execution::{ExecutorFactory, ExecutorSession};
+use crate::config::{ProjectContext, READ_SKILL};
 
 /// What each session of an agent gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.

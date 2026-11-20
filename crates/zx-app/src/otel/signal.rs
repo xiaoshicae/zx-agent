@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
-
 use zx_agent::ai::{Message, StopReason, Usage};
 use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};

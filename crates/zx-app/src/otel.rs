@@ -35,11 +35,11 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use zx_util::env::env_value;
 
 use self::signal::Signal;
 pub use self::signal::TraceHook;
 use self::spans::{Runs, export};
-use zx_util::env::env_value;
 
 /// Either variable turns the trace export on. As the OTLP specification has it, the first is
 /// used as it is, and the second gets `/v1/traces` appended.

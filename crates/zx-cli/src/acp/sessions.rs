@@ -9,7 +9,6 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Client, Error, ErrorCode};
 use anyhow::{Context, Result};
-
 use zx_agent::Session;
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_app::{ConfiguredAgent, resolve_cwd};

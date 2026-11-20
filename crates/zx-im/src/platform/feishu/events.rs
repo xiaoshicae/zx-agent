@@ -5,14 +5,13 @@ use serde_json::{Value, json};
 use zx_agent::events::ApprovalResult;
 use zx_util::sync::lock;
 
+use super::FeishuChannel;
+use super::connection::PREFIX;
 use crate::platform::report;
 use crate::{
     Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
     MessageId, ThreadId, UserId,
 };
-
-use super::FeishuChannel;
-use super::connection::PREFIX;
 
 impl FeishuChannel {
     /// The messages and clicks in one event. A message is named by its `message_id`, which

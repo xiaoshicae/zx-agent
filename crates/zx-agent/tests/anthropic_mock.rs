@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-
 use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, DEFAULT_API_VERSION};
 use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;

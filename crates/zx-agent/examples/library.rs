@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::SystemPrompt;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};

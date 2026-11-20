@@ -30,11 +30,10 @@ use zx_util::env::env_value;
 use zx_util::registry::Registry;
 use zx_util::sync::lock;
 
-use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
-
 #[cfg(feature = "feishu")]
 pub use self::feishu::{FeishuChannel, FeishuConfig};
 pub use self::slack::{SlackChannel, SlackConfig};
+use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
 
 /// The names the built-in platforms are registered under, which their channels go by.
 /// Feishu's is known also to a build without it, which refuses its section by name.

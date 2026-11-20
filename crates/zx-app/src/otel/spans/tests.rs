@@ -3,13 +3,13 @@ use std::time::UNIX_EPOCH;
 use opentelemetry::trace::{SpanId, TracerProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use serde_json::json;
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
+use zx_agent::events::{EventKind, RunReport};
+use zx_agent::policy::PolicyDecision;
 
 use super::*;
 use crate::otel::TraceParent;
 use crate::otel::test_support::{RUN, event};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
-use zx_agent::events::{EventKind, RunReport};
-use zx_agent::policy::PolicyDecision;
 
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 

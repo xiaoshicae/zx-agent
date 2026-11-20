@@ -10,7 +10,6 @@ use agent_client_protocol::v1::schema::{
     SessionUpdate, StopReason, UnstructuredCommandInput,
 };
 use anyhow::Result;
-
 use zx_agent::Session;
 use zx_agent::transcript::SessionName;
 

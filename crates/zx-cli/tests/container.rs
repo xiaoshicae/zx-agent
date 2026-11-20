@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{
@@ -26,12 +25,12 @@ use zx_agent::builtin::executor::{
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::{ExecutionMode, Tool};
-
-use self::common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, ended, ended_output};
 use zx_testing::{RunnerSetup, config, read_session_file, stderr};
+
+use self::common::zx_agent_in;
 
 /// Logs every invocation's arguments to `calls/` and answers from files next to it:
 /// `run.fail` (docker run fails with this message), `probe.code` and `probe.err` (the start-up

@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;

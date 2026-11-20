@@ -30,7 +30,7 @@ $output" '{decision: "block", reason: $r}'
 
 while IFS= read -r dir; do
     cd "$dir" || continue
-    check cargo fmt --check
+    check cargo fmt --check -- --config group_imports=StdExternalCrate
     check cargo clippy -q --all-targets -- -D warnings
     check cargo test -q
     check env RUSTDOCFLAGS="-D warnings" cargo doc -q --no-deps

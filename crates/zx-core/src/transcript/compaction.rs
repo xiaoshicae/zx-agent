@@ -17,9 +17,8 @@ use std::collections::HashSet;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
-
 pub(crate) use self::source::{summary_input, summary_messages};
+use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
 
 /// The largest summary, serialized as JSON, in bytes.
 pub const MAX_SUMMARY_BYTES: usize = 64 * 1024;

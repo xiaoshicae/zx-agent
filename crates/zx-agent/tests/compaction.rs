@@ -6,7 +6,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolResultMessage};
@@ -15,7 +14,6 @@ use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
 use zx_agent::session::SessionError;
 use zx_agent::transcript::Entry;
-
 use zx_testing::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use zx_testing::{
     EchoTool, NotifyingProvider, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session,

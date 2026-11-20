@@ -7,15 +7,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-
-use super::provider::ProviderSettings;
-use super::{parsed, read_text};
 use zx_agent::ai::{ModelCost, ModelMeta, Reasoning};
 use zx_agent::builtin::executor::{Access, ContainerConfig, InvalidContainerConfig};
 use zx_agent::builtin::mcp::ServerConfig;
 use zx_agent::builtin::output_store::{
     InvalidOutputStoreConfig, MAX_FILE_BYTES, MIN_THRESHOLD_BYTES, OutputStoreConfig,
 };
+
+use super::provider::ProviderSettings;
+use super::{parsed, read_text};
 
 /// Where long tool results are stored unless `toolOutput.directory` says otherwise: relative
 /// to the working directory of each session.

@@ -12,10 +12,9 @@ use zx_agent::transcript::{CustomMessage, SessionQuery};
 use zx_agent::{Agent, Session, SessionOptions, compaction};
 use zx_app::shutdown::next_event;
 
-use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
-
 use super::approval::{ApprovalEvents, ApprovalUpdate};
 use super::{Replies, SessionKey, Shared, timed};
+use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.

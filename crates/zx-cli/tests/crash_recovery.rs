@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::Notify;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, Message, Role, StopReason, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
@@ -26,13 +25,13 @@ use zx_agent::hooks::Hook;
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Entry;
-
-use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
 use zx_testing::{
     Collect, Driven, EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer, tool_call_block,
 };
+
+use self::common::zx_agent_in;
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {

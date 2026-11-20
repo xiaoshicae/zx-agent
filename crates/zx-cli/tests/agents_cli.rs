@@ -11,12 +11,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-
-use self::common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, agent_text, ended_output, fake_model_config, write_agent_file, write_config};
 use zx_testing::{json_lines, stderr, stdout};
+
+use self::common::zx_agent_in;
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
 

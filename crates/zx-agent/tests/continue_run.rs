@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, Message, ProviderErrorKind, StopReason};
 use zx_agent::events::RunOutcome;
@@ -14,7 +13,6 @@ use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{CustomMessage, Entry};
-
 use zx_testing::{
     Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, replayed_requests,
     summarize, take_queued_inputs, tool_call_answer, tool_call_block,

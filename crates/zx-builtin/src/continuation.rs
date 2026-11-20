@@ -1,9 +1,9 @@
 //! The hook that continues an answer cut off at the output token limit.
 
 use async_trait::async_trait;
+use zx_core::hooks::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
 
 use crate::ai::StopReason;
-use zx_core::hooks::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
 
 /// What the hook asks the model by default when an answer was cut off; the kernel does not
 /// depend on this wording.

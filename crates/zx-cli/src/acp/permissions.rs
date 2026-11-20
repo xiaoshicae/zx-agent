@@ -8,7 +8,6 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Client, Error};
 use serde_json::Value;
-
 use zx_agent::Session;
 use zx_agent::policy::ApprovalDecision;
 

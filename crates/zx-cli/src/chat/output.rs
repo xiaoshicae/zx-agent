@@ -11,11 +11,10 @@ use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
 use zx_util::text::clip;
 
+use super::term::{Style, Terminal, Tone, elapsed_text};
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, print_json_line};
 use crate::render::{Severity, answer_end_line, call_label, patch_of, progress_line, visible};
-
-use super::term::{Style, Terminal, Tone, elapsed_text};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;

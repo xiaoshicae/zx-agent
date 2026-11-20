@@ -1,10 +1,10 @@
 //! The command policy of the `bash` tool: denied patterns and programs.
 
 use async_trait::async_trait;
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 use super::{BashCall, bash_call, non_empty, normalize};
 use crate::ai::ToolCall;
-use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,

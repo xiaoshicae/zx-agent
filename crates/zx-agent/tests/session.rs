@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ProviderErrorKind, Reasoning, Request, ToolDef};
 use zx_agent::events::{Event, EventKind, RunOutcome};

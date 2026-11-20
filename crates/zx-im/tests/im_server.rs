@@ -13,7 +13,6 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};

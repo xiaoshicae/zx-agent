@@ -4,7 +4,6 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-
 use zx_agent::transcript::{SessionInfo, SessionList};
 use zx_app::{SessionPlace, resolve_cwd};
 

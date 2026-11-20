@@ -10,7 +10,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::fake_slack::{Answer, FakeSlack};
 use zx_testing::mock_server::{MockServer, Reply};

@@ -8,7 +8,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{

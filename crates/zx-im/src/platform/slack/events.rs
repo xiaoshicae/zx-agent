@@ -4,13 +4,12 @@
 use serde_json::{Value, json};
 use zx_agent::events::ApprovalResult;
 
+use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 use crate::platform::split_text;
 use crate::{
     Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId,
     Said, ThreadId, UserId,
 };
-
-use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 
 /// The bot as `auth.test` names it, which tells its own posts from everyone else's.
 #[derive(Default)]

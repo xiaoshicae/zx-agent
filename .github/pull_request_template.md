@@ -11,7 +11,7 @@
 
 ## 验证
 
-- [ ] `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` 通过，附上 `test result` 原始输出
+- [ ] `cargo fmt --check -- --config group_imports=StdExternalCrate`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` 通过，附上 `test result` 原始输出
 - [ ] 用到新语法或新标准库 API 时，`cargo +1.88.0 check --all-targets` 通过
 - [ ] 修 bug 时先补了回归测试，并确认它在修复前失败
 

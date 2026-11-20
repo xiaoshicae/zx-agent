@@ -37,6 +37,13 @@ mod storage;
 mod test_support;
 #[cfg(test)]
 mod tests;
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail, ensure};
+
 pub use self::compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, MAX_SUMMARY_BYTES,
     MAX_SUMMARY_STATEMENTS, SummarizedBy, SummaryFact, SummaryRequest,
@@ -55,13 +62,6 @@ pub use self::request::{RequestConfig, RequestConfigEntry, RequestSource, Reques
 pub use self::storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
 #[cfg(test)]
 pub(crate) use self::test_support::{FailingWriter, WriterLog};
-
-use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
-
-use anyhow::{Context, Result, bail, ensure};
-
 use crate::ai::{Message, UserMessageKind, now_ms};
 
 /// The session format: written to every new header, and the only version a session may have

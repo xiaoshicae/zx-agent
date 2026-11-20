@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
 use zx_agent::events::RunOutcome;
@@ -15,7 +14,6 @@ use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, SessionHeader, Transcript};
-
 use zx_testing::{Driven, EchoTool, RunnerSetup, Seed, Start, config, header};
 
 /// What a policy or a hook was told about the run: the labels and the actor.

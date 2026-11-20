@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 use super::edit_text::{Edit, NO_EDITS, apply_edits, lf_endings, split_bom, unified_patch};
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
@@ -14,7 +15,6 @@ use super::{
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
-use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 /// The most bytes of the patch in a result's details: details over the loop's limit are
 /// dropped whole, so a long patch is cut to leave room for the other fields.

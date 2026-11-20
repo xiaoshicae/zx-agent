@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_app::otel::{Telemetry, TraceParent};

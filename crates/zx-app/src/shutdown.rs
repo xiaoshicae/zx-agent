@@ -8,10 +8,10 @@ use anyhow::Result;
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-
-use crate::otel::Telemetry;
 use zx_agent::events::Event;
 use zx_agent::{Run, Session};
+
+use crate::otel::Telemetry;
 
 /// Which signal arrived.
 #[derive(Clone, Copy)]

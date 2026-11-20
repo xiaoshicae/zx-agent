@@ -2,7 +2,6 @@
 //! sessions of its agents, with what opening them has to say on stderr.
 
 use anyhow::Result;
-
 use zx_agent::Session;
 use zx_agent::transcript::Transcript;
 use zx_app::config::Builtin;

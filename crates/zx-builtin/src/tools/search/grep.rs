@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::{
     MAX_LINE_BYTES, VCS_DIRECTORIES, WITHOUT_DOT_SLASH, Wording, choose_engine, finish, first_lines, glob_of, limit_or,
@@ -14,7 +15,6 @@ use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES};
-use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Matches shown by default (pi: grep's `DEFAULT_LIMIT`).
 const DEFAULT_LIMIT: usize = 100;

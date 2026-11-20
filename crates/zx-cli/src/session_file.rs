@@ -4,7 +4,6 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
-
 use zx_agent::transcript::{SessionInfo, SessionQuery};
 use zx_app::{SessionPlace, resolve_cwd};
 

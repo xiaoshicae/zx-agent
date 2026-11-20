@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-use crate::config;
 use zx_agent::builtin::jsonl::JsonlStorage;
 use zx_agent::transcript::{MemoryStorage, SessionList, SessionQuery, SessionStorage};
+
+use crate::config;
 
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";

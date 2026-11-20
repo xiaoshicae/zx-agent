@@ -9,10 +9,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::{ServerEvent, ServerSink, Shared, timed};
 use crate::backlog;
 use crate::{Backlog, Inbound, MessageKey};
-
-use super::{ServerEvent, ServerSink, Shared, timed};
 
 /// A message's place in the backlog, which the message carries until it is handled: written
 /// into its session, answered without a run, or dropped on purpose. Dropping the receipt

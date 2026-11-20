@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-
-use crate::config::{CONTAINER, ContainerSettings, LOCAL};
 use zx_agent::builtin::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, UnusableWorkspace};
 use zx_util::registry::Registry;
+
+use crate::config::{CONTAINER, ContainerSettings, LOCAL};
 
 /// Starts the executor each session runs its commands with, for the `execution` of
 /// config.toml that names it.

@@ -18,7 +18,6 @@ use serde_json::Value;
 pub use self::auto_approve::{AutoApprove, ProgramOptions};
 pub use self::command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DEFAULT_DENIED_PROGRAMS, DEFAULT_READ_ONLY_PROGRAMS};
 pub use self::rules::{Rule, RuleMatcher, RulePolicy};
-
 use crate::ai::ToolCall;
 use crate::tools::BASH;
 

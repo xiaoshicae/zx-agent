@@ -9,12 +9,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
-
 use super::{
     CompactionPlan, CompactionSummary, LoadedSession, LogRecord, SessionHeader, SessionLog, SummarizedBy, SummaryFact,
     SummaryRequest, Transcript,
 };
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
 /// A log that writes each record and its newline to a writer, on a blocking thread as a file
 /// would be written: a writer that fails or blocks makes the append fail or time out. An

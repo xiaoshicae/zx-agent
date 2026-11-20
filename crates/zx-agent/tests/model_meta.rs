@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, ProviderErrorKind, Request, StopReason, StreamEvent,

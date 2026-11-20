@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
-
 use zx_agent::builtin::policy::{AutoApprove, ProgramOptions};
 
 /// One entry of `allow` or `deny`.

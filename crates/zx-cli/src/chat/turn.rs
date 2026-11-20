@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-
 use zx_agent::compaction;
 use zx_agent::events::{ApprovalResult, Event, EventKind, RunReport};
 use zx_agent::input::{Input, PendingInput};

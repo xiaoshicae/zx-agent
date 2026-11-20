@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-
 use zx_agent::Session;
 use zx_agent::builtin::tools::BASH;
 use zx_agent::transcript::SessionInfo;

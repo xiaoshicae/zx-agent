@@ -18,16 +18,15 @@ mod ls;
 use std::time::Duration;
 
 use serde_json::json;
+use zx_core::tools::{ToolContext, ToolOutput};
 
 pub use self::find::FindTool;
 pub use self::grep::GrepTool;
 pub use self::ls::LsTool;
-
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
 use crate::executor::{CAPTURE_LIMIT, CommandEnd, Executor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
-use zx_core::tools::{ToolContext, ToolOutput};
 
 /// Longest wait for one search: a search that takes longer is better narrowed than waited for,
 /// and the error says so.
@@ -271,10 +270,10 @@ mod tests {
 
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
+    use zx_core::tools::Tool;
 
     use super::*;
     use crate::executor::{Captured, CommandOutput};
-    use zx_core::tools::Tool;
 
     /// An executor whose searches print `stdout` and `stderr` as given and exit with 0.
     struct Scripted {

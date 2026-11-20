@@ -6,10 +6,9 @@ use reqwest::{StatusCode, Url};
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
+use super::{HISTORY_PAGE_MESSAGES, SETUP_ERRORS, SlackChannel};
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
 use crate::{Destination, ImError, MessageId, MessageRef, ThreadId};
-
-use super::{HISTORY_PAGE_MESSAGES, SETUP_ERRORS, SlackChannel};
 
 impl SlackChannel {
     /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON

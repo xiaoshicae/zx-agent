@@ -2,10 +2,10 @@
 //! calls it covers.
 
 use async_trait::async_trait;
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 use super::auto_approve::AutoApprove;
 use crate::ai::ToolCall;
-use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
 #[derive(Clone, Debug, PartialEq, Eq)]

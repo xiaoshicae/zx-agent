@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::extensions::Extension;
 use zx_util::env::env_value;

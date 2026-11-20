@@ -8,15 +8,14 @@ use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    Addressee, Backlog, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, MessageId,
-    MessageKey, MessageRef, Post, ThreadId,
-};
-
 use super::admission::{InputBudget, Limit};
 use super::received::Receipts;
 use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{SessionKey, Shared};
+use crate::{
+    Addressee, Backlog, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, MessageId,
+    MessageKey, MessageRef, Post, ThreadId,
+};
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
 const INBOUND_CAPACITY: usize = 64;

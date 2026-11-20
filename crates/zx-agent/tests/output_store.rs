@@ -6,7 +6,6 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolDef};
 use zx_agent::builtin::output_store::{
@@ -18,7 +17,6 @@ use zx_agent::events::RunOutcome;
 use zx_agent::hooks::Hook;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::{Session, SessionOptions};
-
 use zx_testing::{RunnerSetup, Start, config, header_in, tool_call, tool_context};
 
 /// Where the stores of these tests keep results, below the working directory as a program

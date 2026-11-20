@@ -8,12 +8,11 @@ mod command;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub use self::command::{CommandContext, CommandOutcome, SlashCommand, check_command_name};
 use crate::ai::{PREAMBLE, SystemPrompt};
 use crate::hooks::{Hook, HookChain, HookStage};
 use crate::policy::{PolicyChain, ToolPolicy};
 use crate::tools::Tool;
-
-pub use self::command::{CommandContext, CommandOutcome, SlashCommand, check_command_name};
 
 /// Tools, policies, hooks, system prompt sections and slash commands registered together,
 /// such as a client for an external tool server. An agent takes its extensions in

@@ -5,15 +5,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use zx_agent::agent::RunLimits;
+use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
+use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 
 use super::agent_file::{AgentFile, compaction_error, settle_token_trigger};
 use super::context::ProjectContext;
 use super::permissions::Permissions;
 use super::skills::{READ_SKILL, Skill, validate_skills};
 use super::{Config, read_text};
-use zx_agent::agent::RunLimits;
-use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
-use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
 const AGENTS_DIR: &str = "agents";

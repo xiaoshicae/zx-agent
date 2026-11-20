@@ -23,12 +23,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::ToolCall;
-use crate::guard::CancelSignal;
-
 pub use self::approval::{ApprovalDecision, ApprovalMode};
 pub(crate) use self::approval::{ApprovalGate, NO_HUMAN, RequestEnd, request_id};
 pub use self::chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
+use crate::ai::ToolCall;
+use crate::guard::CancelSignal;
 
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the
 /// strictest decision of all policies stands.

@@ -18,8 +18,6 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::process::Command;
-
-use self::common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_agent::transcript::SessionHeader;
 use zx_testing::http::{Request, read_request, silent_listener};
@@ -28,6 +26,8 @@ use zx_testing::program::{
     AgentHome, Home, agent_text, ended, ended_output, fake_model_config, write_agent_file, write_config,
 };
 use zx_testing::{json_lines, stderr, stdout};
+
+use self::common::zx_agent_in;
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_RUN_CLI_TEST_KEY";

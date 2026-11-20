@@ -8,7 +8,6 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, SessionId, StopReason};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
 use zx_agent::{Run, Session};

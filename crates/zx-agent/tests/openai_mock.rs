@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::Session;
 use zx_agent::ai::openai::{BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;

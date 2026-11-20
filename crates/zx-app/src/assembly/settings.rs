@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-
-use crate::config::{self, Config};
 use zx_agent::builtin::redact::check_secret_files;
 use zx_util::env::env_value;
+
+use crate::config::{self, Config};
 
 /// The variable that names the model under the host's and over config.toml's.
 const MODEL_ENV: &str = "ZX_MODEL";

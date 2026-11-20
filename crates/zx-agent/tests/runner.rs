@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, SystemPrompt, ToolCall, Usage};

@@ -34,11 +34,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use self::final_answer::{cut_off, final_answer};
-use self::run_scope::{CompactionPause, RunScope, RunStop};
-
 pub(crate) use self::accounting::{Exhausted, RunAccounting};
+use self::final_answer::{cut_off, final_answer};
 use self::run_scope::PERSIST_FAILED;
+use self::run_scope::{CompactionPause, RunScope, RunStop};
 pub(crate) use self::step_loop::{FirstInput, Halt, LoopConfig, StepLoop};
 pub(crate) use self::trace::{EventTarget, RunTrace};
 use crate::ai::retry::RetryPolicy;

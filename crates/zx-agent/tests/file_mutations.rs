@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{FileMutationQueue, WriteFileTool, executor_tools};
 use zx_agent::tools::Tool;

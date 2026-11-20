@@ -36,6 +36,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
+use zx_core::tools::ExecutionMode;
 
 pub use self::config::{Access, ContainerConfig, InvalidContainerConfig, Network, UnusableWorkspace};
 use self::config::{Platform, check_workspace, container_section, parse_platform};
@@ -43,14 +44,12 @@ use self::scripts::{
     EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
     PROBE_NO_WORKSPACE, PROBE_READ_ONLY, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
 };
-
 use super::capture::{Capture, await_end, collect};
 use super::{
     Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, directory_read_error, directory_write_error,
     over_limit_error, special_file_error,
 };
 use crate::text::clip;
-use zx_core::tools::ExecutionMode;
 
 /// Pause between readiness probes while the container starts.
 const START_POLL: Duration = Duration::from_millis(100);

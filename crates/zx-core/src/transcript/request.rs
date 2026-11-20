@@ -4,9 +4,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
-
 use super::{CompactionStartedEntry, Entry, SummarizedBy, Transcript, summary_input, summary_messages};
+use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

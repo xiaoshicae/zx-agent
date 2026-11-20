@@ -5,13 +5,13 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
-use crate::config::{MAX_FILE_BYTES, READ_SKILL, Skill};
 use zx_agent::ai::ToolDef;
 use zx_agent::builtin::tools::paging::{Links, Pager, read_text};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
 use zx_agent::builtin::tools::{READ_CANCELLED, parse_args, unless_cancelled};
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
+
+use crate::config::{MAX_FILE_BYTES, READ_SKILL, Skill};
 
 /// The read_skill tool: it reads the body of one of the agent's skills. It runs nothing and
 /// changes no tool or policy.

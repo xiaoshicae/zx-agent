@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::{EventKind, RunOutcome};

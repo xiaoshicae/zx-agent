@@ -28,6 +28,8 @@ mod skills;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
+use zx_agent::builtin::files::read_text_blocking;
+use zx_util::env::env_value;
 
 pub(crate) use self::agent_file::{ModelRequestLimit, RawLimits, cost_budget};
 pub(crate) use self::context::ProjectContext;
@@ -38,9 +40,6 @@ pub(crate) use self::permissions::Permissions;
 pub use self::provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use self::provider::{anthropic_config, openai_config};
 pub(crate) use self::skills::{READ_SKILL, Skill};
-
-use zx_agent::builtin::files::read_text_blocking;
-use zx_util::env::env_value;
 
 /// The variable that names the zx-agent home directory instead of `~/.zx-agent`.
 pub const HOME_ENV: &str = "ZX_AGENT_HOME";

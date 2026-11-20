@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::Message;
 use zx_agent::events::{Event, EventKind, RunOutcome, RunReport};
 use zx_agent::{Run, Session};

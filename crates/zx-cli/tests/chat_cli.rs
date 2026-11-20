@@ -12,12 +12,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
-
-use self::common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, ended, ended_output, retrying_fake_model_config, write_agent, write_config};
 use zx_testing::{json_lines, signal, stderr, stdout, summary_json, tool_call_answer};
+
+use self::common::zx_agent_in;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";

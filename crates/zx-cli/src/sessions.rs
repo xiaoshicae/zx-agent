@@ -2,7 +2,6 @@
 //! line each, most recent first.
 
 use anyhow::Result;
-
 use zx_agent::transcript::{SessionInfo, SessionList};
 use zx_app::{SessionPlace, resolve_cwd};
 use zx_util::stdio::{eprint_line, print_line};

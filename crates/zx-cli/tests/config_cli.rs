@@ -9,11 +9,11 @@ use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use tokio::process::Command;
-
-use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, write_config};
 use zx_testing::stderr;
+
+use self::common::zx_agent_in;
 
 /// `run` in `cwd` with `home`, without a model on the command line.
 fn run(cwd: &Path, home: Home<'_>, args: &[&str]) -> Command {

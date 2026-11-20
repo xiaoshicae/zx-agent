@@ -7,7 +7,6 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::builtin::tools::{FindTool, GrepTool, LsTool};
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
 use zx_testing::tool_context;

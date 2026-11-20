@@ -15,9 +15,8 @@ use zx_agent::Agent;
 use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
-use crate::{ImChannel, ImError, MessageRef, UserId};
-
 use super::{Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
+use crate::{ImChannel, ImError, MessageRef, UserId};
 
 /// Settings and resources every conversation reads.
 pub(super) struct Shared {

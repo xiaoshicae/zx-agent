@@ -6,11 +6,10 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::{self, Bytes, Message};
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
-use crate::{ImError, Inbound, Inlet};
-
 use super::SlackChannel;
 use super::events::{Me, decisions, message};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
+use crate::{ImError, Inbound, Inlet};
 
 impl SlackChannel {
     /// Ask for the Socket Mode connection's address and open it. An error is a failure that

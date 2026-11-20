@@ -6,12 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::parse_args;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::ai::ToolDef;
 use crate::executor::{Captured, CommandEnd, Executor, LocalExecutor, ShellCommand};
-use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// The timeout of a call that sets none, unless the host configures another.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);

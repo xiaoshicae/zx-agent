@@ -5,11 +5,10 @@ use zx_agent::ai::now_ms;
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
 
+use super::{Phase, Worker};
 use crate::server::approval::ApprovalUpdate;
 use crate::server::{ApprovalRecord, ServerEvent};
 use crate::{ApprovalCard, ApprovalId, Choice, MessageRef, Post, Replacement, UserId};
-
-use super::{Phase, Worker};
 
 /// A card waiting for its result.
 pub(super) struct Card {

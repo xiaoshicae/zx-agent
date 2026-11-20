@@ -159,7 +159,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
 cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-builtin
 cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings      # 不带 ⚑ D:5/CHINA FLAG: 飞书平台的 zx-im
-cargo fmt --check
+cargo fmt --check -- --config group_imports=StdExternalCrate   # 导入按规则 01 分组
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 

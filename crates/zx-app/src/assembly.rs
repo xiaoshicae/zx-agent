@@ -29,9 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-use crate::config::{Builtin, Config, cost_budget};
-use crate::otel::TraceHook;
 use zx_agent::ai::Reasoning;
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, short_secret_files};
 use zx_agent::builtin::tools::FileMutationQueue;
@@ -44,12 +41,13 @@ use zx_util::registry::Registry;
 
 pub use self::agent::{Approvals, ConfiguredAgent};
 pub use self::execution::{ExecutorFactory, ExecutorSession};
+use self::mcp::McpTools;
 pub use self::place::SessionPlace;
 pub use self::provider::{BuiltProvider, ProviderFactory, ProviderInput};
 pub use self::settings::NoModel;
-
-use self::mcp::McpTools;
 use self::settings::{Settings, checked_secret_files, secret_files};
+use crate::config::{Builtin, Config, cost_budget};
+use crate::otel::TraceHook;
 
 /// What the agents of a process share, read and connected once: the settings with what the
 /// host says over them, the MCP servers, the secret files to redact, the variables commands

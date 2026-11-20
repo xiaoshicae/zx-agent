@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
 };

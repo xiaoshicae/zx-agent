@@ -31,7 +31,6 @@ mod test_support;
 use std::process::ExitCode;
 
 use clap::Parser;
-
 use zx_util::stdio::eprint_line;
 
 use self::cli::{Cli, Command};

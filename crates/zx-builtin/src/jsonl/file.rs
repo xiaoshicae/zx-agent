@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-
 use zx_core::transcript::{LoadedSession, LogRecord, SessionHeader, SessionLog};
 
 /// The longest header line read from a file that may not be a session at all.

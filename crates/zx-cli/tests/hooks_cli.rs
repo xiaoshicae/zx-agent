@@ -6,11 +6,11 @@ use std::path::Path;
 
 use serde_json::json;
 use tokio::process::Command;
-
-use self::common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, fake_model_config, write_config};
 use zx_testing::{stderr, stdout};
+
+use self::common::zx_agent_in;
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {

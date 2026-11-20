@@ -28,14 +28,13 @@ use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, Sessio
 use zx_util::registry::Registry;
 use zx_util::stdio::eprint_line;
 
+pub(crate) use self::args::Args;
+use self::config_file::{ConfigFile, access, read_file, server_config};
+use self::log::{Log, failure_log};
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
 use crate::{ImChannel, ImError, Server, ServerConfig};
-
-pub(crate) use self::args::Args;
-use self::config_file::{ConfigFile, access, read_file, server_config};
-use self::log::{Log, failure_log};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
 /// asked, a platform failed while serving, or the configuration or the credentials were

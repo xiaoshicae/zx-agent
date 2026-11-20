@@ -7,7 +7,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 use zx_agent::hooks::{
     ContextEdit, FinishedStep, HookContext, RequestPlan, RequestSettings, StepDecision, StepDisposition,

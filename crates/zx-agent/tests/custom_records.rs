@@ -2,7 +2,6 @@
 //! of model context, and `custom_message` entries, which the model sees as user messages.
 
 use serde_json::json;
-
 use zx_agent::ai::{Message, UserMessageKind};
 use zx_agent::transcript::{CustomMessage, Transcript};
 use zx_testing::{header, note, read_lines, summarize};

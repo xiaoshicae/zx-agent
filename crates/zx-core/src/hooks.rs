@@ -15,14 +15,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+pub use self::chain::HookChain;
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 use crate::events::{Event, EventKind, HookPhase};
 use crate::guard::{CancelSignal, Stopped};
 use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
 use crate::transcript::{context_edit_refusal, replace_text};
-
-pub use self::chain::HookChain;
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);

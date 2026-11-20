@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};

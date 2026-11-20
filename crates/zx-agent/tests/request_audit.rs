@@ -5,14 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, ProviderErrorKind, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
-
 use zx_testing::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests, request_ids};
 
 /// Every recorded request of `transcript`, rebuilt: the provider-neutral request and its

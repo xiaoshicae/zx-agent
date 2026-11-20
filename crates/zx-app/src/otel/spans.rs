@@ -9,10 +9,10 @@ use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::trace::SdkTracer;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-use super::signal::{Signal, What};
 use zx_agent::ai::{StopReason, Usage};
 use zx_agent::events::{ApprovalResult, Interruption, RequestKind, RunOutcome};
+
+use super::signal::{Signal, What};
 
 /// Builds spans from signals, one task owning every open span.
 pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs, stop: CancellationToken) {

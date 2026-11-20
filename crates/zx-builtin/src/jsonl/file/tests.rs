@@ -2,10 +2,11 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use zx_core::transcript::{SESSION_VERSION, Transcript};
+
 use super::*;
 use crate::ai::Message;
 use crate::jsonl::test_support::{assistant, header, texts};
-use zx_core::transcript::{SESSION_VERSION, Transcript};
 
 /// A new session in the file `path`.
 fn create(path: &Path) -> Result<Transcript> {

@@ -14,11 +14,10 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_util::random::random_u64;
 
-use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
-use crate::{ImError, Inlet};
-
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
+use crate::{ImError, Inlet};
 
 /// The prefix of every error of the long connection.
 pub(super) const PREFIX: &str = "feishu long connection";

@@ -3,10 +3,11 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
+use zx_core::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
+
 use super::test_support::{header, texts};
 use super::*;
 use crate::ai::Message;
-use zx_core::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
 
 /// A header for a session started in `cwd` at `timestamp`, with `id`.
 fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {

@@ -9,8 +9,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,
@@ -19,6 +17,8 @@ use zx_im::{
 use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use zx_testing::http::silent_listener;
+
+use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
 
 fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());

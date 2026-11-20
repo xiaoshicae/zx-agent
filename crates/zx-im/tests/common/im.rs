@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
 use zx_im::{
     Backlog, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog, MessageKey, ThreadId,
 };

@@ -7,9 +7,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
-
 use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
 
 /// A model-visible message and the entry it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]

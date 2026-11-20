@@ -10,10 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use zx_agent::builtin::files::create_private_dir;
 
+use super::{SessionKey, Shared};
 use crate::files::{RECORD, blocking, read_record, record_paths, remove_record, segment, write_record};
 use crate::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, ThreadId};
-
-use super::{SessionKey, Shared};
 
 /// What [`blocking`] names in its error.
 const FILES: &str = "status files";

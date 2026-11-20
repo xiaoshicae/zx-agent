@@ -17,6 +17,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use self::run::EVENT_BUFFER;
+pub use self::run::Run;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
@@ -28,9 +30,6 @@ use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
 use crate::sync::lock;
 use crate::tools::ActiveTools;
 use crate::transcript::{CustomMessage, SessionName, Transcript};
-
-use self::run::EVENT_BUFFER;
-pub use self::run::Run;
 
 /// What a new session starts with.
 #[derive(Clone, Debug)]

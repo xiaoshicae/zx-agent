@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
@@ -14,7 +13,6 @@ use zx_agent::compaction::Config;
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Entry;
-
 use zx_testing::{
     Collect, Driven, EchoTool, RunnerSetup, Seed, config, fast_retry, seeded_session, summary_json, test_limits,
 };

@@ -5,9 +5,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::now_ms;
-
 use super::{Entry, Transcript};
+use crate::ai::now_ms;
 
 /// What a session is called: one line, without surrounding whitespace, never empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

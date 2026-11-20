@@ -8,12 +8,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
+use zx_core::tools::ToolOutput;
 
 use crate::ai::ToolCall;
 use crate::files::{Links, Unreadable, read_regular_blocking};
 use crate::sync::lock;
-use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
-use zx_core::tools::ToolOutput;
 
 /// The largest secret file read, such as a token: anything bigger is not a single secret, and
 /// it could never be matched whole in the bounded output of a built-in tool.

@@ -6,9 +6,8 @@ use std::collections::HashSet;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{Message, StopReason, ToolCall, now_ms};
-
 use super::{Entry, Transcript};
+use crate::ai::{Message, StopReason, ToolCall, now_ms};
 
 /// A tool call with side effects that is about to run.
 ///

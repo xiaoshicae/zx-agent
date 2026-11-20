@@ -21,14 +21,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-
-use self::environment::WORKING_DIRECTORY_LABEL;
 use zx_core::tools::ExecutionMode;
 
 pub(crate) use self::capture::CAPTURE_LIMIT;
 pub use self::container::{
     Access, ContainerConfig, ContainerExecutor, InvalidContainerConfig, Network, UnusableWorkspace,
 };
+use self::environment::WORKING_DIRECTORY_LABEL;
 pub use self::local::LocalExecutor;
 
 /// One command line, run in `cwd` with the executor's shell: the model's command for the bash

@@ -1,9 +1,9 @@
 //! What the tests of the policies share.
 
 use serde_json::Value;
+use zx_core::policy::PolicyDecision;
 
 use crate::ai::ToolCall;
-use zx_core::policy::PolicyDecision;
 
 /// A call of the tool `name` with `arguments`.
 pub(super) fn call(name: &str, arguments: Value) -> ToolCall {

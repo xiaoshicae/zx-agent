@@ -39,7 +39,7 @@
 
 根目录的 `Cargo.toml` 是虚拟 workspace，在根目录运行覆盖全部 crate；加 `-p <crate>` 或在 `crates/<crate>` 里运行只处理那一个。
 
-- 格式：`cargo fmt`
+- 格式：`cargo fmt -- --config group_imports=StdExternalCrate`（按规则 01 给导入分组）
 - lint：`cargo clippy --all-targets -- -D warnings`，零警告。以下改动另跑 `cargo clippy -p <crate> --no-default-features --all-targets -- -D warnings`，检查关掉默认 feature 的构建：内核的工具校验（`zx-core`，feature `json-schema`）、`zx-builtin`（`mcp`，MCP 客户端）、`zx-im`（⚑ D:5/CHINA FLAG: `feishu`，飞书平台）
 - 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`（引号不能省），零警告，断掉的文档链接也算

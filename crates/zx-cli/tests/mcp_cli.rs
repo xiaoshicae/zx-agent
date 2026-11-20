@@ -12,12 +12,12 @@ use std::process::Stdio;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-
-use self::common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, ended_output, fake_model_config, write_agent, write_config};
 use zx_testing::{stderr, stdout};
+
+use self::common::zx_agent_in;
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";

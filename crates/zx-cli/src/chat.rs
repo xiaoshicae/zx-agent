@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
@@ -33,11 +32,6 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
-use crate::application::{connect, open_or_create};
-use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
-use crate::render::visible;
-
 use self::commands::Command;
 use self::info::{About, banner, help, status};
 use self::input::Line;
@@ -45,6 +39,10 @@ use self::output::Output;
 use self::storage::{Keeping, Storage, opening};
 use self::term::Tone;
 use self::turn::{Operation, TurnIo, drive_turn};
+use crate::application::{connect, open_or_create};
+use crate::cli::{self, ChatArgs};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
+use crate::render::visible;
 
 /// A second Ctrl+C within this long, while idle, exits.
 const QUIT_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);

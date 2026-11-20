@@ -5,12 +5,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::{Wording, finish, first_lines, limit_or, quote, search, search_path};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
-use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Entries shown by default (pi: ls's `DEFAULT_LIMIT`).
 const DEFAULT_LIMIT: usize = 500;

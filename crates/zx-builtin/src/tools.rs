@@ -28,6 +28,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
+use zx_core::tools::{Tool, ToolContext};
 
 pub use self::bash::BashTool;
 pub use self::edit::EditFileTool;
@@ -35,9 +36,7 @@ pub use self::mutation::FileMutationQueue;
 pub use self::read::ReadFileTool;
 pub use self::search::{FindTool, GrepTool, LsTool};
 pub use self::write::WriteFileTool;
-
 use crate::executor::Executor;
-use zx_core::tools::{Tool, ToolContext};
 
 /// Name of the built-in shell tool.
 pub const BASH: &str = "bash";
