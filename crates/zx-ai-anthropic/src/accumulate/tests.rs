@@ -190,8 +190,8 @@ fn a_stream_without_a_stop_reason_or_with_an_error_event_fails() {
     );
 
     let error = json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}});
-    let Failure::Error { details, .. } = acc.apply(&error).unwrap_err() else {
+    let Failure::Error { provider_error, .. } = acc.apply(&error).unwrap_err() else {
         panic!("an error event fails the response");
     };
-    assert_eq!(details.kind, ProviderErrorKind::Unavailable);
+    assert_eq!(provider_error.kind, ProviderErrorKind::Unavailable);
 }

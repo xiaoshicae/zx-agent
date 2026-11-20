@@ -32,13 +32,13 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &OpenAiCon
         .and_then(Value::as_str)
         .map_or_else(|| String::from_utf8_lossy(&bytes).into_owned(), str::to_string);
     let text = excerpt(&text);
-    let details = ProviderError {
+    let provider_error = ProviderError {
         kind: kind::of_status(status, code.as_deref(), &text),
         status: Some(status),
         code,
         retry_after_ms,
     };
-    Failure::error(details, status_message(status, &text))
+    Failure::error(provider_error, status_message(status, &text))
 }
 
 /// What a JSON body under a success status says: its error object, or else that the server
@@ -80,11 +80,11 @@ pub(crate) fn provider_failure(error: &Value) -> Failure {
         .map_or_else(|| error.to_string(), str::to_string);
     let text = excerpt(&text);
     let code = error_code(error);
-    let details = ProviderError {
+    let provider_error = ProviderError {
         kind: kind::of_error(code.as_deref(), &text),
         status: None,
         code,
         retry_after_ms: None,
     };
-    Failure::error(details, error_object_message(&text))
+    Failure::error(provider_error, error_object_message(&text))
 }

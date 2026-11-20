@@ -92,12 +92,12 @@ pub trait Answer {
     /// ended.
     fn finish(&self) -> Result<AssistantMessage, String>;
 
-    /// The message so far, ended by `stop_reason` with `error` and its `details`.
+    /// The message so far, ended by `stop_reason` with `error` and its `provider_error`.
     fn failure(
         &self,
         stop_reason: StopReason,
         error: impl Into<String>,
-        details: Option<ProviderError>,
+        provider_error: Option<ProviderError>,
     ) -> AssistantMessage;
 }
 
@@ -111,7 +111,10 @@ pub async fn end(outcome: Result<(), Failure>, answer: &impl Answer, started: In
             .unwrap_or_else(|error| answer.failure(StopReason::Error, error, Some(ProviderErrorKind::Protocol.into()))),
         Err(Failure::Aborted) => answer.failure(StopReason::Aborted, ABORTED_MESSAGE, None),
         Err(Failure::Closed) => return,
-        Err(Failure::Error { details, message }) => answer.failure(StopReason::Error, message, Some(details)),
+        Err(Failure::Error {
+            provider_error,
+            message,
+        }) => answer.failure(StopReason::Error, message, Some(provider_error)),
     };
     message.duration_ms = Some(duration_ms(started.elapsed()));
     // Once the consumer closes, a terminal event has nobody left to report to.

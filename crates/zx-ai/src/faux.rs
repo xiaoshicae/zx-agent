@@ -20,10 +20,13 @@ pub enum FauxStep {
         blocks: Vec<ContentBlock>,
         stop: StopReason,
     },
-    /// Fail before streaming, as a provider reports a failed request: `error` says what kind
-    /// of failure it was, which decides whether a run retries or compacts, and `message` is
-    /// its text.
-    Fail { error: ProviderError, message: String },
+    /// Fail before streaming, as a provider reports a failed request: `provider_error` says
+    /// what kind of failure it was, which decides whether a run retries or compacts, and
+    /// `message` is its text.
+    Fail {
+        provider_error: ProviderError,
+        message: String,
+    },
     /// Wait until cancelled, then end with `Aborted`.
     Hang,
     /// Decide the step from the request, for answers that must refer to what the request
@@ -48,11 +51,12 @@ impl FauxStep {
         }
     }
 
-    /// Fail before streaming with `error`, a [`ProviderErrorKind`](crate::ProviderErrorKind)
-    /// or a whole [`ProviderError`], and the error text `message`.
-    pub fn fail(error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
+    /// Fail before streaming with `provider_error`, a
+    /// [`ProviderErrorKind`](crate::ProviderErrorKind) or a whole [`ProviderError`], and the
+    /// error text `message`.
+    pub fn fail(provider_error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
         FauxStep::Fail {
-            error: error.into(),
+            provider_error: provider_error.into(),
             message: message.into(),
         }
     }
@@ -151,9 +155,12 @@ async fn event_for(
     let failure = |stop, error: &str| AssistantMessage::failure("faux", model, stop, error);
     Some(match step {
         None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
-        Some(FauxStep::Fail { error, message }) => {
+        Some(FauxStep::Fail {
+            provider_error,
+            message,
+        }) => {
             let mut failed = failure(StopReason::Error, &message);
-            failed.provider_error = Some(error);
+            failed.provider_error = Some(provider_error);
             StreamEvent::Error(failed)
         }
         Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(

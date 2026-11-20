@@ -88,7 +88,7 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
         "stream": true,
     });
     if let Some(system) = system {
-        body["system"] = json!([{ "type": "text", "text": system, "cache_control": cache() }]);
+        body["system"] = json!([{ "type": "text", "text": system, "cache_control": cache_breakpoint() }]);
     }
     if !request.tools.is_empty() {
         body["tools"] = tools(&request.tools);
@@ -105,7 +105,7 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
 }
 
 /// The cache breakpoint of this provider: the API's default lifetime.
-fn cache() -> Value {
+fn cache_breakpoint() -> Value {
     json!({ "type": "ephemeral" })
 }
 
@@ -122,7 +122,7 @@ fn tools(tools: &[ToolDef]) -> Value {
                 "input_schema": tool.parameters,
             });
             if index == last {
-                definition["cache_control"] = cache();
+                definition["cache_control"] = cache_breakpoint();
             }
             definition
         })
@@ -202,7 +202,7 @@ impl Turns {
             && last["role"] != "assistant"
             && let Some(block) = last["content"].as_array_mut().and_then(|content| content.last_mut())
         {
-            block["cache_control"] = cache();
+            block["cache_control"] = cache_breakpoint();
         }
     }
 }

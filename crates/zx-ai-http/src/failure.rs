@@ -21,16 +21,19 @@ pub enum Failure {
     Aborted,
     /// The consumer of the stream went away, so nothing is left to report to.
     Closed,
-    /// The request failed, with the error for the message and its classification.
-    Error { details: ProviderError, message: String },
+    /// The request failed, with its classification and the text for the message.
+    Error {
+        provider_error: ProviderError,
+        message: String,
+    },
 }
 
 impl Failure {
-    /// A failed request: `details`, a whole [`ProviderError`] or only its kind, and the text
-    /// for the message.
-    pub fn error(details: impl Into<ProviderError>, message: impl Into<String>) -> Self {
+    /// A failed request: `provider_error`, a whole [`ProviderError`] or only its kind, and the
+    /// text for the message.
+    pub fn error(provider_error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
         Self::Error {
-            details: details.into(),
+            provider_error: provider_error.into(),
             message: message.into(),
         }
     }

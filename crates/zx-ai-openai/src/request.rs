@@ -161,10 +161,10 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
                 }
             }
             Message::ToolResult(result) => {
-                let Some(pos) = pending.iter().position(|id| *id == result.tool_call_id) else {
+                let Some(position) = pending.iter().position(|id| *id == result.tool_call_id) else {
                     continue;
                 };
-                pending.remove(pos);
+                pending.remove(position);
                 let content = if result.content.is_empty() {
                     EMPTY_TOOL_RESULT
                 } else {

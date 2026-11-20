@@ -54,12 +54,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_a_header_cannot_carry_fails_before_anything_is_sent() {
-        let Err(Failure::Error { details, message }) =
-            api_key(&ApiKey::fixed("sk-line\nbreak"), Duration::from_secs(1)).await
+        let Err(Failure::Error {
+            provider_error,
+            message,
+        }) = api_key(&ApiKey::fixed("sk-line\nbreak"), Duration::from_secs(1)).await
         else {
             panic!("the key was accepted");
         };
-        assert_eq!(details.kind, ProviderErrorKind::ApiKey);
+        assert_eq!(provider_error.kind, ProviderErrorKind::ApiKey);
         assert!(!message.contains("sk-line"), "{message}");
     }
 }

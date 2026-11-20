@@ -172,7 +172,7 @@ async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) ->
         return Ok(false);
     }
     let chunk: Value = serde_json::from_str(data)
-        .map_err(|e| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream chunk: {e}")))?;
+        .map_err(|error| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream chunk: {error}")))?;
     if let Some(error) = error_object(&chunk) {
         return Err(provider_failure(error));
     }
@@ -193,12 +193,16 @@ mod tests {
         let mut acc = Accumulator::new("p", "m", 1);
         let (mut tx, _rx) = event_channel();
         let chunk = r#"{"error":{"message":"overloaded","code":"server_overloaded"}}"#;
-        let Failure::Error { details, message } = handle_data(chunk, &mut acc, &mut tx).await.unwrap_err() else {
+        let Failure::Error {
+            provider_error,
+            message,
+        } = handle_data(chunk, &mut acc, &mut tx).await.unwrap_err()
+        else {
             panic!("expected a provider error");
         };
         // The code is not a known one, so the wording says what kind of failure it is.
         assert_eq!(
-            details,
+            provider_error,
             zx_ai::ProviderError {
                 kind: ProviderErrorKind::Unavailable,
                 status: None,

@@ -46,13 +46,13 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &Anthropic
     } else {
         of_status(status, code.as_deref(), &text)
     };
-    let details = ProviderError {
+    let provider_error = ProviderError {
         kind,
         status: Some(status),
         code,
         retry_after_ms,
     };
-    Failure::error(details, status_message(status, &text))
+    Failure::error(provider_error, status_message(status, &text))
 }
 
 /// What a JSON body under a success status says: its error, or else that the server did not
@@ -85,13 +85,13 @@ pub(crate) fn provider_failure(error: &Value) -> Failure {
         .and_then(Value::as_str)
         .map_or_else(|| error.to_string(), str::to_string);
     let text = excerpt(&text);
-    let details = ProviderError {
+    let provider_error = ProviderError {
         kind: of_type(code.as_deref(), &text),
         status: None,
         code,
         retry_after_ms: None,
     };
-    Failure::error(details, error_object_message(&text))
+    Failure::error(provider_error, error_object_message(&text))
 }
 
 fn error_type(error: &Value) -> Option<String> {
@@ -174,13 +174,15 @@ mod tests {
 
     #[test]
     fn an_error_event_is_a_provider_failure_of_its_type() {
-        let Failure::Error { details, message } =
-            provider_failure(&json!({"type": "overloaded_error", "message": "Overloaded"}))
+        let Failure::Error {
+            provider_error,
+            message,
+        } = provider_failure(&json!({"type": "overloaded_error", "message": "Overloaded"}))
         else {
             panic!("expected an error");
         };
-        assert_eq!(details.kind, ProviderErrorKind::Unavailable);
-        assert_eq!(details.code.as_deref(), Some("overloaded_error"));
+        assert_eq!(provider_error.kind, ProviderErrorKind::Unavailable);
+        assert_eq!(provider_error.code.as_deref(), Some("overloaded_error"));
         assert_eq!(message, "provider error: Overloaded");
     }
 }

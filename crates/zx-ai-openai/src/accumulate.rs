@@ -23,7 +23,7 @@ enum Block {
     Tool {
         id: String,
         name: String,
-        args: String,
+        arguments: String,
     },
 }
 
@@ -34,7 +34,7 @@ pub(crate) struct Accumulator {
     timestamp: u64,
     blocks: Vec<Block>,
     /// OpenAI tool-call index -> position in `blocks`.
-    tool_slots: HashMap<u64, usize>,
+    tool_positions: HashMap<u64, usize>,
     usage: Usage,
     finish_reason: Option<String>,
     /// The first `id` a chunk carried.
@@ -50,7 +50,7 @@ impl Accumulator {
             model: model.to_string(),
             timestamp,
             blocks: Vec::new(),
-            tool_slots: HashMap::new(),
+            tool_positions: HashMap::new(),
             usage: Usage::default(),
             finish_reason: None,
             response_id: None,
@@ -130,9 +130,9 @@ impl Accumulator {
     /// call with the chunk's `id`, and for a chunk without an id the latest call, since a
     /// chunk that names no call can only go on with the one under way. The chunk's place in
     /// its array says nothing: two chunks at the same place can belong to different calls.
-    fn tool_slot(&self, index: Option<u64>, id: Option<&str>) -> Option<usize> {
+    fn tool_position(&self, index: Option<u64>, id: Option<&str>) -> Option<usize> {
         match (index, id) {
-            (Some(index), _) => self.tool_slots.get(&index).copied(),
+            (Some(index), _) => self.tool_positions.get(&index).copied(),
             (None, Some(id)) => self
                 .blocks
                 .iter()
@@ -152,15 +152,15 @@ impl Accumulator {
             .and_then(|function| function.get("name"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let slot = match self.tool_slot(index, id) {
-            Some(slot) => {
-                if let Block::Tool { name: existing, .. } = &mut self.blocks[slot]
+        let position = match self.tool_position(index, id) {
+            Some(position) => {
+                if let Block::Tool { name: existing, .. } = &mut self.blocks[position]
                     && existing.is_empty()
                     && !name.is_empty()
                 {
                     *existing = name.to_string();
                 }
-                slot
+                position
             }
             None => {
                 // Without an id the call is named by its index. A call with neither is the
@@ -169,26 +169,26 @@ impl Accumulator {
                 self.blocks.push(Block::Tool {
                     id: id.clone(),
                     name: name.to_string(),
-                    args: String::new(),
+                    arguments: String::new(),
                 });
-                let slot = self.blocks.len() - 1;
+                let position = self.blocks.len() - 1;
                 if let Some(index) = index {
-                    self.tool_slots.insert(index, slot);
+                    self.tool_positions.insert(index, position);
                 }
                 deltas.push(Delta::ToolCallStart {
                     id,
                     name: name.to_string(),
                 });
-                slot
+                position
             }
         };
         if let Some(fragment) = function
             .and_then(|function| function.get("arguments"))
             .and_then(Value::as_str)
             .filter(|fragment| !fragment.is_empty())
-            && let Block::Tool { args, id, .. } = &mut self.blocks[slot]
+            && let Block::Tool { arguments, id, .. } = &mut self.blocks[position]
         {
-            args.push_str(fragment);
+            arguments.push_str(fragment);
             deltas.push(Delta::ToolCallArgs {
                 id: id.clone(),
                 text: fragment.to_string(),
@@ -237,8 +237,8 @@ impl Accumulator {
                     thinking: text.clone(),
                     signature: Some((*field).to_string()),
                 },
-                Block::Tool { id, name, args } => {
-                    ContentBlock::ToolCall(ToolCall::streamed(id.clone(), name.clone(), args))
+                Block::Tool { id, name, arguments } => {
+                    ContentBlock::ToolCall(ToolCall::streamed(id.clone(), name.clone(), arguments))
                 }
             })
             .collect()
@@ -291,22 +291,22 @@ impl Answer for Accumulator {
                 Some(format!("the provider ended the response with finish_reason {other:?}")),
             ),
         };
-        let details = error.is_some().then(|| ProviderError {
+        let provider_error = error.is_some().then(|| ProviderError {
             kind: kind::of_finish_reason(reason),
             status: None,
             code: Some(reason.to_string()),
             retry_after_ms: None,
         });
-        Ok(self.message(stop_reason, error, details))
+        Ok(self.message(stop_reason, error, provider_error))
     }
 
     fn failure(
         &self,
         stop_reason: StopReason,
         error: impl Into<String>,
-        details: Option<ProviderError>,
+        provider_error: Option<ProviderError>,
     ) -> AssistantMessage {
-        self.message(stop_reason, Some(error.into()), details)
+        self.message(stop_reason, Some(error.into()), provider_error)
     }
 }
 

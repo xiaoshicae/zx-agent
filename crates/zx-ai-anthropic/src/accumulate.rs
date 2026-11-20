@@ -265,13 +265,13 @@ impl Answer for Accumulator {
                         format!("the API ended the response with stop_reason {other:?}"),
                     ),
                 };
-                let details = ProviderError {
+                let provider_error = ProviderError {
                     kind,
                     status: None,
                     code: Some(other.to_string()),
                     retry_after_ms: None,
                 };
-                return Ok(self.message(StopReason::Error, Some(error), Some(details)));
+                return Ok(self.message(StopReason::Error, Some(error), Some(provider_error)));
             }
         };
         Ok(self.message(stop_reason, None, None))
@@ -281,9 +281,9 @@ impl Answer for Accumulator {
         &self,
         stop_reason: StopReason,
         error: impl Into<String>,
-        details: Option<ProviderError>,
+        provider_error: Option<ProviderError>,
     ) -> AssistantMessage {
-        self.message(stop_reason, Some(error.into()), details)
+        self.message(stop_reason, Some(error.into()), provider_error)
     }
 }
 

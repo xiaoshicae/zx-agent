@@ -220,7 +220,7 @@ fn inline_changes_of_the_system_prompt_wait_for_the_next_answer() {
             .contains("cwd /b")
     );
     // The last turn is the end of the conversation, cached.
-    assert_eq!(inline["messages"][6]["content"][0]["cache_control"], cache());
+    assert_eq!(inline["messages"][6]["content"][0]["cache_control"], cache_breakpoint());
 
     let collapsed = body_of(&request(messages), SystemUpdates::Collapse);
     let system = collapsed["system"][0]["text"].as_str().unwrap();

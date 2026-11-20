@@ -181,7 +181,7 @@ async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) ->
         return Ok(false);
     }
     let event: Value = serde_json::from_str(data)
-        .map_err(|e| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream event: {e}")))?;
+        .map_err(|error| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream event: {error}")))?;
     for delta in acc.apply(&event)? {
         if !send_event(tx, StreamEvent::Delta(delta)).await {
             return Err(Failure::Closed);

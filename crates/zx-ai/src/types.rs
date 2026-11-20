@@ -437,7 +437,7 @@ pub enum Message {
 impl Message {
     /// A user message stamped with the current time.
     pub fn user(text: impl Into<String>) -> Self {
-        Message::User {
+        Self::User {
             content: text.into(),
             timestamp: now_ms(),
             kind: UserMessageKind::Prompt,
@@ -456,18 +456,18 @@ impl Message {
     /// Who the message is from: its `role`, as the session file writes it.
     pub fn role(&self) -> Role {
         match self {
-            Message::System(_) => Role::System,
-            Message::User { .. } => Role::User,
-            Message::Assistant(_) => Role::Assistant,
-            Message::ToolResult(_) => Role::ToolResult,
+            Self::System(_) => Role::System,
+            Self::User { .. } => Role::User,
+            Self::Assistant(_) => Role::Assistant,
+            Self::ToolResult(_) => Role::ToolResult,
         }
     }
 
     /// Which kind of user message this is; `None` for a message of another role.
     pub fn user_kind(&self) -> Option<UserMessageKind> {
         match self {
-            Message::User { kind, .. } => Some(*kind),
-            Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => None,
+            Self::User { kind, .. } => Some(*kind),
+            Self::System(_) | Self::Assistant(_) | Self::ToolResult(_) => None,
         }
     }
 }
