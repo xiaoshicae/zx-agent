@@ -94,29 +94,30 @@ async fn chosen(env: &[(&str, &str)], flags: &[&str], file: &MockServer) -> Outp
 }
 
 #[tokio::test]
-async fn the_model_comes_from_the_flag_then_the_variable_then_the_file_and_the_base_url_from_the_variable_then_the_file()
- {
-    let file = MockServer::start(vec![Reply::text("file")]).await;
-    let output = chosen(&[], &[], &file).await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(requested_model(&file), "file-model");
+async fn the_model_comes_from_the_flag_then_the_variable_then_the_file() {
+    for (env, flags, model) in [
+        (&[][..], &[][..], "file-model"),
+        (&[("ZX_MODEL", "env-model")][..], &[][..], "env-model"),
+        (
+            &[("ZX_MODEL", "env-model")][..],
+            &["--model", "flag-model"][..],
+            "flag-model",
+        ),
+    ] {
+        let file = MockServer::start(vec![Reply::text("ok")]).await;
+        let output = chosen(env, flags, &file).await;
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(requested_model(&file), model);
+    }
+}
 
+#[tokio::test]
+async fn the_base_url_comes_from_the_variable_then_the_file() {
     let file = MockServer::start(vec![]).await;
     let env = MockServer::start(vec![Reply::text("env")]).await;
-    let output = chosen(&[("ZX_MODEL", "env-model"), ("ZX_BASE_URL", &env.base_url)], &[], &file).await;
+    let output = chosen(&[("ZX_BASE_URL", &env.base_url)], &[], &file).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(requested_model(&env), "env-model");
-    assert!(file.requests().is_empty());
-
-    let env = MockServer::start(vec![Reply::text("env")]).await;
-    let output = chosen(
-        &[("ZX_MODEL", "env-model"), ("ZX_BASE_URL", &env.base_url)],
-        &["--model", "flag-model"],
-        &file,
-    )
-    .await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(requested_model(&env), "flag-model");
+    assert_eq!(env.requests().len(), 1);
     assert!(file.requests().is_empty());
 }
 

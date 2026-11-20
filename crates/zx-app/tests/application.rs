@@ -225,7 +225,7 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
 }
 
 #[tokio::test]
-async fn an_explicit_host_gets_sanitized_notices_and_rejects_unusable_secret_files() {
+async fn a_notice_about_a_short_secret_names_its_file_but_not_its_value() {
     let dir = tempfile::tempdir().unwrap();
     let secret = dir.path().join("secret.txt");
     std::fs::write(&secret, "Q7z").unwrap();
@@ -237,7 +237,11 @@ async fn an_explicit_host_gets_sanitized_notices_and_rejects_unusable_secret_fil
     assert_eq!(app.notices().len(), 1);
     assert!(app.notices()[0].contains(&secret.display().to_string()));
     assert!(!app.notices()[0].contains("Q7z"));
-    std::fs::remove_file(secret).unwrap();
+}
+
+#[tokio::test]
+async fn a_secret_file_that_cannot_be_used_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
     let mut config = configured();
     config.secret_files.push(dir.path().join("secret.txt"));
     let error = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)

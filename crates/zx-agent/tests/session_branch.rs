@@ -153,8 +153,8 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 }
 
 #[tokio::test]
-async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
-    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("later")]));
+async fn branching_and_inspecting_wait_for_the_run() {
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
     let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
     provider.wait_for_start(&mut running).await;
@@ -165,15 +165,29 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     );
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn an_unknown_entry_is_refused_and_the_position_stays() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
+    session.prompt("first").await.unwrap();
 
     assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
-    // The position did not move: the next prompt continues after the aborted answer.
+
     session.prompt("second").await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[0], "user:first");
     assert_eq!(context[context.len() - 1], "user:second");
-    // While `inspect` runs, the conversation is leased, as during a prompt.
+}
+
+#[tokio::test]
+async fn the_conversation_is_leased_while_it_is_inspected() {
+    let provider = Arc::new(FauxProvider::new(Vec::<FauxStep>::new()));
+    let (session, _) = RunnerSetup::new(config(provider, vec![])).build().await;
+
     let during = session.with_transcript(|_| session.set_reasoning(None)).unwrap();
+
     assert_eq!(during, Err(SessionError::Busy));
     assert_eq!(session.set_reasoning(None), Ok(()));
 }

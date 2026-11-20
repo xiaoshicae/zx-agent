@@ -719,7 +719,7 @@ async fn compaction_timeout_is_bounded_and_keeps_original_context() {
 }
 
 #[tokio::test]
-async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() {
+async fn a_source_over_its_byte_limit_is_not_sent() {
     let (mut seed, _) = seeded_session().await;
     seed.append_message(Message::user("x".repeat(2 * 1024 * 1024)))
         .await
@@ -737,7 +737,10 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("source exceeds"));
     assert!(provider.requests().is_empty());
+}
 
+#[tokio::test]
+async fn a_summary_over_its_byte_limit_is_not_kept() {
     let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("x".repeat(65 * 1024))]));
     let (runner, _) = RunnerSetup {

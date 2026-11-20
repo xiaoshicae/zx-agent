@@ -190,7 +190,7 @@ async fn a_spend_cap_denies_access_and_is_not_retried() {
 }
 
 #[tokio::test]
-async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused() {
+async fn an_overloaded_api_is_unavailable_with_its_wait() {
     let server = MockServer::start(vec![error_reply(
         529,
         "retry-after: 2\r\n",
@@ -218,7 +218,10 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
         }
     );
     assert!(report.error.unwrap().contains("HTTP 529: Overloaded"));
+}
 
+#[tokio::test]
+async fn a_refusal_fails_the_run_as_refused() {
     let server = MockServer::start(vec![Reply::Sse(vec![
         started()[0].clone(),
         json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal", "category": "cyber"}}}),
