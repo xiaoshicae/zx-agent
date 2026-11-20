@@ -131,11 +131,7 @@ pub fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, Strin
 
 /// `raw` as a path, read with [`path_text`], and against `cwd` when relative.
 pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
-    let raw = path_text(raw);
-    if raw.is_empty() {
-        return Err("path is empty".to_string());
-    }
-    let path = Path::new(raw);
+    let path = Path::new(path_text(raw)?);
     Ok(if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -144,16 +140,20 @@ pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
 }
 
 /// The path a model wrote as `raw`: trimmed, and without a leading `@`, which some models put
-/// before paths.
-fn path_text(raw: &str) -> &str {
+/// before paths. Errors when nothing is left.
+fn path_text(raw: &str) -> Result<&str, String> {
     let raw = raw.trim();
-    raw.strip_prefix('@').unwrap_or(raw)
+    let path = raw.strip_prefix('@').unwrap_or(raw);
+    if path.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    Ok(path)
 }
 
 /// Check that `raw` names a path, before the call runs: the working directory is not known
-/// yet, so only the form is checked, as [`resolve`] reads it.
+/// yet, so only the form is checked, as [`path_text`] reads it.
 pub(crate) fn check_path(raw: &str) -> Result<(), String> {
-    resolve(Path::new("."), raw).map(|_| ())
+    path_text(raw).map(|_| ())
 }
 
 /// How far into a file the text tools look for a NUL byte, which marks a binary file.

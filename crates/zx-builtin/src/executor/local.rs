@@ -40,6 +40,7 @@ impl ProcessGroup {
     fn kill(&mut self) {
         let pid = self.0.take();
         #[cfg(unix)]
+        // The PID of a child always fits in a pid_t; one that did not could not be signalled.
         if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
             // SAFETY: kill(2) has no memory-safety preconditions. The child leads this
             // process group, so a negative PID targets its pipelines and descendants.

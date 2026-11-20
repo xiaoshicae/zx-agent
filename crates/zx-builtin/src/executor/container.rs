@@ -87,7 +87,7 @@ impl Target {
         let mut command = docker(&self.docker);
         command.arg("exec");
         if let Input::Piped = input {
-            command.arg("--interactive");
+            command.arg("--interactive").stdin(Stdio::piped());
         }
         command.args(["--user", &self.user]);
         if let Some(workdir) = workdir {
@@ -97,9 +97,6 @@ impl Target {
             .arg(&self.name)
             .args(["sh", "-c", script, label])
             .args(arguments);
-        if let Input::Piped = input {
-            command.stdin(Stdio::piped());
-        }
         command
     }
 

@@ -149,7 +149,7 @@ impl Tool for EditFileTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args = Args::parse(&args)?;
-        let shown = path_text(&args.path);
+        let shown = path_text(&args.path)?;
         let path = resolve(&ctx.cwd, &args.path)?;
         let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await

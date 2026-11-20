@@ -63,14 +63,13 @@ struct Replacement<'a> {
     new_text: &'a str,
 }
 
-/// Where `old` is in `content`: exactly, or else in the tolerant forms of both, which
-/// `content` then must already be in.
-fn find(content: &str, old: &str) -> Option<(usize, usize)> {
+/// Where `old` is in `content`: exactly, or else as `tolerant_old`, its tolerant form,
+/// which `content` then must already be in.
+fn find(content: &str, old: &str, tolerant_old: &str) -> Option<(usize, usize)> {
     if let Some(start) = content.find(old) {
         return Some((start, old.len()));
     }
-    let old = tolerant(old);
-    content.find(&old).map(|start| (start, old.len()))
+    content.find(tolerant_old).map(|start| (start, tolerant_old.len()))
 }
 
 /// Name an edit in an error: `single` when it is the only one, such as pi's "the text", else
@@ -109,7 +108,8 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
         })
         .collect();
     let total = edits.len();
-    for (index, edit) in edits.iter().enumerate() {
+    let tolerant_old: Vec<String> = edits.iter().map(|edit| tolerant(&edit.old_text)).collect();
+    for (index, (edit, tolerant_old)) in edits.iter().zip(&tolerant_old).enumerate() {
         if edit.old_text.is_empty() {
             return Err(format!(
                 "{} has an empty oldText in {path}",
@@ -117,7 +117,7 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
             ));
         }
         // Empty in the form texts are compared in: it would match everywhere and nowhere.
-        if tolerant(&edit.old_text).is_empty() {
+        if tolerant_old.is_empty() {
             return Err(format!(
                 "{} has an oldText of only spaces in {path}; include the text beside them, which says where to edit",
                 which(index, total, "the edit")
@@ -125,15 +125,15 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
         }
     }
     let tolerant_content = tolerant(content);
-    let needs_tolerance = edits
-        .iter()
-        .any(|edit| !content.contains(&edit.old_text) && tolerant_content.contains(&tolerant(&edit.old_text)));
+    let needs_tolerance = edits.iter().zip(&tolerant_old).any(|(edit, tolerant_old)| {
+        !content.contains(&edit.old_text) && tolerant_content.contains(tolerant_old.as_str())
+    });
     let base = if needs_tolerance {
         tolerant_content.as_str()
     } else {
         content
     };
-    let replacements = locate(&edits, base, &tolerant_content, path)?;
+    let replacements = locate(&edits, &tolerant_old, base, &tolerant_content, path)?;
     check_overlaps(&replacements, path)?;
     let changed = replace_touched_lines(text, base, &replacements);
     if changed == text {
@@ -144,24 +144,26 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
     Ok(changed)
 }
 
-/// Where each of `edits` matches in `base`, in order of position. Errors name an edit that
-/// is not found, or that is found more than once in the tolerant form of the content.
+/// Where each of `edits` matches in `base`, in order of position; `tolerant_old` holds the
+/// tolerant form of each oldText. Errors name an edit that is not found, or that is found
+/// more than once in the tolerant form of the content.
 fn locate<'a>(
     edits: &'a [Edit],
+    tolerant_old: &[String],
     base: &str,
     tolerant_content: &str,
     path: &str,
 ) -> Result<Vec<Replacement<'a>>, String> {
     let total = edits.len();
     let mut replacements = Vec::with_capacity(total);
-    for (index, edit) in edits.iter().enumerate() {
-        let Some((start, len)) = find(base, &edit.old_text) else {
+    for (index, (edit, tolerant_old)) in edits.iter().zip(tolerant_old).enumerate() {
+        let Some((start, len)) = find(base, &edit.old_text, tolerant_old) else {
             return Err(format!(
                 "could not find {} in {path}; oldText must match the file exactly, including whitespace and line breaks",
                 which(index, total, "the text")
             ));
         };
-        let occurrences = tolerant_content.matches(&tolerant(&edit.old_text)).count();
+        let occurrences = tolerant_content.matches(tolerant_old.as_str()).count();
         if occurrences > 1 {
             return Err(format!(
                 "found {occurrences} occurrences of {} in {path}; oldText must be unique, so include more of the surrounding text",
@@ -211,11 +213,13 @@ fn replace_touched_lines(original: &str, base: &str, replacements: &[Replacement
         let first = spans
             .iter()
             .position(|&(start, stop)| replacement.start >= start && replacement.start < stop)
-            .unwrap_or(spans.len().saturating_sub(1));
-        let last = spans[first..]
-            .iter()
-            .position(|&(_, stop)| stop >= end)
-            .map_or(spans.len(), |index| first + index + 1);
+            .expect("a match is not empty, so it starts before the end of the text, in a line");
+        let last = first
+            + 1
+            + spans[first..]
+                .iter()
+                .position(|&(_, stop)| stop >= end)
+                .expect("a match ends at the end of the text at the latest, which ends a line");
         match groups.last_mut() {
             Some(group) if first < group.1 => {
                 group.1 = group.1.max(last);
@@ -226,8 +230,9 @@ fn replace_touched_lines(original: &str, base: &str, replacements: &[Replacement
     }
     let mut result = String::with_capacity(original.len());
     let mut next_line = 0;
+    // A group starts at or after the line where the one before it ended.
     for (first, last, group) in groups {
-        for line in &original_lines[next_line.min(first)..first] {
+        for line in &original_lines[next_line..first] {
             result.push_str(line);
         }
         let (group_start, group_end) = (spans[first].0, spans[last - 1].1);

@@ -248,8 +248,8 @@ fn glob_of(raw: &str) -> &str {
 
 /// `raw`, or `.` when absent or blank, read as read_file reads a path.
 fn search_path(raw: Option<&str>) -> String {
-    let raw = path_text(raw.unwrap_or_default());
-    if raw.is_empty() { ".".into() } else { raw.into() }
+    // An absent or blank path is the working directory.
+    path_text(raw.unwrap_or_default()).unwrap_or(".").into()
 }
 
 /// The limit asked for, at most [`MAX_LINES`], which is all a result can show anyway, or

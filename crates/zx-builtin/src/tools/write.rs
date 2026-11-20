@@ -95,7 +95,7 @@ impl Tool for WriteFileTool {
         )
         .await?;
         Ok(
-            ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", path_text(&args.path)))
+            ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", path_text(&args.path)?))
                 .with_details(json!({ "path": path.display().to_string(), "bytes": bytes })),
         )
     }

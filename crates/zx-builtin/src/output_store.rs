@@ -125,15 +125,36 @@ impl fmt::Display for InvalidOutputStoreConfig {
 
 impl std::error::Error for InvalidOutputStoreConfig {}
 
+/// The paths on the way from `cwd` to `cwd.join(below)` that are below `cwd`, as `below`
+/// names them. A `..` back to `cwd` is followed, as the directories after it are below it
+/// again; one above `cwd` leaves it, and what comes after is not below it.
+fn on_the_way(cwd: &Path, below: &Path) -> Vec<PathBuf> {
+    let (mut path, mut depth, mut paths) = (cwd.to_path_buf(), 0_usize, Vec::new());
+    for part in below.components() {
+        path.push(part);
+        match part {
+            Component::Normal(_) => {
+                depth += 1;
+                paths.push(path.clone());
+            }
+            Component::ParentDir if depth == 0 => break,
+            Component::ParentDir => depth -= 1,
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    paths
+}
+
 /// The filesystem address and settings of the stored results. The writer hook and the
 /// reading tool own independent copies; no open file or in-memory catalog is shared between
 /// them.
 #[derive(Clone)]
 pub struct OutputStore {
     config: OutputStoreConfig,
-    /// The directory and the directories above it, up to the working directory and without
-    /// it, outermost first; none for a directory outside the working directory. Commands
-    /// write the working directory, so none of these may be a symbolic link.
+    /// The directories on the way to the directory, as its path names them, while they are
+    /// below the working directory, outermost first; none for a directory outside the working
+    /// directory. Commands write the working directory, so none of these may be a symbolic
+    /// link.
     below_cwd: Vec<PathBuf>,
 }
 
@@ -145,15 +166,8 @@ impl OutputStore {
         config.validate()?;
         config.directory = cwd.join(config.directory);
         let below_cwd = match config.directory.strip_prefix(cwd) {
-            // A path that goes up again is not below the working directory.
-            Ok(below) if !below.components().any(|part| part == Component::ParentDir) => below
-                .components()
-                .scan(cwd.to_path_buf(), |path, part| {
-                    path.push(part);
-                    Some(path.clone())
-                })
-                .collect(),
-            Ok(_) | Err(_) => Vec::new(),
+            Ok(below) => on_the_way(cwd, below),
+            Err(_) => Vec::new(),
         };
         Ok(Self { config, below_cwd })
     }
@@ -415,6 +429,29 @@ mod tests {
 
     use super::*;
     use crate::test_support::make_fifo;
+
+    #[tokio::test]
+    async fn a_directory_named_through_dot_dot_is_checked_for_links_on_its_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("b")).unwrap();
+        let store = OutputStore::new(dir.path(), OutputStoreConfig::new("a/../b/outputs")).unwrap();
+
+        let error = store.check_directory().await.unwrap_err();
+
+        assert!(error.contains("through the symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn only_the_directories_below_the_working_directory_are_on_the_way() {
+        let cwd = Path::new("/w");
+        let way = |below: &str| on_the_way(cwd, Path::new(below));
+        assert_eq!(way("a/b"), [cwd.join("a"), cwd.join("a/b")]);
+        assert_eq!(way("a/../b"), [cwd.join("a"), cwd.join("a/../b")]);
+        assert_eq!(way("a/../../x"), [cwd.join("a")]);
+        assert!(way("../x").is_empty());
+    }
 
     #[tokio::test]
     async fn a_named_pipe_in_place_of_an_output_is_refused() {
