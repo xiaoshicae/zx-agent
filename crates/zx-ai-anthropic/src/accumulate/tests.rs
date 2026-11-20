@@ -17,6 +17,20 @@ fn ended(reason: &str) -> Value {
 }
 
 #[test]
+fn an_empty_id_or_model_names_nothing() {
+    let mut acc = Accumulator::new("anthropic", "claude-opus-5-5", 1);
+    apply_all(
+        &mut acc,
+        &[
+            json!({"type": "message_start", "message": {"id": "", "model": "", "usage": {"input_tokens": 1}}}),
+            ended("end_turn"),
+        ],
+    );
+    let message = acc.finish().unwrap();
+    assert_eq!((message.response_id, message.response_model), (None, None));
+}
+
+#[test]
 fn a_text_answer_streams_its_deltas_and_counts_cached_prompt_tokens_as_input() {
     let mut acc = Accumulator::new("anthropic", "claude-opus-5-5", 1);
     let deltas = apply_all(

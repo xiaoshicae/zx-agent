@@ -83,10 +83,10 @@ impl Accumulator {
     }
 
     fn start(&mut self, message: &Value) {
-        self.response_id = message["id"].as_str().map(str::to_string);
+        self.response_id = message["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string);
         self.response_model = message["model"]
             .as_str()
-            .filter(|model| *model != self.model)
+            .filter(|model| !model.is_empty() && *model != self.model)
             .map(str::to_string);
         self.apply_usage(&message["usage"]);
     }

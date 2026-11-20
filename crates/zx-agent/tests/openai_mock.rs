@@ -183,6 +183,24 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 }
 
 #[tokio::test]
+async fn an_http_error_shows_the_servers_message() {
+    let body = json!({"error": {"message": "Rate limit reached, slow down", "type": "requests"}});
+    let server = MockServer::start(vec![Reply::error(429, "", &body.to_string())]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(0),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    let error = report.error.unwrap();
+    assert!(error.contains("HTTP 429: Rate limit reached, slow down"), "{error}");
+    assert!(!error.contains('{'), "{error}");
+}
+
+#[tokio::test]
 async fn large_http_errors_keep_bounded_diagnostics() {
     let server = MockServer::start(vec![Reply::error(400, "", &"x".repeat(128 * 1024))]).await;
     let (runner, _) = setup(&server, Duration::from_secs(10)).build().await;

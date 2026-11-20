@@ -140,6 +140,9 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
         request = request.header(name.as_str(), value.as_str());
     }
     if let Some(key) = api_key(&config.api_key, config.idle_timeout).await? {
+        let mut key = reqwest::header::HeaderValue::from_str(&key).expect("`api_key` gives keys a header can carry");
+        // Kept out of debug output, as `bearer_auth` keeps the OpenAI-compatible provider's.
+        key.set_sensitive(true);
         request = request.header(KEY_HEADER, key);
     }
     send(request, config.idle_timeout).await

@@ -17,16 +17,21 @@ use crate::config::OpenAiConfig;
 
 /// The failure of a response with an error status, of the kind that the status, the body's
 /// error code and its wording report ([`kind::of_status`]), with the server's Retry-After
-/// hint. A hint the client cannot read is left to the local backoff, and a body that cannot
-/// be read only loses its excerpt; the status still decides.
+/// hint. The text is the message of the body's error object, or else the body. A hint the
+/// client cannot read is left to the local backoff, and a body that cannot be read only loses
+/// its excerpt; the status still decides.
 pub(crate) async fn http_failure(response: reqwest::Response, config: &OpenAiConfig) -> Failure {
     let status = response.status().as_u16();
     let retry_after_ms = retry_after_ms(response.headers(), SystemTime::now());
     let bytes = diagnostic_body(response, config.idle_timeout, config.max_response_bytes).await;
-    let code = serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .and_then(|body| body.get("error").and_then(error_code));
-    let text = excerpt(&String::from_utf8_lossy(&bytes));
+    let body = serde_json::from_slice::<Value>(&bytes).ok();
+    let error = body.as_ref().and_then(error_object);
+    let code = error.and_then(error_code);
+    let text = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map_or_else(|| String::from_utf8_lossy(&bytes).into_owned(), str::to_string);
+    let text = excerpt(&text);
     let details = ProviderError {
         kind: kind::of_status(status, code.as_deref(), &text),
         status: Some(status),
