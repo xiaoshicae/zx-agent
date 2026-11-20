@@ -129,7 +129,7 @@ input = ["text", "image"]
 cost = { input = 0.10, output = 0.50, cacheRead = 0.01, cacheWrite = 0.125 }   # 美元每百万 token
 ```
 
-模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key。这个示例在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；当时 `cost` 只写了 `input` 与 `output`，缓存的读写单价（`input_cache_read`、`input_cache_write`）是事后按价目补的。`[[models]]` 不写缓存单价时按 0 计，读写缓存的请求算出的花费就偏低，花费预算也随之失准。提示词达到 10 万 token 时，OpenRouter 按更高一档的单价计费（`pricing.overrides`），`[[models]]` 只有一档。
+模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key，缓存的读写单价（`input_cache_read`、`input_cache_write`）也在其中。`[[models]]` 不写缓存单价时按 0 计，读写缓存的请求算出的花费就偏低，花费预算也随之失准。提示词达到 10 万 token 时，OpenRouter 按更高一档的单价计费（`pricing.overrides`），`[[models]]` 只有一档。
 
 调 Claude 也可以用 `anthropic` provider，经 OpenRouter 的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）。这个接口按其文档以 `Authorization: Bearer` 认证，所以要设 `apiKeyHeader`；`model` 与 `[[models]]` 同上：
 
