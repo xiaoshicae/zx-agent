@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use serde_json::Value;
 use zx_ai::{ProviderError, ProviderErrorKind};
 use zx_ai_http::Failure;
-use zx_ai_http::failure::{diagnostic_body, excerpt, retry_after_ms};
+use zx_ai_http::failure::{diagnostic_body, error_object_message, excerpt, retry_after_ms, status_message};
 
 use crate::config::AnthropicConfig;
 
@@ -52,7 +52,7 @@ pub(crate) async fn http_failure(response: reqwest::Response, config: &Anthropic
         code,
         retry_after_ms,
     };
-    Failure::error(details, format!("HTTP {status}: {text}"))
+    Failure::error(details, status_message(status, &text))
 }
 
 /// What a JSON body under a success status says: its error, or else that the server did not
@@ -91,7 +91,7 @@ pub(crate) fn provider_failure(error: &Value) -> Failure {
         code,
         retry_after_ms: None,
     };
-    Failure::error(details, format!("provider error: {text}"))
+    Failure::error(details, error_object_message(&text))
 }
 
 fn error_type(error: &Value) -> Option<String> {

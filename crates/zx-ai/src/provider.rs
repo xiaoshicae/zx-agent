@@ -10,6 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::types::{Request, StreamEvent};
 
+/// The error message of a response that ended because its request was cancelled
+/// (`StopReason::Aborted`), as every provider writes it; pi's words.
+pub const ABORTED_MESSAGE: &str = "Request was aborted";
+
 /// Buffered events per response before the producer waits for its consumer.
 pub(crate) const STREAM_EVENT_BUFFER: usize = 64;
 

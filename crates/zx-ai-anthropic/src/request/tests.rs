@@ -133,7 +133,7 @@ fn a_call_without_a_result_gets_one_and_a_result_without_its_call_is_left_out() 
             )
         })
         .collect();
-    assert_eq!(results, [("a", "ok"), ("b", NO_RESULT)]);
+    assert_eq!(results, [("a", "ok"), ("b", MISSING_TOOL_RESULT)]);
     assert_eq!(body["messages"][2]["content"][1]["is_error"], json!(true));
 }
 

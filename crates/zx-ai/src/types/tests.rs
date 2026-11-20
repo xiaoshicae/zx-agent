@@ -48,7 +48,7 @@ fn invalid_streamed_tool_arguments_keep_what_the_model_sent() {
         .arguments_error
         .unwrap();
     assert!(error.len() < MAX_RECEIVED_ARGUMENTS + 200, "{}", error.len());
-    assert!(error.ends_with("…"), "{error}");
+    assert!(error.ends_with("..."), "{error}");
 
     let empty = ToolCall::streamed("c".into(), "bash".into(), " ");
     assert_eq!((empty.arguments, empty.arguments_error), (json!({}), None));

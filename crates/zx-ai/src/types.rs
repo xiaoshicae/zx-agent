@@ -196,7 +196,7 @@ impl ToolCall {
             match serde_json::from_str::<Value>(raw) {
                 Ok(value) => (value, None),
                 Err(error) => {
-                    let received = prefix_noted(raw, MAX_RECEIVED_ARGUMENTS, |_, _| "…".to_string());
+                    let received = prefix_noted(raw, MAX_RECEIVED_ARGUMENTS, |_, _| "...".to_string());
                     let error = format!("arguments are not valid JSON: {error}\n\nReceived arguments:\n{received}");
                     (json!({}), Some(error))
                 }
@@ -369,6 +369,13 @@ impl AssistantMessage {
             .collect()
     }
 }
+
+/// What a provider sends the model as the result of a tool call whose result is empty.
+pub const EMPTY_TOOL_RESULT: &str = "(no output)";
+
+/// What a provider sends the model as the result of a tool call that has none, such as one a
+/// cancelled run left behind: the APIs refuse a call without a result.
+pub const MISSING_TOOL_RESULT: &str = "No result provided";
 
 /// The result of one tool call, sent back to the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

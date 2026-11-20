@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use zx_ai::provider::{EventSender, send_event};
+use zx_ai::provider::{ABORTED_MESSAGE, EventSender, send_event};
 use zx_ai::{AssistantMessage, ProviderError, ProviderErrorKind, StopReason, StreamEvent, duration_ms};
 
 use crate::failure::{Failure, transport_failure};
@@ -109,7 +109,7 @@ pub async fn end(outcome: Result<(), Failure>, answer: &impl Answer, started: In
         Ok(()) => answer
             .finish()
             .unwrap_or_else(|error| answer.failure(StopReason::Error, error, Some(ProviderErrorKind::Protocol.into()))),
-        Err(Failure::Aborted) => answer.failure(StopReason::Aborted, "Request was aborted", None),
+        Err(Failure::Aborted) => answer.failure(StopReason::Aborted, ABORTED_MESSAGE, None),
         Err(Failure::Closed) => return,
         Err(Failure::Error { details, message }) => answer.failure(StopReason::Error, message, Some(details)),
     };

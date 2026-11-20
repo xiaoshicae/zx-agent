@@ -36,6 +36,18 @@ impl Failure {
     }
 }
 
+/// The message of a failure that a response with the error status `status` reports, with
+/// `text` from its body.
+pub fn status_message(status: u16, text: &str) -> String {
+    format!("HTTP {status}: {text}")
+}
+
+/// The message of a failure that a server's error object reports, in a body or in the
+/// stream, with `text` from it.
+pub fn error_object_message(text: &str) -> String {
+    format!("provider error: {text}")
+}
+
 /// The failure of `operation`, a request or a stream read, that `error` ended.
 pub(crate) fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
     let kind = if error.is_timeout() {

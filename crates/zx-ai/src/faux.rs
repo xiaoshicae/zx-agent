@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
+use super::provider::{ABORTED_MESSAGE, EventReceiver, EventSender, Provider, event_channel, send_event};
 use super::types::{
     AssistantMessage, ContentBlock, Delta, ProviderError, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms,
 };
@@ -162,7 +162,7 @@ async fn event_for(
         )),
         Some(FauxStep::Hang) => {
             cancel.cancelled().await;
-            StreamEvent::Error(failure(StopReason::Aborted, "Request was aborted"))
+            StreamEvent::Error(failure(StopReason::Aborted, ABORTED_MESSAGE))
         }
         Some(FauxStep::Respond { blocks, stop }) => respond(blocks, stop, model, cancel, tx).await?,
     })
@@ -201,7 +201,7 @@ async fn respond(
             ..Usage::default()
         },
         stop_reason: if aborted { StopReason::Aborted } else { stop },
-        error_message: aborted.then(|| "Request was aborted".to_string()),
+        error_message: aborted.then(|| ABORTED_MESSAGE.to_string()),
         provider_error: None,
         timestamp,
         duration_ms: Some(0),

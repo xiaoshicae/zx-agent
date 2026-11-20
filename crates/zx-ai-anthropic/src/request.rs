@@ -3,7 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef, api_identifier};
+use zx_ai::{
+    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, MISSING_TOOL_RESULT, Message, Reasoning, Request, SystemPrompt,
+    ToolDef, api_identifier,
+};
 
 use crate::config::{BodyOptions, SystemUpdates};
 
@@ -19,10 +22,6 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 64_000;
 /// What a thinking block the API redacted is recorded with in place of its signature: this
 /// marker, then the block's encrypted data. No signature starts with it.
 pub(crate) const REDACTED: &str = "redacted:";
-
-/// The result sent for a tool call that has none, such as one a cancelled run left behind:
-/// the API refuses a call without a result.
-const NO_RESULT: &str = "No result provided";
 
 /// What is recorded with each request: which conversion turned the transcript into a body,
 /// then its options, side by side in one object.
@@ -183,7 +182,7 @@ impl Turns {
     /// A result for each call of `pending` that has none.
     fn close_calls(&mut self, pending: &mut Vec<String>) {
         for id in pending.drain(..) {
-            self.push("user", tool_result(&id, NO_RESULT, true));
+            self.push("user", tool_result(&id, MISSING_TOOL_RESULT, true));
         }
     }
 
@@ -263,7 +262,7 @@ fn convert_messages(
                 };
                 pending.remove(position);
                 let content = if result.content.is_empty() {
-                    "(no output)"
+                    EMPTY_TOOL_RESULT
                 } else {
                     result.content.as_str()
                 };

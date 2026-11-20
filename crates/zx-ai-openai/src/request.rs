@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt};
+use zx_ai::{
+    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, MISSING_TOOL_RESULT, Message, Reasoning, Request, SystemPrompt,
+};
 
 use crate::accumulate::REASONING_FIELDS;
 use crate::config::{BodyOptions, ReasoningFormat, SystemUpdates};
@@ -164,7 +166,7 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
                 };
                 pending.remove(pos);
                 let content = if result.content.is_empty() {
-                    "(no output)"
+                    EMPTY_TOOL_RESULT
                 } else {
                     result.content.as_str()
                 };
@@ -260,7 +262,7 @@ fn fill_missing_reasoning(messages: &mut [Value]) {
 
 fn flush_missing_results(out: &mut Vec<Value>, pending: &mut Vec<String>) {
     for id in pending.drain(..) {
-        out.push(json!({ "role": "tool", "tool_call_id": id, "content": "No result provided" }));
+        out.push(json!({ "role": "tool", "tool_call_id": id, "content": MISSING_TOOL_RESULT }));
     }
 }
 
