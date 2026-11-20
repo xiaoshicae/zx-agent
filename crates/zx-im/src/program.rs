@@ -9,7 +9,6 @@
 mod args;
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -28,6 +27,7 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
 use zx_util::registry::Registry;
+use zx_util::stdio::{eprint_line, print_line};
 
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
@@ -111,7 +111,7 @@ impl Program {
         match run(Args::parse(), self).await {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("zx-im: {error:#}");
+                eprint_line(&format!("zx-im: {error:#}"));
                 ExitCode::from(EXIT_USAGE)
             }
         }
@@ -203,7 +203,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     let (code, end) =
         shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| -> Result<u8> {
             if telemetry.is_some() {
-                eprintln!("[otel] exporting traces over OTLP/HTTP");
+                eprint_line(shutdown::EXPORT_NOTICE);
             }
             let dir = file.sessions.dir;
             let (statuses, backlog) = open_stores(&dir)?;
@@ -224,23 +224,22 @@ async fn run(args: Args, program: Program) -> Result<u8> {
             Ok(serve(config, &agent, channels, &dir).await)
         })
         .await?;
-    if end.dropped > 0 {
-        eprintln!("[otel] {} event(s) were not exported: the queue was full", end.dropped);
-    }
-    if let Some(error) = end.error {
-        eprintln!("[otel] {error:#}");
+    for notice in end.notices() {
+        eprint_line(&notice);
     }
     code
 }
 
 /// What the process shares, read and connected once, with its startup notices written to
-/// stderr. Without a model, the error names the program's ways to give one.
+/// stderr. Without a model, the error names the program's ways to give one. zx-agent's
+/// subcommands connect the same way: zx-app neither prints nor names the programs' options,
+/// and the two programs share no code.
 async fn connect(overrides: Overrides) -> Result<Application> {
     let app = Application::from_environment(overrides, Builtin::Assistant)
         .await
         .map_err(with_model_hint)?;
     for notice in app.notices() {
-        eprintln!("{notice}");
+        eprint_line(notice);
     }
     Ok(app)
 }
@@ -298,11 +297,15 @@ fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgen
 /// signal or a platform's failure; the exit code says which.
 async fn serve(config: ServerConfig, agent: &ConfiguredAgent, channels: Vec<Arc<dyn ImChannel>>, dir: &Path) -> u8 {
     let names: Vec<&str> = channels.iter().map(|channel| channel.platform()).collect();
-    eprintln!("[im] platforms={}; sessions in {}", names.join(","), dir.display());
+    eprint_line(&format!(
+        "[im] platforms={}; sessions in {}",
+        names.join(","),
+        dir.display()
+    ));
     let cancel = CancellationToken::new();
     // Without the listeners serving goes on, each run still bounded by its own limits.
     if let Err(error) = spawn_signal_handler(cancel.clone()) {
-        eprintln!("zx-im: cannot listen for shutdown signals: {error}");
+        eprint_line(&format!("zx-im: cannot listen for shutdown signals: {error}"));
     }
     // The session file is the record of each conversation; the operator log holds approvals
     // and failures (Log), and traces, when exported, the timeline.
@@ -428,16 +431,13 @@ fn server_config(
 
 /// How serving ended, as an exit code; a failure is reported on stderr.
 fn serve_exit_code(served: Result<(), ImError>) -> u8 {
-    match served {
-        Ok(()) => EXIT_COMPLETED,
-        Err(error @ ImError::Config(_)) => {
-            eprintln!("zx-im: {error:#}");
-            EXIT_USAGE
-        }
-        Err(error @ ImError::Transport(_)) => {
-            eprintln!("zx-im: {error:#}");
-            EXIT_ERROR
-        }
+    let Err(error) = served else {
+        return EXIT_COMPLETED;
+    };
+    eprint_line(&format!("zx-im: {error}"));
+    match error {
+        ImError::Config(_) => EXIT_USAGE,
+        ImError::Transport(_) => EXIT_ERROR,
     }
 }
 
@@ -446,7 +446,8 @@ fn serve_exit_code(served: Result<(), ImError>) -> u8 {
 fn failure_log(platform: &str) -> ErrorReport {
     let platform = platform.to_string();
     Arc::new(move |error: &ImError| {
-        write_line(&json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()}));
+        let line = json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()});
+        print_line(&line.to_string());
     })
 }
 
@@ -471,15 +472,6 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
 /// The thread of `key` in a log line: `null` for a direct chat.
 fn thread(key: &SessionKey) -> Value {
     json!(key.thread.as_ref().map(|thread| thread.0.as_str()))
-}
-
-/// Print `line` and a newline on stdout, unlike `println!` without panicking when stdout is
-/// closed.
-fn write_line(line: &Value) {
-    let mut out = std::io::stdout().lock();
-    // A closed stdout (for example a log collector that exited) leaves nobody to report to;
-    // serving goes on.
-    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
 /// Writes the server's events as JSON lines on stdout, for the operator's log collection.
@@ -517,7 +509,7 @@ impl ServerSink for Log {
                 line
             }
         };
-        write_line(&line);
+        print_line(&line.to_string());
     }
 }
 

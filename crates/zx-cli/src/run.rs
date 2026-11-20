@@ -13,10 +13,11 @@ use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook, TraceParent};
 use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
+use zx_util::stdio::{eprint_line, print_line};
 
 use crate::application::{connect, open_or_create};
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, eprint_line, exit_code, print_line, with_telemetry};
+use crate::process::{EXIT_DENIED, JsonlEvents, cancel_on_signals, exit_code, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::session_file;
 

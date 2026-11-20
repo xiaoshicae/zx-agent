@@ -21,9 +21,9 @@ use zx_agent::builtin::tools::WRITE_FILE;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
+use zx_util::stdio::eprint_line;
 
 use super::tool_kind;
-use crate::process::eprint_line;
 use crate::render::{call_label, patch_of};
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.

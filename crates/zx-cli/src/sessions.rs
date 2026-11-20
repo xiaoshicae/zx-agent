@@ -5,9 +5,10 @@ use anyhow::Result;
 
 use zx_agent::transcript::{SessionInfo, SessionList};
 use zx_app::{SessionPlace, resolve_cwd};
+use zx_util::stdio::{eprint_line, print_line};
 
 use crate::cli::SessionsArgs;
-use crate::process::{EXIT_COMPLETED, eprint_line, print_line};
+use crate::process::EXIT_COMPLETED;
 use crate::render::{local_time, preview_text, visible};
 
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what

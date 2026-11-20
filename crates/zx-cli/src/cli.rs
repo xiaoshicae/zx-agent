@@ -143,6 +143,8 @@ pub(crate) struct SessionsArgs {
     pub(crate) cwd: Option<PathBuf>,
 }
 
+// zx-im has these options and those of `BudgetArgs`, with the same help: zx-app does not use
+// clap, and the two programs share no code.
 #[derive(Args)]
 pub(crate) struct BaseArgs {
     /// Model id passed to the provider. Defaults to ZX_MODEL, else model in config.toml.

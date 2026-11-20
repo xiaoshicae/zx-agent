@@ -11,8 +11,8 @@
 //! - `cli`: the arguments of the subcommands
 //! - `application`: the application a subcommand runs on, and the sessions of its agents
 //! - `session_file`: `--session`'s file, whose session run and chat continue
-//! - `process`: exit codes, and what every subcommand writes to its outputs, about signals and
-//!   the trace export too
+//! - `process`: exit codes, JSON lines on stdout, and what every subcommand says of signals
+//!   and of the trace export
 //! - `render`: how calls, results, times and sessions are shown
 //! - `test_support`, compiled for tests only: what the unit tests of several modules share
 
@@ -32,6 +32,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use zx_util::stdio::eprint_line;
+
 use cli::{Cli, Command};
 use process::EXIT_USAGE;
 
@@ -50,7 +52,7 @@ pub async fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             // The causes may quote a server, a file or the environment.
-            process::eprint_line(&format!("zx-agent: {}", render::visible(&format!("{error:#}"))));
+            eprint_line(&format!("zx-agent: {}", render::visible(&format!("{error:#}"))));
             ExitCode::from(EXIT_USAGE)
         }
     }

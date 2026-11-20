@@ -7,13 +7,14 @@ use zx_agent::Session;
 use zx_agent::transcript::Transcript;
 use zx_app::config::Builtin;
 use zx_app::{Application, ConfiguredAgent, NoModel, Overrides};
+use zx_util::stdio::eprint_line;
 
-use crate::process::eprint_line;
 use crate::render::visible;
 
 /// What the process shares, read and connected once for sessions of `builtin`, with its
 /// startup notices written to stderr. Without a model, the error names the program's ways to
-/// give one.
+/// give one. zx-im connects the same way: zx-app neither prints nor names the programs'
+/// options, and the two programs share no code.
 pub(crate) async fn connect(overrides: Overrides, builtin: Builtin) -> Result<Application> {
     let app = Application::from_environment(overrides, builtin)
         .await

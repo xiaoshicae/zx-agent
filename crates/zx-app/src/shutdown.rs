@@ -124,6 +124,10 @@ pub async fn next_event<T>(run: &mut Run<T>, session: &Session, stop: &Cancellat
     }
 }
 
+/// What a host says as its work starts with the trace export on: [`with_telemetry`] gave the
+/// work an export.
+pub const EXPORT_NOTICE: &str = "[otel] exporting traces over OTLP/HTTP";
+
 /// How the trace export ended, for the host to report: nothing when nothing was exported, or
 /// all of it was.
 #[derive(Debug, Default)]
@@ -132,6 +136,25 @@ pub struct ExportEnd {
     pub dropped: u64,
     /// Why the spans that remained could not all be sent, when they could not.
     pub error: Option<anyhow::Error>,
+}
+
+impl ExportEnd {
+    /// What a host says of how the export ended, a line each: the events that were not
+    /// exported, and why the rest could not all be sent, which may quote the collector.
+    /// Nothing when all of it was.
+    pub fn notices(&self) -> Vec<String> {
+        let mut notices = Vec::new();
+        if self.dropped > 0 {
+            notices.push(format!(
+                "[otel] {} event(s) were not exported: the queue was full, or the export had stopped",
+                self.dropped
+            ));
+        }
+        if let Some(error) = &self.error {
+            notices.push(format!("[otel] {error:#}"));
+        }
+        notices
+    }
 }
 
 /// Run `body` with the trace export started, when the environment names an OTLP endpoint, as
@@ -161,5 +184,30 @@ async fn finish(telemetry: Telemetry) -> ExportEnd {
     ExportEnd {
         dropped,
         error: telemetry.shutdown().await.err(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_that_lost_nothing_has_nothing_to_say() {
+        assert!(ExportEnd::default().notices().is_empty());
+    }
+
+    #[test]
+    fn an_export_that_lost_events_says_how_many_and_why_the_rest_failed() {
+        let end = ExportEnd {
+            dropped: 2,
+            error: Some(anyhow::anyhow!("refused").context("cannot export")),
+        };
+        assert_eq!(
+            end.notices(),
+            [
+                "[otel] 2 event(s) were not exported: the queue was full, or the export had stopped",
+                "[otel] cannot export: refused",
+            ]
+        );
     }
 }

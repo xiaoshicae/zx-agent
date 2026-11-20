@@ -1,8 +1,6 @@
-//! What every subcommand shares of the process: exit codes, lines on stdout and stderr, and
-//! what the subcommands say on stderr about the shutdown signals and the trace export, which
+//! What every subcommand shares of the process: exit codes, JSON lines on stdout, and what
+//! the subcommands say on stderr about the shutdown signals and the trace export, which
 //! `zx_app::shutdown` runs.
-
-use std::io::Write;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -10,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};
+use zx_util::stdio::{eprint_line, print_line};
 
 use crate::render::visible;
 
@@ -62,24 +61,6 @@ pub(crate) fn print_json_line(value: &impl serde::Serialize) {
     print_line(&line);
 }
 
-/// Print `text` and a newline on stdout, unlike `println!` without panicking when stdout is
-/// closed. A synchronous write, also from async code: one line, to a terminal, a pipe or a
-/// file.
-pub(crate) fn print_line(text: &str) {
-    let mut out = std::io::stdout().lock();
-    // A closed stdout (for example a consumer that exited) leaves nobody to report to; the run
-    // continues and the exit code still tells the scheduler how it ended.
-    let _ = writeln!(out, "{text}").and_then(|()| out.flush());
-}
-
-/// Print `text` and a newline on stderr, unlike `eprintln!` without panicking when stderr is
-/// closed. A synchronous write, as [`print_line`]'s.
-pub(crate) fn eprint_line(text: &str) {
-    // A closed stderr leaves nobody to tell; the subcommand goes on, and its exit code says
-    // how it ended.
-    let _ = writeln!(std::io::stderr().lock(), "{text}");
-}
-
 /// Writes every event as one JSON line on stdout.
 pub(crate) struct JsonlEvents {
     pub(crate) deltas: bool,
@@ -105,20 +86,14 @@ where
 {
     let (code, end) = shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| {
         if telemetry.is_some() {
-            eprint_line("[otel] exporting traces over OTLP/HTTP");
+            eprint_line(shutdown::EXPORT_NOTICE);
         }
         body(telemetry).await
     })
     .await?;
-    if end.dropped > 0 {
-        eprint_line(&format!(
-            "[otel] {} event(s) were not exported: the queue was full, or the export had stopped",
-            end.dropped
-        ));
-    }
-    // The collector's answer is quoted in the error.
-    if let Some(error) = end.error {
-        eprint_line(&format!("[otel] {}", visible(&format!("{error:#}"))));
+    // An error quotes the collector's answer.
+    for notice in end.notices() {
+        eprint_line(&visible(&notice));
     }
     code
 }

@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 use zx_agent::Session;
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_app::{ConfiguredAgent, resolve_cwd};
+use zx_util::stdio::eprint_line;
 
 use super::updates::Updates;
 use crate::application::open_session;
-use crate::process::eprint_line;
 use crate::render::{preview_text, utc_time, visible};
 
 /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
