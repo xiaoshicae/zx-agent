@@ -9,9 +9,9 @@
 //! - [`policy`]: the built-in command and rule policies
 //! - [`continuation`]: the hook that continues an answer cut off at the output token limit
 //! - [`redact`]: the hook that redacts known secrets from tool output
-//! - `files`: bounded reads of regular files that never wait on a FIFO, for the executors,
-//!   the paging of tool output, the redaction and zx-app's configuration files; hidden, not
-//!   part of the API
+//! - `files`: bounded reads of regular files that never wait on a FIFO, for the local
+//!   executor, the files that tools page, the redaction and zx-app's configuration files;
+//!   hidden, not part of the API, though `tools::paging` re-exports its `Links`
 //! - `calendar`: dates of the Gregorian calendar, for the times that file names and prompts
 //!   show
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by

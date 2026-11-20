@@ -136,15 +136,11 @@ fn special_file_error(path: &Path) -> String {
     )
 }
 
-/// Check that the `bytes` read from `path` are within `max_bytes`; the error tells the model
-/// what to use instead.
-fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), String> {
-    let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-    if read > max_bytes {
-        return Err(format!(
-            "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
-            path.display()
-        ));
-    }
-    Ok(())
+/// The error for the file at `path` being larger than `max_bytes`, with what the model can do
+/// instead.
+fn over_limit_error(path: &Path, max_bytes: u64) -> String {
+    format!(
+        "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
+        path.display()
+    )
 }

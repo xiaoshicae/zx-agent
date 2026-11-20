@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::capture::{Capture, await_end, collect};
 use super::environment::machine_section;
-use super::{CommandOutput, Executor, SHELL, ShellCommand, check_read_within, directory_error, special_file_error};
-use crate::files::{Links, open_without_blocking, read_bounded};
+use super::{CommandOutput, Executor, SHELL, ShellCommand, directory_error, over_limit_error, special_file_error};
+use crate::files::{Links, Unreadable, read_regular};
 
 /// Runs commands as child processes of the agent, with the `bash` found on `PATH`, and reads
 /// and writes files directly.
@@ -96,26 +96,15 @@ impl Executor for LocalExecutor {
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-        // Opening a special file can act by itself: it releases a FIFO's writer, and some
-        // devices start working when opened. So only regular files are opened.
-        let checked = tokio::fs::metadata(path)
+        read_regular(path, max_bytes, Links::Follow)
             .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        regular_file(path, &checked)?;
-        let (file, meta) = open_regular_file(path).await?;
-        if meta.len() > max_bytes {
-            return Err(format!(
-                "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
-                path.display(),
-                meta.len(),
-                max_bytes
-            ));
-        }
-        let bytes = read_bounded(file, max_bytes)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        check_read_within(path, &bytes, max_bytes)?;
-        Ok(bytes)
+            .map_err(|unreadable| match unreadable {
+                Unreadable::Io(error) => format!("cannot read {}: {error}", path.display()),
+                Unreadable::Directory => directory_error(path),
+                // Links are followed, so none is refused as a link.
+                Unreadable::Link | Unreadable::Special => special_file_error(path),
+                Unreadable::Over => over_limit_error(path, max_bytes),
+            })
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -148,21 +137,10 @@ impl Executor for LocalExecutor {
     }
 }
 
-/// Open the file at `path` for reading, with its metadata, refusing what is not a regular
-/// file: what was checked before may have been replaced by a FIFO since, which is opened at
-/// once and refused here ([`open_without_blocking`]).
-async fn open_regular_file(path: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), String> {
-    let (file, meta) = open_without_blocking(path, Links::Follow)
-        .await
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    regular_file(path, &meta)?;
-    Ok((file, meta))
-}
-
 /// Replace the contents of the file at `path` with `bytes`, creating it when missing and
-/// refusing what is not a regular file. Opened without blocking, as
-/// [`open_without_blocking`] says why: opening a FIFO for writing waits for a reader.
-/// Truncated only once known to be a regular file.
+/// refusing what is not a regular file. Opened without blocking, like the reads of `files`:
+/// opening a FIFO for writing waits for a reader. Truncated only once known to be a regular
+/// file.
 fn overwrite_regular_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let unwritable = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
     let mut options = std::fs::OpenOptions::new();
@@ -196,32 +174,6 @@ mod tests {
     /// ends by itself.
     const PROMPTLY: Duration = Duration::from_secs(5);
 
-    /// Open `path`'s other end without blocking, which ends an open of it that waits.
-    #[cfg(unix)]
-    fn release(path: &Path, read: bool) {
-        // Fails when nothing waits on the other end: then there is nothing to release.
-        std::fs::OpenOptions::new()
-            .read(read)
-            .write(!read)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-            .ok();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_fifo_in_place_of_a_checked_file_is_refused_without_waiting_for_a_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fifo");
-        crate::test_support::make_fifo(&path);
-
-        let opened = tokio::time::timeout(PROMPTLY, open_regular_file(&path)).await;
-        release(&path, false);
-
-        let refused = opened.expect("the open waited for a writer").unwrap_err();
-        assert!(refused.contains("not a regular file"), "{refused}");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn a_fifo_in_place_of_a_checked_file_is_not_written_and_not_waited_on() {
@@ -235,7 +187,12 @@ mod tests {
             tokio::task::spawn_blocking(move || overwrite_regular_file(&target, b"x")),
         )
         .await;
-        release(&path, true);
+        // Opening the read end ends an open of the write end that waits.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
 
         let refused = written.expect("the write waited for a reader").unwrap();
         assert!(refused.is_err(), "{refused:?}");

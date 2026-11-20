@@ -39,7 +39,7 @@ pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use provider::{anthropic_config, openai_config};
 pub(crate) use skills::{READ_SKILL, Skill};
 
-use zx_agent::builtin::files::read_text_file;
+use zx_agent::builtin::files::read_text_blocking;
 use zx_util::env::env_value;
 
 /// The variable that names the zx-agent home directory instead of `~/.zx-agent`.
@@ -81,7 +81,7 @@ pub fn home() -> Result<Option<PathBuf>> {
 /// cannot be read, is not a regular file, is larger or is not UTF-8; the error names the
 /// path.
 pub fn read_text(path: &Path) -> Result<String> {
-    read_text_file(path, MAX_FILE_BYTES)
+    read_text_blocking(path, MAX_FILE_BYTES)
 }
 
 /// `value` parsed by its type, with `key` naming it in the error.

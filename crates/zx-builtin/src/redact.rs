@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::ai::ToolCall;
-use crate::files::read_regular_file;
+use crate::files::{Links, Unreadable, read_regular_blocking};
 use crate::sync::lock;
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_core::tools::ToolOutput;
@@ -110,12 +110,17 @@ fn current_values(paths: &[PathBuf]) -> Result<Vec<String>, String> {
     let mut current = Vec::new();
     for path in paths {
         for file in secret_files_at(path)? {
-            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+            match read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) {
                 // The built-in tools decode output the same way, so a value that is not
                 // UTF-8 appears in their output exactly like this.
                 Ok(bytes) => current.push(String::from_utf8_lossy(&bytes).trim().to_string()),
-                Err(error) if is_unreadable(&error) => {}
-                Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
+                Err(unreadable) if is_missing_or_forbidden(&unreadable) => {}
+                Err(unreadable) => {
+                    return Err(format!(
+                        "cannot read a secret file to redact tool output: {}",
+                        unreadable.describe(&file, MAX_SECRET_FILE_BYTES)
+                    ));
+                }
             }
         }
     }
@@ -220,10 +225,10 @@ pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
     let mut problems = Vec::new();
     for path in paths {
         for file in secret_files_at(path)? {
-            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+            match read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) {
                 Ok(_) => {}
-                Err(error) if is_unreadable(&error) => {}
-                Err(error) => problems.push(format!("{error:#}")),
+                Err(unreadable) if is_missing_or_forbidden(&unreadable) => {}
+                Err(unreadable) => problems.push(unreadable.describe(&file, MAX_SECRET_FILE_BYTES)),
             }
         }
     }
@@ -253,7 +258,7 @@ pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
         };
         for file in files {
             // Likewise for a file that cannot be read.
-            let Ok(bytes) = read_regular_file(&file, MAX_SECRET_FILE_BYTES) else {
+            let Ok(bytes) = read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) else {
                 continue;
             };
             let chars = String::from_utf8_lossy(&bytes).trim().chars().count();
@@ -266,8 +271,6 @@ pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Whether a secret file is missing or not readable by this process.
-fn is_unreadable(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|error| matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied))
+fn is_missing_or_forbidden(unreadable: &Unreadable) -> bool {
+    matches!(unreadable, Unreadable::Io(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied))
 }

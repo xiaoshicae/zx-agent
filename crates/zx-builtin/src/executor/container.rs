@@ -46,7 +46,7 @@ use scripts::{
 
 use super::capture::{Capture, await_end, collect};
 use super::{
-    Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, check_read_within, directory_error,
+    Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, directory_error, over_limit_error,
     special_file_error,
 };
 use zx_core::tools::ExecutionMode;
@@ -570,6 +570,15 @@ fn run_args(config: &ContainerConfig, workspace: &Path, name: &str) -> Vec<Strin
     // from starting with Docker's own error instead of the probe's explanation.
     args.extend(["--entrypoint".into(), "cat".into(), config.image.clone()]);
     args
+}
+
+/// Check that the `bytes` read from `path` are within `max_bytes`.
+fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), String> {
+    let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
+    if read > max_bytes {
+        return Err(over_limit_error(path, max_bytes));
+    }
+    Ok(())
 }
 
 /// Client output for an error message: lossy UTF-8, trimmed, or a note that there was none.
