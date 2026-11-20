@@ -215,6 +215,7 @@ async fn respond(
         duration_ms: Some(0),
         response_id: None,
         response_model: None,
+        input_transformations: Vec::new(),
     };
     Some(StreamEvent::ending(message))
 }

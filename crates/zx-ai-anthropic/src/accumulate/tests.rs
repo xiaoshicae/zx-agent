@@ -227,6 +227,65 @@ fn a_stop_reason_added_to_the_api_since_is_a_refusal() {
     assert_eq!(unknown.provider_error.unwrap().kind, ProviderErrorKind::Refused);
 }
 
+/// The start of a response whose request the API changed as `listed` says.
+fn started_with(listed: &Value) -> Value {
+    json!({"type": "message_start", "message": {"id": "msg_1", "model": "m", "usage": {"input_tokens": 1},
+        "input_transformations": listed}})
+}
+
+/// The changes to the request that the answer made of `events` records.
+fn transformations(events: &[Value]) -> Vec<InputTransformation> {
+    let mut acc = Accumulator::new("anthropic", "m", 1);
+    apply_all(&mut acc, events);
+    acc.finish().unwrap().input_transformations
+}
+
+fn dropped(path: &str, reason: &str) -> InputTransformation {
+    InputTransformation {
+        kind: "thinking_dropped".into(),
+        path: Some(path.into()),
+        reason: Some(reason.into()),
+    }
+}
+
+#[test]
+fn the_changes_the_api_made_to_the_request_are_recorded_in_its_words() {
+    let listed = json!([
+        {"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"},
+        // Values added to the API since are kept as they came.
+        {"type": "thinking_trimmed", "reason": "something_new"},
+    ]);
+    assert_eq!(
+        transformations(&[started_with(&listed), ended("end_turn")]),
+        [
+            dropped("messages.1.content.0", "prefix_binding_mismatch"),
+            InputTransformation {
+                kind: "thinking_trimmed".into(),
+                path: None,
+                reason: Some("something_new".into())
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_change_without_a_type_is_passed_over() {
+    let listed = json!([{"path": "messages.1.content.0", "reason": "prefix_binding_mismatch"}]);
+    assert_eq!(transformations(&[started_with(&listed), ended("end_turn")]), []);
+}
+
+#[test]
+fn the_list_after_a_fallback_replaces_the_first() {
+    let first =
+        json!([{"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"}]);
+    let after_fallback = json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+        "input_transformations": [{"type": "thinking_dropped", "path": "messages.3.content.0", "reason": "model_binding_mismatch"}]});
+    assert_eq!(
+        transformations(&[started_with(&first), after_fallback]),
+        [dropped("messages.3.content.0", "model_binding_mismatch")]
+    );
+}
+
 /// An answer that streamed some text and then ended without a stop reason.
 fn cut_off_text() -> Accumulator {
     let mut acc = Accumulator::new("anthropic", "m", 1);

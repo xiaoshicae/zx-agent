@@ -79,7 +79,7 @@ api = "anthropic"                  # API key 默认取 ANTHROPIC_API_KEY
 - `reasoning` 写成自适应思考（`thinking` 的 `type = "adaptive"`、`display = "summarized"`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking.type = "disabled"`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。`requestFields` 中 `thinking` 与 `output_config` 的其他键（如 `thinking.block_binding`）照常发送，`thinking.type`、`thinking.display` 与 `output_config.effort` 则与 `reasoning` 冲突。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
 - 思考块连同签名记入会话，只回传给产生它的 provider 名与模型；换了模型之后，较早回答中的思考不再发送。
 - 系统提示词、工具定义与对话末尾标为缓存断点（`cache_control`），以便下一次请求读取这一次写入的缓存；回答的输入 token 包括读写缓存的部分，与 `[[models]]` 的 `cacheRead`、`cacheWrite` 单价对应。`collapse` 下系统提示词有变化时，开头的缓存失效。
-- 思考块的签名绑定产生它时的对话：系统提示词、工具与此前的消息。之后的请求开头与那时不同时（如 `collapse` 下系统提示词变了，或摘要之后原样保留的近期消息中的思考），服务按 `thinking.block_binding.prefix_mismatch_behavior` 处理：`"error"` 以 400 拒绝请求，`"drop_block"` 丢掉这些思考块后照常回答；不设时是否拒绝由模型与账号决定（Claude Fable 5.2 一律拒绝）。provider 不改写请求：被拒绝时这次请求失败，不重发。要让服务丢掉这些思考块，带上请求头并设这个字段（只设字段、不带请求头时服务以 400 拒绝；不设 `reasoning` 时 `thinking` 还要写 `type`，如 `"adaptive"`）；模型接受对话中间的 system 消息时，`systemUpdates = "inline"` 让系统提示词的变化不改动开头：
+- 思考块的签名绑定产生它时的对话：系统提示词、工具与此前的消息。之后的请求开头与那时不同时（如 `collapse` 下系统提示词变了，或摘要之后原样保留的近期消息中的思考），服务按 `thinking.block_binding.prefix_mismatch_behavior` 处理：`"error"` 以 400 拒绝请求，`"drop_block"` 丢掉这些思考块后照常回答；不设时是否拒绝由模型与账号决定（Claude Fable 5.2 一律拒绝）。带上请求头时，服务在回答中列出它对请求做的改动（`input_transformations`，如丢掉的思考块及原因 `prefix_binding_mismatch`），非空时原样记入这个回答的 `inputTransformations`。provider 不改写请求：被拒绝时这次请求失败，不重发。要让服务丢掉这些思考块，带上请求头并设这个字段（只设字段、不带请求头时服务以 400 拒绝；不设 `reasoning` 时 `thinking` 还要写 `type`，如 `"adaptive"`）；模型接受对话中间的 system 消息时，`systemUpdates = "inline"` 让系统提示词的变化不改动开头：
 
 ```toml
 [provider]
@@ -311,4 +311,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.31 · 2026年11月
+CONFIGURATION.md · v0.32 · 2026年11月

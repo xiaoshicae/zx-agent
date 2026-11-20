@@ -264,7 +264,8 @@ pub enum ProviderErrorKind {
     /// The service is overloaded, failing or otherwise unavailable for now: an HTTP 5xx or an
     /// error that says so.
     Unavailable,
-    /// The connection failed, or broke off before the response ended.
+    /// The connection failed, or broke off before the response ended, as does a stream that
+    /// ends without saying how the answer ended.
     Transport,
     /// The service did not answer, or stopped sending, within the time allowed, or says that
     /// it timed out itself: an HTTP 408 or an error that says so.
@@ -280,7 +281,8 @@ pub enum ProviderErrorKind {
     /// The service ended the response with a reason of its own instead of an answer, such as
     /// a content filter; the error's `code` holds the reason.
     Refused,
-    /// The response broke the protocol: data that cannot be read, or no end where one was due.
+    /// The response broke the protocol: data that cannot be read, or a whole answer where a
+    /// stream was asked for.
     Protocol,
     /// The response exceeded a byte limit of the provider's settings.
     ResourceLimit,
@@ -315,6 +317,28 @@ pub struct AssistantMessage {
     /// `responseModel`), such as a dated version of an alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
+    /// What the API changed in the request before the model read it, as the API reports it
+    /// (pi: the `anthropic_input_transformations` diagnostic), such as earlier thinking it
+    /// dropped. Empty when it reported nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_transformations: Vec<InputTransformation>,
+}
+
+/// One change an API made to a request before the model read it, in the API's words, such as
+/// `{"type": "thinking_dropped", "path": "messages.1.content.0", "reason":
+/// "prefix_binding_mismatch"}` from the Anthropic Messages API. Values this crate does not
+/// know are kept as sent: an API adds new ones.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputTransformation {
+    /// What the API did, such as `thinking_dropped`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Where in the request as the API received it, such as `messages.1.content.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why, such as `prefix_binding_mismatch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl AssistantMessage {
@@ -333,6 +357,7 @@ impl AssistantMessage {
             duration_ms: None,
             response_id: None,
             response_model: None,
+            input_transformations: Vec::new(),
         }
     }
 

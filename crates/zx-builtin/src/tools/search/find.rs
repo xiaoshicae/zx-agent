@@ -19,8 +19,8 @@ use crate::tools::parse_args;
 const DEFAULT_LIMIT: usize = 1000;
 /// In a glob, any number of directories, none included.
 const ANY_DEPTH: &str = "**/";
-/// The most [`ANY_DEPTH`] in one glob: each doubles the patterns find is given.
-const MAX_ANY_DEPTH: usize = 4;
+/// At the end of a glob, everything below the directory before it.
+const EVERYTHING_BELOW: &str = "**";
 
 /// Finds files whose paths match a glob.
 pub struct FindTool {
@@ -51,14 +51,8 @@ impl Args {
     /// The arguments of a call, checked, and the most paths it shows.
     fn parse(args: &Value) -> Result<(Self, usize), String> {
         let args: Self = parse_args(args)?;
-        let glob = glob_of(&args.pattern);
-        if glob.is_empty() {
+        if glob_of(&args.pattern).is_empty() {
             return Err("pattern is empty".into());
-        }
-        if glob.matches(ANY_DEPTH).count() > MAX_ANY_DEPTH {
-            return Err(format!(
-                "pattern has more than {MAX_ANY_DEPTH} `{ANY_DEPTH}`; write one with fewer"
-            ));
         }
         let limit = limit_or(args.limit, DEFAULT_LIMIT)?;
         Ok((args, limit))
@@ -88,35 +82,78 @@ fn ripgrep(glob: &str) -> String {
 
 /// POSIX find for the paths `glob` matches, printed as ripgrep prints them, without `./`.
 fn posix_find(glob: &str) -> String {
-    // find matches a pattern without a slash against the name, one with a slash against the
-    // path from the search directory.
-    let test = if glob.contains('/') {
-        let paths: Vec<String> = find_paths(glob)
-            .iter()
-            .map(|path| format!("-path {}", quote(&format!("./{path}"))))
-            .collect();
-        format!("\\( {} \\)", paths.join(" -o "))
+    // find matches a pattern without a slash against the name. Its `-path` would let `*` match
+    // `/` too, so a pattern with one is matched against each path afterwards, by bytes as sed
+    // reads them.
+    let (test, filter) = if glob.contains('/') {
+        (
+            String::new(),
+            format!(" | LC_ALL=C grep -E {}", quote(&path_regex(glob))),
+        )
     } else {
-        format!("-name {}", quote(glob))
+        (format!("-name {} ", quote(glob)), String::new())
     };
     let prune = VCS_DIRECTORIES
         .iter()
         .map(|directory| format!("-name {directory}"))
         .collect::<Vec<_>>()
         .join(" -o ");
-    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | {WITHOUT_DOT_SLASH}")
+    format!("find . \\( {prune} \\) -prune -o {test}-type f -print | {WITHOUT_DOT_SLASH}{filter}")
 }
 
-/// The patterns that find's `-path` takes for `glob`, which together match what it matches.
-/// In find `*` also matches `/`, so each [`ANY_DEPTH`] is either nothing or `*/`, one
-/// directory or more: twice as many patterns for each, which [`MAX_ANY_DEPTH`] bounds.
-fn find_paths(glob: &str) -> Vec<String> {
-    match glob.split_once(ANY_DEPTH) {
-        None => vec![glob.to_string()],
-        Some((before, after)) => find_paths(after)
-            .into_iter()
-            .flat_map(|rest| [format!("{before}{rest}"), format!("{before}*/{rest}")])
-            .collect(),
+/// The extended regular expression for the paths from the search directory that `glob`
+/// matches as ripgrep matches it: `*` and `?` stay within one name, a bracket expression is
+/// one character of the set (`[!…]` of the others), [`ANY_DEPTH`] is any number of
+/// directories and a final [`EVERYTHING_BELOW`] everything below, and `\` makes the next
+/// character plain.
+fn path_regex(glob: &str) -> String {
+    let mut regex = String::from("^");
+    let mut rest = glob;
+    // Whether `rest` starts a name: at the start of the glob and after a `/`.
+    let mut name_starts = true;
+    while let Some(next) = rest.chars().next() {
+        let (piece, taken) = if name_starts && rest.starts_with(ANY_DEPTH) {
+            ("(.*/)?".to_string(), ANY_DEPTH.len())
+        } else if name_starts && rest == EVERYTHING_BELOW {
+            (".*".to_string(), EVERYTHING_BELOW.len())
+        } else {
+            match next {
+                '*' => ("[^/]*".to_string(), 1),
+                '?' => ("[^/]".to_string(), 1),
+                '[' => bracket(rest).unwrap_or_else(|| (plain('['), 1)),
+                '\\' => rest[1..]
+                    .chars()
+                    .next()
+                    .map_or((plain('\\'), 1), |escaped| (plain(escaped), 1 + escaped.len_utf8())),
+                other => (plain(other), other.len_utf8()),
+            }
+        };
+        name_starts = rest[..taken].ends_with('/');
+        regex.push_str(&piece);
+        rest = &rest[taken..];
+    }
+    regex.push('$');
+    regex
+}
+
+/// The bracket expression that `glob` starts with, as a regular expression, and its length;
+/// `None` when it is not closed. A `]` right after the opening is one of the set.
+fn bracket(glob: &str) -> Option<(String, usize)> {
+    let negated = glob[1..].starts_with('!');
+    let set_starts = if negated { 2 } else { 1 };
+    let first = glob[set_starts..].chars().next()?.len_utf8();
+    let set_len = first + glob[set_starts + first..].find(']')?;
+    let set = &glob[set_starts..set_starts + set_len];
+    let not = if negated { "^" } else { "" };
+    Some((format!("[{not}{set}]"), set_starts + set_len + 1))
+}
+
+/// `character` as a regular expression that matches only it.
+fn plain(character: char) -> String {
+    if "^.[$()|*+?{\\".contains(character) {
+        format!("\\{character}")
+    } else {
+        character.to_string()
     }
 }
 
@@ -181,33 +218,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_turns_a_glob_with_a_slash_into_a_path_test() {
-        let script = |pattern: &str| {
-            Args {
-                pattern: pattern.into(),
-                path: None,
-                limit: None,
-            }
-            .script(10)
-        };
+    fn find_matches_a_glob_with_a_slash_against_the_whole_path() {
+        let script = |pattern: &str| Args::parse(&json!({"pattern": pattern})).unwrap().0.script(10);
         assert!(script("*.rs").contains("-name '*.rs'"));
-        assert!(script("src/**/*.ts").contains("-path './src/*.ts'"));
-        assert!(script("**/*.json").contains("-path './*.json'"));
-        assert!(script("./a/b.txt").contains("-path './a/b.txt'"));
+        assert!(script("src/**/*.ts").contains(r"grep -E '^src/(.*/)?[^/]*\.ts$'"));
     }
 
     #[test]
-    fn a_glob_that_starts_at_the_search_directory_reaches_ripgrep_without_the_dot() {
+    fn a_glob_that_starts_at_the_search_directory_reaches_both_programs_without_the_dot() {
         let script = Args::parse(&json!({"pattern": "./a/*.txt"})).unwrap().0.script(10);
         assert!(script.contains("--glob 'a/*.txt'"), "{script}");
+        assert!(script.contains(r"grep -E '^a/[^/]*\.txt$'"), "{script}");
     }
 
     #[test]
-    fn a_glob_names_any_depth_a_few_times_at_most() {
-        let pattern = |times: usize| json!({"pattern": format!("{}x", "**/".repeat(times))});
-        assert!(Args::parse(&pattern(MAX_ANY_DEPTH)).is_ok());
-        let error = Args::parse(&pattern(MAX_ANY_DEPTH + 1)).err().unwrap();
-        assert_eq!(error, "pattern has more than 4 `**/`; write one with fewer");
+    fn the_regex_of_a_glob_takes_its_other_characters_as_they_are() {
+        assert_eq!(path_regex(r"a.b/c+(1)/\*[x"), r"^a\.b/c\+\(1\)/\*\[x$");
     }
 
     /// The paths POSIX find prints for `glob` in a directory that holds `files`, sorted.
@@ -242,6 +268,30 @@ mod tests {
         );
         assert_eq!(found_by_find(&files, "a/**/b.txt"), ["a/b.txt", "a/x/b.txt"]);
         assert_eq!(found_by_find(&files, "a/**/x/**/*.txt"), ["a/x/b.txt", "a/x/c.txt"]);
+        assert_eq!(found_by_find(&files, "**/**/c.txt"), ["a/x/c.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_star_in_a_path_stays_within_one_name_as_with_ripgrep() {
+        let files = ["src/a.ts", "src/x/b.ts", "pkg/src/c.ts"];
+        assert_eq!(found_by_find(&files, "src/*.ts"), ["src/a.ts"]);
+        assert_eq!(found_by_find(&files, "src/?.ts"), ["src/a.ts"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_final_any_depth_takes_everything_below() {
+        let files = ["src/a.ts", "src/x/b.ts", "top.ts"];
+        assert_eq!(found_by_find(&files, "src/**"), ["src/a.ts", "src/x/b.ts"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bracket_expression_is_one_character_of_its_set_or_of_the_others() {
+        let files = ["d/a1.txt", "d/b1.txt", "d/x1.txt"];
+        assert_eq!(found_by_find(&files, "d/[ab]1.txt"), ["d/a1.txt", "d/b1.txt"]);
+        assert_eq!(found_by_find(&files, "d/[!ab]1.txt"), ["d/x1.txt"]);
     }
 
     #[test]

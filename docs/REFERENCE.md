@@ -154,13 +154,13 @@ provider 判断每次失败的种类，记在失败回答的 `providerError` 里
 |---|---|---|
 | `rate_limited` | 限频：HTTP 429 或限频的错误码、措辞 | 重试 |
 | `unavailable` | 服务过载、出错或暂时不可用：HTTP 5xx 或相应的错误码、措辞 | 重试 |
-| `transport` | 连接失败或中途断开 | 重试 |
+| `transport` | 连接失败或中途断开，包括流结束时没有结束原因（如网关或代理截断了流） | 重试 |
 | `timeout` | 连接、等待响应头或流中下一段数据超时（后两者的时限为 `provider.idleTimeoutSecs`），或 HTTP 408 与相应的错误码、措辞 | 重试 |
 | `context_overflow` | 上下文过长：HTTP 413、相应的错误码、通用措辞，或指明上下文过长的结束原因（如 `model_context_window_exceeded`） | 开启自动摘要时摘要一次再试，否则失败 |
 | `access_denied` | 凭据、权限或配额被拒：HTTP 401、403 或相应的错误码、措辞；Anthropic 的月度花费上限也是 429，`error.details.error_code` 为 `enforced_spend_limit_reached`，算作此类 | 失败 |
 | `api_key` | 取不到 API key，或 key 不能作为请求头的值（如含换行），请求没有发出 | 失败 |
 | `refused` | 服务端以正常结束、截断与调用工具以外的原因结束回答（OpenAI 兼容服务的 `finish_reason` 如 `content_filter`，Anthropic 的 `stop_reason` 如 `refusal`），`code` 为该取值 | 失败 |
-| `protocol` | 响应不合协议，如无法解析的数据、流结束时没有结束原因 | 失败 |
+| `protocol` | 响应不合协议，如无法解析的数据、要求流式时整个回答以 JSON 返回 | 失败 |
 | `resource_limit` | 超出流式响应的上限：每次请求 16 MiB、每个 SSE 事件 1 MiB | 失败 |
 | `other` | 其他失败，如 HTTP 400 | 失败 |
 
@@ -205,7 +205,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":13,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":14,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
@@ -213,7 +213,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
-- 只读写版本 13，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 14，其他版本的文件拒绝打开，不做升级。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；它的 `source.kind` 与 `request_start` 事件的 `kind` 一样是 `task`（任务请求）或 `summary`（摘要请求）。不记录 API key、URL 与 HTTP 头。
@@ -224,4 +224,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.20 · 2026年11月
+REFERENCE.md · v0.22 · 2026年11月
