@@ -39,6 +39,8 @@ zx-agent = { workspace = true, features = ["testing"] }
 zx-testing.workspace = true
 
 async-trait.workspace = true
+# Images for the tests of prompts that attach them.
+base64.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "time"] }
 

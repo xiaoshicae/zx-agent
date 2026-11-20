@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk, Diff, Notice,
+    CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk, Diff, ImageContent, Notice,
     NoticeSeverity, SessionId, SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallId,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::Value;
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, Role, ToolCall as MessageCall, ToolResultMessage,
-    UserMessageKind,
+    AssistantMessage, ContentBlock as MessageBlock, Delta, Image, Message, Role, ToolCall as MessageCall,
+    ToolResultMessage, UserMessageKind,
 };
 use zx_agent::builtin::tools::WRITE_FILE;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
@@ -55,22 +55,37 @@ impl Updates {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
     }
 
+    /// `image` as the protocol carries it.
+    fn image_block(image: &Image) -> ContentBlock {
+        ContentBlock::Image(ImageContent::new(image.data.clone(), image.mime_type.clone()))
+    }
+
     /// Replay the conversation `transcript` holds to a client that loads the session: what it
     /// would have seen as the turns ran, without the streaming. That is every turn of the
     /// branch, also those a summary stands in for in what the model reads.
     ///
-    /// The person's prompts, the answers with their thoughts, and the tool calls with their
-    /// results; an extension's message when it asked to be shown. Summaries and the model's
-    /// own continuations are the model's, not the person's.
+    /// The person's prompts with their images, the answers with their thoughts, and the tool
+    /// calls with their results; an extension's message when it asked to be shown. Summaries
+    /// and the model's own continuations are the model's, not the person's.
     pub(super) fn replay(&self, transcript: &Transcript) {
         let projection = transcript.raw_projection();
         for (index, item) in projection.iter().enumerate() {
             match &item.message {
                 Message::User {
                     content,
+                    images,
                     kind: UserMessageKind::Prompt,
                     ..
-                } => self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content))),
+                } => {
+                    if !content.is_empty() {
+                        self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content)));
+                    }
+                    for image in images {
+                        self.send(SessionUpdate::UserMessageChunk(ContentChunk::new(Self::image_block(
+                            image,
+                        ))));
+                    }
+                }
                 Message::User {
                     content,
                     kind: UserMessageKind::Custom,
@@ -139,7 +154,8 @@ impl Updates {
             .locations(self.locations(args))
     }
 
-    /// What a result reports: its status, what the client shows, and the raw output.
+    /// What a result reports: its status, what the client shows, its images last, and the raw
+    /// output.
     fn result_fields(
         &self,
         name: &str,
@@ -151,7 +167,13 @@ impl Updates {
         } else {
             ToolCallStatus::Completed
         };
-        let content = self.result_content(name, args, &result.content, result.details.as_ref());
+        let mut content = self.result_content(name, args, &result.content, result.details.as_ref());
+        content.extend(
+            result
+                .images
+                .iter()
+                .map(|image| ToolCallContent::Content(Content::new(Self::image_block(image)))),
+        );
         let raw_output = result
             .details
             .clone()

@@ -1,5 +1,5 @@
-//! One turn of a session: the text of the prompt that starts it, its run read to its end with
-//! the events sent to the client, and the stop reason that answers `session/prompt`.
+//! One turn of a session: the prompt that starts it, its run read to its end with the events
+//! sent to the client, and the stop reason that answers `session/prompt`.
 
 use std::borrow::Cow;
 
@@ -8,8 +8,11 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, SessionId, StopReason};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Image;
+use zx_agent::builtin::images;
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
+use zx_agent::input::Input;
 use zx_agent::{Run, Session};
 use zx_app::shutdown::next_event;
 
@@ -93,16 +96,58 @@ impl Turn {
     }
 }
 
-/// The text of a prompt: its text blocks, one per line, and a line naming each resource
-/// link, which the protocol has every agent take. The agent advertises no image, audio or
-/// embedded-context capability, so clients send nothing else.
-pub(super) fn prompt_text(blocks: &[ContentBlock]) -> String {
+/// What a prompt gives the model: its text, and its images fitted to the limits of the model
+/// APIs. The agent advertises images, and neither audio nor embedded context, so clients send
+/// nothing else besides the text and the resource links every agent takes.
+pub(super) struct Prompt {
+    pub(super) text: String,
+    pub(super) images: Vec<Image>,
+}
+
+impl Prompt {
+    /// The prompt of `blocks`, its images fitted one by one. An image that cannot be fitted
+    /// fails the prompt, with words for the client that say which and why.
+    pub(super) async fn of(blocks: &[ContentBlock]) -> Result<Self, String> {
+        let mut fitted = Vec::new();
+        for block in blocks {
+            if let ContentBlock::Image(image) = block {
+                let number = fitted.len() + 1;
+                let image = images::fit_base64(&image.data)
+                    .await
+                    .map_err(|reason| format!("image {number} of the prompt cannot be used: {reason}"))?;
+                fitted.push(image.image);
+            }
+        }
+        Ok(Self {
+            text: prompt_text(blocks),
+            images: fitted,
+        })
+    }
+
+    /// Whether the prompt has neither text nor images.
+    pub(super) fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.images.is_empty()
+    }
+
+    /// The input that starts the prompt's run.
+    pub(super) fn into_input(self) -> Input {
+        Input::User {
+            text: self.text,
+            images: self.images,
+            actor: None,
+        }
+    }
+}
+
+/// The text of a prompt: its text blocks, one per line, and a line naming each resource link.
+fn prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text(text) => Some(Cow::Borrowed(text.text.as_str())),
             ContentBlock::ResourceLink(link) => Some(Cow::Owned(format!("[resource {} ({})]", link.uri, link.name))),
-            // The protocol may add block kinds: the enum is non-exhaustive.
+            // Images go beside the text; the protocol may add block kinds, the enum is
+            // non-exhaustive.
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -150,7 +195,7 @@ fn compaction_stop(report: &compaction::Report) -> Result<StopReason> {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::v1::schema::{ResourceLink, TextContent};
+    use agent_client_protocol::v1::schema::{ImageContent, ResourceLink, TextContent};
     use zx_agent::ai::Usage;
 
     use super::*;
@@ -225,6 +270,42 @@ mod tests {
         ];
         assert_eq!(prompt_text(&blocks), "one\ntwo");
         assert_eq!(prompt_text(&[]), "");
+    }
+
+    /// A PNG of one transparent pixel, in base64.
+    const ONE_PIXEL_PNG: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[tokio::test]
+    async fn a_prompt_takes_the_images_beside_its_text() {
+        let blocks = vec![
+            ContentBlock::Text(TextContent::new("what is this?")),
+            ContentBlock::Image(ImageContent::new(ONE_PIXEL_PNG, "image/png")),
+        ];
+        let prompt = Prompt::of(&blocks).await.unwrap();
+        assert_eq!(prompt.text, "what is this?");
+        assert_eq!(prompt.images.len(), 1);
+        assert_eq!(prompt.images[0].mime_type, "image/png");
+        assert_eq!(prompt.images[0].data, ONE_PIXEL_PNG);
+
+        let alone = Prompt::of(&[ContentBlock::Image(ImageContent::new(ONE_PIXEL_PNG, "image/png"))])
+            .await
+            .unwrap();
+        assert!(!alone.is_empty(), "an image alone is a prompt");
+        assert!(Prompt::of(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_image_that_cannot_be_used_fails_the_prompt_saying_which() {
+        let blocks = vec![
+            ContentBlock::Image(ImageContent::new(ONE_PIXEL_PNG, "image/png")),
+            ContentBlock::Image(ImageContent::new("not base64!", "image/png")),
+        ];
+        let error = Prompt::of(&blocks).await.err().unwrap();
+        assert!(
+            error.starts_with("image 2 of the prompt cannot be used: the image is not valid base64"),
+            "{error}"
+        );
     }
 
     #[test]
