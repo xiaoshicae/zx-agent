@@ -124,7 +124,7 @@ impl SessionStorage for MemoryStorage {
     }
 
     async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
-        // Copied out under the lock, summarized without it.
+        // Copied out under the lock, described without it.
         let matching: Vec<LoadedSession> = lock(&self.sessions)
             .values()
             .filter(|stored| query.matches(&stored.header))
@@ -163,12 +163,7 @@ impl SessionLog for MemoryLog {
             bail!("session {} is no longer in memory", self.id);
         };
         let next = u64::try_from(stored.records.len())? + 1;
-        ensure!(
-            record.seq == next,
-            "record {} is out of order: session {} expects record {next}",
-            record.seq,
-            self.id
-        );
+        record.check_seq(next).with_context(|| format!("session {}", self.id))?;
         stored.records.push(record.json.to_string());
         Ok(())
     }
@@ -283,7 +278,7 @@ mod tests {
         };
 
         log.append(&record(1)).await.unwrap();
-        let error = log.append(&record(1)).await.unwrap_err().to_string();
+        let error = format!("{:#}", log.append(&record(1)).await.unwrap_err());
 
         assert!(error.contains("expects record 2"), "{error}");
     }

@@ -5,16 +5,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, READ_CANCELLED, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
-use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Reads text files in pages of bounded size.
 pub struct ReadFileTool {
     /// Larger files are refused; the model should use `bash` with head, tail, or grep.
+    /// [`DEFAULT_MAX_FILE_BYTES`](super::DEFAULT_MAX_FILE_BYTES) by default.
     pub max_file_bytes: u64,
     /// Where files are read. Defaults to this machine.
     pub executor: Arc<dyn Executor>,
@@ -40,6 +41,21 @@ struct Args {
     limit: Option<usize>,
 }
 
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        check_path(&args.path)?;
+        if args.offset == Some(0) {
+            return Err("offset must be at least 1: lines are numbered from 1".into());
+        }
+        if args.limit == Some(0) {
+            return Err("limit must be at least 1; omit it to read as many lines as one call shows".into());
+        }
+        Ok(args)
+    }
+}
+
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
@@ -51,7 +67,8 @@ impl Tool for ReadFileTool {
             name: super::READ_FILE.to_string(),
             description: format!(
                 "Read a regular text file up to {} bytes. Returns at most {MAX_LINES} lines or {}KB per call; use offset (1-based line \
-                 number) and limit to page through larger files. Relative paths resolve against the working directory.",
+                 number) and limit to page through larger files. Relative paths resolve against the working directory. \
+                 Read-only.",
                 self.max_file_bytes,
                 MAX_BYTES / 1024
             ),
@@ -77,15 +94,14 @@ impl Tool for ReadFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args: Args = parse_args(args)?;
-        check_path(&args.path)
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = parse_args(&args)?;
+        let args = Args::parse(&args)?;
         let path = resolve(&ctx.cwd, &args.path)?;
         let read = unless_cancelled(ctx, self.executor.read_file(&path, self.max_file_bytes)).await;
-        let bytes = read.ok_or_else(|| "read cancelled".to_string())??;
+        let bytes = read.ok_or(READ_CANCELLED)??;
         if looks_binary(&bytes) {
             return Err(format!(
                 "{} looks like a binary file; use bash with `file`, `xxd` or `strings` to inspect it",
@@ -99,13 +115,13 @@ impl Tool for ReadFileTool {
         if total == 0 {
             return Ok(ToolOutput::ok("(empty file)"));
         }
-        let start = args.offset.unwrap_or(1).max(1);
+        let start = args.offset.unwrap_or(1);
         if start > total {
             return Err(format!("offset {start} is beyond the end of the file ({total} lines)"));
         }
         let end = args
             .limit
-            .map_or(total, |limit| (start - 1).saturating_add(limit.max(1)).min(total));
+            .map_or(total, |limit| (start - 1).saturating_add(limit).min(total));
         let selected = lines[start - 1..end].concat();
         let truncated = truncate_head(&selected, MAX_LINES, MAX_BYTES);
         let shown_end = start - 1 + truncated.kept_lines;
@@ -114,19 +130,19 @@ impl Tool for ReadFileTool {
         let first_line = lines[start - 1].strip_suffix('\n').unwrap_or(lines[start - 1]);
         let cut_line = truncated.kept_lines == 1 && truncated.text.len() < first_line.len();
         let next = if shown_end < total {
-            format!(" Use offset={} to continue.", shown_end + 1)
+            format!("; use offset={} to continue", shown_end + 1)
         } else {
             String::new()
         };
         let note = if cut_line {
             Some(format!(
-                "[Line {start} of {total} was cut: showing {} of {} bytes. read_file cannot page within a line; \
-                 use another tool, such as bash, to read the rest.{next}]",
+                "[line {start} of {total} was truncated to {} of its {} bytes; read_file cannot page within a \
+                 line, so read the rest with another tool, such as bash{next}]",
                 truncated.text.len(),
                 first_line.len()
             ))
         } else if shown_end < total {
-            Some(format!("[Showing lines {start}-{shown_end} of {total}.{next}]"))
+            Some(format!("[showing lines {start}-{shown_end} of {total}{next}]"))
         } else {
             None
         };

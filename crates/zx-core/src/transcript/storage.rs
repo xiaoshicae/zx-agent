@@ -17,8 +17,10 @@ use crate::ai::{Message, UserMessageKind};
 /// session's records in order. It does not interpret the records: [`Transcript`] checks
 /// them when a session is loaded and before each append. An implementation guarantees:
 ///
+/// - `create` refuses a header of another format ([`SessionHeader::check_version`]).
 /// - [`SessionLog::append`] returns only once the record is stored.
-/// - A record whose `seq` the session already has is refused, never overwritten.
+/// - A record whose `seq` the session already has is refused, never overwritten
+///   ([`LogRecord::check_seq`](super::LogRecord::check_seq) checks it against the next one).
 /// - A session has one writer at a time: while a log of it exists, `open` fails, or the
 ///   appends of a second writer do, as a unique key on the session ID and `seq` makes them.
 ///
@@ -53,7 +55,7 @@ use crate::ai::{Message, UserMessageKind};
 #[async_trait]
 pub trait SessionStorage: Send + Sync {
     /// Store `header` as a new session and return the log its records go to. Fails when a
-    /// session with that ID exists already.
+    /// session with that ID exists already, or `header` is of another format.
     async fn create(&self, header: &SessionHeader) -> Result<Box<dyn SessionLog>>;
 
     /// Read session `id` back and become its writer: the header and records, for
@@ -101,7 +103,8 @@ pub struct SessionQuery {
     pub cwd: Option<PathBuf>,
     /// Only sessions that carry each of these labels with the same value.
     pub labels: BTreeMap<String, String>,
-    /// At most this many sessions: the most recently active ones.
+    /// At most this many sessions: in a listing the most recently active ones, among
+    /// [`SessionStorage::headers`] the most recently started ones.
     pub limit: Option<usize>,
 }
 
@@ -168,8 +171,8 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// What a listing shows of the session in `transcript`. A storage that keeps no summary
-    /// of its sessions builds one from a snapshot ([`Transcript::snapshot`]).
+    /// What a listing shows of the session in `transcript`. A storage that keeps no listing
+    /// of its sessions builds it from a snapshot ([`Transcript::snapshot`]).
     pub fn of(transcript: &Transcript) -> Self {
         let header = transcript.header();
         let first_prompt = transcript.entries().iter().find_map(|entry| {
@@ -229,7 +232,8 @@ pub struct SessionList {
 }
 
 impl SessionList {
-    /// The listing `query` asks for, of `sessions` that each match it: most recently active
+    /// The listing `query` asks for, of `sessions` that each match it (unlike
+    /// [`SessionQuery::arrange_headers`], it does not filter them): most recently active
     /// first, of those last active at the same moment the one started later first, and no
     /// more of them than the limit; `unreadable` in the order of their locations, so that a
     /// listing does not depend on the order in which the storage found what it holds.

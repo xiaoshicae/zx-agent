@@ -69,10 +69,9 @@ impl ApprovalGate {
         }
     }
 
-    /// Open a request for the host to answer, with an ID of its own: the model chooses the
-    /// IDs of its calls and may repeat one, and a late answer must not reach another request.
+    /// Open a request for the host to answer, with an ID of its own ([`request_id`]).
     pub(crate) fn open(&self) -> Waiting<'_> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = request_id();
         let (decide, answer) = oneshot::channel();
         lock(&self.state).waiting.insert(id.clone(), decide);
         Waiting { gate: self, id, answer }
@@ -89,6 +88,12 @@ impl ApprovalGate {
     }
 }
 
+/// A new ID for an approval request: the model chooses the IDs of its calls and may repeat
+/// one, and a late answer must not reach another request.
+pub(crate) fn request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 fn granted(calls: &[(String, Value)], call: &ToolCall) -> bool {
     calls
         .iter()
@@ -97,7 +102,7 @@ fn granted(calls: &[(String, Value)], call: &ToolCall) -> bool {
 
 /// How a request ended.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Answer {
+pub(crate) enum RequestEnd {
     Decided(ApprovalDecision),
     /// Nobody answered within this time.
     TimedOut(Duration),
@@ -120,16 +125,16 @@ impl Waiting<'_> {
     }
 
     /// Wait for the host's answer, at most `timeout` and until `cancel` is cancelled.
-    pub(crate) async fn answer(&mut self, timeout: Duration, cancel: &CancellationToken) -> Answer {
+    pub(crate) async fn wait(&mut self, timeout: Duration, cancel: &CancellationToken) -> RequestEnd {
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Answer::Cancelled,
+            () = cancel.cancelled() => RequestEnd::Cancelled,
             decision = &mut self.answer => match decision {
-                Ok(decision) => Answer::Decided(decision),
+                Ok(decision) => RequestEnd::Decided(decision),
                 // Only this request's own withdrawal drops the sender unanswered.
-                Err(_) => Answer::Cancelled,
+                Err(_) => RequestEnd::Cancelled,
             },
-            () = tokio::time::sleep(timeout) => Answer::TimedOut(timeout),
+            () = tokio::time::sleep(timeout) => RequestEnd::TimedOut(timeout),
         }
     }
 }
@@ -145,17 +150,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::test_support::tool_call;
 
     const LONG: Duration = Duration::from_secs(60);
-
-    fn call(arguments: Value) -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "bash".into(),
-            arguments,
-            arguments_error: None,
-        }
-    }
 
     #[tokio::test]
     async fn an_answer_reaches_the_request_it_names_once() {
@@ -167,8 +164,8 @@ mod tests {
         assert!(gate.resolve(&id, ApprovalDecision::Deny("not now".into())));
         assert!(!gate.resolve(&id, ApprovalDecision::AllowOnce), "answered already");
 
-        let answer = request.answer(LONG, &CancellationToken::new()).await;
-        assert_eq!(answer, Answer::Decided(ApprovalDecision::Deny("not now".into())));
+        let end = request.wait(LONG, &CancellationToken::new()).await;
+        assert_eq!(end, RequestEnd::Decided(ApprovalDecision::Deny("not now".into())));
     }
 
     #[tokio::test]
@@ -177,15 +174,15 @@ mod tests {
         let brief = Duration::from_millis(1);
         let mut request = gate.open();
         assert_eq!(
-            request.answer(brief, &CancellationToken::new()).await,
-            Answer::TimedOut(brief)
+            request.wait(brief, &CancellationToken::new()).await,
+            RequestEnd::TimedOut(brief)
         );
 
         let cancel = CancellationToken::new();
         cancel.cancel();
         // Cancellation counts even when an answer has arrived as well.
         assert!(gate.resolve(request.id(), ApprovalDecision::AllowOnce));
-        assert_eq!(request.answer(LONG, &cancel).await, Answer::Cancelled);
+        assert_eq!(request.wait(LONG, &cancel).await, RequestEnd::Cancelled);
     }
 
     #[test]
@@ -202,14 +199,14 @@ mod tests {
     #[test]
     fn a_session_grant_covers_the_exact_call_only() {
         let gate = ApprovalGate::default();
-        let allowed = call(json!({"command": "ls"}));
+        let allowed = tool_call("bash", json!({"command": "ls"}));
         assert!(!gate.allows(&allowed));
 
         gate.remember(&allowed);
         gate.remember(&allowed);
 
         assert!(gate.allows(&allowed));
-        assert!(!gate.allows(&call(json!({"command": "ls -l"}))));
+        assert!(!gate.allows(&tool_call("bash", json!({"command": "ls -l"}))));
         assert!(!gate.allows(&ToolCall {
             name: "other".into(),
             ..allowed.clone()

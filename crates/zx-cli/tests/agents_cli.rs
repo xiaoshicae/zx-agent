@@ -1,6 +1,7 @@
 //! Agents through the real CLI and the shared local HTTP fixture: the user's agent files,
 //! which replace the built-in agents, the command line over them, project context, skills,
 //! tool rules and their audit.
+
 mod common;
 
 use std::path::Path;
@@ -10,12 +11,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-
-use common::zx_agent_in;
 use zx_agent::ai::Message;
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, agent_text, fake_model_config, write_agent_file, write_config};
+use zx_testing::program::{Home, agent_text, ended_output, fake_model_config, write_agent_file, write_config};
 use zx_testing::{json_lines, stderr, stdout};
+
+use self::common::zx_agent_in;
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
 
@@ -47,17 +48,16 @@ fn system(server: &MockServer, index: usize) -> String {
 }
 
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].tool_results()[0]["content"]
-        .as_str()
-        .unwrap()
-        .into()
+    server.requests()[index].tool_result_texts().remove(0)
 }
+
 /// Write the agent that `run` in `dir` uses: `agents/unattended.md` in its zx-agent home,
 /// with `front` over the built-in agent its `extends` names, the unattended one when it names
 /// none, and the instructions of that agent.
 fn agent(dir: &Path, front: &str) {
     agent_as(dir, "unattended", front, "");
 }
+
 /// Write `agents/<builtin>.md` in the zx-agent home of runs in `dir`, with `front` (extending
 /// `builtin` unless it says otherwise) and `body`.
 fn agent_as(dir: &Path, builtin: &str, front: &str, body: &str) {
@@ -68,19 +68,21 @@ fn agent_as(dir: &Path, builtin: &str, front: &str, body: &str) {
     };
     write_agent_file(&agent_home(dir), builtin, &agent_text(&front, body));
 }
+
 /// The zx-agent home of [`command`] run in `dir`: `.zx-agent` in its home directory.
 fn agent_home(dir: &Path) -> std::path::PathBuf {
     dir.join(".home/.zx-agent")
 }
+
 /// Write the config.toml of runs in `dir`: `top`, then the provider settings of these tests.
 fn config(dir: &Path, top: &str) {
     write_config(&agent_home(dir), &fake_model_config(KEY_VAR, top, ""));
 }
+
 fn skill_reply() -> Reply {
-    Reply::Sse(vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"skill-call","type":"function","function":{"name":"read_skill","arguments":"{\"name\":\"review\"}"}}]},"finish_reason":"tool_calls"}]}),
-    ])
+    Reply::tool_call("skill-call", "read_skill", &json!({"name": "review"}))
 }
+
 /// An agent with `extra` and the skill `review`, whose body is `SKILL.md` in `dir`: paths
 /// in an agent file are relative to its directory, `agents/` in the zx-agent home.
 fn register_skill(dir: &Path, extra: &str) {
@@ -104,7 +106,7 @@ fn cat_result(text: &str) -> String {
 /// The ID of the stored result and the offset of the next page, from the footer of `page`.
 fn footer(page: &str) -> (String, usize) {
     let (_, footer) = page
-        .rsplit_once("\n[Use read_output with id=\"")
+        .rsplit_once("\n[use read_output with id=\"")
         .unwrap_or_else(|| panic!("no footer of a stored result in {page:?}"));
     let (id, rest) = footer.split_once("\", offset=").unwrap();
     let offset = rest.split(' ').next().unwrap().parse().unwrap();
@@ -124,11 +126,9 @@ fn last_tool_result(body: &Value) -> &str {
         .unwrap()
 }
 
-fn read_output_reply(body: &Value) -> Vec<Value> {
+fn read_output_reply(body: &Value) -> Reply {
     let (id, offset) = footer(last_tool_result(body));
-    vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"output","type":"function","function":{"name":"read_output","arguments":json!({"id":id,"offset":offset}).to_string()}}]},"finish_reason":"tool_calls"}]}),
-    ]
+    Reply::tool_call("output", "read_output", &json!({"id": id, "offset": offset}))
 }
 
 #[tokio::test]
@@ -267,15 +267,15 @@ async fn a_configured_output_directory_is_relative_to_config_toml() {
 async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = zx_testing::create_session_file(&dir.path().join("audit.jsonl"), zx_testing::header())
+        let mut seed = zx_testing::create_session_file(&dir.path().join("audit.jsonl"), zx_testing::header())
             .await
             .unwrap();
-        let id = store
+        let id = seed
             .append_message(Message::user("x".repeat(300 * 1024)))
             .await
             .unwrap();
-        store.append_message(Message::user("recent input")).await.unwrap();
-        drop(store);
+        seed.append_message(Message::user("recent input")).await.unwrap();
+        drop(seed);
         let summary =
             json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":[]}).to_string();
         let replies = if enable {
@@ -292,10 +292,10 @@ async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
         let output = run(&server, dir.path(), &args).await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), if enable { 2 } else { 1 });
-        let store = zx_testing::open_session_file(&dir.path().join("audit.jsonl"))
+        let seed = zx_testing::open_session_file(&dir.path().join("audit.jsonl"))
             .await
             .unwrap();
-        assert_eq!(store.latest_compaction().is_some(), enable);
+        assert_eq!(seed.latest_compaction().is_some(), enable);
     }
 }
 
@@ -319,7 +319,7 @@ async fn an_agent_file_gives_the_instructions_and_resolves_paths_relative_to_its
 }
 
 #[tokio::test]
-async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file() {
+async fn a_command_line_limit_overrides_the_agent_file_even_at_its_usual_value() {
     let dir = tempfile::tempdir().unwrap();
     agent(
         dir.path(),
@@ -576,10 +576,7 @@ async fn chat_uses_the_agent_turn_budget() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"go\n/quit\n").await.unwrap();
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reports: Vec<Value> = json_lines(&stdout(&output));
     assert!(reports.iter().any(|value| value["type"] == "run_end"
@@ -606,10 +603,7 @@ async fn chat_keeps_shell_approval_even_when_the_agent_has_no_ask_rule() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"go\n1\n/quit\n").await.unwrap();
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stderr(&output).contains("[approval 1]"));
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "approved");
@@ -654,6 +648,7 @@ async fn a_project_context_error_names_the_option_that_skips_it() {
     assert!(stderr(&output).contains("discover = false"), "{}", stderr(&output));
     assert!(server.requests().is_empty());
 }
+
 #[tokio::test]
 async fn a_users_agent_replaces_the_built_in_one_and_other_files_are_ignored() {
     let dir = tempfile::tempdir().unwrap();

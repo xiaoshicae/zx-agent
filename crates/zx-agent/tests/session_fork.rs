@@ -8,7 +8,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolResultMessage};
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, StartRecord, Transcript};
-use zx_testing::{RunnerSetup, Seed, config, header, read_lines, tool_call_answer};
+use zx_testing::{RunnerSetup, Seed, config, header, read_lines, replayed_requests, tool_call_answer};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.id().to_string()).collect()
@@ -79,7 +79,7 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
-    let source = &runner.session();
+    let source = &runner.transcript();
     let leaf = source.leaf_id().unwrap().to_string();
     let fork_path = dir.path().join("fork.jsonl");
 
@@ -90,15 +90,7 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     drop(fork);
 
     let fork = zx_testing::open_session_file(&fork_path).await.unwrap();
-    let replayed: Vec<_> = fork
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(fork.replay_request(&started.id).unwrap().1),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(replayed, provider.requests());
+    assert_eq!(replayed_requests(&fork), provider.requests());
 }
 
 #[tokio::test]

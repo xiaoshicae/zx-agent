@@ -1,19 +1,15 @@
-//! Whether a tool call may run: the [`ToolPolicy`] interface, the verdict it gives, and the
+//! Whether a tool call may run: the [`ToolPolicy`] interface, the decision it gives, and the
 //! approval of a call a policy asks about (pi: `beforeToolCall`, wired to the extension
 //! `tool_call` event).
 //!
-//! An unattended run has no one to ask, so a policy should deny when unsure. A verdict is a
+//! An unattended run has no one to ask, so a policy should deny when unsure. A decision is a
 //! first line of defense, not a security boundary: run the agent as a least-privilege user,
 //! in a container or VM, for real isolation.
 //!
 //! Only policies decide; hooks observe and transform. The policies that ship with zx-agent
-//! live outside the kernel, in the zx-builtin crate (`zx_agent::builtin::policy`):
+//! live outside the kernel, in the zx-builtin crate (`zx_agent::builtin::policy`).
 //!
-//! ```compile_fail
-//! use zx_core::policy::CommandPolicy;
-//! ```
-//!
-//! - `chain`: the policies of a loop, and how their verdicts combine
+//! - `chain`: the policies of a loop, and how their decisions combine
 //! - `approval`: who answers when a policy asks, the answer, and the gate where the call
 //!   waits for it
 
@@ -27,15 +23,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+pub use self::approval::{ApprovalDecision, ApprovalMode};
+pub(crate) use self::approval::{ApprovalGate, NO_HUMAN, RequestEnd, request_id};
+pub use self::chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 use crate::ai::ToolCall;
 use crate::guard::CancelSignal;
 
-pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN};
-pub use approval::{ApprovalDecision, ApprovalMode};
-pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
-
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the
-/// strictest verdict of all policies stands.
+/// strictest decision of all policies stands.
 ///
 /// `check` is called after the tool is found and its arguments are validated, before it
 /// runs; the call cannot be changed here. Return [`PolicyDecision::Deny`] when unsure. A
@@ -62,9 +57,10 @@ pub struct PolicyContext {
     /// tenant or the chat it belongs to.
     pub labels: BTreeMap<String, String>,
     /// Who sent the input the run is answering: the actor of the latest prompt of the
-    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
-    /// nobody. Other people may have spoken earlier in the run: a policy that must hold for
-    /// each of them keeps track of them itself, with a hook's `on_input`.
+    /// session ([`Input::User`](crate::input::Input::User)); `None` when the host named
+    /// nobody, and after a `finish_step` hook asked for a follow-up, which nobody sent. Other
+    /// people may have spoken earlier in the run: a policy that must hold for each of them
+    /// keeps track of them itself, with a hook's `on_input`.
     pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the policy.
     pub cancel: CancelSignal,
@@ -85,7 +81,7 @@ impl PolicyContext {
     }
 }
 
-/// The verdict on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
+/// The decision on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
 /// `reason`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "reason", rename_all = "snake_case")]

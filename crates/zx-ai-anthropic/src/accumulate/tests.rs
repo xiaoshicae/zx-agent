@@ -5,9 +5,9 @@ use super::*;
 fn apply_all(acc: &mut Accumulator, events: &[Value]) -> Vec<Delta> {
     events
         .iter()
-        .flat_map(|event| match acc.apply(event) {
-            Ok(deltas) => deltas,
-            Err(_) => panic!("unexpected failure at {event}"),
+        .flat_map(|event| {
+            acc.apply(event)
+                .unwrap_or_else(|failure| panic!("{failure:?} at {event}"))
         })
         .collect()
 }
@@ -17,7 +17,21 @@ fn ended(reason: &str) -> Value {
 }
 
 #[test]
-fn a_text_answer_streams_its_deltas_and_counts_cached_prompt_tokens_as_input() {
+fn an_empty_id_or_model_names_nothing() {
+    let mut acc = Accumulator::new("anthropic", "claude-opus-5-5", 1);
+    apply_all(
+        &mut acc,
+        &[
+            json!({"type": "message_start", "message": {"id": "", "model": "", "usage": {"input_tokens": 1}}}),
+            ended("end_turn"),
+        ],
+    );
+    let message = acc.finish().unwrap();
+    assert_eq!((message.response_id, message.response_model), (None, None));
+}
+
+/// A streamed text answer: its deltas and the message it makes.
+fn text_answer() -> (Vec<Delta>, AssistantMessage) {
     let mut acc = Accumulator::new("anthropic", "claude-opus-5-5", 1);
     let deltas = apply_all(
         &mut acc,
@@ -33,16 +47,30 @@ fn a_text_answer_streams_its_deltas_and_counts_cached_prompt_tokens_as_input() {
             json!({"type": "message_stop"}),
         ],
     );
+    (deltas, acc.finish().unwrap())
+}
+
+#[test]
+fn a_text_answer_streams_its_deltas() {
+    let (deltas, message) = text_answer();
     assert_eq!(
         deltas,
         [Delta::Text { text: "Hel".into() }, Delta::Text { text: "lo".into() }]
     );
-    let message = acc.finish().unwrap();
     assert_eq!(message.stop_reason, StopReason::Stop);
     assert_eq!(message.text(), "Hello");
+}
+
+#[test]
+fn the_response_id_and_the_model_that_answered_are_kept() {
+    let (_, message) = text_answer();
     assert_eq!(message.response_id.as_deref(), Some("msg_1"));
     assert_eq!(message.response_model.as_deref(), Some("claude-opus-5-5-20261101"));
-    let usage = message.usage;
+}
+
+#[test]
+fn cached_prompt_tokens_count_as_input() {
+    let usage = text_answer().1.usage;
     assert_eq!(
         (
             usage.input,
@@ -55,8 +83,9 @@ fn a_text_answer_streams_its_deltas_and_counts_cached_prompt_tokens_as_input() {
     );
 }
 
-#[test]
-fn thinking_keeps_its_signature_and_tool_calls_their_streamed_arguments() {
+/// An answer that thinks, holds a redacted thinking block and a server tool's block, then
+/// calls a tool: its deltas and the message it makes.
+fn thinking_then_a_call() -> (Vec<Delta>, AssistantMessage) {
     let mut acc = Accumulator::new("anthropic", "m", 1);
     let deltas = apply_all(
         &mut acc,
@@ -74,12 +103,39 @@ fn thinking_keeps_its_signature_and_tool_calls_their_streamed_arguments() {
             ended("tool_use"),
         ],
     );
+    (deltas, acc.finish().unwrap())
+}
+
+#[test]
+fn thinking_keeps_its_signature() {
+    let (deltas, message) = thinking_then_a_call();
     assert_eq!(
-        deltas,
+        deltas[0],
+        Delta::Thinking {
+            text: "Let me look.".into()
+        }
+    );
+    assert_eq!(
+        message.content[..2],
         [
-            Delta::Thinking {
-                text: "Let me look.".into()
+            ContentBlock::Thinking {
+                thinking: "Let me look.".into(),
+                signature: Some("sig".into())
             },
+            ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: Some("redacted:opaque".into())
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_tool_call_keeps_its_streamed_arguments() {
+    let (deltas, message) = thinking_then_a_call();
+    assert_eq!(
+        deltas[1..],
+        [
             Delta::ToolCallStart {
                 id: "toolu_1".into(),
                 name: "bash".into()
@@ -94,90 +150,111 @@ fn thinking_keeps_its_signature_and_tool_calls_their_streamed_arguments() {
             },
         ]
     );
-    let message = acc.finish().unwrap();
     assert_eq!(message.stop_reason, StopReason::ToolUse);
     assert_eq!(
-        message.content,
-        [
-            ContentBlock::Thinking {
-                thinking: "Let me look.".into(),
-                signature: Some("sig".into())
-            },
-            ContentBlock::Thinking {
-                thinking: String::new(),
-                signature: Some("redacted:opaque".into())
-            },
-            ContentBlock::ToolCall(ToolCall {
-                id: "toolu_1".into(),
-                name: "bash".into(),
-                arguments: serde_json::json!({"command": "ls"}),
-                arguments_error: None
-            }),
-        ]
+        message.content[2..],
+        [ContentBlock::ToolCall(ToolCall {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+            arguments_error: None
+        })]
     );
 }
 
 #[test]
-fn a_cut_off_answer_is_long_a_full_window_an_overflow_and_a_refusal_a_failure_of_its_own_kind() {
-    let finished = |reason: &str, details: Value| {
-        let mut acc = Accumulator::new("anthropic", "m", 1);
-        acc.apply(&json!({"type": "message_delta", "delta": {"stop_reason": reason, "stop_details": details}}))
-            .unwrap_or_else(|_| panic!("unexpected failure"));
-        acc.finish().unwrap()
-    };
-    assert_eq!(finished("max_tokens", Value::Null).stop_reason, StopReason::Length);
-    assert_eq!(finished("pause_turn", Value::Null).stop_reason, StopReason::Stop);
+fn a_server_tools_block_is_not_kept() {
+    let (deltas, message) = thinking_then_a_call();
+    assert_eq!((deltas.len(), message.content.len()), (4, 3));
+}
 
+/// The message of a response that ended with `reason`, and `details` as its `stop_details`.
+fn finished(reason: &str, details: &Value) -> AssistantMessage {
+    let mut acc = Accumulator::new("anthropic", "m", 1);
+    acc.apply(&json!({"type": "message_delta", "delta": {"stop_reason": reason, "stop_details": details}}))
+        .unwrap_or_else(|failure| panic!("{failure:?}"));
+    acc.finish().unwrap()
+}
+
+#[test]
+fn an_answer_cut_off_at_the_output_limit_is_long() {
+    assert_eq!(finished("max_tokens", &Value::Null).stop_reason, StopReason::Length);
+}
+
+#[test]
+fn a_paused_turn_ends_the_answer() {
+    assert_eq!(finished("pause_turn", &Value::Null).stop_reason, StopReason::Stop);
+}
+
+#[test]
+fn a_full_context_window_is_an_overflow() {
     // Continuing would not fit either: the conversation is compacted, when it can be.
-    let full = finished("model_context_window_exceeded", Value::Null);
+    let full = finished("model_context_window_exceeded", &Value::Null);
     assert_eq!(full.stop_reason, StopReason::Error);
-    let details = full.provider_error.unwrap();
+    let provider_error = full.provider_error.unwrap();
     assert_eq!(
-        (details.kind, details.code.as_deref()),
+        (provider_error.kind, provider_error.code.as_deref()),
         (
             ProviderErrorKind::ContextOverflow,
             Some("model_context_window_exceeded")
         )
     );
+}
 
+#[test]
+fn a_refusal_is_a_failure_of_its_own_kind_with_the_apis_explanation() {
     let refused = finished(
         "refusal",
-        json!({"type": "refusal", "category": "cyber", "explanation": "Declined."}),
+        &json!({"type": "refusal", "category": "cyber", "explanation": "Declined."}),
     );
     assert_eq!(refused.stop_reason, StopReason::Error);
     assert_eq!(
         refused.error_message.as_deref(),
         Some("the model refused the request (cyber): Declined.")
     );
-    let details = refused.provider_error.unwrap();
+    let provider_error = refused.provider_error.unwrap();
     assert_eq!(
-        (details.kind, details.code.as_deref()),
+        (provider_error.kind, provider_error.code.as_deref()),
         (ProviderErrorKind::Refused, Some("refusal"))
     );
+}
 
-    // A reason added to the API since is not taken for success, and not retried.
-    let unknown = finished("sensitive", Value::Null);
+#[test]
+fn a_stop_reason_added_to_the_api_since_is_a_refusal() {
+    // Not taken for success, and so not retried either.
+    let unknown = finished("sensitive", &Value::Null);
     assert_eq!(unknown.stop_reason, StopReason::Error);
     assert_eq!(unknown.provider_error.unwrap().kind, ProviderErrorKind::Refused);
 }
 
-#[test]
-fn a_stream_without_a_stop_reason_or_with_an_error_event_fails() {
+/// An answer that streamed some text and then ended without a stop reason.
+fn cut_off_text() -> Accumulator {
     let mut acc = Accumulator::new("anthropic", "m", 1);
     apply_all(
         &mut acc,
         &[json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "par"}})],
     );
-    assert_eq!(acc.finish().unwrap_err(), "stream ended without a stop_reason");
-    assert_eq!(
-        acc.failure(StopReason::Error, "cut", None).text(),
-        "par",
-        "what streamed is kept"
-    );
+    acc
+}
 
+#[test]
+fn a_stream_without_a_stop_reason_does_not_finish() {
+    assert_eq!(
+        cut_off_text().finish().unwrap_err(),
+        "stream ended without a stop_reason"
+    );
+}
+
+#[test]
+fn a_failed_answer_keeps_what_streamed() {
+    assert_eq!(cut_off_text().failure(StopReason::Error, "cut", None).text(), "par");
+}
+
+#[test]
+fn an_error_event_fails_the_response_as_its_type() {
     let error = json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}});
-    match acc.apply(&error) {
-        Err(Failure::Error { details, .. }) => assert_eq!(details.kind, ProviderErrorKind::Unavailable),
-        _ => panic!("an error event fails the response"),
-    }
+    let Failure::Error { provider_error, .. } = cut_off_text().apply(&error).unwrap_err() else {
+        panic!("an error event fails the response");
+    };
+    assert_eq!(provider_error.kind, ProviderErrorKind::Unavailable);
 }

@@ -28,17 +28,18 @@ mod skills;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
-
-pub(crate) use agent_file::cost_budget;
-pub use definition::Builtin;
-pub(crate) use definition::{AgentDefinition, HostTools, ProjectContext, known_tool};
-pub use environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
-pub use provider::{ANTHROPIC, OPENAI, ProviderSettings};
-pub(crate) use provider::{anthropic_config, openai_config};
-pub(crate) use skills::{READ_SKILL, Skill, validate_skills};
-
-use zx_agent::builtin::files::read_text_file;
+use zx_agent::builtin::files::read_text_blocking;
 use zx_util::env::env_value;
+
+pub(crate) use self::agent_file::{ModelRequestLimit, RawLimits, cost_budget};
+pub(crate) use self::context::ProjectContext;
+pub use self::definition::Builtin;
+pub(crate) use self::definition::{AgentDefinition, HostTools, known_tool};
+pub use self::environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
+pub(crate) use self::permissions::Permissions;
+pub use self::provider::{ANTHROPIC, OPENAI, ProviderSettings};
+pub(crate) use self::provider::{anthropic_config, openai_config};
+pub(crate) use self::skills::{READ_SKILL, Skill};
 
 /// The variable that names the zx-agent home directory instead of `~/.zx-agent`.
 pub const HOME_ENV: &str = "ZX_AGENT_HOME";
@@ -47,13 +48,16 @@ pub const HOME_ENV: &str = "ZX_AGENT_HOME";
 /// another.
 const HOME_DIR: &str = ".zx-agent";
 
+/// The configuration file in the zx-agent home.
+pub(crate) const CONFIG_FILE: &str = "config.toml";
+
 /// Maximum size of an agent file, context file or skill body.
 pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// The zx-agent home directory, which holds `config.toml`, `agents/` and `sessions/`:
 /// [`HOME_ENV`] when it is set and not empty, else `~/.zx-agent`; `None` when neither is
 /// known. A relative [`HOME_ENV`] is an error: it would depend on the working directory. A
-/// value that is not UTF-8 counts as unset, as for every variable the configuration reads.
+/// value that is not UTF-8 counts as unset.
 pub fn home() -> Result<Option<PathBuf>> {
     match env_value(HOME_ENV) {
         Some(value) => {
@@ -76,7 +80,7 @@ pub fn home() -> Result<Option<PathBuf>> {
 /// cannot be read, is not a regular file, is larger or is not UTF-8; the error names the
 /// path.
 pub fn read_text(path: &Path) -> Result<String> {
-    read_text_file(path, MAX_FILE_BYTES)
+    read_text_blocking(path, MAX_FILE_BYTES)
 }
 
 /// `value` parsed by its type, with `key` naming it in the error.
@@ -84,4 +88,39 @@ fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) 
     value
         .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_reads_accept_the_exact_limit_and_reject_oversize_and_invalid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("text");
+        let exact = "x".repeat(usize::try_from(MAX_FILE_BYTES).unwrap());
+        std::fs::write(&path, &exact).unwrap();
+        assert_eq!(read_text(&path).unwrap(), exact);
+        std::fs::write(&path, format!("{exact}界")).unwrap();
+        assert!(read_text(&path).unwrap_err().to_string().contains("exceeds"));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(read_text(&path).unwrap_err().to_string().contains("UTF-8"));
+        assert!(
+            read_text(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_refused_before_reading() {
+        assert!(
+            read_text(Path::new("/dev/null"))
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+    }
 }

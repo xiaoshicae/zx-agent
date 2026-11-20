@@ -1,6 +1,7 @@
 //! The `acp` subcommand against the local fake model, driven by a hand-written ACP client:
 //! JSON-RPC over the process's stdio, one message per line, so the wire format is what a real
 //! client sees. No paid APIs.
+
 mod common;
 
 use std::collections::VecDeque;
@@ -11,11 +12,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-
-use common::zx_agent_in;
-use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
 use zx_testing::{stderr, summary_json};
+
+use self::common::zx_agent_in;
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -313,9 +314,7 @@ async fn a_shell_call_asks_the_client_and_runs_once_allowed() {
     let server = MockServer::start(vec![Reply::bash("c1", "printf approved > marker"), Reply::text("done")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", "bash"]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 99, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}}))
-        .await;
+    acp.write(prompt_request(99, &session, "go")).await;
 
     let call = acp.next_update().await;
     assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
@@ -374,9 +373,7 @@ async fn a_rejected_call_never_runs_and_the_model_hears_why() {
     let server = MockServer::start(vec![Reply::bash("c1", "printf no > marker"), Reply::text("ok")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", "bash"]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 7, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}}))
-        .await;
+    acp.write(prompt_request(7, &session, "go")).await;
     let call = acp.next_update().await;
     assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
     let (id, _) = acp.next_request("session/request_permission").await;
@@ -407,9 +404,7 @@ async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
     let server = MockServer::start(vec![stalled_answer(), Reply::text("again")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 5, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "first"}]}}))
-        .await;
+    acp.write(prompt_request(5, &session, "first")).await;
     let chunk = acp.next_update().await;
     assert_eq!(text_of(&chunk), "partial");
     acp.notify("session/cancel", json!({"sessionId": session})).await;
@@ -425,9 +420,7 @@ async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
 
 /// A model answer that begins and then never ends: a turn that is not cancelled does not end.
 fn stalled_answer() -> Reply {
-    Reply::Stall(vec![
-        json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}),
-    ])
+    Reply::Stall(vec![text_chunk("partial")])
 }
 
 /// The request that starts a turn of `session` with `text`, as request `id`.
@@ -541,9 +534,7 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
     );
     let mut acp = Acp::start_in(&server, dir.path(), &[], Some(home.path())).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "write"}]}}))
-        .await;
+    acp.write(prompt_request(3, &session, "write")).await;
 
     let call = acp.next_update().await;
     assert_eq!(call["kind"], "edit", "{call}");
@@ -898,6 +889,73 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
 }
 
 #[tokio::test]
+async fn a_prompt_without_text_is_refused_before_any_request() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("unused")]).await;
+    let mut acp = Acp::start(&server, &cwd, &[]).await;
+    let id = acp.session(&cwd).await;
+
+    let response = acp.prompt(&id, " \n ").await;
+
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert!(server.requests().is_empty());
+    acp.finish().await;
+}
+
+#[tokio::test]
+async fn a_listing_names_the_session_files_it_cannot_read_on_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let dir = session_dir(home.path(), &cwd);
+    seed_session(&dir, "aaaa0001", &cwd, 1_000, "first question");
+    std::fs::write(dir.join("broken.jsonl"), "not json\n").unwrap();
+    write_config(&home.path().join(".zx-agent"), &fake_model_config(KEY_VAR, "", ""));
+    // The harness passes stderr through, so this agent is driven by hand.
+    let mut child = zx_agent_in(&cwd, Home::User(home.path()))
+        .args(["acp", "--model", "mock-model"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    // Each request waits for its answer: the protocol takes no other request before
+    // `initialize` is answered.
+    let mut ask = async |id: u64, method: &str, params: Value| -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(8), lines.next_line())
+                .await
+                .expect("no message within 8 seconds")
+                .unwrap()
+                .expect("the agent closed stdout");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["id"] == json!(id) {
+                return message;
+            }
+        }
+    };
+    ask(1, "initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let listed = ask(2, "session/list", json!({"cwd": cwd})).await;
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("the agent did not exit after stdin closed")
+        .unwrap();
+
+    let sessions = listed["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(sessions.len(), 1, "{listed}");
+    let errors = stderr(&output);
+    assert!(errors.contains("[acp]") && errors.contains("broken.jsonl"), "{errors}");
+}
+
+#[tokio::test]
 async fn resume_continues_a_session_without_replaying_it() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -1122,9 +1180,7 @@ async fn closing_a_session_cancels_its_turn() {
     let server = MockServer::start(vec![stalled_answer()]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 50, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "first"}]}}))
-        .await;
+    acp.write(prompt_request(50, &session, "first")).await;
     assert_eq!(text_of(&acp.next_update().await), "partial");
 
     let closed = acp.close(&session).await;

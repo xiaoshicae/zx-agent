@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::*;
@@ -72,7 +73,7 @@ fn builtin_names_are_spelt_as_extends_takes_them() {
 }
 
 #[test]
-fn built_in_agents_preserve_the_existing_scenario_defaults() {
+fn each_built_in_agent_has_the_settings_of_its_file() {
     for (agent, name, file) in [
         (
             load(Builtin::Unattended),
@@ -150,7 +151,7 @@ fn no_built_in_agent_names_a_program_of_a_particular_environment() {
 }
 
 #[test]
-fn only_the_interactive_agent_discovers_project_instructions_by_default() {
+fn only_the_assistant_discovers_project_instructions_by_default() {
     assert!(!load(Builtin::Unattended).context.discover);
     assert!(!shipped("deploy/kubernetes/agents/unattended.md").context.discover);
     assert!(load(Builtin::Assistant).context.discover);
@@ -179,11 +180,11 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
         ("[permissions.allowOptions.Tool]\nlong = ['x']", "one lowercase word"),
         (
             "[permissions.allowOptions.tool]\nlong = ['--namespace']",
-            "without dashes",
+            "without leading dashes",
         ),
         (
             "[permissions.allowOptions.tool]\nlong = ['output=json']",
-            "without dashes",
+            "`=` or whitespace",
         ),
         ("[permissions.allowOptions.tool]\nshortFlags = ['-']", "letter or digit"),
         (
@@ -199,7 +200,7 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
             "[permissions]\nallow = ['bash(sudo tool get)', 'bash(/bin/tool get)']\n[permissions.allowOptions.tool]\nlong = ['x']",
             "begins with",
         ),
-        ("[permissions]\nallowExcept = [' ']", "an entry is empty"),
+        ("[permissions]\nallowExcept = [' ']", "an entry must not be empty"),
     ] {
         let error = format!("{:#}", load_file(table).unwrap_err());
         assert!(error.contains(message), "{table}: {error}");
@@ -399,7 +400,7 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
 }
 
 #[test]
-fn zero_turns_and_unlimited_are_distinct_configurations() {
+fn zero_requests_and_unlimited_are_distinct_configurations() {
     assert_eq!(
         load_file("[limits]\nmaxModelRequests = 0")
             .unwrap()
@@ -444,8 +445,6 @@ fn a_cost_budget_of_zero_disables_it() {
 fn unknown_fields_and_invalid_budget_values_are_rejected() {
     for text in [
         "typo = true",
-        "[limits]\nmax_turns = 2",
-        "[limits]\nmaxTurns = 2",
         "[limits]\nmaxModelRequests = -1",
         "[limits]\nmaxModelRequests = 'infinite'",
         "[limits]\ntokenBudget = -1",
@@ -526,7 +525,7 @@ fn compaction_errors_name_the_keys_of_the_agent_file() {
         ),
         (
             "[compaction]\ntriggerTokens = 10\nkeepRecentBytes = 200",
-            "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes",
+            "compaction.triggerTokens must exceed compaction.keepRecentBytes /",
         ),
         (
             "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
@@ -553,7 +552,7 @@ fn compaction_errors_name_the_keys_of_the_agent_file() {
 #[test]
 fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_is_on() {
     let trigger = |front: &str| load_file(front).unwrap().compaction.trigger_tokens;
-    let window = |reserve_tokens| TokenTrigger::BelowWindow { reserve_tokens };
+    let window = |reserve_tokens| Some(TokenTrigger::BelowWindow { reserve_tokens });
 
     assert_eq!(trigger("extends = 'assistant'"), window(DEFAULT_RESERVE_TOKENS));
     assert_eq!(
@@ -562,7 +561,7 @@ fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_i
     );
     assert_eq!(
         trigger("extends = 'assistant'\n[compaction]\ntriggerBytes = 0"),
-        TokenTrigger::Off,
+        None,
         "without the byte trigger nothing turns automatic compaction on"
     );
     assert_eq!(
@@ -570,13 +569,10 @@ fn a_token_trigger_no_file_sets_follows_the_window_only_while_the_byte_trigger_i
         window(DEFAULT_RESERVE_TOKENS),
         "the unattended agent with the byte trigger turned on"
     );
-    assert_eq!(
-        trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 0"),
-        TokenTrigger::Off
-    );
+    assert_eq!(trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 0"), None);
     assert_eq!(
         trigger("extends = 'assistant'\n[compaction]\ntriggerTokens = 50000\nreserveTokens = 8000"),
-        TokenTrigger::Above(50_000),
+        Some(TokenTrigger::Above(50_000)),
         "a number of tokens does not follow the window"
     );
 }
@@ -591,36 +587,6 @@ fn invalid_tool_names_and_empty_entries_are_configuration_errors() {
     ] {
         assert!(load_file(text).is_err(), "{text}");
     }
-}
-
-#[test]
-fn bounded_reads_accept_the_exact_limit_and_reject_oversize_and_invalid_utf8() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("text");
-    let exact = "x".repeat(64 * 1024);
-    std::fs::write(&path, &exact).unwrap();
-    assert_eq!(read_text(&path).unwrap(), exact);
-    std::fs::write(&path, format!("{exact}界")).unwrap();
-    assert!(read_text(&path).unwrap_err().to_string().contains("exceeds"));
-    std::fs::write(&path, [0xff]).unwrap();
-    assert!(read_text(&path).unwrap_err().to_string().contains("UTF-8"));
-    assert!(
-        read_text(dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("not a regular file")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn special_files_are_refused_before_reading() {
-    assert!(
-        read_text(Path::new("/dev/null"))
-            .unwrap_err()
-            .to_string()
-            .contains("not a regular file")
-    );
 }
 
 #[test]

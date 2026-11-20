@@ -23,24 +23,27 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lifecycle};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
+use zx_core::extensions::Extension;
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
-use crate::ai::ToolDef;
-use crate::extensions::Extension;
+use crate::ai::{ToolDef, api_identifier};
 use crate::sync::lock;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
-use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).
-const MAX_TOOL_NAME: usize = 64;
+pub const MAX_TOOL_NAME_CHARS: usize = 64;
 /// Tool descriptions go with every request and are written by the server, so they are cut
 /// to this size.
 const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 /// Default bound for connecting and listing the tools.
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default bound for one tool call.
-const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default bound for one tool call, without news from the server.
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Progress updates a call can hold before the server's notifications are dropped: a call
+/// reads them as they come, and a burst beyond this only loses updates.
+const MAX_QUEUED_PROGRESS: usize = 16;
 /// Longest wait for a server to take the notice that a request is given up. The notice is a
 /// courtesy that lets the transport close the request's stream; the call that needed the
 /// answer is gone already.
@@ -70,7 +73,7 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// The settings for `tools` of the server `name` at `url`: no token, and the default
-    /// timeouts (30 s to connect, 120 s without news for a call).
+    /// timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_CALL_TIMEOUT`]).
     pub fn new(name: impl Into<String>, url: impl Into<String>, tools: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -88,9 +91,14 @@ impl ServerConfig {
     ///
     /// Errors, each naming the server: a name that is not ASCII lowercase letters, digits and
     /// `-` (so that it ends at the first `__` of a tool's name); a URL that is not `http://` or
-    /// `https://`; no tools; a name longer than model APIs accept (64 characters); two tools
-    /// that would get the same name.
+    /// `https://`; no tools; a name longer than model APIs accept ([`MAX_TOOL_NAME_CHARS`]);
+    /// two tools that would get the same name.
     pub fn validate(&self) -> Result<Vec<String>, String> {
+        self.check().map(|checked| checked.names)
+    }
+
+    /// What [`validate`](Self::validate) checks, with the origin of the URL it parsed.
+    fn check(&self) -> Result<Checked, String> {
         let server = self.name.as_str();
         check_server_name(server)?;
         if self.url.trim().is_empty() {
@@ -114,8 +122,19 @@ impl ServerConfig {
             }
             names.push(name);
         }
-        Ok(names)
+        Ok(Checked {
+            origin: url.origin().ascii_serialization(),
+            names,
+        })
     }
+}
+
+/// The settings of a server, checked.
+struct Checked {
+    /// The scheme, host and port of its URL.
+    origin: String,
+    /// The names the model calls its tools by, in configuration order.
+    names: Vec<String>,
 }
 
 type Client = RunningService<RoleClient, Handler>;
@@ -123,10 +142,11 @@ type Client = RunningService<RoleClient, Handler>;
 /// A connected MCP server and the tools taken from it.
 pub struct Server {
     name: String,
+    origin: String,
     protocol_version: String,
     tools: Vec<Arc<dyn Tool>>,
-    /// `(the server's name, the model's name)` of each tool, in configuration order.
-    names: Vec<(String, String)>,
+    /// The names the model calls the tools by, in configuration order.
+    names: Vec<String>,
 }
 
 impl Server {
@@ -138,7 +158,7 @@ impl Server {
     /// answer within `connect_timeout`, a protocol or transport failure, and a configured tool
     /// the server does not offer. The token never appears in them.
     pub async fn connect(config: ServerConfig) -> Result<Self, String> {
-        let names = config.validate()?;
+        let checked = config.check()?;
         let (client, listed) = connect_and_list(&config).await?;
         // A completed handshake or discovery records the server's information, so the empty
         // fallback is not expected; it only affects what is reported.
@@ -146,22 +166,21 @@ impl Server {
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        Self::with_tools(config, names, protocol_version, &listed, &Arc::new(client))
+        Self::with_tools(config, checked, protocol_version, &listed, &Arc::new(client))
     }
 
     /// The server with the configured tools among those it `listed`, as tools for the model,
-    /// which calls them by `names`, one for each configured tool.
+    /// which calls them by the `checked` names, one for each configured tool.
     fn with_tools(
         config: ServerConfig,
-        names: Vec<String>,
+        checked: Checked,
         protocol_version: String,
         listed: &[rmcp::model::Tool],
         client: &Arc<Client>,
     ) -> Result<Self, String> {
         let server = config.name.as_str();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        let names: Vec<(String, String)> = config.tools.iter().cloned().zip(names).collect();
-        for (remote, name) in &names {
+        for (remote, name) in config.tools.iter().zip(&checked.names) {
             let Some(offered) = listed.iter().find(|tool| tool.name.as_ref() == remote.as_str()) else {
                 let offered: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
                 return Err(fault(
@@ -183,10 +202,17 @@ impl Server {
         }
         Ok(Self {
             name: config.name,
+            origin: checked.origin,
             protocol_version,
             tools,
-            names,
+            names: checked.names,
         })
+    }
+
+    /// The scheme, host and port of the server's URL, such as `https://mcp.example.com`: what
+    /// may be shown of it, since its user, path or query may hold a credential.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// The protocol version settled with the server, such as `2026-07-28`.
@@ -194,8 +220,8 @@ impl Server {
         &self.protocol_version
     }
 
-    /// `(the server's name, the model's name)` of each tool, in configuration order.
-    pub fn tool_names(&self) -> &[(String, String)] {
+    /// The names the model calls the tools by, in configuration order.
+    pub fn tool_names(&self) -> &[String] {
         &self.names
     }
 }
@@ -237,32 +263,20 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
     match tokio::time::timeout(config.connect_timeout, connecting).await {
         Ok(Ok(connected)) => Ok(connected),
         Ok(Err(error)) => Err(fault(server, error)),
-        Err(_) => Err(fault(
-            server,
-            format!("no answer within {} s", config.connect_timeout.as_secs()),
-        )),
+        Err(_) => Err(fault(server, format!("no answer within {:?}", config.connect_timeout))),
     }
 }
 
 /// The name the model calls a server's tool by: `<server>__<tool>`, with characters other than
 /// ASCII letters, digits, `_` and `-` replaced by `_`. MCP allows tool names of up to 128
-/// characters, including `.`; model APIs allow fewer (`MAX_TOOL_NAME`). A server name has no
+/// characters, including `.`; model APIs allow fewer (`MAX_TOOL_NAME_CHARS`). A server name has no
 /// `_`, so the first `__` ends it. Errors when the name would be too long.
 fn tool_name(server: &str, tool: &str) -> Result<String, String> {
-    let tool: String = tool
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let name = format!("{server}__{tool}");
-    if name.len() > MAX_TOOL_NAME {
-        return Err(format!(
-            "MCP server {server}: tool name {name:?} is longer than {MAX_TOOL_NAME} characters"
+    let name = format!("{server}__{}", api_identifier(tool));
+    if name.len() > MAX_TOOL_NAME_CHARS {
+        return Err(fault(
+            server,
+            format_args!("tool name {name:?} is longer than {MAX_TOOL_NAME_CHARS} characters"),
         ));
     }
     Ok(name)
@@ -292,10 +306,6 @@ fn description(offered: Option<&str>) -> String {
     })
 }
 
-/// Progress updates a call can hold before the server's notifications are dropped: a call
-/// reads them as they come, and a burst beyond this only loses updates.
-const PROGRESS_UPDATES: usize = 16;
-
 /// Identifies zx-agent and declares no optional capabilities: only tools are used. Progress
 /// notifications are handed to the call they belong to, by the token rmcp gave its request.
 struct Handler {
@@ -316,7 +326,7 @@ impl Handler {
 
     /// The progress notifications carrying `token`, until the updates are dropped.
     fn subscribe(&self, token: ProgressToken) -> ProgressUpdates<'_> {
-        let (sender, receiver) = mpsc::channel(PROGRESS_UPDATES);
+        let (sender, receiver) = mpsc::channel(MAX_QUEUED_PROGRESS);
         lock(&self.progress).insert(token.clone(), sender);
         ProgressUpdates {
             handler: self,
@@ -374,21 +384,21 @@ struct McpTool {
 impl McpTool {
     /// The error of a failed call; the server's text in `error` is bounded like a result.
     fn failed(&self, error: &dyn std::fmt::Display) -> String {
-        format!(
-            "MCP server {}: {} failed: {}",
-            self.server,
-            self.remote,
-            truncate_head_noted(&error.to_string(), "error")
+        fault(
+            &self.server,
+            format_args!(
+                "{} failed: {}",
+                self.remote,
+                truncate_head_noted(&error.to_string(), "error")
+            ),
         )
     }
 
     /// The error of a call that went `bound` without an answer or progress.
     fn no_answer_within(&self, bound: Duration) -> String {
-        format!(
-            "MCP server {}: {} did not answer within {} s",
-            self.server,
-            self.remote,
-            bound.as_secs()
+        fault(
+            &self.server,
+            format_args!("{} did not answer within {bound:?}", self.remote),
         )
     }
 
@@ -421,7 +431,10 @@ impl McpTool {
                 }
                 () = ctx.cancel.cancelled() => {
                     // Dropping `unanswered` tells the server.
-                    return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
+                    return Err(fault(
+                        &self.server,
+                        format_args!("the call to {} was cancelled", self.remote),
+                    ));
                 }
             }
         };
@@ -429,9 +442,9 @@ impl McpTool {
         unanswered.settle();
         match answer {
             Ok(ServerResult::CallToolResult(result)) => Ok(result),
-            Ok(_) => Err(format!(
-                "MCP server {}: {} answered with a result of another kind",
-                self.server, self.remote
+            Ok(_) => Err(fault(
+                &self.server,
+                format_args!("{} answered with a result of another kind", self.remote),
             )),
             Err(ServiceError::Timeout { timeout }) => Err(self.no_answer_within(timeout)),
             Err(error) => Err(self.failed(&error)),
@@ -464,18 +477,18 @@ impl Drop for Unanswered<'_> {
         let peer = self.peer.clone();
         // Not awaited: the call that would wait for it is gone. The task ends when the
         // notification is sent, the connection turns out to be closed, or the wait times out.
-        tokio::spawn(async move { give_up(&peer, request_id, "cancelled by the agent").await });
+        tokio::spawn(async move { give_up(&peer, request_id).await });
     }
 }
 
-/// Tell the server that the request `request_id` is given up, for `reason`, waiting at most
+/// Tell the server that the agent gave up the request `request_id`, waiting at most
 /// [`GIVE_UP_TIMEOUT`]. The notification is what makes the transport close the request's
 /// stream; one that cannot be sent in time leaves nothing more to do, so its result is not
 /// needed.
-async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId, reason: &str) {
+async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId) {
     let notice = peer.notify_cancelled(CancelledNotificationParam::new(
         Some(request_id),
-        Some(reason.to_string()),
+        Some("cancelled by the agent".to_string()),
     ));
     let _ = tokio::time::timeout(GIVE_UP_TIMEOUT, notice).await;
 }
@@ -569,11 +582,11 @@ mod tests {
         assert_eq!(tool_name("prom", "query").unwrap(), "prom__query");
         assert_eq!(tool_name("prom", "range.query v2").unwrap(), "prom__range_query_v2");
         assert_eq!(tool_name("prom", "中文").unwrap(), "prom____");
-        let long = "x".repeat(MAX_TOOL_NAME);
+        let long = "x".repeat(MAX_TOOL_NAME_CHARS);
         assert!(tool_name("prom", &long).unwrap_err().contains("longer than 64"));
         assert_eq!(
-            tool_name("p", &"x".repeat(MAX_TOOL_NAME - 3)).unwrap().len(),
-            MAX_TOOL_NAME
+            tool_name("p", &"x".repeat(MAX_TOOL_NAME_CHARS - 3)).unwrap().len(),
+            MAX_TOOL_NAME_CHARS
         );
     }
 
@@ -610,7 +623,7 @@ mod tests {
                 "tool \"a_b\" would be named \"prom__a_b\", like another of its tools",
             ),
             (
-                ServerConfig::new("prom", "https://x", tools(&[&"x".repeat(MAX_TOOL_NAME)])),
+                ServerConfig::new("prom", "https://x", tools(&[&"x".repeat(MAX_TOOL_NAME_CHARS)])),
                 "longer than 64",
             ),
         ] {

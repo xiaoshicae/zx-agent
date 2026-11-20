@@ -7,14 +7,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Usage};
 use zx_agent::compaction::{Config, Outcome, Summarized, Summarizer, SummarySource};
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{CompactionSummary, Entry, SummarizedBy, SummaryFact, Transcript};
-
 use zx_testing::{Collect, Driven, RunnerSetup, config, refusal, seeded_session};
 
 /// What a scripted summarizer answers a call with.
@@ -110,12 +108,12 @@ async fn summarized_by(
     compaction: Config,
     steps: Vec<FauxStep>,
 ) -> (Driven, Arc<Collect>, Arc<FauxProvider>, String) {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new(steps));
     let mut config = config(provider.clone(), vec![]);
     config.summarizer = Some(summarizer);
     let (session, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()

@@ -6,12 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::parse_args;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::ai::ToolDef;
 use crate::executor::{Captured, CommandEnd, Executor, LocalExecutor, ShellCommand};
-use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// The timeout of a call that sets none, unless the host configures another.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -48,6 +48,21 @@ struct Args {
     timeout_secs: Option<u64>,
 }
 
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        if args.command.trim().is_empty() {
+            return Err("command is empty".to_string());
+        }
+        // A zero limit would end the command before it could run.
+        if args.timeout_secs == Some(0) {
+            return Err("timeoutSecs must be at least 1; omit it to use the default timeout".to_string());
+        }
+        Ok(args)
+    }
+}
+
 impl BashTool {
     /// The limit for one call: what it asks for, else the default, never above the maximum.
     fn timeout_for(&self, requested_secs: Option<u64>) -> Duration {
@@ -57,13 +72,13 @@ impl BashTool {
     }
 }
 
-/// Of the output budget, the share stderr keeps when both streams are long: the answer is
-/// usually on stdout. Room one stream leaves unused goes to the other.
-const STDERR_SHARE: usize = 4;
+/// When both streams are long, stderr keeps the output budget divided by this, a quarter: the
+/// answer is usually on stdout. Room one stream leaves unused goes to the other.
+const STDERR_DIVISOR: usize = 4;
 
 /// Split `budget` between stdout and stderr, which need `stdout` and `stderr` of it.
 fn split(budget: usize, stdout: usize, stderr: usize) -> (usize, usize) {
-    let for_stderr = stderr.min((budget / STDERR_SHARE).max(budget.saturating_sub(stdout)));
+    let for_stderr = stderr.min((budget / STDERR_DIVISOR).max(budget.saturating_sub(stdout)));
     (budget - for_stderr, for_stderr)
 }
 
@@ -106,41 +121,16 @@ fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
         CommandEnd::Exited(0) => ("[exit code: 0]".to_string(), false),
         CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
         CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
-        CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
-        CommandEnd::TimedOut => (
-            format!("[timed out after {}s; process group killed]", limit.as_secs()),
-            true,
-        ),
-        CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
+        CommandEnd::WaitFailed(e) => (format!("[cannot wait for the command: {e}]"), true),
+        CommandEnd::TimedOut => (format!("[timed out after {limit:?}; its processes were stopped]"), true),
+        CommandEnd::Cancelled => ("[cancelled; its processes were stopped]".to_string(), true),
     }
-}
-
-/// The same checks run before policy and approval, and again for direct SDK calls.
-fn parse(args: &Value) -> Result<Args, String> {
-    let args: Args = parse_args(args)?;
-    if args.command.trim().is_empty() {
-        return Err("command is empty".to_string());
-    }
-    // A zero limit would end the command before it could run.
-    if args.timeout_secs == Some(0) {
-        return Err("timeoutSecs must be at least 1; omit it to use the default timeout".to_string());
-    }
-    Ok(args)
 }
 
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
         super::BASH
-    }
-
-    fn execution_mode(&self) -> ExecutionMode {
-        self.executor.execution_mode()
-    }
-
-    /// Commands can change anything the process can reach, so every call is a side effect.
-    fn effects(&self) -> Effects {
-        Effects::SideEffects
     }
 
     fn definition(&self) -> ToolDef {
@@ -167,12 +157,16 @@ impl Tool for BashTool {
         }
     }
 
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
+    }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        parse(args).map(|_| ())
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args = parse(&args)?;
+        let args = Args::parse(&args)?;
         let limit = self.timeout_for(args.timeout_secs);
         let request = ShellCommand {
             command: &args.command,

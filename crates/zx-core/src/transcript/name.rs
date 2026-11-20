@@ -5,9 +5,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::now_ms;
-
 use super::{Entry, Transcript};
+use crate::ai::now_ms;
 
 /// What a session is called: one line, without surrounding whitespace, never empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +26,7 @@ impl SessionName {
         (!name.is_empty()).then(|| Self(name.to_string()))
     }
 
+    /// The name as text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -34,8 +34,8 @@ impl SessionName {
 
 /// Control characters, line breaks among them, and the Unicode line and paragraph
 /// separators, which are not control characters but end a line all the same.
-fn breaks_line(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+fn breaks_line(character: char) -> bool {
+    character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
 }
 
 impl TryFrom<String> for SessionName {
@@ -118,29 +118,29 @@ mod tests {
 
     #[tokio::test]
     async fn the_latest_name_counts_on_any_branch_and_the_model_never_sees_it() {
-        let mut store = Transcript::in_memory(header());
-        assert_eq!(store.session_name(), None);
-        let question = store.append_message(Message::user("q")).await.unwrap();
-        let answer = store.append_message(assistant("a")).await.unwrap();
-        let first = store.append_session_name(name("first")).await.unwrap();
-        assert_eq!(store.get(&first).and_then(Entry::parent_id), Some(answer.as_str()));
+        let mut transcript = Transcript::in_memory(header());
+        assert_eq!(transcript.session_name(), None);
+        let question = transcript.append_message(Message::user("q")).await.unwrap();
+        let answer = transcript.append_message(assistant("a")).await.unwrap();
+        let first = transcript.append_session_name(name("first")).await.unwrap();
+        assert_eq!(transcript.get(&first).and_then(Entry::parent_id), Some(answer.as_str()));
         // Named again on another branch, then back on the first one.
-        store.branch(&question).unwrap();
-        store.append_session_name(name("second")).await.unwrap();
-        store.branch(&first).unwrap();
+        transcript.branch(&question).unwrap();
+        transcript.append_session_name(name("second")).await.unwrap();
+        transcript.branch(&first).unwrap();
 
-        assert_eq!(store.session_name().map(SessionName::as_str), Some("second"));
-        assert_eq!(texts(&store), ["q", "a"]);
+        assert_eq!(transcript.session_name().map(SessionName::as_str), Some("second"));
+        assert_eq!(texts(&transcript), ["q", "a"]);
     }
 
     #[tokio::test]
     async fn a_name_is_written_as_a_session_info_record_and_reopens() {
         let storage = MemoryStorage::default();
         let header = header();
-        let mut store = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
-        let question = store.append_message(Message::user("q")).await.unwrap();
-        let id = store.append_session_name(name("排查 nginx 502")).await.unwrap();
-        drop(store);
+        let mut transcript = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
+        let question = transcript.append_message(Message::user("q")).await.unwrap();
+        let id = transcript.append_session_name(name("排查 nginx 502")).await.unwrap();
+        drop(transcript);
 
         let records = storage.read(&header.id).await.unwrap().records;
         let line = records.last().unwrap().as_str();

@@ -3,12 +3,11 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{Message, StopReason, ToolCall, now_ms};
-
 use super::{Entry, Transcript};
+use crate::ai::{Message, StopReason, ToolCall, now_ms};
 
 /// A tool call with side effects that is about to run.
 ///
@@ -82,10 +81,10 @@ impl Transcript {
         let path = self.branch_path_from(leaf);
         // The last message that is not a tool result. A custom message is a message to the
         // model too: calls before it are answered or abandoned, not interrupted.
-        let last_message = path.iter().rposition(|entry| match entry {
-            Entry::Message(entry) => !matches!(entry.message, Message::ToolResult(_)),
-            Entry::CustomMessage(_) => true,
-            _ => false,
+        let last_message = path.iter().rposition(|entry| {
+            entry
+                .projected()
+                .is_some_and(|message| !matches!(*message, Message::ToolResult(_)))
         });
         let Some(position) = last_message else {
             return Vec::new();
@@ -140,9 +139,7 @@ impl Transcript {
     fn started_off_branch(&self, issuer: &str, call_id: &str) -> bool {
         self.entries.iter().any(|entry| match entry {
             Entry::ToolCallStarted(start) if start.tool_call_id == call_id => self
-                .branch_path_from(start.parent_id.as_deref())
-                .into_iter()
-                .rev()
+                .ancestors(start.parent_id.as_deref())
                 .find(|entry| issued_call(entry, call_id).is_some())
                 .is_some_and(|entry| entry.id() == issuer),
             _ => false,
@@ -150,36 +147,33 @@ impl Transcript {
     }
 
     /// The call must have been issued on this branch and have neither a result nor an
-    /// earlier start record since.
+    /// earlier start record since. Walks the branch upward from the start to the answer that
+    /// issued the call.
     pub(super) fn validate_tool_call_start(&self, start: &ToolCallStartedEntry) -> Result<()> {
-        let path = self.branch_path_from(start.parent_id.as_deref());
-        let (position, call) = path
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, entry)| issued_call(entry, &start.tool_call_id).map(|call| (index, call)))
-            .ok_or_else(|| anyhow!("tool call {:?} is not on this branch", start.tool_call_id))?;
-        ensure!(
-            call.name == start.tool_name,
-            "tool call {:?} is {:?}, not {:?}",
-            start.tool_call_id,
-            call.name,
-            start.tool_name
-        );
-        for entry in &path[position + 1..] {
+        let id = &start.tool_call_id;
+        for entry in self.ancestors(start.parent_id.as_deref()) {
+            if let Some(call) = issued_call(entry, id) {
+                ensure!(
+                    call.name == start.tool_name,
+                    "tool call {id:?} is {:?}, not {:?}",
+                    call.name,
+                    start.tool_name
+                );
+                return Ok(());
+            }
             if let Entry::Message(entry) = entry
                 && let Message::ToolResult(result) = &entry.message
-                && result.tool_call_id == start.tool_call_id
+                && result.tool_call_id == *id
             {
-                bail!("tool call {:?} already has a result", start.tool_call_id);
+                bail!("tool call {id:?} already has a result");
             }
             if let Entry::ToolCallStarted(earlier) = entry
-                && earlier.tool_call_id == start.tool_call_id
+                && earlier.tool_call_id == *id
             {
-                bail!("tool call {:?} has already started", start.tool_call_id);
+                bail!("tool call {id:?} has already started");
             }
         }
-        Ok(())
+        bail!("tool call {id:?} is not on this branch")
     }
 }
 
@@ -204,24 +198,27 @@ mod tests {
     use crate::ai::{AssistantMessage, ContentBlock, ToolCall, ToolResultMessage};
     use crate::transcript::{CustomMessage, SessionHeader};
 
-    fn store() -> Transcript {
+    fn transcript() -> Transcript {
         Transcript::in_memory(SessionHeader::new(Path::new("."), "m"))
     }
 
     fn answer(stop_reason: StopReason, calls: &[(&str, &str)]) -> Message {
-        let mut answer = AssistantMessage::failure("p", "m", stop_reason, "");
-        answer.error_message = None;
-        answer.content = calls
-            .iter()
-            .map(|(id, name)| {
-                ContentBlock::ToolCall(ToolCall {
-                    id: (*id).into(),
-                    name: (*name).into(),
-                    arguments: json!({}),
-                    arguments_error: None,
+        let answer = AssistantMessage::new(
+            "p",
+            "m",
+            stop_reason,
+            calls
+                .iter()
+                .map(|(id, name)| {
+                    ContentBlock::ToolCall(ToolCall {
+                        id: (*id).into(),
+                        name: (*name).into(),
+                        arguments: json!({}),
+                        arguments_error: None,
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        );
         Message::Assistant(answer)
     }
 
@@ -238,8 +235,8 @@ mod tests {
         })
     }
 
-    fn starts(store: &Transcript) -> Vec<(String, StartRecord)> {
-        store
+    fn starts(transcript: &Transcript) -> Vec<(String, StartRecord)> {
+        transcript
             .interrupted_tool_calls()
             .into_iter()
             .map(|call| (call.tool_call_id, call.start))
@@ -248,139 +245,148 @@ mod tests {
 
     #[tokio::test]
     async fn start_records_use_snake_case_tags_and_camel_case_fields() {
-        let mut store = store();
-        let issuer = store
+        let mut transcript = transcript();
+        let issuer = transcript
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
             .unwrap();
-        let id = store.append_tool_call_started("c1", "bash").await.unwrap();
-        let line = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        let id = transcript.append_tool_call_started("c1", "bash").await.unwrap();
+        let line = serde_json::to_value(transcript.get(&id).unwrap()).unwrap();
         assert_eq!(line["type"], "tool_call_started");
         assert_eq!(line["parentId"], issuer);
         assert_eq!(line["toolCallId"], "c1");
         assert_eq!(line["toolName"], "bash");
-        assert_eq!(&serde_json::from_value::<Entry>(line).unwrap(), store.get(&id).unwrap());
+        assert_eq!(
+            &serde_json::from_value::<Entry>(line).unwrap(),
+            transcript.get(&id).unwrap()
+        );
     }
 
     #[tokio::test]
     async fn a_start_must_name_an_unfinished_call_issued_on_the_branch() {
-        let mut store = store();
-        store
+        let mut transcript = transcript();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "bash")]))
             .await
             .unwrap();
-        store.append_message(result("c1", "bash")).await.unwrap();
-        store.append_tool_call_started("c2", "bash").await.unwrap();
-        let before = store.entries().len();
+        transcript.append_message(result("c1", "bash")).await.unwrap();
+        transcript.append_tool_call_started("c2", "bash").await.unwrap();
+        let before = transcript.entries().len();
         // Unknown call, another tool's name, a call with a result, a call that already started.
         for (id, name) in [("c9", "bash"), ("c2", "read_file"), ("c1", "bash"), ("c2", "bash")] {
-            assert!(store.append_tool_call_started(id, name).await.is_err(), "{id} {name}");
+            assert!(
+                transcript.append_tool_call_started(id, name).await.is_err(),
+                "{id} {name}"
+            );
         }
-        assert_eq!(store.entries().len(), before);
+        assert_eq!(transcript.entries().len(), before);
     }
 
     #[tokio::test]
     async fn a_reused_call_id_refers_to_the_latest_answer() {
-        let mut store = store();
-        store
+        let mut transcript = transcript();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
             .await
             .unwrap();
-        store.append_tool_call_started("call_0", "bash").await.unwrap();
-        store.append_message(result("call_0", "bash")).await.unwrap();
-        store
+        transcript.append_tool_call_started("call_0", "bash").await.unwrap();
+        transcript.append_message(result("call_0", "bash")).await.unwrap();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("call_0", "read_file")]))
             .await
             .unwrap();
-        assert!(store.append_tool_call_started("call_0", "bash").await.is_err());
-        store.append_tool_call_started("call_0", "read_file").await.unwrap();
+        assert!(transcript.append_tool_call_started("call_0", "bash").await.is_err());
+        transcript
+            .append_tool_call_started("call_0", "read_file")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn interrupted_calls_are_the_unanswered_calls_of_the_last_answer_in_call_order() {
-        let mut store = store();
-        store.append_message(Message::user("go")).await.unwrap();
-        store
+        let mut transcript = transcript();
+        transcript.append_message(Message::user("go")).await.unwrap();
+        transcript
             .append_message(answer(
                 StopReason::ToolUse,
                 &[("c1", "bash"), ("c2", "bash"), ("c3", "read_file")],
             ))
             .await
             .unwrap();
-        store.append_tool_call_started("c1", "bash").await.unwrap();
-        store.append_tool_call_started("c2", "bash").await.unwrap();
-        store.append_message(result("c1", "bash")).await.unwrap();
+        transcript.append_tool_call_started("c1", "bash").await.unwrap();
+        transcript.append_tool_call_started("c2", "bash").await.unwrap();
+        transcript.append_message(result("c1", "bash")).await.unwrap();
         assert_eq!(
-            starts(&store),
+            starts(&transcript),
             [("c2".into(), StartRecord::Present), ("c3".into(), StartRecord::Absent)]
         );
     }
 
     #[tokio::test]
     async fn calls_followed_by_other_messages_or_off_the_branch_are_not_interrupted() {
-        let mut store = store();
-        let question = store.append_message(Message::user("go")).await.unwrap();
-        store
+        let mut transcript = transcript();
+        let question = transcript.append_message(Message::user("go")).await.unwrap();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
             .unwrap();
-        store.append_message(Message::user("later")).await.unwrap();
-        assert!(store.interrupted_tool_calls().is_empty());
-        store.branch(&question).unwrap();
-        assert!(store.interrupted_tool_calls().is_empty());
+        transcript.append_message(Message::user("later")).await.unwrap();
+        assert!(transcript.interrupted_tool_calls().is_empty());
+        transcript.branch(&question).unwrap();
+        assert!(transcript.interrupted_tool_calls().is_empty());
     }
 
     #[tokio::test]
     async fn a_call_that_started_on_a_branch_left_behind_still_counts_as_started() {
-        let mut store = store();
-        store.append_message(Message::user("go")).await.unwrap();
-        let issuer = store
+        let mut transcript = transcript();
+        transcript.append_message(Message::user("go")).await.unwrap();
+        let issuer = transcript
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "read_file")]))
             .await
             .unwrap();
-        store.append_tool_call_started("c1", "bash").await.unwrap();
-        store.append_message(result("c1", "bash")).await.unwrap();
-        store.append_message(result("c2", "read_file")).await.unwrap();
+        transcript.append_tool_call_started("c1", "bash").await.unwrap();
+        transcript.append_message(result("c1", "bash")).await.unwrap();
+        transcript.append_message(result("c2", "read_file")).await.unwrap();
 
         // Back to the answer: its calls have no results on the branch that starts here.
-        store.branch(&issuer).unwrap();
+        transcript.branch(&issuer).unwrap();
 
         assert_eq!(
-            starts(&store),
+            starts(&transcript),
             [("c1".into(), StartRecord::Present), ("c2".into(), StartRecord::Absent)]
         );
     }
 
     #[tokio::test]
     async fn a_start_of_a_reused_call_id_belongs_to_the_answer_that_issued_it_last() {
-        let mut store = store();
-        let first = store
+        let mut transcript = transcript();
+        let first = transcript
             .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
             .await
             .unwrap();
-        store.append_message(result("call_0", "bash")).await.unwrap();
-        store
+        transcript.append_message(result("call_0", "bash")).await.unwrap();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
             .await
             .unwrap();
-        store.append_tool_call_started("call_0", "bash").await.unwrap();
+        transcript.append_tool_call_started("call_0", "bash").await.unwrap();
 
         // The start is the later answer's: the first answer's call has none.
-        store.branch(&first).unwrap();
+        transcript.branch(&first).unwrap();
 
-        assert_eq!(starts(&store), [("call_0".into(), StartRecord::Absent)]);
+        assert_eq!(starts(&transcript), [("call_0".into(), StartRecord::Absent)]);
     }
 
     #[tokio::test]
     async fn failed_and_cancelled_answers_never_ran_their_calls() {
         for stop_reason in [StopReason::Error, StopReason::Aborted] {
-            let mut store = store();
-            store
+            let mut transcript = transcript();
+            transcript
                 .append_message(answer(stop_reason, &[("c1", "bash")]))
                 .await
                 .unwrap();
             assert_eq!(
-                store.interrupted_tool_calls(),
+                transcript.interrupted_tool_calls(),
                 [InterruptedToolCall {
                     tool_call_id: "c1".into(),
                     tool_name: "bash".into(),
@@ -393,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_edits_hide_answers_but_not_recorded_results() {
-        let mut omitted = store();
+        let mut omitted = transcript();
         let issuer = omitted
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
@@ -401,7 +407,7 @@ mod tests {
         omitted.append_context_edit(&issuer, None).await.unwrap();
         assert!(omitted.interrupted_tool_calls().is_empty());
 
-        let mut hidden = store();
+        let mut hidden = transcript();
         hidden
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
@@ -413,14 +419,14 @@ mod tests {
 
     #[tokio::test]
     async fn calls_before_a_message_from_an_extension_are_not_interrupted() {
-        let mut store = store();
-        store
+        let mut transcript = transcript();
+        transcript
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
             .unwrap();
-        assert_eq!(starts(&store), [("c1".to_string(), StartRecord::Absent)]);
+        assert_eq!(starts(&transcript), [("c1".to_string(), StartRecord::Absent)]);
 
-        store
+        transcript
             .append_custom_message(CustomMessage {
                 custom_type: "note".into(),
                 content: "status".into(),
@@ -430,6 +436,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.interrupted_tool_calls().is_empty());
+        assert!(transcript.interrupted_tool_calls().is_empty());
     }
 }

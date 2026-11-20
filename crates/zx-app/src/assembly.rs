@@ -29,9 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-use crate::config::{Builtin, Config, cost_budget};
-use crate::otel::TraceHook;
 use zx_agent::ai::Reasoning;
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, short_secret_files};
 use zx_agent::builtin::tools::FileMutationQueue;
@@ -42,14 +39,15 @@ use zx_agent::policy::ToolPolicy;
 use zx_agent::tools::Tool;
 use zx_util::registry::Registry;
 
-pub use agent::{Approvals, ConfiguredAgent};
-pub use execution::{ExecutorFactory, ExecutorSession};
-pub use place::SessionPlace;
-pub use provider::{BuiltProvider, ProviderFactory, ProviderInput};
-pub use settings::NoModel;
-
-use mcp::McpTools;
-use settings::{Settings, checked_secret_files, secret_files};
+pub use self::agent::{Approvals, ConfiguredAgent};
+pub use self::execution::{ExecutorFactory, ExecutorSession};
+use self::mcp::McpTools;
+pub use self::place::SessionPlace;
+pub use self::provider::{BuiltProvider, ProviderFactory, ProviderInput};
+pub use self::settings::NoModel;
+use self::settings::{Settings, checked_secret_files, secret_files};
+use crate::config::{Builtin, Config, cost_budget};
+use crate::otel::TraceHook;
 
 /// What the agents of a process share, read and connected once: the settings with what the
 /// host says over them, the MCP servers, the secret files to redact, the variables commands
@@ -58,8 +56,8 @@ use settings::{Settings, checked_secret_files, secret_files};
 /// session is opened at startup.
 ///
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
-/// (tools, hooks, policies, extensions, prompt sections), `set_*` replaces the one there is
-/// (the summarizer, the hidden variables, the trace export), and `register_*` names one
+/// (tools, hooks, policies, extensions, prompt sections, hidden variables), `set_*` replaces
+/// the one there is (the summarizer, the trace export), and `register_*` names one
 /// that config.toml chooses by its name (providers, executors). They are treated as the built-in ones
 /// are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
@@ -170,18 +168,25 @@ impl Application {
         })
     }
 
-    /// Hide `names` from commands and redact their values: credentials besides the API key,
-    /// such as the tokens of an IM service's platforms.
-    pub fn set_hidden_env(mut self, names: Vec<String>) -> Self {
-        self.hidden_env = names;
+    /// Export the runs of every session through `traces`, the host's trace hook; `None`
+    /// exports nothing, as when the host has no collector to export to. The host starts and
+    /// finishes the export ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here
+    /// installs it.
+    pub fn set_traces(mut self, traces: Option<TraceHook>) -> Self {
+        self.traces = traces;
         self
     }
 
-    /// Export the runs of every session through `traces`, the host's trace hook, when it
-    /// exports them. The host starts and finishes the export
-    /// ([`with_telemetry`](crate::shutdown::with_telemetry)); nothing here installs it.
-    pub fn set_traces(mut self, traces: Option<TraceHook>) -> Self {
-        self.traces = traces;
+    /// Make the summaries with `summarizer` in place of the agent's model.
+    pub fn set_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = Some(summarizer);
+        self
+    }
+
+    /// Hide the variable `name` from commands and redact its value, beside the API key's: a
+    /// credential such as a token of an IM service's platform.
+    pub fn add_hidden_env(mut self, name: &str) -> Self {
+        self.hidden_env.push(name.to_string());
         self
     }
 
@@ -209,7 +214,7 @@ impl Application {
         self
     }
 
-    /// Add `policy` as `name`. The strictest verdict of all policies stands, so a policy can
+    /// Add `policy` as `name`. The strictest decision of all policies stands, so a policy can
     /// tighten what the agent's permissions allow but never loosen it.
     pub fn add_policy(mut self, name: &str, policy: Arc<dyn ToolPolicy>) -> Self {
         self.policies.push((name.into(), policy));
@@ -240,12 +245,6 @@ impl Application {
         self
     }
 
-    /// Make the summaries with `summarizer` in place of the agent's model.
-    pub fn set_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
-        self.summarizer = Some(summarizer);
-        self
-    }
-
     /// Assemble the agent for `model`, usually [`Self::model`], whose sessions are kept in
     /// `place`, sharing what startup read and connected with the host's other agents. Startup
     /// reads; each session gets its executor when it is created or opened.
@@ -266,13 +265,6 @@ impl Application {
     /// The reasoning level config.toml sets; `None` when it sets none.
     pub fn reasoning(&self) -> Option<Reasoning> {
         self.settings.config.reasoning
-    }
-
-    /// The variables hidden from commands besides the API key's, as
-    /// [`set_hidden_env`](Self::set_hidden_env) gave them, for a program that hides its own
-    /// beside those a host gave.
-    pub fn hidden_env(&self) -> &[String] {
-        &self.hidden_env
     }
 
     /// Where new sessions work unless a request names a directory: [`Overrides::cwd`];
@@ -296,7 +288,8 @@ pub struct Overrides {
     pub model: Option<String>,
     /// Where new sessions work; the current directory without it.
     pub cwd: Option<PathBuf>,
-    /// The enabled tools, in place of the agent's.
+    /// The enabled tools, by name, in place of the agent's: each name is trimmed of
+    /// surrounding whitespace, and an empty one is dropped.
     pub tools: Option<Vec<String>>,
     /// Model requests per run, failed attempts included.
     pub max_model_requests: Option<u32>,

@@ -4,15 +4,27 @@
 //!
 //! - `report`: what a run produced and how it ended, as `run_end` and `attempt_end` carry it
 
+/// `Serialize` for an enum without data, as the string its `name()` gives, so that each
+/// name is written once.
+macro_rules! serialize_by_name {
+    ($($kind:ty),* $(,)?) => {$(
+        impl serde::Serialize for $kind {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.name())
+            }
+        }
+    )*};
+}
+
 pub(crate) mod report;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::ai::{Delta, Message, Usage};
+pub use self::report::{Budget, RunOutcome, RunReport};
+use crate::ai::{Delta, Message, Role, Usage};
 use crate::policy::PolicyDecision;
-pub use report::{Budget, RunOutcome, RunReport};
 
 /// Where the events of a run go, for the kernel's own objects below the run, such as the
 /// compactor: the run implements it, stamping each event, handing it to the run's reader and
@@ -23,7 +35,7 @@ pub(crate) trait Emit: Send + Sync {
 }
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
-/// changes; events without a version predate the envelope.
+/// changes.
 pub const EVENT_SCHEMA_VERSION: u32 = 7;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
@@ -48,8 +60,7 @@ pub struct Event {
 }
 
 /// Which model request a `request_start` announces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestKind {
     /// A request for the task: the conversation so far.
     Task,
@@ -57,9 +68,18 @@ pub enum RequestKind {
     Summary,
 }
 
+impl RequestKind {
+    /// The kind as JSON names it: `task` or `summary`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Summary => "summary",
+        }
+    }
+}
+
 /// How an approval ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalResult {
     /// Allowed for this call.
     AllowOnce,
@@ -74,25 +94,51 @@ pub enum ApprovalResult {
     Cancelled,
 }
 
+impl ApprovalResult {
+    /// The result as JSON names it, such as `allow_once` or `timed_out`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowSession => "allow_session",
+            Self::Remembered => "remembered",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// What is known about a tool call that an interrupted run left without a result. The
 /// result recorded during recovery tells the model the same thing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interruption {
     /// The call started and may have changed state; its outcome is unknown.
     Started,
     /// Whether the call started is unknown: the tool is no longer configured, so whether it
     /// has side effects, whose starts are recorded, is unknown too. Treated like `Started`.
     StartUnknown,
-    /// A call with side effects that never started, so it had no effect.
+    /// A call that never started, so it had no effect: one with side effects and no start
+    /// record, or any call of an answer that failed or was cancelled, whose calls never run.
     NotStarted,
     /// A read-only call: it changed nothing, whether or not it ran.
     ReadOnly,
 }
 
+impl Interruption {
+    /// The state as JSON names it, such as `start_unknown`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::StartUnknown => "start_unknown",
+            Self::NotStarted => "not_started",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
 /// Which phase of the loop a hook call is in: one per [`Hook`](crate::hooks::Hook) method.
 /// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks in the same
-/// phase. In JSON, the name [`HookPhase::as_str`] gives.
+/// phase. In JSON, the name [`HookPhase::name`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookPhase {
     OnInput,
@@ -105,7 +151,7 @@ pub enum HookPhase {
 
 impl HookPhase {
     /// The phase as JSON names it: the name of the hook method, such as `after_tool`.
-    pub fn as_str(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::OnInput => "on_input",
             Self::TransformContext => "transform_context",
@@ -119,15 +165,11 @@ impl HookPhase {
 
 impl std::fmt::Display for HookPhase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.write_str(self.name())
     }
 }
 
-impl Serialize for HookPhase {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
+serialize_by_name!(RequestKind, ApprovalResult, Interruption, HookPhase);
 
 /// Events emitted while the agent runs.
 ///
@@ -171,7 +213,7 @@ pub enum EventKind {
         attempt: u32,
     },
     MessageStart {
-        role: &'static str,
+        role: Role,
     },
     /// Streaming output of the assistant message in progress.
     MessageUpdate {
@@ -206,7 +248,7 @@ pub enum EventKind {
         tool_name: String,
         content: String,
     },
-    /// The verdict of the tool policies on a call, in JSON its `decision` and, for a denial or
+    /// The decision of the tool policies on a call, in JSON its `decision` and, for a denial or
     /// a question, its `reason`. A policy that panics, runs past its timeout or is cut short
     /// by cancellation denies the call, and the reason names it.
     ToolDecision {
@@ -257,7 +299,8 @@ pub enum EventKind {
     StepEnd {
         step: u32,
     },
-    /// End of one attempt. The runner may still retry afterwards.
+    /// End of one attempt. The runner may still retry afterwards. The time limit cancels the
+    /// attempt, so it ends `cancelled` here and `timed_out` in `run_end`.
     AttemptEnd {
         #[serde(flatten)]
         outcome: RunOutcome,
@@ -308,7 +351,7 @@ pub enum EventKind {
         usage: Usage,
         automatic: bool,
     },
-    /// A compaction failed; the preceding projection is retained.
+    /// A compaction failed; the preceding projection is kept.
     CompactionFailed {
         error: String,
         automatic: bool,
@@ -336,6 +379,7 @@ impl EventKind {
             Self::MessageStart { .. } => "message_start",
             Self::MessageUpdate { .. } => "message_update",
             Self::MessageEnd { .. } => "message_end",
+            Self::CustomEntry { .. } => "custom_entry",
             Self::ToolExecutionStart { .. } => "tool_execution_start",
             Self::ToolExecutionUpdate { .. } => "tool_execution_update",
             Self::ToolDecision { .. } => "tool_decision",
@@ -352,7 +396,6 @@ impl EventKind {
             Self::CompactionEnd { .. } => "compaction_end",
             Self::CompactionFailed { .. } => "compaction_failed",
             Self::ToolCallRecovered { .. } => "tool_call_recovered",
-            Self::CustomEntry { .. } => "custom_entry",
         }
     }
 }
@@ -404,7 +447,7 @@ mod tests {
                 model: "m".into(),
                 attempt: 1,
             },
-            EventKind::MessageStart { role: "user" },
+            EventKind::MessageStart { role: Role::User },
             EventKind::MessageUpdate {
                 delta: Delta::Text { text: "x".into() },
             },
@@ -509,6 +552,19 @@ mod tests {
     }
 
     #[test]
+    fn a_message_start_names_its_role_as_the_session_file_does() {
+        for (role, name) in [
+            (Role::System, "system"),
+            (Role::User, "user"),
+            (Role::Assistant, "assistant"),
+            (Role::ToolResult, "toolResult"),
+        ] {
+            let event = EventKind::MessageStart { role };
+            assert_eq!(serde_json::to_value(&event).unwrap()["role"], name);
+        }
+    }
+
+    #[test]
     fn recovered_calls_serialize_their_documented_states() {
         let states = [
             (Interruption::Started, "started"),
@@ -530,6 +586,24 @@ mod tests {
     }
 
     #[test]
+    fn approval_results_and_request_kinds_serialize_their_documented_names() {
+        let results = [
+            (ApprovalResult::AllowOnce, "allow_once"),
+            (ApprovalResult::AllowSession, "allow_session"),
+            (ApprovalResult::Remembered, "remembered"),
+            (ApprovalResult::Denied, "denied"),
+            (ApprovalResult::TimedOut, "timed_out"),
+            (ApprovalResult::Cancelled, "cancelled"),
+        ];
+        for (result, name) in results {
+            assert_eq!(serde_json::to_value(result).unwrap(), name);
+        }
+        for (kind, name) in [(RequestKind::Task, "task"), (RequestKind::Summary, "summary")] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+    }
+
+    #[test]
     fn a_hook_failure_names_the_hook_method_as_its_phase() {
         let event = EventKind::HookFailed {
             hook: "audit".into(),
@@ -543,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_decision_carries_the_verdict_as_policies_give_it() {
+    fn a_tool_decision_carries_the_decision_as_policies_give_it() {
         let decision = |decision| EventKind::ToolDecision {
             tool_call_id: "c".into(),
             tool_name: "bash".into(),

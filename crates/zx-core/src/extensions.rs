@@ -8,15 +8,14 @@ mod command;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub use self::command::{CommandContext, CommandOutcome, SlashCommand, check_command_name};
 use crate::ai::{PREAMBLE, SystemPrompt};
 use crate::hooks::{Hook, HookChain, HookStage};
 use crate::policy::{PolicyChain, ToolPolicy};
 use crate::tools::Tool;
 
-pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
-
-/// Tools, hooks and system prompt sections registered together, such as a client for an
-/// external tool server. An agent takes its extensions in
+/// Tools, policies, hooks, system prompt sections and slash commands registered together,
+/// such as a client for an external tool server. An agent takes its extensions in
 /// [`AgentConfig::extensions`](crate::AgentConfig::extensions) and asks each once, when the
 /// agent is made, for what it adds; every session of the agent then has it, and the sessions
 /// share the tools, the policies, the hooks and the commands. A hook that keeps something for
@@ -38,7 +37,12 @@ pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, ch
 ///
 /// #[async_trait::async_trait]
 /// impl Hook for Mark {
-///     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
+///     async fn after_tool(
+///         &self,
+///         _call: &ToolCall,
+///         mut output: ToolOutput,
+///         _ctx: &HookContext,
+///     ) -> HookResult<ToolOutput> {
 ///         output.content.push_str("\n(checked)");
 ///         Ok(output)
 ///     }
@@ -85,7 +89,7 @@ pub trait Extension: Send + Sync {
     }
 
     /// Policies that decide whether a tool call may run, registered under the extension's
-    /// name. The strictest verdict of all policies stands, so an extension can tighten what
+    /// name. The strictest decision of all policies stands, so an extension can tighten what
     /// the host allows but never loosen it.
     fn policies(&self) -> Vec<Arc<dyn ToolPolicy>> {
         Vec::new()
@@ -169,7 +173,8 @@ impl Expanded {
             .find(|stage| *stage != HookStage::Default)
         {
             return Err(format!(
-                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Default stage"
+                "extension {name:?}: a hook declares the {} stage; extension hooks run in the default stage",
+                stage.name()
             ));
         }
         let sections = extension.prompt_sections();

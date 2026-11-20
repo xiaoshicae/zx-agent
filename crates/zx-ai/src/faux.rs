@@ -6,12 +6,12 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use zx_util::sync::lock;
 
-use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use super::types::{
     AssistantMessage, ContentBlock, Delta, ProviderError, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms,
 };
-use zx_util::sync::lock;
+use super::{ABORTED_MESSAGE, EventReceiver, EventSender, Provider, event_channel, send_event};
 
 /// One scripted response.
 pub enum FauxStep {
@@ -20,10 +20,13 @@ pub enum FauxStep {
         blocks: Vec<ContentBlock>,
         stop: StopReason,
     },
-    /// Fail before streaming, as a provider reports a failed request: `error` says what kind
-    /// of failure it was, which decides whether a run retries or compacts, and `message` is
-    /// its text.
-    Fail { error: ProviderError, message: String },
+    /// Fail before streaming, as a provider reports a failed request: `provider_error` says
+    /// what kind of failure it was, which decides whether a run retries or compacts, and
+    /// `message` is its text.
+    Fail {
+        provider_error: ProviderError,
+        message: String,
+    },
     /// Wait until cancelled, then end with `Aborted`.
     Hang,
     /// Decide the step from the request, for answers that must refer to what the request
@@ -48,11 +51,12 @@ impl FauxStep {
         }
     }
 
-    /// Fail before streaming with `error`, a [`ProviderErrorKind`](crate::ProviderErrorKind)
-    /// or a whole [`ProviderError`], and the error text `message`.
-    pub fn fail(error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
+    /// Fail before streaming with `provider_error`, a
+    /// [`ProviderErrorKind`](crate::ProviderErrorKind) or a whole [`ProviderError`], and the
+    /// error text `message`.
+    pub fn fail(provider_error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
         FauxStep::Fail {
-            error: error.into(),
+            provider_error: provider_error.into(),
             message: message.into(),
         }
     }
@@ -129,7 +133,8 @@ impl Provider for FauxProvider {
         lock(&self.requests).push(request);
         let (mut tx, rx) = event_channel();
         // Not awaited: the task ends with the response, at its final event, when the
-        // receiver is dropped or when `cancel` fires (the `Provider` contract).
+        // receiver is dropped or when `cancel` fires (the `Provider` contract); a `Hang` step
+        // ends only when `cancel` fires.
         tokio::spawn(async move {
             if let Some(event) = event_for(step, &model, &cancel, &mut tx).await {
                 // A failed terminal send only means its consumer has gone away.
@@ -151,9 +156,12 @@ async fn event_for(
     let failure = |stop, error: &str| AssistantMessage::failure("faux", model, stop, error);
     Some(match step {
         None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
-        Some(FauxStep::Fail { error, message }) => {
+        Some(FauxStep::Fail {
+            provider_error,
+            message,
+        }) => {
             let mut failed = failure(StopReason::Error, &message);
-            failed.provider_error = Some(error);
+            failed.provider_error = Some(provider_error);
             StreamEvent::Error(failed)
         }
         Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(
@@ -162,7 +170,7 @@ async fn event_for(
         )),
         Some(FauxStep::Hang) => {
             cancel.cancelled().await;
-            StreamEvent::Error(failure(StopReason::Aborted, "Request was aborted"))
+            StreamEvent::Error(failure(StopReason::Aborted, ABORTED_MESSAGE))
         }
         Some(FauxStep::Respond { blocks, stop }) => respond(blocks, stop, model, cancel, tx).await?,
     })
@@ -201,7 +209,7 @@ async fn respond(
             ..Usage::default()
         },
         stop_reason: if aborted { StopReason::Aborted } else { stop },
-        error_message: aborted.then(|| "Request was aborted".to_string()),
+        error_message: aborted.then(|| ABORTED_MESSAGE.to_string()),
         provider_error: None,
         timestamp,
         duration_ms: Some(0),
@@ -236,16 +244,19 @@ mod tests {
 
     use super::*;
 
-    async fn events(provider: &FauxProvider) -> Vec<StreamEvent> {
-        let request = Request {
+    fn request() -> Request {
+        Request {
             model: "m".into(),
             messages: vec![],
             tools: vec![],
             max_tokens: None,
             reasoning: None,
             cache_key: None,
-        };
-        provider.stream(request, CancellationToken::new()).collect().await
+        }
+    }
+
+    async fn events(provider: &FauxProvider) -> Vec<StreamEvent> {
+        provider.stream(request(), CancellationToken::new()).collect().await
     }
 
     #[tokio::test]
@@ -316,15 +327,7 @@ mod tests {
             blocks,
             stop: StopReason::Stop,
         }]);
-        let request = Request {
-            model: "m".into(),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: None,
-            reasoning: None,
-            cache_key: None,
-        };
-        let mut receiver = provider.stream(request, CancellationToken::new());
+        let mut receiver = provider.stream(request(), CancellationToken::new());
         let mut deltas = 0;
         let mut final_text = None;
         while let Some(event) = receiver.next().await {

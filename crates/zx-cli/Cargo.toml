@@ -10,10 +10,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[lib]
-name = "zx_cli"
-path = "src/lib.rs"
-
 # The program keeps the project's name. It is not documented: its pages would take the place
 # of the library's of the same name (`zx_agent`, crates/zx-agent).
 [[bin]]

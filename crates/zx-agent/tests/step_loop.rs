@@ -1,4 +1,6 @@
-//! Loop semantics, mirroring pi's agent-loop behavior.
+//! Loop semantics, mirroring pi's agent-loop behavior: steps and tool execution, provider
+//! failures and cancellation, the system prompt, and the preparation of arguments, progress
+//! and details.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -8,21 +10,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::AgentConfig;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, ProviderErrorKind, Request, StopReason, SystemPrompt,
-    ToolCall, ToolDef, Usage,
+    EventReceiver, Message, PREAMBLE, Provider, ProviderErrorKind, Request, StopReason, SystemPrompt, ToolCall,
+    ToolDef, Usage,
 };
 use zx_agent::events::{Budget, EventKind, RunOutcome};
+use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use zx_testing::{
-    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
-    take_queued_inputs,
+    Collect, Driven, EchoTool, RunnerSetup, config, run_prompt, run_prompt_with, summarize, take_queued_inputs,
+    tool_call_block,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -55,10 +57,6 @@ async fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, A
     echo.feeds(runner.queues());
     (runner, events)
 }
-
-// ---------------------------------------------------------------------------
-// Steps and tool execution
-// ---------------------------------------------------------------------------
 
 /// Counts how often it is asked how it runs and what it changes.
 struct Described(std::sync::atomic::AtomicUsize);
@@ -108,7 +106,7 @@ async fn a_run_goes_by_what_its_tools_declared_when_the_session_was_made() {
         "the run asks the tool nothing more"
     );
     let started = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| entry.kind() == "tool_call_started")
@@ -143,7 +141,13 @@ async fn a_call_that_repeats_the_id_of_an_earlier_call_of_the_answer_is_answered
     };
     assert_eq!((first.content.as_str(), first.is_error), ("first", false));
     assert!(second.is_error, "{second:?}");
-    assert!(second.content.contains("same ID"), "{}", second.content);
+    assert!(
+        second
+            .content
+            .starts_with("Not executed: an earlier call of this answer has the ID"),
+        "{}",
+        second.content
+    );
 }
 
 #[tokio::test]
@@ -298,8 +302,6 @@ async fn one_sequential_tool_makes_the_batch_sequential() {
     );
 }
 
-struct DenyEcho;
-
 struct PanickingPolicy;
 
 #[async_trait]
@@ -365,6 +367,8 @@ async fn cancellation_interrupts_a_waiting_policy() {
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 
+struct DenyEcho;
+
 #[async_trait]
 impl ToolPolicy for DenyEcho {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
@@ -400,11 +404,11 @@ async fn failures_become_error_results_and_the_loop_continues() {
     assert_eq!(
         summarize(&context)[2..7],
         [
-            "tool:a=Tool missing not found!",
-            "tool:b=Invalid arguments for tool \"other\": expected a JSON object!",
-            "tool:c=Blocked by policy: echo is disabled!",
+            "tool:a=Not executed: there is no tool \"missing\". Call one of the tools offered.!",
+            "tool:b=Not executed: the arguments of \"other\" are invalid: expected a JSON object!",
+            "tool:c=Not executed: a policy denied it: echo is disabled!",
             "tool:d=disk not mounted!",
-            "tool:e=Tool other panicked!",
+            "tool:e=Failed: the tool \"other\" panicked.!",
         ]
     );
     assert_eq!(echo.calls.load(Ordering::SeqCst), 0, "denied calls never run");
@@ -414,12 +418,7 @@ async fn failures_become_error_results_and_the_loop_continues() {
 #[tokio::test]
 async fn length_stop_fails_tool_calls_without_running_them() {
     let cut_off = FauxStep::Respond {
-        blocks: vec![ContentBlock::ToolCall(ToolCall {
-            id: "t".into(),
-            name: "echo".into(),
-            arguments: json!({"text": "cut"}),
-            arguments_error: None,
-        })],
+        blocks: vec![tool_call_block("t", "echo", json!({"text": "cut"}))],
         stop: StopReason::Length,
     };
     let provider = provider([cut_off, FauxStep::text("retried")]);
@@ -491,7 +490,7 @@ async fn steering_enters_after_the_step_and_follow_ups_after_the_answer() {
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -519,7 +518,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -555,7 +554,7 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         )
     );
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:go", "assistant:calls[c1]", "tool:c1=ok"]
     );
     assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("also check disk")]);
@@ -566,10 +565,6 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         .collect();
     assert_eq!(steps, ["step_start", "step_end"]);
 }
-
-// ---------------------------------------------------------------------------
-// Provider failures and cancellation
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
@@ -589,19 +584,6 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
     );
 }
 
-#[tokio::test]
-async fn cancellation_ends_the_loop() {
-    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
-    // Cancelled once the request has started.
-    let (result, ()) = tokio::join!(runner.run("go"), async {
-        provider.started.notified().await;
-        runner.cancel();
-    });
-
-    assert_eq!(result.outcome, RunOutcome::Cancelled);
-}
-
 /// Breaks the provider contract: its stream ends without a `Done` or `Error` event.
 struct SilentProvider;
 
@@ -612,7 +594,7 @@ impl Provider for SilentProvider {
 
     fn stream(&self, _request: Request, _cancel: CancellationToken) -> EventReceiver {
         // Dropping the sender ends the stream at once.
-        let (_sender, receiver) = zx_agent::ai::provider::event_channel();
+        let (_sender, receiver) = zx_agent::ai::event_channel();
         receiver
     }
 }
@@ -634,9 +616,36 @@ async fn a_stream_without_a_final_event_is_an_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// System prompt
-// ---------------------------------------------------------------------------
+/// Sends every task request to `0` instead of the configured model.
+struct UseModel(&'static str);
+
+#[async_trait]
+impl Hook for UseModel {
+    async fn prepare_request(
+        &self,
+        _plan: &RequestPlan<'_>,
+        _ctx: &HookContext,
+    ) -> HookResult<Option<RequestSettings>> {
+        Ok(Some(RequestSettings {
+            model: self.0.into(),
+            reasoning: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_stream_without_a_final_event_fails_for_the_model_it_asked() {
+    let mut config = config(Arc::new(SilentProvider), vec![]);
+    config.hooks.push("use_model", Arc::new(UseModel("other-model")));
+    let mut context = Vec::new();
+
+    run_prompt(config, &mut context, "go").await;
+
+    let Some(Message::Assistant(answer)) = context.last() else {
+        panic!("the failure is recorded as an assistant message: {context:?}");
+    };
+    assert_eq!(answer.model, "other-model");
+}
 
 fn prompt(started: &str) -> SystemPrompt {
     SystemPrompt::default()
@@ -680,10 +689,6 @@ async fn an_unchanged_prompt_adds_no_system_message() {
     assert_eq!(summarize(&context)[3..], ["user:b", "assistant:two"]);
 }
 
-// ---------------------------------------------------------------------------
-// Argument preparation, progress and details
-// ---------------------------------------------------------------------------
-
 /// Takes `text` and accepts the older name `cmd` for it. `boom` makes the preparation panic.
 #[derive(Default)]
 struct Renaming {
@@ -721,10 +726,10 @@ impl Tool for Renaming {
 
 /// Allows every call and records the arguments it was asked about.
 #[derive(Default)]
-struct RecordingPolicy(Mutex<Vec<Value>>);
+struct ArgumentRecordingPolicy(Mutex<Vec<Value>>);
 
 #[async_trait]
-impl ToolPolicy for RecordingPolicy {
+impl ToolPolicy for ArgumentRecordingPolicy {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.lock().unwrap().push(call.arguments.clone());
         PolicyDecision::Allow
@@ -745,7 +750,7 @@ async fn policy_and_tool_see_prepared_arguments_while_the_context_keeps_the_orig
         FauxStep::text("done"),
     ]);
     let tool = Arc::new(Renaming::default());
-    let policy = Arc::new(RecordingPolicy::default());
+    let policy = Arc::new(ArgumentRecordingPolicy::default());
     let config = with_policy(config(provider.clone(), vec![tool.clone()]), policy.clone());
     let mut context = Vec::new();
 
@@ -777,7 +782,9 @@ async fn prepared_arguments_must_still_match_the_schema() {
     let result = tool_result(&requests[1].messages, 2);
     assert!(result.is_error);
     assert!(
-        result.content.starts_with("Invalid arguments for tool \"renaming\""),
+        result
+            .content
+            .starts_with("Not executed: the arguments of \"renaming\" are invalid"),
         "{}",
         result.content
     );
@@ -799,7 +806,10 @@ async fn a_panicking_argument_preparation_blocks_only_that_call() {
     let requests = provider.requests();
     let result = tool_result(&requests[1].messages, 2);
     assert!(result.is_error);
-    assert_eq!(result.content, "Tool renaming argument preparation panicked");
+    assert_eq!(
+        result.content,
+        "Not executed: preparing the arguments of \"renaming\" panicked."
+    );
 }
 
 #[tokio::test]
@@ -898,6 +908,8 @@ async fn details_reach_the_end_event_and_the_result_message() {
     );
 }
 
+/// The usage each `ToolExecutionEnd` event reports, read as [`end_details`] reads their
+/// details; one function for both would take the field as a callback.
 fn end_usages(sink: &Collect) -> Vec<Option<Usage>> {
     sink.events()
         .into_iter()

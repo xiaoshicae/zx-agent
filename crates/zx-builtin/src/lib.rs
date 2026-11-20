@@ -9,18 +9,18 @@
 //! - [`policy`]: the built-in command and rule policies
 //! - [`continuation`]: the hook that continues an answer cut off at the output token limit
 //! - [`redact`]: the hook that redacts known secrets from tool output
-//! - `files`: bounded reads of regular files that never wait on a FIFO, for the executors,
-//!   the paging of tool output, the redaction and zx-app's configuration files; hidden, not
-//!   part of the API
+//! - `files`: bounded reads of regular files that never wait on a FIFO, for the local
+//!   executor, the files that tools page, the redaction and zx-app's configuration files;
+//!   hidden, not part of the API, though `tools::paging` re-exports its `Links`
 //! - `calendar`: dates of the Gregorian calendar, for the times that file names and prompts
 //!   show
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by
 //!   default
+//! - `test_support`, compiled for tests on Unix only: the FIFOs that tests put where a file
+//!   is expected
 
-// The modules name the model layer, the shared helpers and the kernel by these crate-root paths.
+// The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-#[cfg(feature = "mcp")]
-use zx_core::extensions;
 use zx_util::{sync, text};
 
 mod calendar;
@@ -34,4 +34,6 @@ pub mod mcp;
 pub mod output_store;
 pub mod policy;
 pub mod redact;
+#[cfg(all(test, unix))]
+mod test_support;
 pub mod tools;

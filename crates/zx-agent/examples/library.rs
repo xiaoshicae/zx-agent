@@ -1,4 +1,4 @@
-//! Embedding zx-agent as a library. The embedder chooses the instructions, tools, rules and
+//! zx-agent as a library. The host, this program, chooses the instructions, tools, rules and
 //! limits: the kernel has no scenario of its own, and its default limits are unlimited.
 //!
 //! Run: ZX_BASE_URL=http://127.0.0.1:11434/v1 ZX_MODEL=<model> cargo run --example library -- "task"
@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::SystemPrompt;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
@@ -18,7 +19,7 @@ use zx_agent::events::EventKind;
 use zx_agent::policy::PolicyDecision;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 
-/// This embedder's scenario: a bounded, read-only report about the machine it runs on.
+/// This host's scenario: a bounded, read-only report about the machine it runs on.
 const INSTRUCTIONS: &str = "You are an agent running without a human operator. Use only the tools \
 provided and only read-only commands. Finish with a short report: what you found, and the commands \
 whose output shows it.";
@@ -28,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     let task = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "Report disk and memory usage.".to_string());
-    let model = std::env::var("ZX_MODEL")?;
+    let model = std::env::var("ZX_MODEL").context("ZX_MODEL must name the model")?;
     let cwd = std::env::current_dir()?;
     // Read-only diagnostics only: other commands ask, and nobody is there to approve them.
     // `ps` is left out: on Linux, `ps e` can print the environment of the user's processes,
@@ -74,8 +75,7 @@ async fn main() -> anyhow::Result<()> {
         limits: RunLimits {
             max_model_requests: Some(30),
             timeout: Some(Duration::from_secs(15 * 60)),
-            token_budget: None,
-            cost_budget: None,
+            ..RunLimits::default()
         },
         ..AgentConfig::new(Arc::new(provider), model)
     };

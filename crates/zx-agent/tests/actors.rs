@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
 use zx_agent::events::RunOutcome;
@@ -15,7 +14,6 @@ use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, SessionHeader, Transcript};
-
 use zx_testing::{Driven, EchoTool, RunnerSetup, Seed, Start, config, header};
 
 /// What a policy or a hook was told about the run: the labels and the actor.
@@ -23,10 +21,10 @@ type Told = (BTreeMap<String, String>, Option<String>);
 
 /// Remembers what it was told at each call it was asked about.
 #[derive(Default)]
-struct RecordingPolicy(Mutex<Vec<Told>>);
+struct ContextRecordingPolicy(Mutex<Vec<Told>>);
 
 #[async_trait]
-impl ToolPolicy for RecordingPolicy {
+impl ToolPolicy for ContextRecordingPolicy {
     async fn check(&self, _call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
         self.0.lock().unwrap().push((ctx.labels.clone(), ctx.actor.clone()));
         PolicyDecision::Allow
@@ -70,9 +68,9 @@ fn one_call() -> [FauxStep; 2] {
 
 /// The session `session` whose model calls `echo` once in each of `runs` runs, with a policy
 /// and a hook that remember what they were told.
-async fn observed(session: Start, runs: usize) -> (Driven, Arc<RecordingPolicy>, RecordingHook) {
+async fn observed(session: Start, runs: usize) -> (Driven, Arc<ContextRecordingPolicy>, RecordingHook) {
     let provider = Arc::new(FauxProvider::new((0..runs).flat_map(|_| one_call())));
-    let policy = Arc::new(RecordingPolicy::default());
+    let policy = Arc::new(ContextRecordingPolicy::default());
     let hook = RecordingHook::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.policies.push("recording", policy.clone());

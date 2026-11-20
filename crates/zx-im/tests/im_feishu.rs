@@ -1,6 +1,7 @@
 //! The Feishu channel against a fake open platform: the long connection (pings, pongs,
 //! acknowledgements, fragments, redeliveries, reconnection), messages and card clicks,
 //! tokens, replies in topics, edits, cards, rate limits and the stop.
+
 mod common;
 
 use std::sync::Arc;
@@ -8,18 +9,16 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-use common::im::{FullBacklog, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, FeishuChannel, FeishuConfig,
-    ImChannel, ImError, Inbound, MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,
+    ImError, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
 };
+use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use zx_testing::http::silent_listener;
 
-/// Only reached when an expected event never comes.
-const WAIT: Duration = Duration::from_secs(10);
+use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
 
 fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
@@ -66,13 +65,6 @@ fn bot_mention() -> Value {
 
 fn received(event: &Value) -> Vec<u8> {
     payload("im.message.receive_v1", event)
-}
-
-fn at(chat: &str, thread: Option<&str>) -> Destination {
-    Destination {
-        conversation: ConversationId(chat.into()),
-        thread: thread.map(|root| ThreadId(root.into())),
-    }
 }
 
 /// A message from ou_u1 in a group that mentions the bot.
@@ -359,6 +351,21 @@ async fn a_silent_connection_is_reported_and_opened_again() {
     let second = fake.socket().await;
     assert_eq!(fake.calls("endpoint").len(), 2);
     drop((first, second));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_lost_connection_is_reported_and_opened_again() {
+    let mut fake = FakeFeishu::start(120).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let running = run_channel(channel, WAIT);
+    // Gone without a close frame.
+    drop(fake.socket().await);
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("lost"), "{report}");
+    let second = fake.socket().await;
+    assert_eq!(fake.calls("endpoint").len(), 2);
+    drop(second);
     running.stop().await.unwrap();
 }
 

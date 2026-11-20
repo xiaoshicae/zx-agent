@@ -11,12 +11,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
-
 use zx_agent::builtin::policy::{AutoApprove, ProgramOptions};
 
 /// One entry of `allow` or `deny`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Entry {
+enum Entry {
     /// A tool, by the name the model calls it.
     Tool(String),
     /// Bash commands, by a text: a prefix in `allow`, a substring in `deny`.
@@ -29,14 +28,14 @@ pub(crate) struct Permissions {
     /// Tools whose calls need a person's approval; refused where no one can answer.
     pub(crate) ask: Vec<String>,
     /// Commands that run without asking, by prefix, and MCP tools that do.
-    pub(crate) allow: Vec<Entry>,
+    allow: Vec<Entry>,
     /// Texts that keep an allowed command asking, compared without case, such as `secret`.
     pub(crate) allow_except: Vec<String>,
     /// For a program, such as kubectl, the options an allowed command may pass; any other
     /// option asks. Programs not listed may pass any option.
     pub(crate) allow_options: BTreeMap<String, ProgramOptions>,
     /// Tools denied whatever else says, and commands containing a text.
-    pub(crate) deny: Vec<Entry>,
+    deny: Vec<Entry>,
     /// Ask nobody: calls that would wait for an approval run instead, while denials and the
     /// command policy still apply. Only where the executor isolates commands, such as the
     /// container, which the assembly checks, and not together with `ask`.
@@ -65,7 +64,7 @@ impl RawPermissions {
                     !tool.starts_with("bash("),
                     "permissions.ask: {tool:?}: ask names tools, such as \"bash\"; to let some commands run without asking, add bash(<command>) to permissions.allow"
                 );
-                ensure!(!tool.trim().is_empty(), "permissions.ask: an entry is empty");
+                ensure!(!tool.trim().is_empty(), "permissions.ask: an entry must not be empty");
             }
             permissions.ask = ask;
         }
@@ -75,7 +74,7 @@ impl RawPermissions {
         if let Some(texts) = self.allow_except {
             ensure!(
                 texts.iter().all(|text| !text.trim().is_empty()),
-                "permissions.allowExcept: an entry is empty"
+                "permissions.allowExcept: an entry must not be empty"
             );
             permissions.allow_except = texts;
         }
@@ -98,7 +97,7 @@ fn entries(key: &str, values: Vec<String>) -> Result<Vec<Entry>> {
 /// A tool name or `bash(<text>)`, the text not empty.
 fn entry(key: &str, value: String) -> Result<Entry> {
     let trimmed = value.trim();
-    ensure!(!trimmed.is_empty(), "permissions.{key}: an entry is empty");
+    ensure!(!trimmed.is_empty(), "permissions.{key}: an entry must not be empty");
     if let Some(inner) = trimmed.strip_prefix("bash(") {
         let Some(text) = inner.strip_suffix(')') else {
             bail!("permissions.{key}: {value:?} has no closing parenthesis; write bash(<command>)");
@@ -145,10 +144,15 @@ impl Permissions {
         )
     }
 
-    /// Check the tool names against what is registered: `known` for the tools that run unless
-    /// asked about, the built-in ones and the host's own, and `asking` for those that ask
-    /// unless allowed, the MCP tools and the host's extensions' tools; and the program options.
+    /// Check that `ask` is empty where every call is approved; the tool names against what is
+    /// registered: `known` for the tools that run unless asked about, the built-in ones and the
+    /// host's own, and `asking` for those that ask unless allowed, the MCP tools and the host's
+    /// extensions' tools; and the program options.
     pub(super) fn validate(&self, known: impl Fn(&str) -> bool, asking: &[String]) -> Result<()> {
+        ensure!(
+            !self.approve_all || self.ask.is_empty(),
+            "permissions.approveAll asks for no approval, so permissions.ask must be empty"
+        );
         let registered = |tool: &str| known(tool) || asking.iter().any(|name| name == tool);
         for tool in &self.ask {
             ensure!(registered(tool), "permissions.ask: unknown tool {tool:?}");
@@ -156,12 +160,12 @@ impl Permissions {
         for tool in self.allowed_tools() {
             ensure!(
                 !known(&tool),
-                "permissions.allow: {tool} runs without asking unless it is in permissions.ask"
+                "permissions.allow: {tool:?} runs without asking unless it is in permissions.ask"
             );
             ensure!(registered(&tool), "permissions.allow: unknown tool {tool:?}");
             ensure!(
                 !self.ask.contains(&tool),
-                "{tool} is in both permissions.ask and permissions.allow"
+                "permissions.allow: {tool:?} is in permissions.ask as well"
             );
         }
         for tool in self.denied_tools() {
@@ -259,7 +263,7 @@ mod tests {
     fn malformed_entries_name_their_field() {
         for (text, expected) in [
             ("ask = ['bash(ls)']", "permissions.ask: \"bash(ls)\": ask names tools"),
-            ("ask = [' ']", "permissions.ask: an entry is empty"),
+            ("ask = [' ']", "permissions.ask: an entry must not be empty"),
             ("allow = ['bash()']", "permissions.allow: \"bash()\" names no command"),
             (
                 "allow = ['bash(  )']",
@@ -273,8 +277,11 @@ mod tests {
                 "deny = ['shell(rm)']",
                 "permissions.deny: \"shell(rm)\" is neither a tool name",
             ),
-            ("allow = ['']", "permissions.allow: an entry is empty"),
-            ("allowExcept = [' ']", "permissions.allowExcept: an entry is empty"),
+            ("allow = ['']", "permissions.allow: an entry must not be empty"),
+            (
+                "allowExcept = [' ']",
+                "permissions.allowExcept: an entry must not be empty",
+            ),
             ("autoApprove = ['ls']", "unknown field `autoApprove`"),
         ] {
             let error = format!("{:#}", parse(text).unwrap_err());
@@ -291,11 +298,11 @@ mod tests {
             ("allow = ['missing']", "permissions.allow: unknown tool \"missing\""),
             (
                 "allow = ['read_file']",
-                "permissions.allow: read_file runs without asking unless it is in permissions.ask",
+                "permissions.allow: \"read_file\" runs without asking unless it is in permissions.ask",
             ),
             (
                 "ask = ['prom__query']\nallow = ['prom__query']",
-                "prom__query is in both permissions.ask and permissions.allow",
+                "permissions.allow: \"prom__query\" is in permissions.ask as well",
             ),
         ] {
             let error = format!("{:#}", parse(text).unwrap().validate(known, &mcp).unwrap_err());

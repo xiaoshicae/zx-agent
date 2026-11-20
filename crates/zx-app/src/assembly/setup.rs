@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-
-use crate::config::{ProjectContext, READ_SKILL};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, SpillOutputs};
 use zx_agent::builtin::tools::{self, EXECUTOR_TOOL_NAMES, FileMutationQueue, READ_OUTPUT};
@@ -19,6 +17,7 @@ use zx_agent::transcript::SessionHeader;
 
 use super::SessionPlace;
 use super::execution::{ExecutorFactory, ExecutorSession};
+use crate::config::{ProjectContext, READ_SKILL};
 
 /// What each session of an agent gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
@@ -34,7 +33,7 @@ pub(super) struct PerSession {
     /// place among them.
     pub(super) skills: Option<(Arc<dyn Tool>, String)>,
     /// What starts each session's executor: the one config.toml names in `execution`.
-    pub(super) executor: Arc<dyn ExecutorFactory>,
+    pub(super) executor_factory: Arc<dyn ExecutorFactory>,
     /// Variables that commands must not see.
     pub(super) hidden_env: Vec<String>,
     pub(super) tool_timeout: Duration,
@@ -53,6 +52,8 @@ pub(super) struct PerSession {
 const ENVIRONMENT: &str = "environment";
 const PROJECT_CONTEXT: &str = "project_context";
 const AVAILABLE_SKILLS: &str = "available_skills";
+/// The names of those sections, in their order.
+pub(super) const SECTION_NAMES: [&str; 3] = [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS];
 /// The hook that stores a session's long tool results, named like the hooks every session
 /// shares (`agent::hooks`).
 pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
@@ -61,14 +62,12 @@ pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
 impl SessionSetup for PerSession {
     fn section_names(&self) -> Vec<String> {
         let host = self.host_sections.iter().map(|(name, _)| name.clone());
-        [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS]
-            .map(String::from)
-            .into_iter()
-            .chain(host)
-            .collect()
+        SECTION_NAMES.map(String::from).into_iter().chain(host).collect()
     }
 
-    /// Startup reads, then the start of the session's executor, such as its container.
+    /// Each time a session is made or opened: a look at its working directory and a read of
+    /// the project's instructions, synchronous but small and bounded by the instructions' size
+    /// limit; then the start of the session's executor, such as its container.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts> {
         let cwd = Path::new(&header.cwd);
         // A new session's directory was just resolved; one that is opened again may have
@@ -82,10 +81,10 @@ impl SessionSetup for PerSession {
             "cannot load project instructions; an agent with discover = false under [context] skips AGENTS.md discovery",
         )?;
         let mut hooks = HookChain::new();
-        let mut host: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut on_this_machine: Vec<Arc<dyn Tool>> = Vec::new();
         let mut catalog = "";
         if let Some((tool, skills)) = &self.skills {
-            host.push(tool.clone());
+            on_this_machine.push(tool.clone());
             catalog = skills;
         }
         if self.tools.iter().any(|name| name == READ_OUTPUT) {
@@ -95,20 +94,21 @@ impl SessionSetup for PerSession {
             let paging = [READ_OUTPUT, READ_SKILL, tools::READ_FILE];
             let (spill, reader) = SpillOutputs::with_reader(store, paging.map(String::from).to_vec());
             hooks.push(SPILL_OUTPUTS, Arc::new(spill));
-            host.push(Arc::new(reader));
+            on_this_machine.push(Arc::new(reader));
         }
-        let records = self.place.location(cwd);
+        let location = self.place.location(cwd);
         let executor = self
-            .executor
+            .executor_factory
             .start(ExecutorSession {
                 cwd,
                 id: &header.id,
-                records: records.as_deref(),
+                location: location.as_deref(),
                 hidden_env: &self.hidden_env,
             })
             .await?;
         let environment = executor.environment_section(cwd);
-        // The agent's tools were checked when it was loaded: the others are those of `host`.
+        // The agent's tools were checked when it was loaded: the others are those of
+        // `on_this_machine`.
         let on_executor: Vec<String> = self
             .tools
             .iter()
@@ -116,7 +116,7 @@ impl SessionSetup for PerSession {
             .cloned()
             .collect();
         let mut tools = tools::executor_tools(&on_executor, self.tool_timeout, &executor, &self.file_queue)?;
-        tools.extend(host);
+        tools.extend(on_this_machine);
         let mut prompt_sections = vec![
             (ENVIRONMENT.to_string(), environment),
             (PROJECT_CONTEXT.to_string(), context),

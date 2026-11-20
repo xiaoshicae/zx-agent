@@ -83,10 +83,10 @@ impl Accumulator {
     }
 
     fn start(&mut self, message: &Value) {
-        self.response_id = message["id"].as_str().map(str::to_string);
+        self.response_id = message["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string);
         self.response_model = message["model"]
             .as_str()
-            .filter(|model| *model != self.model)
+            .filter(|model| !model.is_empty() && *model != self.model)
             .map(str::to_string);
         self.apply_usage(&message["usage"]);
     }
@@ -265,13 +265,13 @@ impl Answer for Accumulator {
                         format!("the API ended the response with stop_reason {other:?}"),
                     ),
                 };
-                let details = ProviderError {
+                let provider_error = ProviderError {
                     kind,
                     status: None,
                     code: Some(other.to_string()),
                     retry_after_ms: None,
                 };
-                return Ok(self.message(StopReason::Error, Some(error), Some(details)));
+                return Ok(self.message(StopReason::Error, Some(error), Some(provider_error)));
             }
         };
         Ok(self.message(stop_reason, None, None))
@@ -281,9 +281,9 @@ impl Answer for Accumulator {
         &self,
         stop_reason: StopReason,
         error: impl Into<String>,
-        details: Option<ProviderError>,
+        provider_error: Option<ProviderError>,
     ) -> AssistantMessage {
-        self.message(stop_reason, Some(error.into()), details)
+        self.message(stop_reason, Some(error.into()), provider_error)
     }
 }
 

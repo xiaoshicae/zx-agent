@@ -1,4 +1,5 @@
-//! The provider contract, and the API key a provider authenticates with.
+//! The provider contract, and the API key a provider authenticates with (pi:
+//! packages/agent/src/types.ts).
 
 use std::fmt;
 use std::sync::Arc;
@@ -9,6 +10,10 @@ use futures::channel::mpsc::{Receiver, Sender, channel};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{Request, StreamEvent};
+
+/// The error message of a response that ended because its request was cancelled
+/// (`StopReason::Aborted`), as every provider writes it; pi's words.
+pub const ABORTED_MESSAGE: &str = "Request was aborted";
 
 /// Buffered events per response before the producer waits for its consumer.
 pub(crate) const STREAM_EVENT_BUFFER: usize = 64;
@@ -27,7 +32,7 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
 
 /// A model provider.
 ///
-/// Contract (same as pi's `StreamFn`, packages/agent/src/types.ts):
+/// Contract (same as pi's `StreamFn`):
 /// - `stream` returns immediately; setup and I/O run in a background task.
 /// - It never panics and never returns an error. Every failure becomes a final
 ///   `StreamEvent::Error` whose message has `stop_reason` `Error` or `Aborted`,
@@ -128,9 +133,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_key_is_no_key_and_a_key_is_never_shown() {
+    fn a_key_is_fixed_unless_it_is_empty() {
         assert!(matches!(ApiKey::fixed(""), ApiKey::None));
         assert!(matches!(ApiKey::from(Some("k".to_string())), ApiKey::Fixed(key) if key == "k"));
+    }
+
+    #[test]
+    fn a_key_is_never_shown() {
         assert_eq!(format!("{:?}", ApiKey::fixed("sk-secret")), "[REDACTED]");
     }
 }

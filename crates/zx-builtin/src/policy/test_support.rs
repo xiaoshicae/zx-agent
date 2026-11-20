@@ -1,6 +1,7 @@
 //! What the tests of the policies share.
 
 use serde_json::Value;
+use zx_core::policy::PolicyDecision;
 
 use crate::ai::ToolCall;
 
@@ -12,4 +13,9 @@ pub(super) fn call(name: &str, arguments: Value) -> ToolCall {
         arguments,
         arguments_error: None,
     }
+}
+
+/// Whether `decision` denies the call.
+pub(super) fn denied(decision: &PolicyDecision) -> bool {
+    matches!(decision, PolicyDecision::Deny(_))
 }

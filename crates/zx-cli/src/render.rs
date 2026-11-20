@@ -1,9 +1,10 @@
-//! Text about calls and events for a terminal or a log, shared by run, chat, acp and the
-//! session listing. Names, arguments and errors come from models, tools and servers, so
+//! Text about calls, events and sessions for a terminal, a log or a client, shared by run,
+//! chat, acp and the session listing. Names, arguments and errors come from models, tools and servers, so
 //! nothing printed here can drive the terminal.
 
 use serde_json::Value;
 use zx_agent::ai::{AssistantMessage, StopReason};
+use zx_agent::builtin::tools::{EDIT_FILE, PATCH_DETAIL};
 use zx_agent::events::{EventKind, Interruption};
 use zx_util::text::clip;
 
@@ -16,11 +17,13 @@ const BLOCK_LINES: usize = 60;
 /// Argument fields that say what a call does, shown instead of the whole JSON: the first
 /// one present is the call's main value, the others follow as `name=value`.
 const LABEL_FIELDS: [&str; 3] = ["command", "pattern", "path"];
-/// Characters of a call's arguments on a `[tool]` progress line.
-const PROGRESS_ARGS_CHARS: usize = 300;
 /// Characters of a call's label on a progress or result line, or as a client's title;
 /// approvals show everything.
 const LABEL_CHARS: usize = 80;
+/// Characters of a session's name or first prompt shown in a listing or as a client's title.
+const PROMPT_PREVIEW_CHARS: usize = 60;
+/// How a time is shown to a person, in a listing or a banner: to the minute.
+const LOCAL_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// [`describe_call`] cut to [`LABEL_CHARS`], for a line that lists the call.
 pub(crate) fn call_label(name: &str, args: &Value) -> String {
@@ -77,8 +80,7 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
     match value {
         Value::String(text) if text.contains('\n') || text.chars().count() > INLINE_CHARS => {
             let total = text.lines().count();
-            let plural = if total == 1 { "" } else { "s" };
-            lines.push(format!("{path} ({total} line{plural}):"));
+            lines.push(format!("{path} ({total} line(s)):"));
             for line in text.lines().take(BLOCK_LINES) {
                 lines.push(format!("    {}", visible(line)));
             }
@@ -103,6 +105,15 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
     }
 }
 
+/// The unified patch in the details of a result of the call `tool_name`, when the call was
+/// [`EDIT_FILE`]'s: what it changed, shown in place of the text the model received.
+pub(crate) fn patch_of<'a>(tool_name: &str, details: Option<&'a Value>) -> Option<&'a str> {
+    if tool_name != EDIT_FILE {
+        return None;
+    }
+    details?.get(PATCH_DETAIL)?.as_str()
+}
+
 /// How serious a line is, for a terminal that colors lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Severity {
@@ -120,12 +131,15 @@ pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, S
     if let Some(error) = &message.error_message {
         Some((
             Severity::Error,
-            format!("[model] {:?}: {}", message.stop_reason, visible(error)),
+            format!("[model] {}: {}", message.stop_reason.name(), visible(error)),
         ))
     } else if message.stop_reason == StopReason::Length {
         Some((
             Severity::Warn,
-            "[model] Length: the response hit the output token limit".to_string(),
+            format!(
+                "[model] {}: the response hit the output token limit",
+                StopReason::Length.name()
+            ),
         ))
     } else {
         None
@@ -138,14 +152,9 @@ pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, S
 #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
 pub(crate) fn progress_line(event: &EventKind) -> Option<(Severity, String)> {
     let line = match event {
-        EventKind::ToolExecutionStart { tool_name, args, .. } => (
-            Severity::Info,
-            format!(
-                "[tool] {} {}",
-                visible(tool_name),
-                visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
-            ),
-        ),
+        EventKind::ToolExecutionStart { tool_name, args, .. } => {
+            (Severity::Info, format!("[tool] {}", call_label(tool_name, args)))
+        }
         EventKind::ToolExecutionUpdate { tool_name, content, .. } => (
             Severity::Info,
             format!("[tool] {}: {}", visible(tool_name), visible(content)),
@@ -239,15 +248,27 @@ fn describe_interruption(state: Interruption) -> &'static str {
     }
 }
 
-/// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`
-/// for a time the calendar cannot hold.
-pub(crate) fn local_time(ms: u64, format: &str) -> Option<String> {
-    // A timestamp beyond i64, or past the year 262143, cannot occur; each caller shows its
-    // line without the time.
-    i64::try_from(ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|utc| utc.with_timezone(&chrono::Local).format(format).to_string())
+/// `ms` since the epoch as a time, or `None` for one the calendar cannot hold: beyond `i64`,
+/// or past the year 262143, which no record holds. A caller then shows no time rather than
+/// a wrong one.
+pub(crate) fn utc_time(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis)
+}
+
+/// `ms` since the epoch in local time, as a person reads it ([`utc_time`]).
+pub(crate) fn local_time(ms: u64) -> Option<String> {
+    utc_time(ms).map(|utc| utc.with_timezone(&chrono::Local).format(LOCAL_TIME_FORMAT).to_string())
+}
+
+/// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an
+/// ellipsis for what is left out and control characters made visible.
+pub(crate) fn preview_text(text: &str) -> String {
+    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let mut shown: String = line.chars().take(PROMPT_PREVIEW_CHARS).collect();
+    if line.chars().count() > PROMPT_PREVIEW_CHARS || text.trim().lines().count() > 1 {
+        shown.push('…');
+    }
+    visible(&shown)
 }
 
 /// Escape control characters, including bidirectional overrides, so that text from models,
@@ -311,14 +332,25 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_starts_is_shown_by_its_label() {
+        let started = EventKind::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: json!({"command": "ls -la", "timeoutSecs": 5}),
+        };
+        let line = progress_line(&started).map(|(_, line)| line);
+        assert_eq!(line.as_deref(), Some("[tool] bash: ls -la"));
+    }
+
+    #[test]
     fn a_label_is_the_description_cut_short() {
         assert_eq!(call_label("bash", &json!({"command": "ls -la"})), "bash: ls -la");
         let long = call_label("bash", &json!({"command": "x".repeat(LABEL_CHARS)}));
         assert_eq!(long, format!("bash: {}...", "x".repeat(LABEL_CHARS - "bash: ".len())));
     }
 
-    // Fields keep the order they were sent in: serde_json's `preserve_order` is on for the
-    // whole workspace since the ACP SDK enables it.
+    // Fields keep the order they were sent in: the root `Cargo.toml` turns on serde_json's
+    // `preserve_order`.
     #[test]
     fn arguments_left_out_of_the_label_are_listed_readably() {
         assert_eq!(
@@ -332,7 +364,7 @@ mod tests {
         );
         assert_eq!(
             describe_arguments(&json!({"path": "notes.txt", "content": "one\ntwo\n"})),
-            ["content (2 lines):", "    one", "    two"]
+            ["content (2 line(s)):", "    one", "    two"]
         );
         assert_eq!(
             describe_arguments(&json!({"path": "a.rs", "edits": [{"oldText": "x", "newText": "y\u{1b}"}]})),
@@ -346,7 +378,7 @@ mod tests {
         let long = "x".repeat(INLINE_CHARS + 1);
         assert_eq!(
             describe_arguments(&json!({"note": long})),
-            ["note (1 line):".to_string(), format!("    {long}")]
+            ["note (1 line(s)):".to_string(), format!("    {long}")]
         );
         let tall = (0..BLOCK_LINES + 2)
             .map(|i| i.to_string())

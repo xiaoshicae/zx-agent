@@ -18,7 +18,7 @@ struct Registered {
     timeout: Duration,
 }
 
-/// The policies of an agent, asked in the order they were registered. The strictest verdict
+/// The policies of an agent, asked in the order they were registered. The strictest decision
 /// stands, so the order never loosens one: a deny ends the check, and an ask outweighs an
 /// allow. A clone is a chain of the same policies: each session of the agent asks one.
 #[derive(Clone, Default)]
@@ -27,6 +27,7 @@ pub struct PolicyChain {
 }
 
 impl PolicyChain {
+    /// A chain without policies, which allows every call.
     pub fn new() -> Self {
         Self::default()
     }
@@ -52,16 +53,11 @@ impl PolicyChain {
         self.policies.extend(other.policies);
     }
 
-    /// Whether no policy is registered: every call is then allowed.
-    pub fn is_empty(&self) -> bool {
-        self.policies.is_empty()
-    }
-
-    /// The verdict on `call`: the first deny, else the first ask, else allow. A policy that
+    /// The decision on `call`: the first deny, else the first ask, else allow. A policy that
     /// panics, runs past its timeout or is cut short by cancellation denies the call, and the
     /// reason names it.
     pub(crate) async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
-        let mut verdict = PolicyDecision::Allow;
+        let mut strictest = PolicyDecision::Allow;
         for entry in &self.policies {
             let checked = bounded(
                 entry.policy.check(call, ctx),
@@ -76,11 +72,11 @@ impl PolicyChain {
             };
             match decision {
                 PolicyDecision::Deny(_) => return decision,
-                PolicyDecision::Ask(_) if matches!(verdict, PolicyDecision::Allow) => verdict = decision,
+                PolicyDecision::Ask(_) if matches!(strictest, PolicyDecision::Allow) => strictest = decision,
                 PolicyDecision::Ask(_) | PolicyDecision::Allow => {}
             }
         }
-        verdict
+        strictest
     }
 }
 
@@ -94,28 +90,20 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::test_support::tool_call;
 
     fn context() -> PolicyContext {
         PolicyContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
     }
 
-    fn call() -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "echo".into(),
-            arguments: json!({}),
-            arguments_error: None,
-        }
-    }
-
-    struct Verdict {
+    struct Decides {
         decision: PolicyDecision,
         index: usize,
         seen: Arc<Mutex<Vec<usize>>>,
     }
 
     #[async_trait]
-    impl ToolPolicy for Verdict {
+    impl ToolPolicy for Decides {
         async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
             self.seen.lock().unwrap().push(self.index);
             self.decision.clone()
@@ -123,7 +111,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_strictest_verdict_stands_in_registration_order() {
+    async fn the_strictest_decision_stands_in_registration_order() {
         for (decisions, expected, visited) in [
             (
                 vec![
@@ -154,14 +142,14 @@ mod tests {
             for (index, decision) in decisions.into_iter().enumerate() {
                 chain.push(
                     format!("policy{index}"),
-                    Arc::new(Verdict {
+                    Arc::new(Decides {
                         decision,
                         index,
                         seen: seen.clone(),
                     }),
                 );
             }
-            assert_eq!(chain.check(&call(), &context()).await, expected);
+            assert_eq!(chain.check(&tool_call("echo", json!({})), &context()).await, expected);
             assert_eq!(*seen.lock().unwrap(), visited);
         }
     }
@@ -169,8 +157,10 @@ mod tests {
     #[tokio::test]
     async fn no_policy_allows_every_call() {
         let chain = PolicyChain::new();
-        assert!(chain.is_empty());
-        assert_eq!(chain.check(&call(), &context()).await, PolicyDecision::Allow);
+        assert_eq!(
+            chain.check(&tool_call("echo", json!({})), &context()).await,
+            PolicyDecision::Allow
+        );
     }
 
     struct Never;
@@ -187,7 +177,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push_with_timeout("slow", Arc::new(Never), Duration::from_millis(1));
         assert_eq!(
-            chain.check(&call(), &context()).await,
+            chain.check(&tool_call("echo", json!({})), &context()).await,
             PolicyDecision::Deny("policy slow timed out after 1ms".into())
         );
     }
@@ -206,7 +196,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push("broken", Arc::new(Panics));
         assert_eq!(
-            chain.check(&call(), &context()).await,
+            chain.check(&tool_call("echo", json!({})), &context()).await,
             PolicyDecision::Deny("policy broken panicked".into())
         );
     }
@@ -219,7 +209,7 @@ mod tests {
         let mut chain = PolicyChain::new();
         chain.push("waiting", Arc::new(Never));
         assert_eq!(
-            chain.check(&call(), &ctx).await,
+            chain.check(&tool_call("echo", json!({})), &ctx).await,
             PolicyDecision::Deny("policy waiting was cancelled".into())
         );
     }

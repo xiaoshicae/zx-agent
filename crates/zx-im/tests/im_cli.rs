@@ -10,17 +10,19 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::fake_slack::{Answer, FakeSlack};
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{self, Home, fake_model_config, write_agent};
 use zx_testing::{json_lines, stderr, stdout};
 
+/// The variable that config.toml names for the fake model's API key.
+const KEY_VAR: &str = "ZX_IM_CLI_TEST_KEY";
 const APP_TOKEN: &str = "xapp-1-im-test-token";
 const BOT_TOKEN: &str = "xoxb-im-test-token";
-/// Only reached when the server never answers.
-const WAIT: Duration = Duration::from_secs(20);
+/// How long a test waits for the program to start serving: longer than [`zx_testing::WAIT`],
+/// as it connects its MCP servers first. Only reached when it never does.
+const START_WAIT: Duration = Duration::from_secs(20);
 
 /// The error for a `[feishu]` section whose secret is not set: a build without that platform
 /// refuses the section itself.
@@ -53,7 +55,7 @@ fn zx_im_in(cwd: &Path, home: Home<'_>) -> Command {
 /// home in `dir` has a config.toml without retries.
 fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
-    program::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
+    program::write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_im_in(dir, Home::Agent(&home));
     command
         .args(["--config", config.to_str().unwrap(), "--model", "mock"])
@@ -70,13 +72,13 @@ fn only_session(sessions: &Path) -> String {
     let files: Vec<_> = std::fs::read_dir(sessions)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .flat_map(|directory| zx_testing::program::session_files(&directory))
+        .flat_map(|directory| program::session_files(&directory))
         .collect();
     assert_eq!(files.len(), 1, "{files:?}");
     std::fs::read_to_string(&files[0]).unwrap()
 }
 
-fn write_config(dir: &Path, text: &str) -> PathBuf {
+fn write_im_config(dir: &Path, text: &str) -> PathBuf {
     let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
     path
@@ -153,7 +155,7 @@ async fn configuration_errors_are_reported_before_serving() {
     ];
     for (config, extra, unset, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), config);
+        let path = write_im_config(dir.path(), config);
         let mut command = im(dir.path(), &path, "http://127.0.0.1:9/v1");
         command.args(extra);
         if let Some(variable) = unset {
@@ -182,7 +184,7 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     let command = "echo app=$SLACK_APP_TOKEN bot=$SLACK_BOT_TOKEN; cat token.txt";
     let model = MockServer::start(vec![Reply::bash("c1", command), Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &format!("{VALID}\n[limits]\nidleSecs = 600\n")
             .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
@@ -241,13 +243,8 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     assert!(recorded.contains("run it"));
     assert!(!recorded.contains(BOT_TOKEN));
 
-    let pid = child.id().unwrap().to_string();
-    let killed = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(killed.success());
-    let output = tokio::time::timeout(WAIT, child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&child, "-TERM").await;
+    let output = program::ended_output(child).await;
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let log: Vec<Value> = json_lines(&stdout(&output));
@@ -273,7 +270,7 @@ async fn im_tells_the_model_how_the_conversation_reaches_people() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -305,7 +302,7 @@ async fn configured_replies_and_card_labels_replace_the_english_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::bash("c1", "echo hi"), Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &format!(
             "{VALID}\n[replies]\nworking = \"处理中…\"\n[cardLabels]\ntitle = \"需要审批\"\nallowed = \"已批准\"\n"
@@ -358,7 +355,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
     // The model never answers, so the run is still going when the server is killed.
     let model = MockServer::start(vec![Reply::Stall(Vec::new())]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -371,7 +368,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
     socket.send(mention("e1", "1700000001.000100", "wait")).await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
     // The status is kept before the run asks the model.
-    tokio::time::timeout(WAIT, model.wait_for_requests(1)).await.unwrap();
+    model.wait_for_requests(1).await;
     let status = "1700000000.000001";
     assert_eq!(slack.calls("chat.postMessage").len(), 1);
     first.kill().await.unwrap();
@@ -400,13 +397,8 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
             &json!("The service restarted: this task did not finish; please send it again.")
         )
     );
-    let pid = second.id().unwrap().to_string();
-    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(stopped.success());
-    let output = tokio::time::timeout(WAIT, second.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&second, "-TERM").await;
+    let output = program::ended_output(second).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }
 
@@ -422,7 +414,7 @@ async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_ag
         "conversations.replies",
         vec![Answer::RateLimited { retry_after_secs: 60 }],
     );
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -465,13 +457,8 @@ async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_ag
         (&updates[0].body["channel"], &updates[0].body["text"]),
         (&json!("C1"), &json!("late answer"))
     );
-    let pid = second.id().unwrap().to_string();
-    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(stopped.success());
-    let output = tokio::time::timeout(WAIT, second.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&second, "-TERM").await;
+    let output = program::ended_output(second).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(left(&pending).is_empty(), "{:?}", left(&pending));
 }
@@ -483,20 +470,16 @@ const MCP_TOKEN: &str = "mcp-im-secret-5678";
 /// config.toml has one MCP server at `url`, where `query` runs without approval and `range`
 /// asks.
 fn mcp_home(dir: &Path, url: &str) -> PathBuf {
-    let home = dir.join(".zx-agent");
+    let home = dir.join(".zx-agent-home");
     write_agent(
         &home,
         "assistant",
         "tools = []\n[context]\ndiscover = false\n[permissions]\nallow = [\"prom__query\"]\n",
     );
-    program::write_config(
-        &home,
-        &format!(
-            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\n\
-             [provider]\napiKeyEnv = \"ZX_IM_CLI_TEST_KEY\"\nmaxRetries = 0\n"
-        ),
+    let server = format!(
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\ntools = [\"query\", \"range\"]"
     );
+    program::write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
 }
 
@@ -510,7 +493,7 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
     .await;
     let model = MockServer::start(Vec::new()).await;
     // Nothing listens on port 9, so the Slack connection keeps failing; this test stops first.
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         "[slack]\napiBase = \"http://127.0.0.1:9/api\"\n[access]\nconversations = [\"slack:C1\"]\n\
          approvers = [\"slack:U2\"]\n[sessions]\ndir = \"sessions\"\n",
@@ -528,7 +511,7 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
         .unwrap();
     let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
     let mut seen = Vec::new();
-    tokio::time::timeout(WAIT, async {
+    tokio::time::timeout(START_WAIT, async {
         while let Some(line) = lines.next_line().await.unwrap() {
             let serving = line.starts_with("[im] platforms=");
             seen.push(line);

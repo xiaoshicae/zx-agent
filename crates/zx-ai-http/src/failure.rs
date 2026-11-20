@@ -15,28 +15,44 @@ const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_ERROR_EXCERPT_CHARS: usize = 2000;
 
 /// Why a request did not end with a complete answer.
+#[derive(Debug)]
 pub enum Failure {
     /// The caller cancelled the request.
     Aborted,
     /// The consumer of the stream went away, so nothing is left to report to.
     Closed,
-    /// The request failed, with the error for the message and its classification.
-    Error { details: ProviderError, message: String },
+    /// The request failed, with its classification and the text for the message.
+    Error {
+        provider_error: ProviderError,
+        message: String,
+    },
 }
 
 impl Failure {
-    /// A failed request: `details`, a whole [`ProviderError`] or only its kind, and the text
-    /// for the message.
-    pub fn error(details: impl Into<ProviderError>, message: impl Into<String>) -> Self {
+    /// A failed request: `provider_error`, a whole [`ProviderError`] or only its kind, and the
+    /// text for the message.
+    pub fn error(provider_error: impl Into<ProviderError>, message: impl Into<String>) -> Self {
         Self::Error {
-            details: details.into(),
+            provider_error: provider_error.into(),
             message: message.into(),
         }
     }
 }
 
+/// The message of a failure that a response with the error status `status` reports, with
+/// `text` from its body.
+pub fn status_message(status: u16, text: &str) -> String {
+    format!("HTTP {status}: {text}")
+}
+
+/// The message of a failure that a server's error object reports, in a body or in the
+/// stream, with `text` from it.
+pub fn error_object_message(text: &str) -> String {
+    format!("provider error: {text}")
+}
+
 /// The failure of `operation`, a request or a stream read, that `error` ended.
-pub fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
+pub(crate) fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
     let kind = if error.is_timeout() {
         ProviderErrorKind::Timeout
     } else {
@@ -101,13 +117,12 @@ pub fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> 
             .map(str::trim)
             .filter(|value| !value.is_empty())
     };
-    let whole = whole_milliseconds;
     if let Some(value) = text("retry-after-ms") {
-        return value.parse::<f64>().ok().and_then(whole);
+        return value.parse::<f64>().ok().and_then(whole_milliseconds);
     }
     let value = text("retry-after")?;
     if let Ok(seconds) = value.parse::<f64>() {
-        return whole(seconds * 1000.0);
+        return whole_milliseconds(seconds * 1000.0);
     }
     let at = http_date_epoch_secs(value)?;
     let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
@@ -155,17 +170,18 @@ fn http_date_epoch_secs(text: &str) -> Option<u64> {
     {
         return None;
     }
-    // Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's days_from_civil).
-    let (y, m) = if month <= 2 {
+    // Days since 1970-01-01 of a proleptic Gregorian date, in 400-year cycles that start on
+    // March 1 (Howard Hinnant's days_from_civil; zx-builtin's calendar.rs has the inverse).
+    let (year_from_march, month_from_march) = if month <= 2 {
         (year - 1, month + 9)
     } else {
         (year, month - 3)
     };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
+    let cycle = year_from_march.div_euclid(400);
+    let year_of_cycle = year_from_march - cycle * 400;
+    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
+    let day_of_cycle = year_of_cycle * 365 + year_of_cycle / 4 - year_of_cycle / 100 + day_of_year;
+    let days = cycle * 146_097 + day_of_cycle - 719_468;
     u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
 }
 

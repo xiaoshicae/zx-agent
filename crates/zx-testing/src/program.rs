@@ -5,6 +5,7 @@
 //! the workspace start theirs alike.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The families of variables that a test's program inherits none of: zx-agent's own, and the
 /// OpenTelemetry exporter's, of which the SDK reads more than the programs name.
@@ -57,7 +58,12 @@ pub enum Home<'a> {
 /// API key in the variable `key_env`, no retries, and `rest` after these provider keys (more
 /// of them, or further tables). The model's address goes in `ZX_BASE_URL`.
 pub fn fake_model_config(key_env: &str, top: &str, rest: &str) -> String {
-    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = 0\n{rest}\n")
+    retrying_fake_model_config(key_env, 0, top, rest)
+}
+
+/// [`fake_model_config`], with `retries` retries of a failure that may pass.
+pub fn retrying_fake_model_config(key_env: &str, retries: u32, top: &str, rest: &str) -> String {
+    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = {retries}\n{rest}\n")
 }
 
 /// A zx-agent home directory of its own, for `ZX_AGENT_HOME`: a `config.toml` and the
@@ -159,6 +165,26 @@ pub fn session_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// How long a test waits for a program it started to end: long enough for a slow machine and
+/// for a container to start, so that only a program that hangs fails the test.
+pub const EXIT_WAIT: Duration = Duration::from_secs(60);
+
+/// How `child` ended. Panics when it has not ended within [`EXIT_WAIT`].
+pub async fn ended(child: &mut tokio::process::Child) -> std::process::ExitStatus {
+    tokio::time::timeout(EXIT_WAIT, child.wait())
+        .await
+        .expect("the program did not end in time")
+        .unwrap()
+}
+
+/// What `child` wrote, once it ended. Panics when it has not ended within [`EXIT_WAIT`].
+pub async fn ended_output(child: tokio::process::Child) -> std::process::Output {
+    tokio::time::timeout(EXIT_WAIT, child.wait_with_output())
+        .await
+        .expect("the program did not end in time")
+        .unwrap()
+}
+
 /// What a finished program wrote to stdout, decoded lossily.
 pub fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -169,7 +195,7 @@ pub fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Send `name` (as `kill` spells it, such as `TERM`) to `child`.
+/// Send the signal `name` to `child`, written as `kill` takes it, such as `-TERM`.
 #[cfg(unix)]
 pub async fn signal(child: &tokio::process::Child, name: &str) {
     assert!(

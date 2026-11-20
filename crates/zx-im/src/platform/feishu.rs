@@ -6,8 +6,10 @@
 //! events are acknowledged once their messages are kept, not after they are handled, because
 //! Feishu redelivers what is not acknowledged within three seconds.
 //!
-//! The open API calls are in `api.rs`; the long connection in `connection.rs`, with its
-//! frames in `frame.rs`; what arrives over it, and the cards, in `events.rs`.
+//! - `api`: the open API calls and the tenant token
+//! - `connection`: the long connection
+//! - `frame`: the frames of the long connection
+//! - `events`: what arrives over it, and the text and cards the channel posts
 
 mod api;
 mod connection;
@@ -26,32 +28,31 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_util::sync::lock;
 
-use crate::{
-    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageId, MessageRef, Post,
-    Replacement,
-};
-
+use self::api::CallError;
+use self::connection::{ClientConfig, PREFIX};
+use self::events::{button, card, card_request, markdown, resolution, text_content};
 use super::{
-    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput, http_client,
-    pause, report, secret, split_text,
+    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, FEISHU, MAX_TEXT_CHARS, Pacer, PlatformFactory,
+    PlatformInput, http_client, pause, report, secret, split_text,
 };
-use api::CallError;
-use connection::{ClientConfig, Connection, Ended, PREFIX};
-use events::{button, card, markdown, resolution, text_content, without_fences, without_mentions};
+use crate::{
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageId, MessageRef, Post, Replacement,
+};
 
 /// Where the open API lives.
 const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
 /// The tenant token endpoint the documentation recommends; the older
 /// `/open-apis/auth/v3/tenant_access_token/internal` is marked as a historical version.
 const DEFAULT_TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
-pub(super) const PLATFORM: &str = "feishu";
 /// The variables that hold the credentials, unless the `[feishu]` section of im.toml names
 /// others.
 const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
 const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
-/// Longest interval accepted from the server (pings, reconnection, a frequency limit's
-/// wait), so that a bad value cannot stop pings or stall posts.
+/// Longest interval accepted from the server, for pings and reconnection, so that a bad value
+/// can neither stop pings nor put off reconnecting for days.
 const MAX_INTERVAL: Duration = Duration::from_secs(3600);
+/// Least time between two posts to one chat, by default: see [`FeishuConfig::post_interval`].
+const DEFAULT_POST_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Settings of a [`FeishuChannel`]. The secret is sent only to the token and endpoint URLs.
 pub struct FeishuConfig {
@@ -83,7 +84,7 @@ impl FeishuConfig {
             api_base: DEFAULT_API_BASE.into(),
             token_url: DEFAULT_TOKEN_URL.into(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            post_interval: Duration::from_millis(200),
+            post_interval: DEFAULT_POST_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
         }
@@ -122,7 +123,7 @@ impl PlatformFactory for Feishu {
     /// The variable holding the App Secret is the one commands must not see: the App ID is
     /// not a secret. Fails when a variable does not hold its credential, and when the channel
     /// cannot be built.
-    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+    fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         let section: FeishuSection = toml::Value::Table(input.section.clone()).try_into()?;
         let mut config = FeishuConfig::new(
             secret(&section.app_id_env, "the Feishu App ID")?,
@@ -136,7 +137,7 @@ impl PlatformFactory for Feishu {
         }
         config.labels.clone_from(input.labels);
         config.on_error = Some(input.on_error);
-        let channel = FeishuChannel::new(config).map_err(anyhow::Error::msg)?;
+        let channel = FeishuChannel::new(config)?;
         Ok(BuiltChannel {
             channel: Arc::new(channel),
             hidden_env: vec![section.app_secret_env],
@@ -157,19 +158,6 @@ pub struct FeishuChannel {
     posts: Pacer,
     /// Direct chats seen so far: replies there do not open a topic.
     direct: Mutex<HashSet<String>>,
-}
-
-/// What a card shows of the request `card`, open and once closed. What the request says
-/// mentions nobody, and its summary stays in the code block.
-fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
-    format!(
-        "**{}**: `{}`\n```\n{}\n```\n{}: {}",
-        labels.title,
-        without_mentions(&card.tool),
-        without_fences(&without_mentions(&card.summary)),
-        labels.reason,
-        without_mentions(&card.reason)
-    )
 }
 
 impl FeishuChannel {
@@ -218,7 +206,7 @@ impl FeishuChannel {
 #[async_trait]
 impl ImChannel for FeishuChannel {
     fn platform(&self) -> &str {
-        PLATFORM
+        FEISHU
     }
 
     async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
@@ -234,16 +222,18 @@ impl ImChannel for FeishuChannel {
             let wait = match connected {
                 Connection::Open(link) => {
                     backoff.reset();
-                    match self.receive(*link, &mut config, &inlet, cancel).await {
+                    let why = match self.receive(*link, &mut config, &inlet, cancel).await {
                         Ended::Cancelled => return Ok(()),
-                        // Spread reconnections out, as the server asks.
-                        Ended::Lost => connection::jitter(config.nonce),
-                        Ended::Silent(silence) => {
-                            let silent = format!("{PREFIX}: silent for {} s; opening it again", silence.as_secs());
-                            report(self.config.on_error.as_ref(), &ImError::Transport(silent));
-                            connection::jitter(config.nonce)
-                        }
+                        Ended::Closed => None,
+                        Ended::Lost(why) => Some(format!("lost ({why})")),
+                        Ended::Silent(silence) => Some(format!("silent for {silence:?}")),
+                    };
+                    if let Some(why) = why {
+                        let reconnecting = format!("{PREFIX}: {why}; opening it again");
+                        report(self.config.on_error.as_ref(), &ImError::Transport(reconnecting));
                     }
+                    // Spread reconnections out, as the server asks.
+                    connection::jitter(config.nonce)
                 }
                 Connection::Later(reason) => {
                     report(self.config.on_error.as_ref(), &ImError::Transport(reason));
@@ -268,9 +258,9 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(posted)
             }
-            Post::ApprovalRequest { id, card: asked } => {
+            Post::ApprovalRequest { id, card: request } => {
                 let labels = &self.config.labels;
-                let request = shown(labels, asked);
+                let text = card_request(labels, request);
                 // The click carries everything needed to find the conversation.
                 let value = |choice: &str| {
                     json!({
@@ -281,7 +271,7 @@ impl ImChannel for FeishuChannel {
                     })
                 };
                 let card = card(&[
-                    markdown(&request),
+                    markdown(&text),
                     button(&labels.allow_once, "primary", &value("allow_once")),
                     button(&labels.deny, "danger", &value("deny")),
                 ]);
@@ -301,7 +291,7 @@ impl ImChannel for FeishuChannel {
                     Ok(_) => {}
                     // Feishu refused the edit (a message allows 20 edits, within a time the
                     // tenant's admin sets): post the text instead of losing it.
-                    Err(CallError::Api { code: Some(_), .. }) => {
+                    Err(CallError::Refused(_)) => {
                         self.post_text(&thread, &first).await?;
                     }
                     Err(error) => return Err(error.into()),
@@ -312,14 +302,14 @@ impl ImChannel for FeishuChannel {
                 Ok(())
             }
             Replacement::ApprovalResolved {
-                card: asked,
+                card: request,
                 user,
                 result,
                 ..
             } => {
                 let labels = &self.config.labels;
                 let elements = vec![
-                    markdown(&shown(labels, asked)),
+                    markdown(&card_request(labels, request)),
                     markdown(&resolution(labels, user.as_ref(), *result)),
                 ];
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);

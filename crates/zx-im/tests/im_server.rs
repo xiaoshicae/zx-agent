@@ -9,15 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, Request, Usage};
+use zx_agent::ai::{Message, Usage};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::events::ApprovalResult;
@@ -32,7 +31,7 @@ use zx_im::{
     Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
     ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_testing::{EchoTool, config, fast_retry, summarize, summary_json, test_limits};
+use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -41,8 +40,6 @@ const DIRECT: &str = "D1";
 const ASKER: &str = "U-asker";
 const APPROVER: &str = "U-approver";
 const OTHER: &str = "U-other";
-/// Only reached when an expected message never comes.
-const WAIT: Duration = Duration::from_secs(10);
 
 /// What the server asked the channel to do.
 #[derive(Debug, PartialEq)]
@@ -435,6 +432,13 @@ impl ServerSink for Events {
     }
 }
 
+/// A sink for a server whose events no test reads.
+struct NullServerSink;
+
+impl ServerSink for NullServerSink {
+    fn emit(&self, _event: &ServerEvent) {}
+}
+
 struct Setup {
     steps: Vec<FauxStep>,
     config: ServerConfig,
@@ -814,7 +818,7 @@ async fn a_message_in_the_chat_is_answered_in_a_thread_under_it() {
         ..Setup::default()
     });
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("answer")).await;
     assert_eq!(h.requests(), [["user:U-asker: hello"]]);
     h.stop().await.unwrap();
@@ -826,7 +830,7 @@ async fn a_reply_in_the_thread_continues_its_session() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -847,7 +851,7 @@ async fn each_thread_has_a_session_of_its_own() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -867,7 +871,7 @@ async fn a_chat_that_is_not_served_gets_a_refusal_and_nothing_else() {
         conversation: ConversationId("C2".into()),
         thread: Some(ThreadId("m1".into())),
     };
-    h.posted(&refused, text(&h.replies.unauthorized.clone())).await;
+    h.posted(&refused, text(&h.replies.unauthorized)).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     assert!(h.requests().is_empty());
     h.stop().await.unwrap();
@@ -880,7 +884,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.click("m1", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
@@ -931,10 +935,10 @@ async fn a_click_by_someone_who_is_not_an_approver_decides_nothing() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.click("m1", OTHER, &id, Choice::AllowOnce).await;
-    h.posted(&thread("m1"), text(&h.replies.not_approver.clone())).await;
+    h.posted(&thread("m1"), text(&h.replies.not_approver)).await;
     h.click("m1", APPROVER, &id, Choice::Deny).await;
     h.updated(
         &card,
@@ -959,7 +963,7 @@ async fn an_unanswered_approval_times_out_and_its_card_says_so() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.updated(
         &card,
@@ -983,7 +987,7 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.say("m2", Some("m1"), " /cancel ").await;
     h.updated(
@@ -996,19 +1000,10 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
         },
     )
     .await;
-    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.updated(&status, text(&h.replies.cancelled)).await;
     assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 0);
     assert_eq!(h.requests().len(), 1);
     h.stop().await.unwrap();
-}
-
-/// A summary of what a summary request read, citing the first record it read.
-fn summary_of_the_source(request: &Request) -> FauxStep {
-    let Some(Message::User { content, .. }) = request.messages.last() else {
-        panic!("a summary request ends with its input");
-    };
-    let records: Vec<Value> = serde_json::from_str(content).unwrap();
-    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
 }
 
 #[tokio::test]
@@ -1017,14 +1012,14 @@ async fn compact_summarizes_the_earlier_talk_as_work_of_its_own() {
         steps: vec![
             FauxStep::text("first"),
             FauxStep::text("second"),
-            FauxStep::compute(summary_of_the_source),
+            FauxStep::compute(|request| FauxStep::text(zx_testing::summary_of_the_source(request))),
             FauxStep::text("third"),
         ],
         // Everything before the latest prompt is old enough to summarize.
         keep_recent_bytes: Some(1),
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     for (id, prompt, answer) in [("d1", "one", "first"), ("d2", "two", "second")] {
         h.say_directly(id, prompt).await;
         let status = h.posted(&direct(), working.clone()).await;
@@ -1034,7 +1029,7 @@ async fn compact_summarizes_the_earlier_talk_as_work_of_its_own() {
     h.say_directly("d3", " /compact ").await;
 
     let status = h.posted(&direct(), working.clone()).await;
-    h.updated(&status, text(&h.replies.compacted.clone())).await;
+    h.updated(&status, text(&h.replies.compacted)).await;
     h.say_directly("d4", "three").await;
     let status = h.posted(&direct(), working).await;
     h.updated(&status, text("third")).await;
@@ -1054,12 +1049,12 @@ async fn compact_says_when_there_is_nothing_to_summarize() {
         steps: vec![FauxStep::text("first")],
         ..Setup::default()
     });
-    let nothing: Post = text(&h.replies.nothing_to_compact.clone());
+    let nothing: Post = text(&h.replies.nothing_to_compact);
     // A conversation without a session gets none for the command.
     h.say("m1", None, "/compact").await;
     h.posted(&thread("m1"), nothing).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say_directly("d1", "one").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("first")).await;
@@ -1068,7 +1063,7 @@ async fn compact_says_when_there_is_nothing_to_summarize() {
 
     // One turn is the latest talk, which a summary leaves as it is: no request is made.
     let status = h.posted(&direct(), working).await;
-    h.updated(&status, text(&h.replies.nothing_to_compact.clone())).await;
+    h.updated(&status, text(&h.replies.nothing_to_compact)).await;
     assert_eq!(h.requests().len(), 1);
     h.stop().await.unwrap();
 }
@@ -1084,7 +1079,7 @@ async fn compacting(gate: &Arc<Gate>, more: Vec<FauxStep>) -> (Harness, MessageR
         summary_gate: Some(gate.clone()),
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     for (id, prompt, answer) in [("d1", "one", "first"), ("d2", "two", "second")] {
         h.say_directly(id, prompt).await;
         let status = h.posted(&direct(), working.clone()).await;
@@ -1103,7 +1098,7 @@ async fn cancel_stops_a_compaction_like_a_run() {
 
     h.say_directly("d4", "/cancel").await;
 
-    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.updated(&status, text(&h.replies.cancelled)).await;
     // Nothing was summarized: the next answer reads the talk as it was.
     assert_eq!(h.requests().len(), 2);
     h.stop().await.unwrap();
@@ -1118,8 +1113,8 @@ async fn a_message_sent_during_a_compaction_is_answered_after_it() {
 
     h.acknowledged(&direct(), "d4").await;
     gate.release.cancel();
-    h.updated(&status, text(&h.replies.compacted.clone())).await;
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    h.updated(&status, text(&h.replies.compacted)).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     h.updated(&status, text("third")).await;
     let read = h.requests()[2].join("\n");
     assert!(read.contains("user:three") && !read.contains("user:one"), "{read}");
@@ -1133,18 +1128,18 @@ async fn compact_during_a_run_says_that_the_conversation_is_busy() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (_, _card) = h.card(&thread("m1")).await;
 
     h.say("m2", Some("m1"), "/compact").await;
 
-    h.posted(&thread("m1"), text(&h.replies.busy.clone())).await;
+    h.posted(&thread("m1"), text(&h.replies.busy)).await;
     // The run goes on as it was: it still ends by `/cancel`.
     h.say("m3", Some("m1"), "/cancel").await;
     loop {
         match h.next().await {
             Sent::Update { posted, message } if posted == status => {
-                assert_eq!(message, text(&h.replies.cancelled.clone()));
+                assert_eq!(message, text(&h.replies.cancelled));
                 break;
             }
             Sent::Update { .. } => {}
@@ -1158,8 +1153,7 @@ async fn compact_during_a_run_says_that_the_conversation_is_busy() {
 async fn cancel_with_nothing_running_says_so() {
     let mut h = start(Setup::default());
     h.say("m1", None, "/cancel").await;
-    h.posted(&thread("m1"), text(&h.replies.nothing_to_cancel.clone()))
-        .await;
+    h.posted(&thread("m1"), text(&h.replies.nothing_to_cancel)).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }
@@ -1174,13 +1168,13 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
         },
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("a", None, "task a").await;
     let status_a = h.posted(&thread("a"), working.clone()).await;
     // Thread a now waits for an approval while holding the only run slot.
     let (id, card) = h.card(&thread("a")).await;
     h.say("b", None, "task b").await;
-    h.posted(&thread("b"), text(&h.replies.queued.clone())).await;
+    h.posted(&thread("b"), text(&h.replies.queued)).await;
     h.click("a", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
         &card,
@@ -1206,7 +1200,7 @@ async fn a_message_during_a_run_is_steered_into_it() {
         ..Setup::default()
     });
     h.say("m1", None, "run echo").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.say("m2", Some("m1"), "also check the logs").await;
     h.acknowledged(&thread("m1"), "m2").await;
@@ -1244,7 +1238,7 @@ async fn an_idle_conversation_releases_its_session_and_reopens_it() {
         },
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1267,9 +1261,9 @@ async fn a_run_cancelled_by_the_stop_says_the_server_is_stopping() {
         ..Setup::default()
     });
     h.say("m1", None, "wait forever").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.cancel.cancel();
-    h.updated(&status, text(&h.replies.stopped.clone())).await;
+    h.updated(&status, text(&h.replies.stopped)).await;
     h.server.await.unwrap().unwrap();
 }
 
@@ -1398,7 +1392,7 @@ async fn a_handled_message_delivered_again_is_not_answered_again() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1452,7 +1446,7 @@ async fn a_running_status_is_kept_and_forgotten_before_the_answer_replaces_it() 
         ..Setup::default()
     });
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     assert_eq!(h.next().await, Sent::Kept(status.clone()));
     assert_eq!(h.next().await, Sent::Forgot(status.clone()));
     h.updated(&status, text("answer")).await;
@@ -1468,7 +1462,7 @@ async fn a_status_left_by_an_earlier_process_is_replaced_and_forgotten() {
         statuses: Some(vec![(key("m0"), left.clone())]),
         ..Setup::default()
     });
-    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    h.updated(&left, text(&h.replies.interrupted)).await;
     assert_eq!(h.next().await, Sent::Forgot(left));
     let statuses = h.statuses.clone().unwrap();
     h.stop().await.unwrap();
@@ -1483,7 +1477,7 @@ async fn a_left_status_the_platform_does_not_replace_is_reported_and_forgotten()
         updates: Updates::Refused,
         ..Setup::default()
     });
-    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    h.updated(&left, text(&h.replies.interrupted)).await;
     assert_eq!(h.next().await, Sent::Forgot(left));
     assert_eq!(
         h.event().await,
@@ -1526,7 +1520,7 @@ async fn the_stop_gives_up_replacing_left_statuses_and_keeps_them() {
         ..Setup::default()
     });
     // The platform never answers this update.
-    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    h.updated(&left, text(&h.replies.interrupted)).await;
     let statuses = h.statuses.clone().unwrap();
     h.stop().await.unwrap();
     assert_eq!(statuses.kept(), [(key("m0"), left)]);
@@ -1541,7 +1535,7 @@ async fn a_status_that_cannot_be_kept_is_reported_and_the_run_goes_on() {
         ..Setup::default()
     });
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     assert_eq!(h.next().await, Sent::Kept(status.clone()));
     assert_eq!(
         h.event().await,
@@ -1561,7 +1555,7 @@ async fn a_status_that_cannot_be_forgotten_is_reported_and_still_replaced() {
         ..Setup::default()
     });
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     assert_eq!(h.next().await, Sent::Kept(status.clone()));
     assert_eq!(h.next().await, Sent::Forgot(status.clone()));
     assert_eq!(
@@ -1581,7 +1575,7 @@ async fn an_answer_that_cannot_replace_its_status_is_posted_instead() {
         ..Setup::default()
     });
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     assert_eq!(h.next().await, Sent::Kept(status.clone()));
     assert_eq!(h.next().await, Sent::Forgot(status.clone()));
     h.updated(&status, text("answer")).await;
@@ -1612,7 +1606,7 @@ async fn statuses_that_cannot_be_read_are_reported_and_the_server_serves() {
         }
     );
     h.say("m1", None, "hello").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     assert_eq!(h.next().await, Sent::Kept(status.clone()));
     assert_eq!(h.next().await, Sent::Forgot(status.clone()));
     h.updated(&status, text("answer")).await;
@@ -1641,7 +1635,7 @@ async fn a_conversation_whose_session_is_gone_goes_on_in_a_new_one() {
         },
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say_directly("d1", "hello").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1710,19 +1704,13 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
     h.stop().await.unwrap();
 }
 
-struct NullServerSink;
-
-impl ServerSink for NullServerSink {
-    fn emit(&self, _event: &ServerEvent) {}
-}
-
 #[tokio::test]
 async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1741,7 +1729,7 @@ async fn the_session_records_the_sender_of_each_message_it_answers_as_its_actor(
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1749,12 +1737,7 @@ async fn the_session_records_the_sender_of_each_message_it_answers_as_its_actor(
     let status = h.posted(&thread("m1"), working).await;
     h.updated(&status, text("two")).await;
 
-    let key = SessionKey {
-        platform: PLATFORM.into(),
-        conversation: ConversationId(CHAT.into()),
-        thread: Some(ThreadId("m1".into())),
-    };
-    let id = h.sessions.of(&key).await.unwrap().remove(0);
+    let id = h.sessions.of(&key("m1")).await.unwrap().remove(0);
     let stored = Transcript::snapshot(h.sessions.storage.read(&id).await.unwrap()).unwrap();
     let actors: Vec<Option<&str>> = stored
         .entries()
@@ -1774,12 +1757,12 @@ async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
     h.say_directly("d2", " /new ").await;
-    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    h.posted(&direct(), text(&h.replies.new_session)).await;
     h.say_directly("d3", "second").await;
     let status = h.posted(&direct(), working).await;
     h.updated(&status, text("two")).await;
@@ -1798,7 +1781,7 @@ async fn a_conversation_released_after_new_goes_on_in_the_new_session() {
         },
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     let released = ServerEvent::Released { key: direct_key() };
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
@@ -1807,7 +1790,7 @@ async fn a_conversation_released_after_new_goes_on_in_the_new_session() {
     // last record by more than the clock's resolution.
     assert_eq!(h.event().await, released);
     h.say_directly("d2", "/new").await;
-    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    h.posted(&direct(), text(&h.replies.new_session)).await;
     // Released again, the conversation remembers nothing: only the new session, which it
     // held until now, says that `/new` was asked for.
     assert_eq!(h.event().await, released);
@@ -1840,13 +1823,29 @@ async fn new_reports_a_session_it_cannot_create() {
 }
 
 #[tokio::test]
+async fn the_stop_does_not_wait_for_the_session_new_is_making() {
+    let gate = Gate::new();
+    let h = start(Setup {
+        setup_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    let backlog = h.backlog.clone();
+    // The new session's setup waits at the gate, which stays shut.
+    h.say_as(ASKER, "m1", "slow-thread", Addressee::Bot, "/new").await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    tokio::time::timeout(WAIT, h.stop()).await.unwrap().unwrap();
+    // Nothing was made: the command waits for the next start.
+    assert_eq!(pending(&backlog).await, ["m1"]);
+}
+
+#[tokio::test]
 async fn new_during_a_run_cancels_it_and_then_starts_over() {
     let mut h = start(Setup {
         steps: vec![echo_call(), FauxStep::text("fresh")],
         ..Setup::default()
     });
     h.say_directly("d1", "run echo").await;
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     // The card shows that the run is waiting, its request answered.
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
@@ -1857,10 +1856,10 @@ async fn new_during_a_run_cancels_it_and_then_starts_over() {
         result: ApprovalResult::Cancelled,
     };
     h.updated(&card, closed).await;
-    h.updated(&status, text(&h.replies.cancelled.clone())).await;
-    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    h.updated(&status, text(&h.replies.cancelled)).await;
+    h.posted(&direct(), text(&h.replies.new_session)).await;
     h.say_directly("d3", "again").await;
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     h.updated(&status, text("fresh")).await;
     assert_eq!(h.requests()[1], ["user:again"]);
     h.stop().await.unwrap();
@@ -1914,7 +1913,7 @@ async fn a_session_closed_under_its_conversation_is_opened_again_for_the_next_me
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1974,7 +1973,7 @@ async fn talk_in_a_thread_the_bot_never_joined_reaches_neither_a_worker_nor_the_
     // A mention in the direct chat, answered once the router has passed the talk by: it
     // routes what arrives in order.
     h.say_directly("d1", "hello").await;
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     h.updated(&status, text("hi")).await;
 
     assert_eq!(h.sessions.indexed.load(Ordering::SeqCst), 1, "read once, at the start");
@@ -1990,7 +1989,7 @@ async fn a_conversation_of_an_earlier_process_is_followed_without_a_mention() {
         ..Setup::default()
     });
     h.say_as(ASKER, "m2", "m1", Addressee::Bot, "first").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("first")).await;
     let storage = Arc::clone(&h.sessions.storage);
     h.stop().await.unwrap();
@@ -2004,7 +2003,7 @@ async fn a_conversation_of_an_earlier_process_is_followed_without_a_mention() {
     h.say_as(OTHER, "m3", "m1", Addressee::Nobody, "said while the bot was away")
         .await;
     h.say_as(ASKER, "m4", "m1", Addressee::Bot, "again").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("second")).await;
     let request = &h.requests()[0];
     assert!(
@@ -2028,7 +2027,7 @@ async fn a_thread_the_bot_joins_after_talk_it_passed_by_is_followed_from_then_on
     });
     h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "before the bot").await;
     h.say_as(ASKER, "m3", "m1", Addressee::Bot, "first").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     while h.event().await != (ServerEvent::Released { key: key("m1") }) {}
 
@@ -2038,7 +2037,7 @@ async fn a_thread_the_bot_joins_after_talk_it_passed_by_is_followed_from_then_on
     h.say_as(OTHER, "m4", "m1", Addressee::Nobody, "the cache was flushed")
         .await;
     h.say_as(ASKER, "m5", "m1", Addressee::Bot, "second").await;
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("two")).await;
     let request = &h.requests()[1];
     assert!(
@@ -2121,7 +2120,7 @@ async fn the_person_just_answered_goes_on_without_a_mention() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -2142,7 +2141,7 @@ async fn talk_between_people_in_the_thread_is_recorded_but_not_answered() {
         names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "why is checkout slow?").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -2180,7 +2179,7 @@ async fn talk_where_the_bot_never_took_part_is_left_alone() {
     h.inject.send(elsewhere).await.unwrap();
     h.say("m3", None, "hello").await;
     // The first thing the server does is answer the mention: no refusal, no run before it.
-    let status = h.posted(&thread("m3"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m3"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
@@ -2204,7 +2203,7 @@ async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
         ..Setup::default()
     });
     h.say("m2", Some("t1"), "why?").await;
-    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     // The mention itself is the prompt, not part of what came before.
     assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
@@ -2225,7 +2224,7 @@ async fn the_first_mention_in_a_thread_reads_only_what_was_said_before_it() {
         ..Setup::default()
     });
     h.say("m2", Some("t1"), "why?").await;
-    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
     h.stop().await.unwrap();
@@ -2243,11 +2242,11 @@ async fn a_session_started_by_new_does_not_read_what_was_said_in_the_thread() {
         ..Setup::default()
     });
     h.say("m2", Some("t1"), "/new").await;
-    h.posted(&thread("t1"), text(&h.replies.new_session.clone())).await;
+    h.posted(&thread("t1"), text(&h.replies.new_session)).await;
     // Released, the conversation opens the session as it would any other of its own.
     assert_eq!(h.event().await, ServerEvent::Released { key: key("t1") });
     h.say("m3", Some("t1"), "why?").await;
-    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     assert_eq!(h.requests()[0], ["user:U-asker: why?"]);
     h.stop().await.unwrap();
@@ -2263,11 +2262,41 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
         },
         ..Setup::default()
     });
-    let working: Post = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working);
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
     assert_eq!(h.event().await, ServerEvent::Released { key: key("m1") });
+    h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "fixed it").await;
+    h.say("m3", Some("m1"), "confirm?").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(
+        h.requests()[1],
+        [
+            "user:U-asker: first",
+            "assistant:one",
+            "user:U-other: fixed it",
+            "user:U-asker: confirm?"
+        ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_in_a_thread_whose_session_closed_is_recorded_in_the_session_opened_again() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working);
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    // Closed under the conversation, as a session closes itself when it can no longer write
+    // its records.
+    let session = h.sessions.of(&key("m1")).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&session));
     h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "fixed it").await;
     h.say("m3", Some("m1"), "confirm?").await;
     let status = h.posted(&thread("m1"), working).await;
@@ -2298,11 +2327,10 @@ async fn talk_heard_before_a_thread_has_a_session_is_read_with_the_thread_at_the
     });
     // A mention that makes no session.
     h.say("m2", Some("t1"), "/cancel").await;
-    h.posted(&thread("t1"), text(&h.replies.nothing_to_cancel.clone()))
-        .await;
+    h.posted(&thread("t1"), text(&h.replies.nothing_to_cancel)).await;
     h.say_as(OTHER, "m3", "t1", Addressee::Nobody, "any news?").await;
     h.say("m4", Some("t1"), "why?").await;
-    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     assert_eq!(
         h.requests()[0],
@@ -2324,7 +2352,7 @@ async fn a_slow_session_setup_does_not_block_another_conversations_messages() {
     h.say_directly("d1", "hello").await;
     // The direct chat is answered while the thread's setup is still held. Only WAIT, the
     // harness's failure bound, limits this wait; no scheduler-speed assumption is needed.
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     h.updated(&status, text("hi")).await;
     gate.release.cancel();
     h.stop().await.unwrap();
@@ -2450,7 +2478,7 @@ async fn a_first_session_is_made_only_once_its_thread_is_read() {
         "a session that starts before its thread is read could be left without it"
     );
     gate.release.cancel();
-    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.updated(&status, text("hi")).await;
     h.stop().await.unwrap();
 }
@@ -2515,9 +2543,9 @@ async fn a_conversation_waiting_for_a_run_slot_does_not_set_up_a_session() {
         ..Setup::default()
     });
     h.say("m1", None, "run").await;
-    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.say_directly("d1", "wait").await;
-    h.posted(&direct(), text(&h.replies.queued.clone())).await;
+    h.posted(&direct(), text(&h.replies.queued)).await;
     let opened = h.sessions.opened.load(Ordering::SeqCst);
     h.stop().await.unwrap();
     assert_eq!(
@@ -2537,9 +2565,9 @@ async fn the_conversation_limit_refuses_new_workers_before_session_setup() {
         ..Setup::default()
     });
     h.say("m1", None, "run").await;
-    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.say_directly("d1", "another conversation").await;
-    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.posted(&direct(), text(&h.replies.overloaded)).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
@@ -2556,15 +2584,15 @@ async fn a_waiting_conversation_bounds_its_messages_and_still_accepts_cancel() {
         ..Setup::default()
     });
     h.say("m1", None, "run").await;
-    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.posted(&thread("m1"), text(&h.replies.working)).await;
     h.say_directly("d1", "wait").await;
-    h.posted(&direct(), text(&h.replies.queued.clone())).await;
+    h.posted(&direct(), text(&h.replies.queued)).await;
     h.say_directly("d2", "too much").await;
-    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.posted(&direct(), text(&h.replies.overloaded)).await;
     h.say_directly("d3", "/cancel").await;
-    h.posted(&direct(), text(&h.replies.cancelled.clone())).await;
+    h.posted(&direct(), text(&h.replies.cancelled)).await;
     h.say_directly("d4", "wait again").await;
-    h.posted(&direct(), text(&h.replies.queued.clone())).await;
+    h.posted(&direct(), text(&h.replies.queued)).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
@@ -2600,7 +2628,7 @@ async fn talk_refused_for_capacity_gets_no_reply_and_a_request_does() {
     );
     let refused = events
         .iter()
-        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("capacity exceeded")))
+        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("max_pending_messages")))
         .count();
     assert_eq!(refused, 2, "the operator hears of both: {events:?}");
 }
@@ -2616,13 +2644,13 @@ async fn steering_is_bounded_by_utf8_bytes_without_acknowledging_rejected_messag
         ..Setup::default()
     });
     h.say_directly("d1", "run").await;
-    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
     h.say_directly("d2", "中文").await;
     h.acknowledged(&direct(), "d2").await;
     h.say_directly("d3", "x").await;
-    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.posted(&direct(), text(&h.replies.overloaded)).await;
     h.say_directly("d4", "/cancel").await;
-    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.updated(&status, text(&h.replies.cancelled)).await;
     h.stop().await.unwrap();
 }
 
@@ -2636,7 +2664,7 @@ async fn an_oversized_message_is_refused_without_opening_a_session() {
         ..Setup::default()
     });
     h.say_directly("d1", "中文").await;
-    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.posted(&direct(), text(&h.replies.overloaded)).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }

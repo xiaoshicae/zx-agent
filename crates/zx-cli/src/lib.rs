@@ -7,45 +7,51 @@
 //! `sessions` uses it only to find the session directory. The subcommands do not refer to
 //! each other:
 //!
-//! - `run`, `chat`, `acp`, `list_sessions`: the subcommands
+//! - `run`, `chat`, `acp`, `sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands
+//! - `application`: the application a subcommand runs on, and the sessions of its agents
 //! - `session_file`: `--session`'s file, whose session run and chat continue
-//! - `listing`: how a listing shows sessions
-//! - `process`: exit codes, and what every subcommand writes to its outputs, about signals and
-//!   the trace export too
-//! - `render`: how calls, results and times are shown
+//! - `process`: exit codes, JSON lines on stdout, and what every subcommand says of signals
+//!   and of the trace export
+//! - `render`: how calls, results, times and sessions are shown
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 
 mod acp;
+mod application;
 mod chat;
 mod cli;
-mod list_sessions;
-mod listing;
 mod process;
 mod render;
 mod run;
 mod session_file;
+mod sessions;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 
 use clap::Parser;
+use zx_util::stdio::eprint_line;
 
-use cli::{Cli, Command};
-use process::EXIT_USAGE;
+use self::cli::{Cli, Command};
+use self::process::EXIT_USAGE;
 
-/// Run the command line the process was started with, and return its exit code. A
-/// configuration problem found before the subcommand started is written to stderr and
-/// exits with the code of a usage error.
+/// Run the command line the process was started with, and return its exit code. An error
+/// that ends a subcommand, such as a configuration problem found before it started or an
+/// ACP connection that failed, is written to stderr and exits with the code of a usage
+/// error.
 pub async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
-        Command::Sessions(args) => list_sessions::run(args).await,
+        Command::Sessions(args) => sessions::run(args).await,
         Command::Acp(args) => acp::run(args).await,
     };
     match result {
         Ok(code) => ExitCode::from(code),
-        Err(e) => {
-            process::eprint_line(&format!("zx-agent: {e:#}"));
+        Err(error) => {
+            // The causes may quote a server, a file or the environment.
+            eprint_line(&format!("zx-agent: {}", render::visible(&format!("{error:#}"))));
             ExitCode::from(EXIT_USAGE)
         }
     }

@@ -1,7 +1,7 @@
-//! Approvals in the chat: a card with buttons, answered by an approver's click.
+//! Approvals in the chat: a card with buttons, decided by an approver's click.
 //!
 //! The task that reads a run passes its approval events on to the worker
-//! ([`ApprovalEvents`]): the worker posts a card for each request, answers the request when
+//! ([`ApprovalEvents`]): the worker posts a card for each request, resolves the request when
 //! an approver clicks, and closes the card when the run reports how the approval ended.
 
 use std::sync::Arc;
@@ -11,9 +11,8 @@ use tokio::sync::mpsc;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_util::text::clip;
 
-use crate::{ApprovalCard, ApprovalId};
-
 use super::{ServerEvent, ServerSink, SessionKey};
+use crate::{ApprovalCard, ApprovalId};
 
 /// Longest command or argument text shown on a card; longer text ends with "...". A card is
 /// for deciding at a glance; the full call is in the session file.
@@ -76,7 +75,30 @@ impl ApprovalEvents {
                 tool: tool_name.clone(),
                 result: *approval,
             },
-            _ => return,
+            // Nothing about approvals: a new event about them is to be told apart above.
+            EventKind::RunStart { .. }
+            | EventKind::RunEnd { .. }
+            | EventKind::AttemptStart { .. }
+            | EventKind::StepStart { .. }
+            | EventKind::RequestStart { .. }
+            | EventKind::MessageStart { .. }
+            | EventKind::MessageUpdate { .. }
+            | EventKind::MessageEnd { .. }
+            | EventKind::CustomEntry { .. }
+            | EventKind::ToolExecutionStart { .. }
+            | EventKind::ToolExecutionUpdate { .. }
+            | EventKind::ToolDecision { .. }
+            | EventKind::ToolExecutionEnd { .. }
+            | EventKind::StepEnd { .. }
+            | EventKind::AttemptEnd { .. }
+            | EventKind::RetryScheduled { .. }
+            | EventKind::ContextOverflow { .. }
+            | EventKind::ContextEdited { .. }
+            | EventKind::HookFailed { .. }
+            | EventKind::CompactionStart { .. }
+            | EventKind::CompactionEnd { .. }
+            | EventKind::CompactionFailed { .. }
+            | EventKind::ToolCallRecovered { .. } => return,
         };
         // Reading the run must not wait for the worker, which may be waiting for the run.
         // The channel holds the updates of approvals asked one at a time, two per approval,

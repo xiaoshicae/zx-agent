@@ -7,10 +7,9 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use super::FeishuChannel;
 use crate::ImError;
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
-
-use super::{FeishuChannel, MAX_INTERVAL};
 
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -22,19 +21,21 @@ const RATE_LIMIT_CODES: [i64; 2] = [99_991_400, 230_020];
 /// Header with the seconds to wait after a frequency limit.
 const RATE_LIMIT_RESET: &str = "x-ogw-ratelimit-reset";
 
-/// Why an API call did not succeed.
+/// Why an API call failed.
 pub(super) enum CallError {
-    /// No token: the secret was refused, or the token endpoint failed.
-    Token(ImError),
-    /// The call failed; `code` is what Feishu answered, `None` when no answer came.
-    Api { code: Option<i64>, message: String },
+    /// Feishu answered with a code other than 0: it refused the call, as this says for the
+    /// operator, the code included.
+    Refused(String),
+    /// No answer came that says how the call went, or no token could be had: the secret
+    /// was refused, or the token endpoint failed.
+    Failed(ImError),
 }
 
 impl From<CallError> for ImError {
     fn from(error: CallError) -> Self {
         match error {
-            CallError::Token(error) => error,
-            CallError::Api { message, .. } => ImError::Transport(message),
+            CallError::Refused(message) => ImError::Transport(message),
+            CallError::Failed(error) => error,
         }
     }
 }
@@ -92,7 +93,7 @@ impl FeishuChannel {
         let url = format!("{}{path}", self.config.api_base.trim_end_matches('/'));
         let mut retries = 0;
         loop {
-            let token = self.token().await.map_err(CallError::Token)?;
+            let token = self.token().await.map_err(CallError::Failed)?;
             let response = self
                 .http
                 .request(method.clone(), &url)
@@ -100,12 +101,9 @@ impl FeishuChannel {
                 .json(body)
                 .send()
                 .await
-                .map_err(|error| CallError::Api {
-                    code: None,
-                    message: format!("feishu {path}: {error}"),
-                })?;
+                .map_err(|error| CallError::Failed(ImError::Transport(format!("feishu {path}: {error}"))))?;
             let status = response.status();
-            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET, MAX_INTERVAL);
+            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET);
             // A body that is not JSON leaves no code; the status then explains the failure.
             let answer: Option<Value> = response.json().await.ok();
             let code = answer.as_ref().and_then(|answer| answer["code"].as_i64());
@@ -122,11 +120,15 @@ impl FeishuChannel {
                     let detail = answer
                         .as_ref()
                         .and_then(|answer| answer["msg"].as_str())
-                        .unwrap_or("no message")
-                        .to_string();
-                    Err(CallError::Api {
-                        code,
-                        message: format!("feishu {path}: HTTP {status}, code {code:?}: {detail}"),
+                        .unwrap_or("no message");
+                    Err(match code {
+                        Some(code) => {
+                            CallError::Refused(format!("feishu {path}: HTTP {status}, code {code}: {detail}"))
+                        }
+                        // A body that is not JSON, or has no code, does not say how the call went.
+                        None => CallError::Failed(ImError::Transport(format!(
+                            "feishu {path}: HTTP {status}, no code: {detail}"
+                        ))),
                     })
                 }
             };

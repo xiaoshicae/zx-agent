@@ -12,7 +12,7 @@ use super::{Captured, CommandEnd, CommandOutput};
 use crate::sync::{AbortOnDrop, lock};
 
 /// Bytes kept per stream while reading. Older output is dropped; only the tail is returned.
-const CAPTURE_LIMIT: usize = 1024 * 1024;
+pub(crate) const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// How long to wait for output pipes after the process ends. Background children that
 /// inherited the pipes could otherwise keep them open forever.
 const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -76,8 +76,8 @@ pub(super) async fn await_end(child: &mut Child, timeout: Duration, cancel: &Can
     tokio::select! {
         status = child.wait() => match status {
             Ok(status) => match status.code() {
+                // Also how `docker exec` reports a command ended by signal N: as 128 + N.
                 Some(code) => CommandEnd::Exited(code),
-                // Also how `docker exec` reports a command ended by signal N: 128 + N.
                 None => CommandEnd::Signaled,
             },
             Err(e) => CommandEnd::WaitFailed(e.to_string()),

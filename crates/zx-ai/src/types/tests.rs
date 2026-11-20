@@ -4,6 +4,35 @@ use super::*;
 use crate::{SectionChange, SystemMessage};
 
 #[test]
+fn reasoning_levels_parse_from_the_names_they_are_recorded_by() {
+    for level in Reasoning::ALL {
+        assert_eq!(level.as_str().parse::<Reasoning>(), Ok(level));
+        assert_eq!(serde_json::to_value(level).unwrap(), level.as_str());
+        assert_eq!(level.to_string(), level.as_str());
+    }
+    assert_eq!(" HIGH ".parse::<Reasoning>(), Ok(Reasoning::High));
+}
+
+#[test]
+fn an_unknown_reasoning_level_is_refused_with_the_levels_there_are() {
+    let error = "max".parse::<Reasoning>().unwrap_err();
+    assert!(error.contains("off, minimal, low, medium, high, xhigh"), "{error}");
+}
+
+#[test]
+fn stop_reason_names_are_the_ones_json_gives() {
+    for reason in [
+        StopReason::Stop,
+        StopReason::Length,
+        StopReason::ToolUse,
+        StopReason::Error,
+        StopReason::Aborted,
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), reason.name());
+    }
+}
+
+#[test]
 fn invalid_streamed_tool_arguments_keep_what_the_model_sent() {
     let raw = "{\"command\":\"echo \"quoted\" text\"}";
     let call = ToolCall::streamed("c".into(), "bash".into(), raw);
@@ -19,7 +48,7 @@ fn invalid_streamed_tool_arguments_keep_what_the_model_sent() {
         .arguments_error
         .unwrap();
     assert!(error.len() < MAX_RECEIVED_ARGUMENTS + 200, "{}", error.len());
-    assert!(error.ends_with("…"), "{error}");
+    assert!(error.ends_with("..."), "{error}");
 
     let empty = ToolCall::streamed("c".into(), "bash".into(), " ");
     assert_eq!((empty.arguments, empty.arguments_error), (json!({}), None));

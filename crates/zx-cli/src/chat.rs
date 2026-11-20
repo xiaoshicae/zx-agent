@@ -4,7 +4,8 @@
 //! - `input`: the single owner of the terminal's input
 //! - `turn`: one operation of a conversation driven to its end, with the approvals its
 //!   calls wait for
-//! - `output` and `term`: streaming output and colors
+//! - `output`: what a conversation shows as it runs, streamed
+//! - `term`: the lines drawn on the terminal, and their colors
 //! - `commands`: slash commands, which never reach the model
 //! - `storage`: where conversations are kept, and which one opens first
 //! - `info`: the banner, `/status` and `/help`
@@ -22,7 +23,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
@@ -32,20 +32,22 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{Interrupt, Signals};
 use zx_app::{Application, Approvals, SessionPlace};
 
+use self::commands::Command;
+use self::info::{About, banner, help, status};
+use self::input::Line;
+use self::output::Output;
+use self::storage::{Keeping, Storage, opening};
+use self::term::Tone;
+use self::turn::{Operation, TurnIo, drive_turn};
+use crate::application::{connect, open_or_create};
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, with_telemetry};
 use crate::render::visible;
 
-use commands::Command;
-use info::{About, banner, help, status};
-use input::Line;
-use output::Output;
-use storage::{Storage, opening};
-use term::Tone;
-use turn::{Operation, TurnIo, drive_turn};
-
 /// A second Ctrl+C within this long, while idle, exits.
 const QUIT_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);
+/// The answers to an approval request, as the request and /help show them.
+const APPROVAL_MENU: &str = "1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
 const PROMPT: &str = "zx> ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,7 +76,7 @@ struct Built {
 /// What every conversation of this chat is built with.
 struct Chat {
     app: Application,
-    output: Arc<Output>,
+    output: Output,
 }
 
 impl Chat {
@@ -85,10 +87,7 @@ impl Chat {
         // The person at the terminal answers; `drive_turn` passes the answer on.
         let approvals = Approvals::Person("shell commands require interactive approval");
         let agent = self.app.build(model, place, approvals)?;
-        let session = match resume {
-            Some(id) => crate::process::resume(&agent, id).await?,
-            None => agent.create(None).await?,
-        };
+        let session = open_or_create(&agent, resume).await?;
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
         let commands = session
             .commands()
@@ -102,25 +101,6 @@ impl Chat {
             about,
             commands,
         })
-    }
-
-    /// Replace the conversation with a new one kept in `place`; when that fails, the current
-    /// one stays and `what` says what could not be done.
-    async fn switch(&self, built: &mut Built, model: &str, place: &SessionPlace, what: &str) -> bool {
-        match self.build(model, place, None).await {
-            Ok(next) => {
-                *built = next;
-                self.output.reset_totals();
-                true
-            }
-            Err(error) => {
-                self.output.line(
-                    Tone::Error,
-                    &format!("[chat] cannot {what}: {}", visible(&format!("{error:#}"))),
-                );
-                false
-            }
-        }
     }
 }
 
@@ -139,7 +119,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
+    let app = connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
         .set_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
@@ -148,15 +128,15 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         InputMode::Script
     };
     let chat = Chat {
-        output: Arc::new(Output::new(output_mode, deltas, color)),
+        output: Output::new(output_mode, deltas, color),
         app,
     };
     let output = &chat.output;
     let model = chat.app.model().to_string();
-    let resume = resume.as_ref().map(Option::as_deref);
-    let (storage, first) = opening(no_session, session, resume, chat.app.cwd()).await?;
+    let keeping = Keeping::of(no_session, session, resume.as_ref());
+    let (storage, first) = opening(keeping, chat.app.cwd()).await?;
     let built = chat.build(&model, &storage.place, first.id()).await?;
-    let mut terminal = Terminal {
+    let mut terminal = TerminalInput {
         signals: Signals::new().context("cannot register chat signal handlers")?,
         input: input::spawn(mode)?,
         next_approval: 1,
@@ -213,10 +193,10 @@ enum Read {
     Exit(u8),
 }
 
-/// The terminal side of the REPL: its input and signals, the number of the next approval
-/// request, and what the next read starts from.
-struct Terminal {
-    input: input::Input,
+/// The input side of the REPL: the terminal's lines and signals, the number of the next
+/// approval request, and what the next read starts from.
+struct TerminalInput {
+    input: input::Lines,
     /// Approval requests are numbered through the chat, so that a number names one request.
     next_approval: u64,
     signals: Signals,
@@ -227,7 +207,7 @@ struct Terminal {
     last_interrupt: Option<Instant>,
 }
 
-impl Terminal {
+impl TerminalInput {
     /// Read the next line, or the prompt queued for it. Ctrl+C twice, SIGTERM or the end of
     /// input end the chat.
     async fn read(&mut self, output: &Output) -> Result<Read> {
@@ -292,8 +272,8 @@ struct Repl<'a> {
 
 impl Repl<'_> {
     /// Carry out `command` typed while no task runs.
-    async fn command(&mut self, command: Command, terminal: &mut Terminal) -> Result<Flow> {
-        let output = &*self.chat.output;
+    async fn command(&mut self, command: Command, terminal: &mut TerminalInput) -> Result<Flow> {
+        let output = &self.chat.output;
         let session = &self.built.session;
         Ok(match command {
             Command::Prompt(text) => self.operate(Operation::Prompt(text), terminal).await?,
@@ -326,7 +306,7 @@ impl Repl<'_> {
     }
 
     /// Run `operation` while the terminal takes steering, approvals and signals.
-    async fn operate(&self, operation: Operation, terminal: &mut Terminal) -> Result<Flow> {
+    async fn operate(&self, operation: Operation, terminal: &mut TerminalInput) -> Result<Flow> {
         let mut io = terminal.io(&self.chat.output, &self.built.commands);
         drive_turn(&self.built.session, operation, &mut io).await
     }
@@ -341,7 +321,7 @@ impl Repl<'_> {
     fn set_model(&mut self, next: String) -> Result<Flow> {
         self.built
             .session
-            .set_model(self.built.provider.clone(), next.clone())?;
+            .set_model(Arc::clone(&self.built.provider), next.clone())?;
         self.model = next;
         Ok(self.say(Tone::Dim, &format!("[chat] model={}", visible(&self.model))))
     }
@@ -362,7 +342,7 @@ impl Repl<'_> {
     }
 
     /// Do what `flow` asks of the REPL. Returns the exit code when the chat ends.
-    async fn follow(&mut self, flow: Flow, terminal: &mut Terminal) -> Option<u8> {
+    async fn follow(&mut self, flow: Flow, terminal: &mut TerminalInput) -> Option<u8> {
         match flow {
             Flow::Continue => {}
             Flow::Prompt(text) => terminal.next_prompt = Some(text),
@@ -372,26 +352,33 @@ impl Repl<'_> {
         None
     }
 
-    /// /new: a new conversation where conversations are kept.
+    /// /new: a new conversation where conversations are kept. When it cannot be made, the
+    /// current one stays.
     async fn new_conversation(&mut self) {
         let beside = self.storage.beside();
         let place = beside.as_ref().unwrap_or(&self.storage.place);
-        if self
-            .chat
-            .switch(&mut self.built, &self.model, place, "create new conversation")
-            .await
-        {
-            self.keep_reasoning();
-            let file = self
-                .built
-                .about
-                .session
-                .as_deref()
-                .map(|path| format!("; session={}", path.display()))
-                .unwrap_or_default();
-            self.chat
-                .output
-                .line(Tone::Dim, &format!("[chat] new conversation{file}"));
+        let output = &self.chat.output;
+        match self.chat.build(&self.model, place, None).await {
+            Ok(next) => {
+                self.built = next;
+                output.reset_totals();
+                self.keep_reasoning();
+                let file = self
+                    .built
+                    .about
+                    .session
+                    .as_deref()
+                    .map(|path| format!("; session={}", path.display()))
+                    .unwrap_or_default();
+                output.line(Tone::Dim, &format!("[chat] new conversation{file}"));
+            }
+            Err(error) => output.line(
+                Tone::Error,
+                &format!(
+                    "[chat] cannot create a new conversation: {}",
+                    visible(&format!("{error:#}"))
+                ),
+            ),
         }
     }
 
@@ -399,7 +386,7 @@ impl Repl<'_> {
     /// written: say why, and open it again from where it is kept. A session kept in memory
     /// is forgotten once closed, so the chat ends then, and when opening it again fails.
     async fn reopen(&mut self, error: &anyhow::Error) -> Flow {
-        let output = &*self.chat.output;
+        let output = &self.chat.output;
         output.line(Tone::Error, &format!("[chat] {}", visible(&format!("{error:#}"))));
         if !self.built.place.is_persistent() {
             return Flow::Exit(EXIT_ERROR);

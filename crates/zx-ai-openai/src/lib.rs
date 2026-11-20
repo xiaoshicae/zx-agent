@@ -6,11 +6,13 @@
 //! model layer, with an HTTP client: `zx-ai` holds the types and the `Provider` contract. The
 //! `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
 //!
-//! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
-//! request and what kind each is (the error codes and wording of OpenAI-compatible services)
-//! in `failure.rs` and the message built from the stream in `accumulate.rs`; this module
-//! holds the provider and the HTTP flow of one request, with what the HTTP providers share
-//! (`zx-ai-http`).
+//! This module holds the provider and the HTTP flow of one request, with what the HTTP
+//! providers share (`zx-ai-http`):
+//! - `config`: the settings and their checks
+//! - `request`: the request body, the options recorded with it, and the body rebuilt from them
+//! - `failure`: the failures of a request, and what kind each is by the error codes and
+//!   wording of OpenAI-compatible services
+//! - `accumulate`: the message built from the stream's chunks
 
 mod accumulate;
 mod config;
@@ -21,17 +23,17 @@ use std::time::Instant;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
+use zx_ai::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use zx_ai::{ProviderErrorKind, Request, StreamEvent, now_ms};
 use zx_ai_http::failure::answers_json;
 use zx_ai_http::request::{api_key, send};
 use zx_ai_http::stream::{Events, end};
 use zx_ai_http::{CONNECT_TIMEOUT, Failure};
 
-use accumulate::Accumulator;
-pub use config::{BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
-use failure::{error_object, http_failure, json_body_failure, provider_failure};
-pub use request::replay_body;
+use self::accumulate::Accumulator;
+pub use self::config::{BodyOptions, MaxTokensField, OpenAiConfig, ReasoningFormat, SystemUpdates};
+use self::failure::{error_object, http_failure, json_body_failure, provider_failure};
+pub use self::request::replay_body;
 
 /// Streaming provider for the OpenAI Chat Completions protocol.
 pub struct OpenAiCompatible {
@@ -172,7 +174,7 @@ async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) ->
         return Ok(false);
     }
     let chunk: Value = serde_json::from_str(data)
-        .map_err(|e| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream chunk: {e}")))?;
+        .map_err(|error| Failure::error(ProviderErrorKind::Protocol, format!("invalid stream chunk: {error}")))?;
     if let Some(error) = error_object(&chunk) {
         return Err(provider_failure(error));
     }
@@ -193,21 +195,23 @@ mod tests {
         let mut acc = Accumulator::new("p", "m", 1);
         let (mut tx, _rx) = event_channel();
         let chunk = r#"{"error":{"message":"overloaded","code":"server_overloaded"}}"#;
-        match handle_data(chunk, &mut acc, &mut tx).await {
-            Err(Failure::Error { details, message }) => {
-                // The code is not a known one, so the wording says what kind of failure it is.
-                assert_eq!(
-                    details,
-                    zx_ai::ProviderError {
-                        kind: ProviderErrorKind::Unavailable,
-                        status: None,
-                        code: Some("server_overloaded".into()),
-                        retry_after_ms: None,
-                    }
-                );
-                assert_eq!(message, "provider error: overloaded");
+        let Failure::Error {
+            provider_error,
+            message,
+        } = handle_data(chunk, &mut acc, &mut tx).await.unwrap_err()
+        else {
+            panic!("expected a provider error");
+        };
+        // The code is not a known one, so the wording says what kind of failure it is.
+        assert_eq!(
+            provider_error,
+            zx_ai::ProviderError {
+                kind: ProviderErrorKind::Unavailable,
+                status: None,
+                code: Some("server_overloaded".into()),
+                retry_after_ms: None,
             }
-            Err(Failure::Aborted | Failure::Closed) | Ok(_) => panic!("expected a provider error"),
-        }
+        );
+        assert_eq!(message, "provider error: overloaded");
     }
 }

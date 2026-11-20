@@ -8,16 +8,14 @@
 mod files;
 
 use std::collections::{HashSet, VecDeque};
-use std::hash::Hash;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zx_util::sync::lock;
 
+pub(crate) use self::files::BacklogFiles;
 use crate::{Addressee, ChatKind, ConversationId, Destination, Inbound, MessageId, ThreadId, UserId};
-
-pub(crate) use files::BacklogFiles;
 
 /// Handled messages a [`MemoryBacklog`] remembers, to know them when they are delivered
 /// again: platforms redeliver only for a short while, and this covers far more messages than
@@ -79,7 +77,7 @@ pub struct MemoryBacklog {
 struct Memory {
     /// The messages pending, in the order kept. As many as the server's limits let wait.
     pending: Vec<(MessageKey, String)>,
-    handled: Seen<MessageKey>,
+    handled: Seen,
 }
 
 impl Default for MemoryBacklog {
@@ -116,15 +114,15 @@ impl Backlog for MemoryBacklog {
     }
 }
 
-/// Keys seen recently, the oldest forgotten first.
-struct Seen<K> {
-    order: VecDeque<K>,
-    keys: HashSet<K>,
+/// Messages handled recently, the oldest forgotten first.
+struct Seen {
+    order: VecDeque<MessageKey>,
+    keys: HashSet<MessageKey>,
     capacity: usize,
 }
 
-impl<K: Clone + Eq + Hash> Seen<K> {
-    /// Remember the last `capacity` keys.
+impl Seen {
+    /// Remember the last `capacity` messages.
     fn new(capacity: usize) -> Self {
         Self {
             order: VecDeque::new(),
@@ -133,12 +131,12 @@ impl<K: Clone + Eq + Hash> Seen<K> {
         }
     }
 
-    fn contains(&self, key: &K) -> bool {
+    fn contains(&self, key: &MessageKey) -> bool {
         self.keys.contains(key)
     }
 
     /// Remember `key`, forgetting the oldest beyond the capacity.
-    fn insert(&mut self, key: &K) {
+    fn insert(&mut self, key: &MessageKey) {
         if !self.keys.insert(key.clone()) {
             return;
         }
@@ -215,14 +213,7 @@ pub(crate) fn message(key: &MessageKey, record: &str) -> Result<Inbound, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(message: &str) -> MessageKey {
-        MessageKey {
-            platform: "slack".into(),
-            conversation: ConversationId("C1".into()),
-            message: MessageId(message.into()),
-        }
-    }
+    use crate::test_support::message_key as key;
 
     #[tokio::test]
     async fn a_message_is_kept_once_and_known_after_it_is_handled() {
@@ -245,13 +236,13 @@ mod tests {
     #[test]
     fn the_oldest_handled_messages_are_forgotten_first() {
         let mut seen = Seen::new(REMEMBERED);
-        seen.insert(&0);
-        seen.insert(&0);
+        seen.insert(&key("0"));
+        seen.insert(&key("0"));
         for n in 1..=REMEMBERED {
-            seen.insert(&n);
+            seen.insert(&key(&n.to_string()));
         }
-        assert!(!seen.contains(&0), "the oldest key is forgotten");
-        assert!(seen.contains(&1));
+        assert!(!seen.contains(&key("0")), "the oldest key is forgotten");
+        assert!(seen.contains(&key("1")));
     }
 
     #[test]

@@ -3,23 +3,30 @@
 //!
 //! They run system programs through the executor, so in a container they search the
 //! container. ripgrep is used when it is installed, and then `.gitignore` is respected; pi
-//! downloads it instead, which zx-agent does not do. Without it, POSIX `grep` and `find` do
-//! the work and skip only the version control directories. Every value from the model reaches
+//! downloads it instead, which zx-agent does not do. Without it, the system's `grep` and
+//! `find` do the work and skip only the version control directories. Every value from the model reaches
 //! the shell single-quoted, so it is never interpreted.
 //!
 //! This module holds what the tools share: running a script and reading what it printed,
 //! bounding and reporting the result, and the pieces of the scripts. Each tool is in a module
 //! of its own.
 
+mod find;
+mod grep;
+mod ls;
+
 use std::time::Duration;
 
 use serde_json::json;
+use zx_core::tools::{ToolContext, ToolOutput};
 
+pub use self::find::FindTool;
+pub use self::grep::GrepTool;
+pub use self::ls::LsTool;
 use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
-use crate::executor::{CommandEnd, Executor, ShellCommand};
+use crate::executor::{CAPTURE_LIMIT, CommandEnd, Executor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
-use zx_core::tools::{ToolContext, ToolOutput};
 
 /// Longest wait for one search: a search that takes longer is better narrowed than waited for,
 /// and the error says so.
@@ -28,42 +35,16 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LINE_BYTES: usize = 500;
 /// The marker a script writes to standard error to say which program searched.
 const ENGINE_MARKER: &str = "zx-engine=";
-/// The name the engine marker gives ripgrep; any other name is the POSIX program that searched
-/// instead.
+/// The name the engine marker gives ripgrep; any other name is the system's program that
+/// searched instead.
 const RIPGREP: &str = "rg";
 /// Directories of version control systems, skipped when `.gitignore` cannot be read.
 const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
-/// The note after a line cut to [`MAX_LINE_BYTES`].
-const LINE_CUT: &str = " [line cut]";
-
-/// Shared tool plumbing: read-only, and running one at a time when the executor does.
-macro_rules! search_tool_basics {
-    ($name:expr) => {
-        fn name(&self) -> &str {
-            $name
-        }
-
-        fn execution_mode(&self) -> ::zx_core::tools::ExecutionMode {
-            self.executor.execution_mode()
-        }
-
-        fn effects(&self) -> ::zx_core::tools::Effects {
-            ::zx_core::tools::Effects::ReadOnly
-        }
-    };
-}
-
-// The tools use the macro, which is in scope only after its definition.
-mod find;
-mod grep;
-mod ls;
-
-pub use find::FindTool;
-pub use grep::GrepTool;
-pub use ls::LsTool;
+/// The note after a line truncated to [`MAX_LINE_BYTES`].
+const LINE_TRUNCATED: &str = " [line truncated]";
 
 /// `text` as one single-quoted shell word: nothing in it is interpreted.
-pub(crate) fn quote(text: &str) -> String {
+pub(super) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
@@ -76,6 +57,16 @@ pub(crate) fn quote(text: &str) -> String {
 fn first_lines(shown: usize) -> String {
     format!("head -n {} | LC_ALL=C cut -c 1-{}", shown + 1, MAX_LINE_BYTES + 1)
 }
+
+// What `first_lines` keeps of a search that shows the most lines, each with its newline, fits
+// in what the executor keeps.
+const _: () = assert!((MAX_LINES + 1) * (MAX_LINE_BYTES + 2) <= CAPTURE_LIMIT);
+
+/// The filter that drops the `./` before each path, as ripgrep and grep print the paths
+/// under `.`, the directory they search by default. `sed` reads bytes in the C locale: where
+/// it reads characters, macOS `sed` stops at a line that is not text in the user's encoding,
+/// and prints nothing.
+const WITHOUT_DOT_SLASH: &str = "LC_ALL=C sed 's|^\\./||'";
 
 /// The script that searches with `rg` when ripgrep is installed and with `fallback`, the
 /// program named `name`, otherwise; each announces itself with the engine marker on
@@ -102,8 +93,8 @@ struct Searched {
     stdout: String,
     /// Standard error without the engine marker.
     stderr: String,
-    /// The name of the program the script chose, from its marker: [`RIPGREP`] or a POSIX
-    /// program.
+    /// The name of the program the script chose, from its marker: [`RIPGREP`] or the
+    /// system's program.
     engine: Option<String>,
     /// Bytes the executor dropped because there were too many.
     dropped: usize,
@@ -121,27 +112,23 @@ async fn search(executor: &dyn Executor, script: &str, ctx: &ToolContext) -> Res
         CommandEnd::Exited(_) => {}
         CommandEnd::TimedOut => {
             return Err(format!(
-                "the search took longer than {}s and was stopped; narrow the path or the pattern",
-                TIMEOUT.as_secs()
+                "the search took longer than {TIMEOUT:?} and was stopped; narrow the path or the pattern"
             ));
         }
         CommandEnd::Cancelled => return Err("the search was cancelled".into()),
         CommandEnd::Signaled => return Err("the search was ended by a signal".into()),
-        CommandEnd::WaitFailed(error) => return Err(format!("the search could not be waited for: {error}")),
+        CommandEnd::WaitFailed(error) => return Err(format!("cannot wait for the search: {error}")),
     }
     let mut engine = None;
     // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
     let stderr_text = String::from_utf8_lossy(&output.stderr.bytes);
-    let stderr: Vec<&str> = stderr_text
-        .lines()
-        .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
-            Some(name) => {
-                engine = Some(name.to_string());
-                false
-            }
-            None => true,
-        })
-        .collect();
+    let mut stderr = Vec::new();
+    for line in stderr_text.lines() {
+        match line.strip_prefix(ENGINE_MARKER) {
+            Some(name) => engine = Some(name.to_string()),
+            None => stderr.push(line),
+        }
+    }
     Ok(Searched {
         stdout: String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
         stderr: stderr.join("\n"),
@@ -158,7 +145,7 @@ fn bound(text: &str) -> (String, bool) {
     for line in text.lines() {
         if line.len() > MAX_LINE_BYTES {
             lines.push_str(prefix_within(line, MAX_LINE_BYTES));
-            lines.push_str(LINE_CUT);
+            lines.push_str(LINE_TRUNCATED);
             cut = true;
         } else {
             lines.push_str(line);
@@ -169,21 +156,16 @@ fn bound(text: &str) -> (String, bool) {
     (kept.text, cut || kept.truncated)
 }
 
-/// The result text: the lines, then notes on what was cut, which program searched and the
-/// errors the programs reported alongside their results.
-fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutput {
-    if let Some(program) = searched.engine.as_deref().filter(|name| *name != RIPGREP) {
-        notes.push(format!(
-            "ripgrep is not installed, so {program} searched and .gitignore was not applied"
-        ));
-    }
+/// The result text: the lines, then the `notes`, then the errors the programs reported
+/// alongside their results.
+fn report(searched: &Searched, lines: &str, mut notes: Vec<String>) -> ToolOutput {
     if !searched.stderr.trim().is_empty() {
         let first = searched.stderr.lines().next().unwrap_or_default();
-        let first = prefix_noted(first, MAX_LINE_BYTES, |_, _| LINE_CUT.to_string());
+        let first = prefix_noted(first, MAX_LINE_BYTES, |_, _| LINE_TRUNCATED.to_string());
         notes.push(format!("some paths could not be searched: {first}"));
     }
     let mut text = lines.to_string();
-    for note in notes.iter() {
+    for note in &notes {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -205,13 +187,17 @@ struct Wording {
     more: &'static str,
     /// What to do to see the rest.
     advice: &'static str,
-    /// That lines too long to show whole were cut short, such as "long paths were cut".
+    /// That lines too long to show whole were truncated, such as "long paths were truncated".
     long_lines: &'static str,
+    /// What else the system's program left out, besides `.gitignore`, when it searched in
+    /// place of ripgrep.
+    also_not_applied: Option<&'static str>,
 }
 
 /// The result of a search that shows at most `shown` of its lines: the lines, then the notes
-/// `wording` gives, then which program searched and what it reported. A note says how many
-/// lines are shown whenever some are not, by `shown` or by the bound of a result.
+/// `wording` gives, then which program searched, what it left out and what it reported. A
+/// note says how many lines are shown whenever some are not, by `shown` or by the bound of a
+/// result.
 fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOutput, String> {
     if let Some(error) = failed(searched) {
         return Err(error);
@@ -227,13 +213,22 @@ fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOut
     let mut notes = Vec::new();
     if more || kept < all.len() {
         notes.push(format!(
-            "{}; showing the first {kept} lines. {}",
+            "{}; showing the first {kept} lines; {}",
             wording.more, wording.advice
         ));
     } else if cut {
         notes.push(wording.long_lines.to_string());
     }
-    Ok(report(searched, &text, &mut notes))
+    if let Some(program) = searched.engine.as_deref().filter(|name| *name != RIPGREP) {
+        let not_applied = match wording.also_not_applied {
+            Some(also) => format!(".gitignore and {also} were"),
+            None => ".gitignore was".to_string(),
+        };
+        notes.push(format!(
+            "ripgrep is not installed, so {program} searched and {not_applied} not applied"
+        ));
+    }
+    Ok(report(searched, &text, notes))
 }
 
 /// The error when a search produced nothing but errors, bounded like a result.
@@ -252,14 +247,17 @@ fn glob_of(raw: &str) -> &str {
 
 /// `raw`, or `.` when absent or blank, read as read_file reads a path.
 fn search_path(raw: Option<&str>) -> String {
-    let raw = path_text(raw.unwrap_or_default());
-    if raw.is_empty() { ".".into() } else { raw.into() }
+    // An absent or blank path is the working directory.
+    path_text(raw.unwrap_or_default()).unwrap_or(".").into()
 }
 
-/// The limit asked for, at most [`MAX_LINES`], which is all a result can show anyway.
-fn positive(limit: Option<usize>, default: usize, name: &str) -> Result<usize, String> {
+/// The limit asked for, at most [`MAX_LINES`], which is all a result can show anyway, or
+/// `default` when none was. Zero is refused.
+fn limit_or(limit: Option<usize>, default: usize) -> Result<usize, String> {
     match limit {
-        Some(0) => Err(format!("{name} must be at least 1; omit it for {default}")),
+        Some(0) => Err(format!(
+            "limit must be at least 1; omit it to use the default of {default}"
+        )),
         Some(limit) => Ok(limit.min(MAX_LINES)),
         None => Ok(default),
     }
@@ -272,10 +270,10 @@ mod tests {
 
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
+    use zx_core::tools::Tool;
 
     use super::*;
     use crate::executor::{Captured, CommandOutput};
-    use zx_core::tools::Tool;
 
     /// An executor whose searches print `stdout` and `stderr` as given and exit with 0.
     struct Scripted {
@@ -346,6 +344,45 @@ mod tests {
         assert_eq!(output.stdout, b"one\n\xe9two\nthree\n", "{output:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_dot_filter_keeps_the_lines_after_one_that_is_not_utf8() {
+        let script = format!("printf './one\\n./\\351two\\n./three\\n' | {WITHOUT_DOT_SLASH}");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("LC_ALL", "en_US.UTF-8")
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"one\n\xe9two\nthree\n", "{output:?}");
+    }
+
+    #[tokio::test]
+    async fn the_note_on_grep_in_place_of_ripgrep_says_what_it_left_out() {
+        let tool = grep_with(b"zx-engine=grep\n");
+        let names = tool
+            .execute(json!({"pattern": "hit", "glob": "*.rs"}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            names
+                .content
+                .contains("so grep searched and .gitignore was not applied]"),
+            "{}",
+            names.content
+        );
+        let paths = tool
+            .execute(json!({"pattern": "hit", "glob": "src/*.rs"}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            paths
+                .content
+                .contains("so grep searched and .gitignore and the directories of the glob were not applied]"),
+            "{}",
+            paths.content
+        );
+    }
+
     #[tokio::test]
     async fn a_search_that_only_produced_errors_reports_them_bounded() {
         // Many unreadable files: the executor keeps up to a mebibyte of such lines.
@@ -368,7 +405,7 @@ mod tests {
         let tool = grep_with(stderr.as_bytes());
         let output = tool.execute(json!({"pattern": "hit"}), &ctx()).await.unwrap();
         assert!(output.content.starts_with("src/a.rs:1:hit\n"), "{}", output.content);
-        assert!(output.content.contains(LINE_CUT), "{}", output.content);
+        assert!(output.content.contains(LINE_TRUNCATED), "{}", output.content);
         assert!(
             output.content.len() <= MAX_LINE_BYTES + 100,
             "{} bytes",
@@ -411,14 +448,14 @@ mod tests {
         let (text, cut) = bound(&format!("short\n{line}\n"));
         assert!(cut);
         let second = text.lines().nth(1).unwrap();
-        assert!(second.ends_with(LINE_CUT), "{second}");
-        assert!(second.len() <= MAX_LINE_BYTES + LINE_CUT.len());
+        assert!(second.ends_with(LINE_TRUNCATED), "{second}");
+        assert!(second.len() <= MAX_LINE_BYTES + LINE_TRUNCATED.len());
         assert_eq!(bound("a\nb\n"), ("a\nb\n".to_string(), false));
     }
 
     #[test]
     fn limits_are_capped_at_what_a_result_can_show() {
-        assert_eq!(positive(Some(1_000_000), 10, "limit"), Ok(MAX_LINES));
-        assert_eq!(positive(None, 10, "limit"), Ok(10));
+        assert_eq!(limit_or(Some(1_000_000), 10), Ok(MAX_LINES));
+        assert_eq!(limit_or(None, 10), Ok(10));
     }
 }

@@ -129,4 +129,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.9 · 2026年11月
+deploy/kubernetes/README.md · v0.10 · 2026年11月

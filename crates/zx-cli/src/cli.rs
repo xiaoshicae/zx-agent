@@ -5,7 +5,6 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-
 use zx_app::Overrides;
 
 #[derive(Parser)]
@@ -21,7 +20,7 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Start a conversation with streaming output and terminal approvals.
     Chat(ChatArgs),
-    /// List the session files chat keeps for a working directory, most recent first.
+    /// List the sessions kept for a working directory, chat's and acp's, most recent first.
     Sessions(SessionsArgs),
     /// Serve the Agent Client Protocol over stdio for an editor or a terminal client.
     Acp(AcpArgs),
@@ -62,6 +61,12 @@ pub(crate) struct RunArgs {
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
     pub(crate) deltas: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum OutputMode {
+    Text,
+    Jsonl,
 }
 
 #[derive(Args)]
@@ -137,6 +142,8 @@ pub(crate) struct SessionsArgs {
     pub(crate) cwd: Option<PathBuf>,
 }
 
+// zx-im has these options and those of `BudgetArgs`, with the same help: zx-app does not use
+// clap, and the two programs share no code.
 #[derive(Args)]
 pub(crate) struct BaseArgs {
     /// Model id passed to the provider. Defaults to ZX_MODEL, else model in config.toml.
@@ -191,30 +198,24 @@ pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs) -> Overrides {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum OutputMode {
-    Text,
-    Jsonl,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn model_request_limit_is_available_in_each_subcommand() {
+    fn model_request_limit_is_available_in_each_subcommand_that_runs() {
         let flag = "--max-model-requests";
-        let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", flag, "3", "go"]).unwrap();
-        match cli.command {
-            Command::Run(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
-            _ => panic!("run command"),
+        for subcommand in [&["run", "go"][..], &["chat"], &["acp"]] {
+            let args = ["zx-agent", subcommand[0], "--model", "m", flag, "3"];
+            let cli = Cli::try_parse_from(args.into_iter().chain(subcommand[1..].iter().copied())).unwrap();
+            let budget = match cli.command {
+                Command::Run(args) => args.budget,
+                Command::Chat(args) => args.budget,
+                Command::Acp(args) => args.budget,
+                Command::Sessions(_) => panic!("{subcommand:?} parsed as sessions"),
+            };
+            assert_eq!(budget.max_model_requests, Some(3), "{subcommand:?}");
         }
-        let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m", flag, "3"]).unwrap();
-        match cli.command {
-            Command::Chat(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
-            _ => panic!("chat command"),
-        }
-        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
     }
 
     #[test]

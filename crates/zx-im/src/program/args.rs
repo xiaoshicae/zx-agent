@@ -19,6 +19,8 @@ pub(crate) struct Args {
     #[arg(long)]
     config: PathBuf,
 
+    // The options from here on are those of zx-agent's `run` and `chat`, with the same help:
+    // zx-app does not use clap, and the two programs share no code.
     /// Model id passed to the provider. Defaults to ZX_MODEL, else model in config.toml.
     #[arg(long)]
     model: Option<String>,

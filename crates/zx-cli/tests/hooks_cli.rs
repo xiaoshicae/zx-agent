@@ -6,24 +6,21 @@ use std::path::Path;
 
 use serde_json::json;
 use tokio::process::Command;
-
-use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{AgentHome, Home, fake_model_config, write_config};
 use zx_testing::{stderr, stdout};
 
+use self::common::zx_agent_in;
+
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
-    const KEY: &str = "sk-p1-test-secret";
-    const KEY_VAR: &str = "ZX_P1_TEST_KEY";
+    const KEY: &str = "sk-hooks-test-secret";
+    const KEY_VAR: &str = "ZX_HOOKS_TEST_KEY";
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("session.jsonl");
     std::fs::write(dir.path().join("credentials.txt"), format!("token={KEY}\n")).unwrap();
     let server = MockServer::start(vec![
-        Reply::Sse(vec![json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": "read1", "type": "function",
-            "function": {"name": "read_file", "arguments": "{\"path\":\"credentials.txt\"}"}
-        }]}, "finish_reason": "tool_calls"}]})]),
+        Reply::tool_call("read1", "read_file", &json!({"path": "credentials.txt"})),
         Reply::text("done"),
     ])
     .await;
@@ -61,7 +58,7 @@ fn run_bash(server: &MockServer, dir: &Path) -> Command {
 /// `zx-agent run` with bash against `server`, in `dir`, with `secret_files` in the
 /// `secretFiles` of a config.toml in a zx-agent home of `dir`.
 fn run_bash_redacting(server: &MockServer, dir: &Path, secret_files: &[&Path]) -> Command {
-    let home = dir.join(".home");
+    let home = dir.join(".zx-agent-home");
     let files: Vec<String> = secret_files
         .iter()
         .map(|path| format!("{:?}", path.display().to_string()))

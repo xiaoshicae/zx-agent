@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
-
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
@@ -28,8 +27,8 @@ async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<d
 /// The ID of the first message entry `matches` accepts.
 fn entry_id(session: &Driven, matches: impl Fn(&Message) -> bool) -> String {
     session
-        .with_transcript(|store| {
-            store.entries().iter().find_map(|entry| match entry {
+        .with_transcript(|transcript| {
+            transcript.entries().iter().find_map(|entry| match entry {
                 Entry::Message(entry) if matches(&entry.message) => Some(entry.id.clone()),
                 _ => None,
             })
@@ -73,8 +72,8 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         |message| matches!(message, Message::User { content, .. } if content == "third"),
     );
     let parent = session
-        .with_transcript(|store| {
-            store
+        .with_transcript(|transcript| {
+            transcript
                 .get(&third)
                 .and_then(|entry| entry.parent_id().map(str::to_string))
         })
@@ -153,30 +152,41 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 }
 
 #[tokio::test]
-async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
-    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("later")]));
+async fn branching_and_inspecting_wait_for_the_run() {
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
     let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! {
-        () = provider.started.notified() => {}
-        _ = &mut running => panic!("must be running"),
-    }
+    provider.wait_for_start(&mut running).await;
     assert_eq!(session.branch(None), Err(SessionError::Busy));
     assert_eq!(
-        session.with_transcript(|store| store.entries().len()).err(),
+        session.with_transcript(|transcript| transcript.entries().len()).err(),
         Some(SessionError::Busy)
     );
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn an_unknown_entry_is_refused_and_the_position_stays() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
+    session.prompt("first").await.unwrap();
 
     assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
-    // The position did not move: the next prompt continues after the aborted answer.
+
     session.prompt("second").await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[0], "user:first");
     assert_eq!(context[context.len() - 1], "user:second");
-    // While `inspect` runs, the conversation is leased, as during a prompt.
+}
+
+#[tokio::test]
+async fn the_conversation_is_leased_while_it_is_inspected() {
+    let provider = Arc::new(FauxProvider::new(Vec::<FauxStep>::new()));
+    let (session, _) = RunnerSetup::new(config(provider, vec![])).build().await;
+
     let during = session.with_transcript(|_| session.set_reasoning(None)).unwrap();
+
     assert_eq!(during, Err(SessionError::Busy));
     assert_eq!(session.set_reasoning(None), Ok(()));
 }

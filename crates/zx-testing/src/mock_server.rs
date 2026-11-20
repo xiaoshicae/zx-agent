@@ -48,14 +48,23 @@ impl Captured {
             .cloned()
             .collect()
     }
+
+    /// The texts of the tool result messages, in order.
+    pub fn tool_result_texts(&self) -> Vec<String> {
+        self.tool_results()
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect()
+    }
 }
 
 /// The scripted answer to one request.
 pub enum Reply {
     /// Stream these chunks, then `[DONE]`.
     Sse(Vec<Value>),
-    /// Build SSE chunks from the request body, e.g. to read a newly generated output ID.
-    Dynamic(fn(&Value) -> Vec<Value>),
+    /// Build the reply from the request body, e.g. to read a newly generated output ID; the
+    /// reply it builds is of another kind.
+    Dynamic(fn(&Value) -> Reply),
     /// Stream these chunks, then keep the connection open without sending anything more.
     Stall(Vec<Value>),
     /// Send partial output, then finish only after the test releases the gate.
@@ -72,6 +81,12 @@ pub enum Reply {
 }
 
 impl Reply {
+    /// An HTTP error `status` with the JSON `body`, after `headers`, each line of which ends
+    /// with `\r\n`, such as `retry-after: 2\r\n`.
+    pub fn error(status: u16, headers: &str, body: &str) -> Self {
+        Reply::Raw(error_response(status, headers, body))
+    }
+
     /// A plain answer that ends normally.
     pub fn text(text: &str) -> Self {
         Reply::Sse(vec![
@@ -106,6 +121,11 @@ impl Reply {
 
 fn usage() -> Value {
     json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+}
+
+/// Streamed `text` that does not end the answer, for [`Reply::Stall`] and [`Reply::Gate`].
+pub fn text_chunk(text: &str) -> Value {
+    json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
 }
 
 /// A running fake server. It stops answering after the scripted replies are used up.
@@ -143,14 +163,24 @@ impl MockServer {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Wait until at least `count` requests have arrived.
+    /// Wait until at least `count` requests have arrived; panic, naming them, when they have
+    /// not within [`WAIT`](crate::WAIT).
     pub async fn wait_for_requests(&self, count: usize) {
-        loop {
-            let notified = self.received.notified();
-            if self.requests.lock().unwrap().len() >= count {
-                return;
+        let arrived = async {
+            loop {
+                let notified = self.received.notified();
+                if self.requests.lock().unwrap().len() >= count {
+                    return;
+                }
+                notified.await;
             }
-            notified.await;
+        };
+        if tokio::time::timeout(crate::WAIT, arrived).await.is_err() {
+            panic!(
+                "the mock model service got {} of {count} requests within {:?}",
+                self.requests.lock().unwrap().len(),
+                crate::WAIT
+            );
         }
     }
 }
@@ -161,7 +191,7 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
         return;
     };
     let reply = match reply {
-        Reply::Dynamic(build) => Reply::Sse(build(&request.body)),
+        Reply::Dynamic(build) => build(&request.body),
         reply => reply,
     };
     log.lock().unwrap().push(request);
@@ -189,23 +219,31 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             stream.shutdown().await.unwrap();
         }
         Reply::Status(code, body) => {
-            let response = format!(
-                "HTTP/1.1 {code} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            stream
+                .write_all(error_response(code, "", body).as_bytes())
+                .await
+                .unwrap();
             stream.shutdown().await.unwrap();
         }
         Reply::Raw(response) => {
             // Limit/cancellation tests intentionally close the connection early.
             let _ = stream.write_all(response.as_bytes()).await;
         }
-        Reply::Dynamic(_) => unreachable!("dynamic replies are resolved before recording the request"),
+        Reply::Dynamic(_) => panic!("a dynamic reply built another dynamic reply"),
     }
 }
 
 fn sse_events(chunks: &[Value]) -> String {
     chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect()
+}
+
+/// An HTTP error response: `status`, then `headers` (lines ending with `\r\n`), then the JSON
+/// `body`, on a connection that closes after it.
+fn error_response(status: u16, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// One request, as the fake records it: `None` when the client closed the connection first.

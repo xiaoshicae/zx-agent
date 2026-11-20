@@ -4,30 +4,28 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
-
 use zx_agent::transcript::{SessionInfo, SessionQuery};
 use zx_app::{SessionPlace, resolve_cwd};
 
-/// The ID of the session the file `path` holds already, which then continues; `None` for a
-/// file that does not exist yet. The file is kept in [`SessionPlace::file`].
+/// The file `path`, opened: where it keeps its session ([`SessionPlace::file`]), and the ID
+/// of the session it holds already, which then continues; `None` for a file that does not
+/// exist yet.
 ///
 /// Fails for a file that cannot be read as a session, and when `cwd`, the directory `--cwd`
 /// gave, is another than the one the session works in.
-pub(crate) async fn held(path: &Path, cwd: Option<&Path>) -> Result<Option<String>> {
-    let Some(held) = only(path).await? else {
-        return Ok(None);
+pub(crate) async fn open(path: &Path, cwd: Option<&Path>) -> Result<(SessionPlace, Option<String>)> {
+    let place = SessionPlace::file(path);
+    let Some(held) = held_session(&place).await? else {
+        return Ok((place, None));
     };
     check_session_cwd(cwd, &held.cwd)?;
-    Ok(Some(held.id))
+    Ok((place, Some(held.id)))
 }
 
-/// The session the file `path` holds; `None` for a file that does not exist yet. A file that
+/// The session `place`, a file, holds; `None` for a file that does not exist yet. A file that
 /// cannot be read as a session is an error.
-async fn only(path: &Path) -> Result<Option<SessionInfo>> {
-    let list = SessionPlace::file(path)
-        .storage()
-        .list(&SessionQuery::default())
-        .await?;
+async fn held_session(place: &SessionPlace) -> Result<Option<SessionInfo>> {
+    let list = place.storage().list(&SessionQuery::default()).await?;
     if let Some(unreadable) = list.unreadable.first() {
         bail!("{}", unreadable.error);
     }
@@ -36,7 +34,8 @@ async fn only(path: &Path) -> Result<Option<SessionInfo>> {
 
 /// Refuse `--cwd`'s directory, `explicit`, when it is another than `session_cwd`, where the
 /// session to continue works: a session goes on in the directory it started in, and `--cwd`
-/// is where new ones work. Without `--cwd` nothing is asked.
+/// is where new ones work. Without `--cwd` nothing is asked; with it, two synchronous reads
+/// of metadata, as the subcommand starts.
 fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
     let Some(explicit) = explicit else {
         return Ok(());
@@ -66,21 +65,22 @@ mod tests {
     async fn a_file_holds_its_session_once_it_exists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.jsonl");
-        assert_eq!(only(&path).await.unwrap(), None);
-        assert_eq!(held(&path, None).await.unwrap(), None);
+        let place = SessionPlace::file(&path);
+        assert_eq!(held_session(&place).await.unwrap(), None);
+        assert_eq!(open(&path, None).await.unwrap().1, None);
 
         let header = SessionHeader::new(Path::new("/w"), "m");
-        let log = SessionPlace::file(&path).storage().create(&header).await.unwrap();
-        let mut session = Transcript::with_log(header.clone(), log);
-        session.append_message(Message::user("q")).await.unwrap();
-        drop(session);
+        let log = place.storage().create(&header).await.unwrap();
+        let mut transcript = Transcript::with_log(header.clone(), log);
+        transcript.append_message(Message::user("q")).await.unwrap();
+        drop(transcript);
 
-        let only = only(&path).await.unwrap().unwrap();
+        let held = held_session(&place).await.unwrap().unwrap();
         assert_eq!(
-            (only.id.as_str(), only.cwd.as_str(), only.messages),
+            (held.id.as_str(), held.cwd.as_str(), held.messages),
             (header.id.as_str(), "/w", 1)
         );
-        assert_eq!(held(&path, None).await.unwrap(), Some(header.id));
+        assert_eq!(open(&path, None).await.unwrap().1, Some(header.id));
     }
 
     #[tokio::test]
@@ -89,7 +89,7 @@ mod tests {
         let path = dir.path().join("run.jsonl");
         std::fs::write(&path, "not json\n").unwrap();
 
-        let error = held(&path, None).await.unwrap_err();
+        let error = open(&path, None).await.err().unwrap();
 
         let text = format!("{error:#}");
         assert!(

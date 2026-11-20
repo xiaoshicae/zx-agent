@@ -12,7 +12,7 @@
 
 | crate | 负责 |
 |---|---|
-| `zx-util` | 各 crate 共用的小工具：加锁、文本截短、随机数、判断默认值、读环境变量、按名字登记；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
+| `zx-util` | 各 crate 共用的小工具：加锁、文本截短、随机数、判断默认值、读环境变量、按名字登记、不会 panic 的输出行；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | 消息类型、流式事件、`Provider` 契约 |
 | `zx-ai-openai` | OpenAI 兼容的 provider；模型层里依赖 reqwest 的只有两个 provider 与它们共用的 `zx-ai-http`，都不依赖内核 |
 | `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |
@@ -39,7 +39,7 @@
 
 根目录的 `Cargo.toml` 是虚拟 workspace，在根目录运行覆盖全部 crate；加 `-p <crate>` 或在 `crates/<crate>` 里运行只处理那一个。
 
-- 格式：`cargo fmt`
+- 格式：`cargo fmt -- --config group_imports=StdExternalCrate`（按规则 01 给导入分组）
 - lint：`cargo clippy --all-targets -- -D warnings`，零警告。以下改动另跑 `cargo clippy -p <crate> --no-default-features --all-targets -- -D warnings`，检查关掉默认 feature 的构建：内核的工具校验（`zx-core`，feature `json-schema`）、`zx-builtin`（`mcp`，MCP 客户端）、`zx-im`（⚑ D:5/CHINA FLAG: `feishu`，飞书平台）
 - 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`（引号不能省），零警告，断掉的文档链接也算
@@ -60,7 +60,7 @@
 
 1. 不用 `Rc<RefCell<_>>`、`Arc<Mutex<_>>`、`.clone()`、`'static`、`Box::leak`、`unsafe` 来绕过借用检查器。遇到借用错误，先按 `.claude/rules/02-ownership-borrowing.md` 的顺序重新设计数据流。
 2. 生产代码不用 `unwrap()`。`expect("原因")` 只用于可以证明成立的不变量。测试代码可以用 `unwrap()`。
-3. 不用 `#[allow(...)]` 压制警告。确实需要例外时用 `#[expect(lint, reason = "...")]`。唯一的例外见 `.claude/rules/01-code-style.md`。
+3. 不用 `#[allow(...)]` 压制警告。确实需要例外时用 `#[expect(lint, reason = "...")]`。
 4. 持有 `std::sync::Mutex` 的 guard 时不 `.await`；async 代码里不调用阻塞 API，少量、有界的同步 I/O 除外（见 `.claude/rules/04-async-concurrency.md`）。
 5. 不新增依赖、不升级依赖、不修改 `rust-version`、不修改 `edition`，除非用户明确同意（`.claude/rules/07-dependencies.md`；已获授权的依赖见 `docs/ROADMAP.md` 的决策 D2）。
 6. 不使用 Rust 1.88 之后才稳定的语言特性和标准库 API。标准库 API 由 clippy 的 `incompatible_msrv` 检查；语言特性用 `cargo +1.88.0 check --all-targets` 验证。
@@ -98,4 +98,4 @@
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer` | `crates/zx-agent/tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，自己的工具、钩子、策略、扩展与摘要器经它的 `add_*`、`set_*` 加入，由配置按名字选用的 provider 与执行环境经 `register_provider`、`register_executor` 注册（D34），信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
-| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的 `PlatformFactory` 都在这个模块里，在 `platform::built_in` 登记；可选的平台放在 cargo feature 后。库外的平台由宿主自己的程序经 `zx_im::Program::register_platform` 登记，宿主的其他部件经 `Program::customize` | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |
+| IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`，开连接与连接结束的 `Connection`、`Ended`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的 `PlatformFactory` 都在这个模块里，在 `platform::built_in` 登记；可选的平台放在 cargo feature 后。库外的平台由宿主自己的程序经 `zx_im::Program::register_platform` 登记，宿主的其他部件经 `Program::customize` | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server.rs` 的 `FakeChannel` |

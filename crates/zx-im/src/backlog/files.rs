@@ -1,7 +1,6 @@
 //! The backlog of the program `zx-im` ([`BacklogFiles`]): a file per message pending, and
 //! an empty one per message handled lately.
 
-use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -10,12 +9,14 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zx_agent::ai::now_ms;
+use zx_agent::builtin::files::create_private_dir;
 use zx_util::sync::lock;
 
-use crate::files::{RECORD, blocking, record_paths, remove_record, segment, write_record};
-use crate::{ConversationId, MessageId};
-
 use super::{Backlog, Kept, MessageKey};
+use crate::files::{
+    RECORD, blocking, create_private_file, read_record, record_paths, remove_record, segment, write_record,
+};
+use crate::{ConversationId, MessageId};
 
 /// How long a handled message stays known, so that a delivery of it again is not handled
 /// twice: Slack retries a delayed event "once per hour for 24 hours" (Events API, "Delayed
@@ -48,13 +49,13 @@ pub(crate) struct BacklogFiles {
 }
 
 impl BacklogFiles {
-    /// The backlog in `dir`, whose two directories are created when they are missing. Fails
-    /// when they cannot be.
+    /// The backlog in `dir`, whose two directories are created when they are missing,
+    /// readable only by this user. Fails when they cannot be.
     pub(crate) fn open(dir: &Path) -> io::Result<Self> {
         let pending = dir.join("pending");
         let handled = dir.join("handled");
-        std::fs::create_dir_all(&pending)?;
-        std::fs::create_dir_all(&handled)?;
+        create_private_dir(&pending)?;
+        create_private_dir(&handled)?;
         Ok(Self {
             pending,
             handled,
@@ -113,13 +114,11 @@ impl Backlog for BacklogFiles {
             order: self.next_order(),
             record: record.to_string(),
         };
-        let text = serde_json::to_string(&stored)
-            .map_err(|error| format!("cannot encode the record of {}: {error}", path.display()))?;
         blocking(FILES, move || {
             if exists(&path)? || exists(&mark)? {
                 return Ok(Kept::Again);
             }
-            write_record(&path, &text)?;
+            write_record(&path, &stored)?;
             Ok(Kept::New)
         })
         .await
@@ -144,8 +143,11 @@ impl Backlog for BacklogFiles {
     async fn pending(&self) -> Result<Vec<(MessageKey, String)>, String> {
         let (pending, handled) = (self.pending.clone(), self.handled.clone());
         let kept = blocking(FILES, move || {
+            // Read first: a record left beside its mark, by a process that ended between the
+            // two steps of `complete`, is known as handled by the mark, however old it is.
+            let kept = read_pending(&pending, &handled)?;
             prune_marks(&handled);
-            read_pending(&pending, &handled)
+            Ok(kept)
         })
         .await?;
         *lock(&self.pruned) = Instant::now();
@@ -163,14 +165,9 @@ fn exists(path: &Path) -> Result<bool, String> {
         .map_err(|error| format!("cannot look for {}: {error}", path.display()))
 }
 
-/// Mark a message handled with an empty file at `path`.
+/// Mark a message handled with an empty file at `path`, which only the owner may read.
 fn write_mark(path: &Path) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(path)
+    create_private_file(path)
         .map(drop)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
@@ -199,10 +196,7 @@ fn prune_marks(handled: &Path) {
 fn read_pending(pending: &Path, handled: &Path) -> Result<Vec<Stored>, String> {
     let mut kept = Vec::new();
     for path in record_paths(pending)? {
-        let text =
-            std::fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let stored: Stored = serde_json::from_str(&text)
-            .map_err(|error| format!("{} is not a backlog record: {error}", path.display()))?;
+        let stored: Stored = read_record(&path, "backlog")?;
         if exists(&mark_path(handled, &stored.key()))? {
             remove_record(&path)?;
             continue;
@@ -246,23 +240,7 @@ mod tests {
     use std::fs::File;
 
     use super::*;
-
-    fn key(message: &str) -> MessageKey {
-        MessageKey {
-            platform: "slack".into(),
-            conversation: ConversationId("C1".into()),
-            message: MessageId(message.into()),
-        }
-    }
-
-    fn names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
+    use crate::test_support::{message_key as key, names};
 
     #[tokio::test]
     async fn what_is_pending_comes_back_after_a_restart_in_the_order_kept() {
@@ -335,12 +313,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_cut_short_is_passed_over_and_a_broken_record_is_an_error() {
+    async fn a_message_marked_handled_a_day_ago_but_still_recorded_is_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let backlog = BacklogFiles::open(dir.path()).unwrap();
+        backlog.keep(&key("m1"), "one").await.unwrap();
+        // The process ended between marking the message and removing its record, and the next
+        // start came more than a day later.
+        let mark = mark_path(&dir.path().join("handled"), &key("m1"));
+        write_mark(&mark).unwrap();
+        let marked = SystemTime::now() - HANDLED_FOR - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(&mark)
+            .unwrap()
+            .set_modified(marked)
+            .unwrap();
+
+        let restarted = BacklogFiles::open(dir.path()).unwrap();
+        assert!(restarted.pending().await.unwrap().is_empty());
+        assert!(names(&dir.path().join("pending")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_write_cut_short_is_passed_over() {
         let dir = tempfile::tempdir().unwrap();
         let backlog = BacklogFiles::open(dir.path()).unwrap();
         let pending = dir.path().join("pending");
         std::fs::write(pending.join("slack.C1.m1.partial"), "{\"platform\":").unwrap();
         assert!(backlog.pending().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_broken_record_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backlog = BacklogFiles::open(dir.path()).unwrap();
+        let pending = dir.path().join("pending");
         std::fs::write(pending.join("slack.C1.m2.json"), "{\"platform\":").unwrap();
         let error = backlog.pending().await.unwrap_err();
         assert!(error.contains("slack.C1.m2.json is not a backlog record"), "{error}");
@@ -359,6 +366,19 @@ mod tests {
         for path in ["pending/slack.C1.m1.json", "handled/slack.C1.m2.handled"] {
             let mode = std::fs::metadata(dir.path().join(path)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_owner_may_list_the_backlog() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        BacklogFiles::open(&dir.path().join(".backlog")).unwrap();
+        for path in [".backlog", ".backlog/pending", ".backlog/handled"] {
+            let mode = std::fs::metadata(dir.path().join(path)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{path}");
         }
     }
 

@@ -2,9 +2,9 @@
 //!
 //! Facts the model needs, such as the operating system and the date, are written into the
 //! prompt when a session is opened instead of being left for the model to discover:
-//! discovering them costs turns, and a policy may deny or ask for the commands that would
+//! discovering them costs tool calls, and a policy may deny or ask for the commands that would
 //! reveal them. [`machine_section`] describes this machine, for [`LocalExecutor`]; a container
-//! describes itself with the same time and OS name ([`current_time`], [`pretty_name`]).
+//! describes itself with the same labels, time and OS name ([`current_time`], [`pretty_name`]).
 //!
 //! [`LocalExecutor`]: super::LocalExecutor
 
@@ -12,6 +12,13 @@ use std::path::Path;
 
 use crate::ai::now_ms;
 use crate::calendar::civil_from_days;
+
+/// The label of the line that says what system commands run on.
+pub(super) const OS_LABEL: &str = "OS: ";
+/// The label of the line that says when the section was made.
+pub(super) const OPENED_LABEL: &str = "Session opened: ";
+/// The label of the line that names the working directory.
+pub(super) const WORKING_DIRECTORY_LABEL: &str = "Working directory: ";
 
 /// Facts about the machine; Claude Code, Codex, and Gemini CLI give the model similar ones.
 /// Host and user names are left out because the prompt goes to a third-party model.
@@ -22,7 +29,7 @@ use crate::calendar::civil_from_days;
 pub(super) fn machine_section(cwd: &Path) -> String {
     let os = format!("{} ({})", os_release(), std::env::consts::ARCH);
     format!(
-        "OS: {os}\nSession opened: {}\nWorking directory: {}",
+        "{OS_LABEL}{os}\n{OPENED_LABEL}{}\n{WORKING_DIRECTORY_LABEL}{}",
         current_time(),
         cwd.display()
     )
@@ -31,10 +38,10 @@ pub(super) fn machine_section(cwd: &Path) -> String {
 /// The current UTC time, with this machine's time zone when it is known, as an environment
 /// section states it.
 pub(super) fn current_time() -> String {
-    let started = format_utc(now_ms() / 1000);
+    let utc = format_utc(now_ms() / 1000);
     match time_zone() {
-        Some(zone) => format!("{started} (local time zone: {zone})"),
-        None => started,
+        Some(zone) => format!("{utc} (local time zone: {zone})"),
+        None => utc,
     }
 }
 

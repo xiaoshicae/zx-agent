@@ -1,18 +1,19 @@
 //! An agent: what it does and may do. A host runs one of the built-in agents, which a file of
 //! the same name in the `agents/` directory of the zx-agent home replaces.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
-
-use super::agent_file::{AgentFile, compaction_error, settle_token_trigger};
-use super::permissions::Permissions;
-use super::skills::{READ_SKILL, Skill, validate_skills};
-use super::{Config, context, read_text};
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
 use zx_agent::compaction::{self, DEFAULT_RESERVE_TOKENS, TokenTrigger};
+
+use super::agent_file::{AgentFile, compaction_error, settle_token_trigger};
+use super::context::ProjectContext;
+use super::permissions::Permissions;
+use super::skills::{READ_SKILL, Skill, validate_skills};
+use super::{Config, read_text};
 
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
 const AGENTS_DIR: &str = "agents";
@@ -56,23 +57,6 @@ pub(crate) struct HostTools {
     pub(crate) extensions: Vec<String>,
 }
 
-/// Which project instructions a session reads when it is set up. Explicit paths are
-/// absolute after load.
-#[derive(Debug)]
-pub(crate) struct ProjectContext {
-    /// Discover root-to-cwd AGENTS.md files, bounded by the nearest Git root.
-    pub(crate) discover: bool,
-    /// Extra instruction files, resolved relative to the agent file at load time.
-    pub(crate) files: Vec<PathBuf>,
-}
-
-impl ProjectContext {
-    /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
-    pub(crate) fn section(&self, cwd: &Path) -> Result<String> {
-        context::load(cwd, self)
-    }
-}
-
 /// A resolved agent: its file over the built-in agent it extends. The assembly lays what a
 /// host says over the agent ([`Overrides`](crate::Overrides)) on it and checks it again.
 #[derive(Debug)]
@@ -81,11 +65,13 @@ pub(crate) struct AgentDefinition {
     pub(crate) name: String,
     /// Effective preamble, before generated machine and project sections.
     pub(crate) instructions: String,
-    /// Requested built-in tools; read_skill is omitted when no catalog is registered.
+    /// The tools the agent enables, by name: built-in ones and the host's own. read_skill is
+    /// offered only to an agent with skills.
     pub(crate) tools: Vec<String>,
-    /// What the host lets the agent do, independently of prompt text.
+    /// What the agent may do, whatever its instructions say: which tools ask, which calls run
+    /// without asking and which are denied.
     pub(crate) permissions: Permissions,
-    /// Per-prompt request and time budgets.
+    /// The limits of each run: model requests, time, tokens and cost.
     pub(crate) limits: RunLimits,
     /// Number of length-truncated responses to continue automatically.
     pub(crate) continue_on_length: u32,
@@ -177,9 +163,9 @@ impl AgentDefinition {
             // Until a file sets `triggerTokens`, the token trigger follows the context window;
             // `load` settles it once every file is applied.
             compaction: compaction::Config {
-                trigger_tokens: TokenTrigger::BelowWindow {
+                trigger_tokens: Some(TokenTrigger::BelowWindow {
                     reserve_tokens: DEFAULT_RESERVE_TOKENS,
-                },
+                }),
                 ..compaction::Config::default()
             },
         }
@@ -198,10 +184,6 @@ impl AgentDefinition {
         asking.extend(host.extensions.iter().cloned());
         self.permissions.validate(known, &asking)?;
         self.compaction.validate().map_err(|error| compaction_error(&error))?;
-        ensure!(
-            !self.permissions.approve_all || self.permissions.ask.is_empty(),
-            "permissions.approveAll asks for no approval, so permissions.ask must be empty"
-        );
         validate_skills(&self.skills)
     }
 }
@@ -216,8 +198,6 @@ fn exists(path: &Path) -> Result<bool> {
     }
 }
 
-/// Whether `name` is a tool the host registers itself: one that runs on the executor,
-/// read_output, or read_skill.
 /// Whether `name` is one of the built-in tools an agent may enable.
 pub(crate) fn known_tool(name: &str) -> bool {
     EXECUTOR_TOOL_NAMES.contains(&name) || name == READ_OUTPUT || name == READ_SKILL

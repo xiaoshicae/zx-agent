@@ -2,29 +2,19 @@
 //! of model context, and `custom_message` entries, which the model sees as user messages.
 
 use serde_json::json;
-
 use zx_agent::ai::{Message, UserMessageKind};
 use zx_agent::transcript::{CustomMessage, Transcript};
-use zx_testing::{header, read_lines, summarize};
-
-fn note(text: &str) -> CustomMessage {
-    CustomMessage {
-        custom_type: "note".into(),
-        content: text.into(),
-        display: true,
-        details: Some(json!({"n": 1})),
-    }
-}
+use zx_testing::{header, note, read_lines, summarize};
 
 #[tokio::test]
 async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries_stay_out() {
-    let mut store = Transcript::in_memory(header());
-    store.append_message(Message::user("first")).await.unwrap();
-    store.append_custom_entry("state", json!({"n": 1})).await.unwrap();
-    let id = store.append_custom_message(note("remember")).await.unwrap();
+    let mut transcript = Transcript::in_memory(header());
+    transcript.append_message(Message::user("first")).await.unwrap();
+    transcript.append_custom_entry("state", json!({"n": 1})).await.unwrap();
+    let id = transcript.append_custom_message(note("remember")).await.unwrap();
 
-    assert_eq!(summarize(&store.messages()), ["user:first", "user:remember"]);
-    let projected = store.projection();
+    assert_eq!(summarize(&transcript.messages()), ["user:first", "user:remember"]);
+    let projected = transcript.projection();
     assert_eq!(projected[1].entry_id, id);
     assert!(matches!(
         &projected[1].message,
@@ -34,20 +24,20 @@ async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries
         }
     ));
     // A context edit targets the record like any user message.
-    store.append_context_edit(&id, None).await.unwrap();
-    assert_eq!(summarize(&store.messages()), ["user:first"]);
-    assert_eq!(store.entries().len(), 4);
+    transcript.append_context_edit(&id, None).await.unwrap();
+    assert_eq!(summarize(&transcript.messages()), ["user:first"]);
+    assert_eq!(transcript.entries().len(), 4);
 }
 
 #[tokio::test]
 async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("first")).await.unwrap();
-    store.append_custom_entry("state", json!(1)).await.unwrap();
-    store.append_custom_message(note("remember")).await.unwrap();
-    drop(store);
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user("first")).await.unwrap();
+    seed.append_custom_entry("state", json!(1)).await.unwrap();
+    seed.append_custom_message(note("remember")).await.unwrap();
+    drop(seed);
 
     let lines = read_lines(&path);
     assert_eq!(lines[2]["type"], "custom");
@@ -72,10 +62,10 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
 
 #[tokio::test]
 async fn a_custom_record_needs_a_type_and_writes_nothing_without_one() {
-    let mut store = Transcript::in_memory(header());
-    assert!(store.append_custom_entry(" ", json!(null)).await.is_err());
+    let mut transcript = Transcript::in_memory(header());
+    assert!(transcript.append_custom_entry(" ", json!(null)).await.is_err());
     assert!(
-        store
+        transcript
             .append_custom_message(CustomMessage {
                 custom_type: String::new(),
                 ..note("x")
@@ -83,5 +73,5 @@ async fn a_custom_record_needs_a_type_and_writes_nothing_without_one() {
             .await
             .is_err()
     );
-    assert!(store.entries().is_empty());
+    assert!(transcript.entries().is_empty());
 }

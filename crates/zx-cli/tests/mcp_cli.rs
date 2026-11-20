@@ -3,27 +3,25 @@
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
 //! cannot be used stops startup. The IM service's test of the same is with its program
 //! (`crates/zx-im/tests/im_cli.rs`).
+
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-
-use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, write_agent, write_config};
+use zx_testing::program::{Home, ended_output, fake_model_config, write_agent, write_config};
 use zx_testing::{stderr, stdout};
+
+use self::common::zx_agent_in;
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
 const KEY_VAR: &str = "ZX_MCP_CLI_TEST_KEY";
-/// Only reached when the program never prints what is expected.
-const WAIT: Duration = Duration::from_secs(20);
 
 async fn prom() -> FakeMcp {
     FakeMcp::start(
@@ -36,7 +34,7 @@ async fn prom() -> FakeMcp {
 /// A zx-agent home in `dir` whose agents enable `builtin_tools`, and whose config.toml has one
 /// MCP server, where `query` runs without approval and `range` asks.
 fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
-    let home = dir.join(".zx-agent");
+    let home = dir.join(".zx-agent-home");
     for builtin in ["unattended", "assistant"] {
         write_agent(
             &home,
@@ -46,14 +44,10 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
             ),
         );
     }
-    write_config(
-        &home,
-        &format!(
-            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\n\
-             [provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = 0\n"
-        ),
+    let server = format!(
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\ntools = [\"query\", \"range\"]"
     );
+    write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
 }
 
@@ -77,14 +71,7 @@ fn run(model: &MockServer, dir: &Path, home: &Path) -> Command {
 
 /// The tool results in the model's last request.
 fn tool_results(model: &MockServer) -> Vec<String> {
-    let requests = model.requests();
-    requests
-        .last()
-        .unwrap()
-        .tool_results()
-        .iter()
-        .map(|message| message["content"].as_str().unwrap().to_string())
-        .collect()
+    model.requests().last().unwrap().tool_result_texts()
 }
 
 fn origin(fake: &FakeMcp) -> &str {
@@ -154,10 +141,7 @@ async fn chat_asks_before_an_mcp_tool_that_needs_approval() {
     stdin.write_all(b"go\n1\n/quit\n").await.unwrap();
     stdin.shutdown().await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(WAIT, child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(

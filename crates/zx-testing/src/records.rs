@@ -6,35 +6,68 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, Usage};
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::{CustomMessage, Entry, Transcript};
 
-/// An answer by `provider` and `model` that asked for `tool` with `arguments` and was cut
-/// off before the call ran: the shape a crash leaves in a session file.
-pub fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
-    let mut answer = AssistantMessage::failure(provider, model, StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
+/// The call `id` of `tool` with `arguments`, as an answer holds it.
+pub fn tool_call_block(id: &str, tool: &str, arguments: Value) -> ContentBlock {
+    ContentBlock::ToolCall(ToolCall {
+        id: id.into(),
         name: tool.into(),
         arguments,
         arguments_error: None,
-    })];
-    Message::Assistant(answer)
+    })
+}
+
+/// The call `c` of `tool` without arguments, as a hook that reads only a call's output is
+/// given it.
+pub fn tool_call(tool: &str) -> ToolCall {
+    ToolCall {
+        id: "c".into(),
+        name: tool.into(),
+        arguments: json!({}),
+        arguments_error: None,
+    }
+}
+
+/// A message of the custom type `note` with `text`, shown to the user and with the details
+/// `{"n": 1}`, as an extension sends one.
+pub fn note(text: &str) -> CustomMessage {
+    CustomMessage {
+        custom_type: "note".into(),
+        content: text.into(),
+        display: true,
+        details: Some(json!({"n": 1})),
+    }
+}
+
+/// An answer by `provider` and `model` that asked for `tool` with `arguments`, as the call
+/// `c1`, and was cut off before the call ran: the shape a crash leaves in a session file.
+pub fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
+    Message::Assistant(AssistantMessage::new(
+        provider,
+        model,
+        StopReason::ToolUse,
+        vec![tool_call_block("c1", tool, arguments)],
+    ))
 }
 
 /// A finished answer that reported `input` prompt tokens and 10 output tokens, as the last
 /// answer of a long conversation does.
 pub fn answer_reporting(input: u64) -> Message {
-    let mut answer = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::Text { text: "noted".into() }];
-    answer.usage = Usage {
-        input,
-        output: 10,
-        total_tokens: input + 10,
-        ..Usage::default()
-    };
-    Message::Assistant(answer)
+    Message::Assistant(AssistantMessage {
+        usage: Usage {
+            input,
+            output: 10,
+            total_tokens: input + 10,
+            ..Usage::default()
+        },
+        ..AssistantMessage::new(
+            "p",
+            "m",
+            StopReason::Stop,
+            vec![ContentBlock::Text { text: "noted".into() }],
+        )
+    })
 }
 
 /// A summary citing `id`, as the JSON the model answers a summary request with.
@@ -43,15 +76,33 @@ pub fn summary_json(id: &str) -> String {
         .to_string()
 }
 
-/// Every request of the session, rebuilt from its checkpoints, in order.
-pub fn replayed_requests(store: &Transcript) -> Vec<Request> {
-    store
+/// A summary of what the summary request `request` read, citing the first record it read, as
+/// [`summary_json`].
+pub fn summary_of_the_source(request: &Request) -> String {
+    let Some(Message::User { content, .. }) = request.messages.last() else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    summary_json(records[0]["entryId"].as_str().unwrap())
+}
+
+/// The IDs of the session's request checkpoints, in order.
+pub fn request_ids(transcript: &Transcript) -> Vec<String> {
+    transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(store.replay_request(&started.id).unwrap().1),
+            Entry::RequestStarted(started) => Some(started.id.clone()),
             _ => None,
         })
+        .collect()
+}
+
+/// Every request of the session, rebuilt from its checkpoints, in order.
+pub fn replayed_requests(transcript: &Transcript) -> Vec<Request> {
+    request_ids(transcript)
+        .iter()
+        .map(|id| transcript.replay_request(id).unwrap().1)
         .collect()
 }
 

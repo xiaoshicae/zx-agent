@@ -128,6 +128,15 @@ impl Seed {
         Ok(())
     }
 
+    /// Append a message long enough to be worth summarizing, as an old turn of a long
+    /// conversation; returns its entry ID, which a summary of it cites.
+    pub async fn append_old_observation(&mut self) -> String {
+        self.transcript
+            .append_message(Message::user("observed ".repeat(600)))
+            .await
+            .expect("the session takes the message")
+    }
+
     /// Record, after the session's last record, that the call `tool_call_id` to `tool_name`
     /// started, as [`append_record`](Self::append_record) does: what the kernel writes
     /// before it runs a call with side effects, and what a run that crashed while the call ran
@@ -161,13 +170,10 @@ impl DerefMut for Seed {
 /// A session in memory with one old message worth summarizing and a recent input; returns
 /// the old message's entry ID.
 pub async fn seeded_session() -> (Seed, String) {
-    let mut store = Seed::in_memory(header()).await;
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    store.append_message(Message::user("most recent input")).await.unwrap();
-    (store, old)
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed.append_old_observation().await;
+    seed.append_message(Message::user("most recent input")).await.unwrap();
+    (seed, old)
 }
 
 /// A new session with `header` in the file `path`, through the storage of that one file.
@@ -222,7 +228,7 @@ pub struct LogStorage {
 
 impl LogStorage {
     /// A storage of a session with `header` and no records yet, which records to `log`.
-    pub fn new(header: SessionHeader, log: impl SessionLog + 'static) -> Self {
+    fn new(header: SessionHeader, log: impl SessionLog + 'static) -> Self {
         let loaded = LoadedSession {
             header,
             records: Vec::new(),

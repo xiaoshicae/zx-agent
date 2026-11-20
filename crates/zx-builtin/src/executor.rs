@@ -1,4 +1,4 @@
-//! Where built-in tools run commands and read files.
+//! Where built-in tools run commands and read and write files.
 //!
 //! Tools keep their arguments, result format and truncation; an executor only runs a
 //! command, reads a file or writes one, and says where it does so. [`LocalExecutor`] uses
@@ -21,11 +21,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-
 use zx_core::tools::ExecutionMode;
 
-pub use container::{Access, ContainerConfig, ContainerExecutor, InvalidContainerConfig, Network, UnusableWorkspace};
-pub use local::LocalExecutor;
+pub(crate) use self::capture::CAPTURE_LIMIT;
+pub use self::container::{
+    Access, ContainerConfig, ContainerExecutor, InvalidContainerConfig, Network, UnusableWorkspace,
+};
+use self::environment::WORKING_DIRECTORY_LABEL;
+pub use self::local::LocalExecutor;
 
 /// One command line, run in `cwd` with the executor's shell: the model's command for the bash
 /// tool, a POSIX script for the search tools.
@@ -63,7 +66,7 @@ pub struct CommandOutput {
     pub end: CommandEnd,
 }
 
-/// Runs commands and reads files for the built-in tools.
+/// Runs commands, and reads and writes files, for the built-in tools.
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Whether calls may run at the same time.
@@ -87,7 +90,7 @@ pub trait Executor: Send + Sync {
     ///
     /// Called when a session is set up; reading a few small local files there is fine.
     fn environment_section(&self, cwd: &Path) -> String {
-        format!("Working directory: {}", cwd.display())
+        format!("{WORKING_DIRECTORY_LABEL}{}", cwd.display())
     }
 
     /// Run `command` with the executor's shell until it exits, its timeout passes, or
@@ -122,10 +125,14 @@ pub trait Executor: Send + Sync {
 /// the search tools' scripts are POSIX, which it runs too.
 const SHELL: &str = "bash";
 
-/// The error for `path` being a directory where a file was expected, with what the model
-/// can do instead.
-fn directory_error(path: &Path) -> String {
+/// The error for reading `path`, a directory, with what the model can do instead.
+fn directory_read_error(path: &Path) -> String {
     format!("{} is a directory; use bash `ls` to list it", path.display())
+}
+
+/// The error for writing to `path`, a directory, with what the model can do instead.
+fn directory_write_error(path: &Path) -> String {
+    format!("{} is a directory; write to the path of a file instead", path.display())
 }
 
 /// The error for `path` being neither a regular file nor a directory.
@@ -136,15 +143,11 @@ fn special_file_error(path: &Path) -> String {
     )
 }
 
-/// Check that the `bytes` read from `path` are within `max_bytes`; the error tells the model
-/// what to use instead.
-fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), String> {
-    let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-    if read > max_bytes {
-        return Err(format!(
-            "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
-            path.display()
-        ));
-    }
-    Ok(())
+/// The error for the file at `path` being larger than `max_bytes`, with what the model can do
+/// instead.
+fn over_limit_error(path: &Path, max_bytes: u64) -> String {
+    format!(
+        "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
+        path.display()
+    )
 }

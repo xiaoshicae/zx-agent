@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
-use std::path::Path;
-
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
+
+use zx_core::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
 
 use super::test_support::{header, texts};
 use super::*;
 use crate::ai::Message;
-use zx_core::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
 
 /// A header for a session started in `cwd` at `timestamp`, with `id`.
 fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {
@@ -385,16 +385,10 @@ async fn open_file(path: &Path) -> Transcript {
     Transcript::load(loaded, log).unwrap()
 }
 
-/// A snapshot of the session in the file `path`.
-async fn read_file(path: &Path) -> Transcript {
-    let id = file::read_header(path).unwrap().id;
-    Transcript::snapshot(JsonlStorage::file(path).read(&id).await.unwrap()).unwrap()
-}
-
 #[tokio::test]
 async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
     /// Answers every write late, like a session volume that stopped answering; bounded,
-    /// so that a store that waits for it still ends.
+    /// so that a transcript that waits for it still ends.
     struct Stuck;
     impl Write for Stuck {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -405,12 +399,13 @@ async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
             Ok(())
         }
     }
-    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(Stuck))));
+    let log = JsonlFile::with_writer(Path::new("s.jsonl"), Box::new(Stuck));
+    let mut transcript = Transcript::with_log(header(), Box::new(log));
     let started = std::time::Instant::now();
 
     let error = tokio::time::timeout(
         std::time::Duration::from_millis(50),
-        store.append_message(Message::user("q")),
+        transcript.append_message(Message::user("q")),
     )
     .await;
 
@@ -420,6 +415,26 @@ async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
         "{:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn a_failed_write_names_the_session_file() {
+    /// Refuses every write, like a full disk.
+    struct Full;
+    impl Write for Full {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = JsonlFile::with_writer(Path::new("s.jsonl"), Box::new(Full));
+    let mut transcript = Transcript::with_log(header(), Box::new(log));
+
+    let error = transcript.append_message(Message::user("q")).await.unwrap_err();
+
+    assert_eq!(format!("{error:#}"), "cannot write session file s.jsonl: disk full");
 }
 
 /// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
@@ -453,51 +468,26 @@ impl Write for PartialWriteOnce {
 async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = create_file(&path).await;
-    store.append_message(Message::user("kept")).await.unwrap();
-    drop(store);
+    let mut transcript = create_file(&path).await;
+    transcript.append_message(Message::user("kept")).await.unwrap();
+    drop(transcript);
     let file = OpenOptions::new().append(true).open(&path).unwrap();
     let writer = PartialWriteOnce {
         file,
         keep: 10,
         calls: 0,
     };
-    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(writer))));
+    let mut transcript = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(&path, Box::new(writer))));
 
-    assert!(store.append_message(Message::user("cut short")).await.is_err());
+    assert!(transcript.append_message(Message::user("cut short")).await.is_err());
     // A run keeps emitting messages until it observes its cancellation.
-    let later = store.append_message(Message::user("after the failure")).await;
+    let later = transcript.append_message(Message::user("after the failure")).await;
     assert!(later.is_err(), "an entry was written after a failed write");
-    drop(store);
+    drop(transcript);
 
     let reopened = open_file(&path).await;
     assert_eq!(reopened.incomplete_tail_bytes(), 10);
     assert_eq!(texts(&reopened), ["kept"]);
-}
-
-#[tokio::test]
-async fn opening_leaves_an_incomplete_tail_and_the_next_record_replaces_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    let mut store = create_file(&path).await;
-    store.append_message(Message::user("kept")).await.unwrap();
-    drop(store);
-    let tail = b"{\"type\":\"mess";
-    OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(tail)
-        .unwrap();
-
-    let mut reopened = open_file(&path).await;
-    assert!(std::fs::read(&path).unwrap().ends_with(tail), "opening changes nothing");
-    reopened.append_message(Message::user("next")).await.unwrap();
-    drop(reopened);
-
-    let read = read_file(&path).await;
-    assert_eq!(read.incomplete_tail_bytes(), 0);
-    assert_eq!(texts(&read), ["kept", "next"]);
 }
 
 #[tokio::test]

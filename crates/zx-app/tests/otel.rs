@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_app::otel::{Telemetry, TraceParent};
 use zx_testing::{EchoTool, RunnerSetup, config};
+use zx_util::sync::lock;
 
 /// Keeps every exported span, also after shutdown, which the SDK's in-memory exporter clears.
 #[derive(Clone, Debug, Default)]
@@ -19,7 +19,7 @@ struct Kept(Arc<Mutex<Vec<SpanData>>>);
 
 impl SpanExporter for Kept {
     fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
-        self.0.lock().unwrap().extend(batch);
+        lock(&self.0).extend(batch);
         std::future::ready(Ok(()))
     }
 }
@@ -52,7 +52,7 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
     assert_eq!(report.outcome, RunOutcome::Completed);
     telemetry.shutdown().await.unwrap();
 
-    let spans = exporter.0.lock().unwrap().clone();
+    let spans = lock(&exporter.0).clone();
     let mut names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
     names.sort_unstable();
     assert_eq!(
@@ -91,7 +91,7 @@ async fn a_run_continues_the_callers_trace_through_hook_under() {
     assert_eq!(report.outcome, RunOutcome::Completed);
     telemetry.shutdown().await.unwrap();
 
-    let spans = exporter.0.lock().unwrap().clone();
+    let spans = lock(&exporter.0).clone();
     let run = spans.iter().find(|span| span.name == "run").unwrap();
     assert_eq!(run.span_context.trace_id().to_string(), parent.trace_id());
     assert_eq!(run.parent_span_id.to_string(), parent.span_id());

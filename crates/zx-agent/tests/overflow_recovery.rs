@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
@@ -14,7 +13,6 @@ use zx_agent::compaction::Config;
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Entry;
-
 use zx_testing::{
     Collect, Driven, EchoTool, RunnerSetup, Seed, config, fast_retry, seeded_session, summary_json, test_limits,
 };
@@ -94,7 +92,7 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
     assert!(requests[1].tools.is_empty(), "the second request is the summary");
     // The new attempt sends the compacted projection: without the failed answer, with the
     // prompt once, and without the summarized message.
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     assert_eq!(requests[2].messages, messages[..messages.len() - 1]);
     assert_eq!(failed_answers(&requests[2].messages), 0);
     let prompts = requests[2]
@@ -106,7 +104,7 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
     assert!(!format!("{:?}", requests[2].messages).contains("observed observed"));
     // The failed answer stays in the session for the audit.
     let recorded = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(message) if matches!(&message.message, Message::Assistant(answer) if answer.stop_reason == StopReason::Error)))
@@ -260,7 +258,7 @@ async fn a_failed_recovery_summary_pauses_automatic_compaction() {
     assert!(error.contains("compacting the context to recover failed"), "{error}");
     assert_eq!(first.model_requests, 2);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
 
@@ -303,7 +301,7 @@ async fn the_run_timeout_also_bounds_the_recovery_summary() {
     assert_eq!(report.outcome, RunOutcome::TimedOut, "{report:?}");
     assert_eq!(report.model_requests, 2);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
 }

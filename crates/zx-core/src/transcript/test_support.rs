@@ -1,5 +1,5 @@
-//! What the unit tests of the session modules share: a header, messages, the texts a store
-//! projects, a compaction's plan and summary, a log that writes to a writer, and a writer
+//! What the unit tests of the transcript's modules share: a header, messages, the texts a
+//! transcript projects, a compaction's plan and summary, a log that writes to a writer, and a writer
 //! that always fails. The rest of the crate's tests reach [`FailingWriter`] and [`WriterLog`]
 //! as `crate::transcript::...`.
 
@@ -9,12 +9,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
-
 use super::{
     CompactionPlan, CompactionSummary, LoadedSession, LogRecord, SessionHeader, SessionLog, SummarizedBy, SummaryFact,
     SummaryRequest, Transcript,
 };
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
 /// A log that writes each record and its newline to a writer, on a blocking thread as a file
 /// would be written: a writer that fails or blocks makes the append fail or time out. An
@@ -54,9 +53,9 @@ pub(super) fn loaded(header: SessionHeader, records: Vec<String>) -> LoadedSessi
     }
 }
 
-/// The records of `store`, each as its log was given it.
-pub(super) fn records_of(store: &Transcript) -> Vec<String> {
-    store
+/// The records of `transcript`, each as its log was given it.
+pub(super) fn records_of(transcript: &Transcript) -> Vec<String> {
+    transcript
         .entries()
         .iter()
         .map(|entry| serde_json::to_string(entry).expect("an entry serializes"))
@@ -94,16 +93,19 @@ pub(super) fn header() -> SessionHeader {
 }
 
 pub(super) fn assistant(text: &str) -> Message {
-    let mut message = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    message.error_message = None;
-    message.content = vec![ContentBlock::Text { text: text.into() }];
+    let message = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::Stop,
+        vec![ContentBlock::Text { text: text.into() }],
+    );
     Message::Assistant(message)
 }
 
-/// An old message and the latest input, appended to `store`; returns their entry IDs.
-pub(super) async fn seeded(store: &mut Transcript) -> (String, String) {
-    let old = store.append_message(Message::user("old evidence")).await.unwrap();
-    let kept = store.append_message(Message::user("latest input")).await.unwrap();
+/// An old message and the latest input, appended to `transcript`; returns their entry IDs.
+pub(super) async fn seeded(transcript: &mut Transcript) -> (String, String) {
+    let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
+    let kept = transcript.append_message(Message::user("latest input")).await.unwrap();
     (old, kept)
 }
 
@@ -119,10 +121,10 @@ pub(super) fn summary(id: &str) -> CompactionSummary {
     }
 }
 
-/// A compaction of `store` that the model summarizes, keeping from `first_kept` and reading
+/// A compaction of `transcript` that the model summarizes, keeping from `first_kept` and reading
 /// every record before it.
-pub(super) fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
-    let source_entry_ids = store
+pub(super) fn plan(transcript: &Transcript, first_kept: &str) -> CompactionPlan {
+    let source_entry_ids = transcript
         .raw_projection()
         .into_iter()
         .take_while(|item| item.entry_id != first_kept)
@@ -142,15 +144,15 @@ pub(super) fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
     }
 }
 
-pub(super) fn texts(store: &Transcript) -> Vec<String> {
-    store
+pub(super) fn texts(transcript: &Transcript) -> Vec<String> {
+    transcript
         .messages()
         .iter()
-        .map(|m| match m {
+        .map(|message| match message {
             Message::System(system) => format!("system:{}", system.sections.len()),
             Message::User { content, .. } => content.clone(),
-            Message::Assistant(a) => a.text(),
-            Message::ToolResult(r) => r.content.clone(),
+            Message::Assistant(answer) => answer.text(),
+            Message::ToolResult(result) => result.content.clone(),
         })
         .collect()
 }

@@ -15,11 +15,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 
+pub(crate) use self::compactor::Compactor;
 use crate::ai::{Message, ModelMeta, Usage};
 use crate::guard::CancelSignal;
 use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without_details};
-
-pub(crate) use compactor::Compactor;
 
 /// The most bytes of original records one compaction reads.
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -32,12 +31,12 @@ pub const MAX_SUMMARY_TOKENS: u32 = 16_384;
 /// automatic trigger; manual compaction still uses the remaining bounded settings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Serialized transcript threshold; `None` disables the byte trigger of automatic
-    /// compaction.
+    /// Bytes of the serialized context that start automatic compaction; `None` disables
+    /// the byte trigger.
     pub trigger_bytes: Option<usize>,
     /// When the estimated tokens of the context ([`context_tokens`]) run an automatic
-    /// compaction. Either trigger runs one.
-    pub trigger_tokens: TokenTrigger,
+    /// compaction; `None` disables the token trigger. Either trigger runs one.
+    pub trigger_tokens: Option<TokenTrigger>,
     /// Recent message budget. The complete latest input and all system messages survive.
     pub keep_recent_bytes: usize,
     /// Output token budget for the summary request, independently of task requests.
@@ -50,8 +49,6 @@ pub struct Config {
 /// the model the session asks at that time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenTrigger {
-    /// No token trigger.
-    Off,
     /// Above this many estimated tokens, whatever the model.
     Above(u64),
     /// Above the context window of the model, less `reserve_tokens` (pi: `shouldCompact`,
@@ -70,7 +67,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
-            trigger_tokens: TokenTrigger::Off,
+            trigger_tokens: None,
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
             timeout: Duration::from_secs(120),
@@ -89,8 +86,7 @@ impl Config {
     /// automatic compaction; `None` when no token trigger applies to that model. `models`
     /// gives the window that a [`TokenTrigger::BelowWindow`] trigger lies below.
     pub(crate) fn trigger_tokens_for(&self, models: &HashMap<String, ModelMeta>, model: &str) -> Option<u64> {
-        match self.trigger_tokens {
-            TokenTrigger::Off => None,
+        match self.trigger_tokens? {
             TokenTrigger::Above(tokens) => Some(tokens),
             TokenTrigger::BelowWindow { reserve_tokens } => models
                 .get(model)?
@@ -103,7 +99,10 @@ impl Config {
     /// Whether a token trigger lies above the recent messages a summary keeps, as
     /// `trigger_bytes` must: a summary could otherwise never bring the context under it.
     fn leaves_room(trigger_tokens: u64, keep_recent_bytes: usize) -> bool {
-        trigger_tokens.saturating_mul(BYTES_PER_TOKEN as u64) > keep_recent_bytes as u64
+        // Tokens beyond `usize` take more bytes than any budget holds.
+        usize::try_from(trigger_tokens).map_or(true, |tokens| {
+            tokens.saturating_mul(BYTES_PER_TOKEN) > keep_recent_bytes
+        })
     }
 
     /// Reject budgets that cannot make progress or cannot bound external waiting.
@@ -111,7 +110,7 @@ impl Config {
         if self.keep_recent_bytes == 0 {
             return Err(InvalidConfig::ZeroKeepRecentBytes);
         }
-        if let TokenTrigger::Above(tokens) = self.trigger_tokens {
+        if let Some(TokenTrigger::Above(tokens)) = self.trigger_tokens {
             if tokens == 0 {
                 return Err(InvalidConfig::ZeroTriggerTokens);
             }
@@ -147,11 +146,14 @@ pub enum InvalidConfig {
     #[error("keep_recent_bytes must be greater than zero")]
     ZeroKeepRecentBytes,
     /// `trigger_tokens` is `Above(0)`.
-    #[error("trigger_tokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)")]
+    #[error("trigger_tokens must be greater than zero (`None` disables the token trigger)")]
     ZeroTriggerTokens,
     /// `trigger_tokens` lies within the recent messages a summary keeps, so a summary could
     /// never bring the context under it.
-    #[error("trigger_tokens must exceed a quarter of keep_recent_bytes, the tokens the kept recent messages take")]
+    #[error(
+        "trigger_tokens must exceed keep_recent_bytes / {per_token}, the tokens the kept recent messages take",
+        per_token = BYTES_PER_TOKEN
+    )]
     TriggerTokensWithinKept,
     /// `trigger_bytes` does not exceed `keep_recent_bytes`.
     #[error("trigger_bytes must exceed keep_recent_bytes (`None` disables the byte trigger)")]
@@ -173,8 +175,9 @@ pub enum InvalidConfig {
 /// one the kernel asks the model, and the request can be rebuilt from the session.
 ///
 /// The kernel stays in charge either way: when a compaction runs, which records it reads (at
-/// most 2 MiB of them), the records of its start and of its result or failure, the check that
-/// every fact cites a record the compaction read, and the bounds of time and cancellation.
+/// most [`MAX_SOURCE_BYTES`] of them), the records of its start and of its result or
+/// failure, the check that every fact cites a record the compaction read, and the bounds of
+/// time and cancellation.
 /// With a summarizer the start records its name instead of a request: how the summary was
 /// made is not in the session.
 #[async_trait]
@@ -183,10 +186,14 @@ pub trait Summarizer: Send + Sync {
     fn name(&self) -> &str;
 
     /// The summary of `source`. Every fact cites the `entry_id` of at least one record of
-    /// `source`; a summary holds at most 64 KiB and 128 statements of each kind, and must
-    /// make the context smaller. An error is why the compaction fails, which its failure
-    /// record keeps. The kernel waits at most [`Config::timeout`] and stops waiting when the
-    /// run is cancelled; a panic fails the compaction.
+    /// `source`; a summary holds at most [`MAX_SUMMARY_BYTES`] and [`MAX_SUMMARY_STATEMENTS`]
+    /// statements of each kind, and must make the context smaller. An error is why the
+    /// compaction fails, which its failure record keeps. The kernel waits at most
+    /// [`Config::timeout`] and stops waiting when the run is cancelled; a panic fails the
+    /// compaction.
+    ///
+    /// [`MAX_SUMMARY_BYTES`]: crate::transcript::MAX_SUMMARY_BYTES
+    /// [`MAX_SUMMARY_STATEMENTS`]: crate::transcript::MAX_SUMMARY_STATEMENTS
     async fn summarize(&self, source: &SummarySource<'_>) -> Result<Summarized, String>;
 }
 
@@ -337,16 +344,17 @@ pub(crate) enum End {
     },
     /// The compaction failed, for this reason, and left the context as it was.
     Failed(String),
-    /// The run was cancelled before the compaction completed; the text says where.
+    /// The run was cancelled before the compaction completed: the text is `compaction
+    /// cancelled`, or the failure that came with the cancellation.
     Cancelled(String),
-    /// The session could not record a step of the compaction, so a run must stop
-    /// (invariant 7).
+    /// The session could not record a step of the compaction, so a run must stop: what it
+    /// does next could not be recorded either.
     Unrecorded(anyhow::Error),
 }
 
-/// Why a compaction runs.
+/// Whose initiative a compaction runs on.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Trigger {
+pub(crate) enum Initiative {
     /// Someone asked for it.
     Manual,
     /// The run started it: the context passed a trigger before a request, or the model
@@ -356,8 +364,8 @@ pub(crate) enum Trigger {
     Automatic,
 }
 
-/// Serialized transcript bytes as a model may see them (without tool result details), not a
-/// tokenizer or a model context-window guarantee.
+/// Bytes of `messages` serialized as a model may see them (without tool result details), not
+/// a tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
     serialized_bytes(&without_details(messages))
 }
@@ -384,13 +392,13 @@ fn serialized_bytes(value: &impl serde::Serialize) -> Result<usize> {
 
 /// Bytes of serialized context that count as one token in an estimate (pi:
 /// `estimateTokens`, `Math.ceil(chars / 4)`).
-const BYTES_PER_TOKEN: usize = 4;
+pub const BYTES_PER_TOKEN: usize = 4;
 
 /// An estimate of the tokens the next request's context holds (pi:
 /// `estimateProjectedContextTokens`): the prompt and output tokens counted by the last answer
-/// whose usage still measures the context ([`Transcript::measured_context`]), plus a
-/// quarter of the bytes of the messages after it; without such an answer, a quarter of all
-/// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
+/// whose usage still measures the context ([`Transcript::measured_context`]), plus an
+/// estimate from the bytes of the messages after it; without such an answer, an estimate from
+/// all bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
 pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
     let (measured, rest) = transcript.measured_context();
@@ -401,7 +409,8 @@ pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
 /// The tokens `bytes` of serialized context are estimated to hold when no answer measures
 /// them, such as right after a compaction ([`context_tokens`]).
 fn estimated_tokens(bytes: usize) -> u64 {
-    bytes.div_ceil(BYTES_PER_TOKEN) as u64
+    // A `usize` fits in a `u64` on every target Rust supports; otherwise the count saturates.
+    u64::try_from(bytes.div_ceil(BYTES_PER_TOKEN)).unwrap_or(u64::MAX)
 }
 
 /// Bytes of one message as a model may see it.
@@ -425,7 +434,7 @@ mod tests {
     /// Settings whose token trigger lies `reserve_tokens` below the window of the model.
     fn below_window(reserve_tokens: u64) -> Config {
         Config {
-            trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens },
+            trigger_tokens: Some(TokenTrigger::BelowWindow { reserve_tokens }),
             ..Config::default()
         }
     }
@@ -454,7 +463,7 @@ mod tests {
     #[test]
     fn a_token_trigger_of_a_number_of_tokens_is_kept_whatever_the_window() {
         let config = Config {
-            trigger_tokens: TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS),
+            trigger_tokens: Some(TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS)),
             ..Config::default()
         };
 
@@ -475,9 +484,10 @@ mod tests {
         );
         assert!(
             !small.automatic(&window("m", 1000), "m"),
-            "nothing turns summaries on when the window is within the reserve"
+            "nothing turns automatic compaction on when the window is within the reserve"
         );
-        // 20000 - 16384 tokens would lie within the 64 KiB of recent messages a summary keeps.
+        // 20000 tokens less the default reserve would lie within the recent messages that a
+        // summary keeps by default.
         assert_eq!(
             below_window(DEFAULT_RESERVE_TOKENS).trigger_tokens_for(&window("m", 20_000), "m"),
             None,
@@ -489,7 +499,7 @@ mod tests {
     fn a_token_trigger_must_lie_above_zero_and_the_kept_messages() {
         assert!(
             Config {
-                trigger_tokens: TokenTrigger::Above(100),
+                trigger_tokens: Some(TokenTrigger::Above(100)),
                 ..Config::default()
             }
             .validate()
@@ -499,7 +509,7 @@ mod tests {
         );
         assert!(
             Config {
-                trigger_tokens: TokenTrigger::Above(0),
+                trigger_tokens: Some(TokenTrigger::Above(0)),
                 ..Config::default()
             }
             .validate()

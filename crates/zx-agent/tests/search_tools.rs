@@ -1,5 +1,5 @@
 //! The grep, find and ls tools on this machine. They use ripgrep when it is installed and
-//! POSIX grep and find otherwise; the assertions hold for both.
+//! the system's grep and find otherwise; the assertions hold for both.
 
 #![cfg(unix)]
 
@@ -7,13 +7,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::builtin::tools::{FindTool, GrepTool, LsTool};
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
-
-fn ctx(dir: &Path) -> ToolContext {
-    ToolContext::new(dir.to_path_buf(), CancellationToken::new())
-}
+use zx_testing::tool_context;
 
 /// A small project: sources at two depths, a dotfile, and a version control directory.
 fn project() -> tempfile::TempDir {
@@ -30,25 +26,20 @@ fn project() -> tempfile::TempDir {
 }
 
 async fn grep(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    GrepTool::default().execute(args, &ctx(dir)).await
+    GrepTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn find(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    FindTool::default().execute(args, &ctx(dir)).await
+    FindTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn ls(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    LsTool::default().execute(args, &ctx(dir)).await
+    LsTool::default().execute(args, &tool_context(dir)).await
 }
 
 /// The result lines without the notes in brackets.
-fn lines(output: &ToolOutput) -> Vec<String> {
-    output
-        .content
-        .lines()
-        .filter(|line| !line.starts_with('['))
-        .map(|line| line.trim_start_matches("./").to_string())
-        .collect()
+fn lines(output: &ToolOutput) -> Vec<&str> {
+    output.content.lines().filter(|line| !line.starts_with('[')).collect()
 }
 
 #[test]
@@ -271,14 +262,14 @@ async fn ls_says_how_many_entries_it_shows_when_the_output_is_cut() {
 }
 
 #[tokio::test]
-async fn long_matching_lines_are_cut() {
+async fn long_matching_lines_are_truncated() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("min.js"), format!("needle{}\n", "x".repeat(5000))).unwrap();
 
     let output = grep(dir.path(), json!({"pattern": "needle"})).await.unwrap();
 
     let line = output.content.lines().next().unwrap();
-    assert!(line.ends_with(" [line cut]"), "{line}");
+    assert!(line.ends_with(" [line truncated]"), "{line}");
     assert!(line.len() < 600, "{}", line.len());
 }
 

@@ -1,7 +1,7 @@
 //! A scripted troubleshooting session for evaluating context summaries over several rounds of
-//! compaction. Each round runs a
-//! few commands; the commands, their output and what the assistant says plant facts among
-//! routine noise. The round ends with the user's next request, and a summary follows.
+//! compaction. Each round runs a few commands; the commands, their output and what the
+//! assistant says plant facts among routine noise. The round ends with the user's next
+//! request, and a summary follows.
 //!
 //! Each summary is scored by the planted facts that still hold and that its facts state; by
 //! the replaced ones that it gives only the old value of; and by the replaced ones that some
@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
 };
@@ -32,7 +31,7 @@ const TASK: &str = "Checkout in namespace shop has been failing and slow since a
 
 /// A fact planted in the records of one round.
 pub struct Planted {
-    /// What [`planted`] finds it by, such as `F1`.
+    /// Its name, such as `F1`, by which the script refers to it.
     pub id: &'static str,
     /// The round whose records first state it.
     pub round: usize,
@@ -58,7 +57,7 @@ impl Planted {
     }
 
     /// Whether the fact holds after `round`: stated by then, and not yet replaced.
-    pub fn holds_after(&self, round: usize) -> bool {
+    fn holds_after(&self, round: usize) -> bool {
         self.round <= round && self.replacement().is_none_or(|by| by.round > round)
     }
 
@@ -81,7 +80,7 @@ impl Planted {
 }
 
 /// The planted fact with this ID.
-pub fn planted(id: &str) -> &'static Planted {
+fn planted(id: &str) -> &'static Planted {
     PLANTED
         .iter()
         .find(|fact| fact.id == id)
@@ -840,39 +839,39 @@ impl Evaluation {
 /// cannot be written or does not load again at the end.
 pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let path = dir.join("summaries.jsonl");
-    let mut store = crate::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user(TASK)).await.unwrap();
-    drop(store);
+    let mut seed = crate::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user(TASK)).await.unwrap();
+    drop(seed);
     let mut rounds = Vec::new();
     let mut facts = Vec::new();
     for n in 1..=ROUNDS {
-        let mut store = crate::open_session_file(&path).await.unwrap();
+        let mut seed = crate::open_session_file(&path).await.unwrap();
         for message in round(n) {
-            store.append_message(message).await.unwrap();
+            seed.append_message(message).await.unwrap();
         }
-        let sent_before = summary_requests(&store).len();
-        let mut loop_config = config(Arc::clone(&provider), vec![]);
-        loop_config.model = model.into();
+        let sent_before = summary_requests(&seed).len();
+        let mut agent_config = config(Arc::clone(&provider), vec![]);
+        agent_config.model = model.into();
         let (runner, _) = RunnerSetup {
-            session: store.into(),
+            session: seed.into(),
             compaction: Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
                 ..budget
             },
-            ..RunnerSetup::new(loop_config)
+            ..RunnerSetup::new(agent_config)
         }
         .build()
         .await;
 
         let report = runner.compact().await.unwrap();
 
-        let store = &runner.session();
-        let request_bytes = match summary_requests(store).get(sent_before) {
-            Some(id) => input_bytes(store, id),
+        let transcript = &runner.transcript();
+        let request_bytes = match summary_requests(transcript).get(sent_before) {
+            Some(id) => input_bytes(transcript, id),
             None => 0,
         };
-        let summary = store.entries().iter().rev().find_map(|entry| match entry {
+        let summary = transcript.entries().iter().rev().find_map(|entry| match entry {
             Entry::Compaction(done) => Some(done),
             _ => None,
         });
@@ -899,9 +898,9 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, 
     Evaluation { rounds, facts }
 }
 
-/// IDs of the summary requests recorded in `store`, oldest first.
-fn summary_requests(store: &Transcript) -> Vec<&str> {
-    store
+/// IDs of the summary requests recorded in `transcript`, oldest first.
+fn summary_requests(transcript: &Transcript) -> Vec<&str> {
+    transcript
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -914,8 +913,8 @@ fn summary_requests(store: &Transcript) -> Vec<&str> {
 }
 
 /// Bytes of a summary request's input, rebuilt from the session as an audit would.
-fn input_bytes(store: &Transcript, request_id: &str) -> usize {
-    let (_, request) = store.replay_request(request_id).unwrap();
+fn input_bytes(transcript: &Transcript, request_id: &str) -> usize {
+    let (_, request) = transcript.replay_request(request_id).unwrap();
     match &request.messages[..] {
         [Message::System(_), Message::User { content, .. }] => content.len(),
         other => panic!("a summary request holds its instructions and its input, not {other:?}"),

@@ -15,13 +15,12 @@
 //! Inside, `assembly` makes agents from config.toml, the agent file and what a host says over
 //! them ([`Overrides`]), with what each session gets for itself; [`Application`] is its entry.
 
+mod assembly;
 pub mod config;
 pub mod otel;
 pub mod shutdown;
 
-mod assembly;
-
-pub use assembly::{
+pub use self::assembly::{
     Application, Approvals, BuiltProvider, ConfiguredAgent, ExecutorFactory, ExecutorSession, NoModel, Overrides,
     ProviderFactory, ProviderInput, SessionPlace, resolve_cwd,
 };

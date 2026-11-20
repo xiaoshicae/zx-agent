@@ -8,7 +8,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
@@ -21,17 +20,18 @@ use zx_agent::events::{ApprovalResult, Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, FinishedStep, Hook, HookContext, HookResult, HookStage, StepDecision};
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::Entry;
 use zx_agent::{CancelSignal, SessionOptions};
 use zx_testing::{
     Asked, EchoTool, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines, refusal, run_approved,
-    run_prompt, summarize, take_queued_inputs,
+    run_prompt, summarize, take_queued_inputs, tool_call, tool_context,
 };
 
-struct Verdict(PolicyDecision);
+struct Decides(PolicyDecision);
+
 #[async_trait]
-impl ToolPolicy for Verdict {
+impl ToolPolicy for Decides {
     async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.clone()
     }
@@ -46,12 +46,12 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool.clone()]);
     config.policies.push(
-        "verdict",
-        Arc::new(Verdict(PolicyDecision::Ask("review required".into()))),
+        "decision",
+        Arc::new(Decides(PolicyDecision::Ask("review required".into()))),
     );
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Allow)));
+        .push("decision", Arc::new(Decides(PolicyDecision::Allow)));
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -60,12 +60,13 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     );
 }
 
-struct Approver {
+struct CountingApprover {
     approval: ApprovalDecision,
     calls: AtomicUsize,
 }
+
 #[async_trait]
-impl zx_testing::Approver for Approver {
+impl zx_testing::Approver for CountingApprover {
     async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision> {
         assert_eq!(request.reason, "review");
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -88,14 +89,14 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
             FauxStep::text("done"),
         ]));
         let tool = Arc::new(EchoTool::new("echo"));
-        let host = Arc::new(Approver {
+        let host = Arc::new(CountingApprover {
             approval,
             calls: AtomicUsize::new(0),
         });
         let mut config = config(provider, vec![tool.clone()]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
         let (result, _) = run_approved(config, host.clone(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
@@ -104,6 +105,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 }
 
 struct SwitchPolicy(Arc<AtomicBool>);
+
 #[async_trait]
 impl ToolPolicy for SwitchPolicy {
     async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
@@ -130,7 +132,7 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     let provider = Arc::new(FauxProvider::new(steps));
     let tool = Arc::new(EchoTool::new("echo"));
     let denied = Arc::new(AtomicBool::new(false));
-    let host = Arc::new(Approver {
+    let host = Arc::new(CountingApprover {
         approval: ApprovalDecision::AllowSession,
         calls: AtomicUsize::new(0),
     });
@@ -154,6 +156,7 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
 
 /// Is asked and never answers; says when it was asked.
 struct WaitingHost(Arc<tokio::sync::Notify>);
+
 #[async_trait]
 impl zx_testing::Approver for WaitingHost {
     async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
@@ -172,7 +175,7 @@ async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on
     let mut config = config(provider.clone(), vec![tool.clone()]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     config.approvals = ApprovalMode::Wait(Duration::ZERO);
     let host = Arc::new(WaitingHost(Arc::default()));
     let (result, _) = run_approved(config, host, "go").await;
@@ -197,7 +200,7 @@ async fn cancellation_interrupts_a_pending_approval() {
     let mut config = config(provider, vec![tool.clone()]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let (runner, _) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
@@ -213,6 +216,7 @@ async fn cancellation_interrupts_a_pending_approval() {
 }
 
 struct CountBefore(Arc<AtomicUsize>);
+
 #[async_trait]
 impl ToolPolicy for CountBefore {
     async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
@@ -228,7 +232,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
         FauxStep::text("handled"),
     ]));
     let checks = Arc::new(AtomicUsize::new(0));
-    let host = Arc::new(Approver {
+    let host = Arc::new(CountingApprover {
         approval: ApprovalDecision::AllowOnce,
         calls: AtomicUsize::new(0),
     });
@@ -238,11 +242,12 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
-        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("Invalid arguments"))
+        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.starts_with("Not executed: the arguments of"))
     );
 }
 
 struct RewriteInput;
+
 #[async_trait]
 impl Hook for RewriteInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
@@ -251,6 +256,7 @@ impl Hook for RewriteInput {
 }
 
 struct Project;
+
 #[async_trait]
 impl Hook for Project {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
@@ -272,10 +278,12 @@ struct AuditProbe {
     provider: Arc<FauxProvider>,
     path: PathBuf,
 }
+
 impl Provider for AuditProbe {
     fn name(&self) -> &str {
         "audit-probe"
     }
+
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
         let persisted = zx_testing::read_session_file(&self.path).unwrap();
         assert_eq!(
@@ -319,11 +327,12 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
     assert_eq!(
         zx_testing::read_session_file(&path).unwrap().messages(),
-        runner.session().messages()
+        runner.transcript().messages()
     );
 }
 
 struct InvalidPlan;
+
 #[async_trait]
 impl Hook for InvalidPlan {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
@@ -347,10 +356,10 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
     assert!(provider.requests().is_empty());
-    assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
+    assert_eq!(summarize(&runner.transcript().messages()), ["user:go"]);
     assert!(
         !runner
-            .session()
+            .transcript()
             .entries()
             .iter()
             .any(|entry| matches!(entry, Entry::ContextEdit(_)))
@@ -358,6 +367,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
 }
 
 struct RejectInput;
+
 #[async_trait]
 impl Hook for RejectInput {
     async fn on_input(&self, _text: String, _ctx: &HookContext) -> HookResult<String> {
@@ -382,13 +392,14 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
         (RunOutcome::Failed, 0, 0)
     );
     assert!(provider.requests().is_empty());
-    assert_eq!(runner.session().entries().len(), 2);
-    assert!(runner.session().messages().is_empty());
+    assert_eq!(runner.transcript().entries().len(), 2);
+    assert!(runner.transcript().messages().is_empty());
 }
 
 #[tokio::test]
 async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run() {
     struct RejectMarked;
+
     #[async_trait]
     impl Hook for RejectMarked {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
@@ -416,6 +427,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
 }
 
 struct OmitEarlier;
+
 #[async_trait]
 impl Hook for OmitEarlier {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
@@ -451,6 +463,7 @@ enum BadOutput {
     Panic,
     Pending,
 }
+
 #[async_trait]
 impl Hook for BadOutput {
     async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
@@ -465,11 +478,13 @@ impl Hook for BadOutput {
 #[tokio::test]
 async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() {
     struct SecretTool;
+
     #[async_trait]
     impl zx_agent::tools::Tool for SecretTool {
         fn name(&self) -> &str {
             "echo"
         }
+
         fn definition(&self) -> zx_agent::ai::ToolDef {
             zx_agent::ai::ToolDef {
                 name: "echo".into(),
@@ -477,6 +492,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 parameters: json!({}),
             }
         }
+
         async fn execute(
             &self,
             _args: serde_json::Value,
@@ -497,7 +513,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
         let (runner, events) = RunnerSetup::new(config).build().await;
         let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
-        let serialized = serde_json::to_string(runner.session().entries()).unwrap();
+        let serialized = serde_json::to_string(runner.transcript().entries()).unwrap();
         assert!(!serialized.contains("raw-tool-secret"));
         assert!(
             !serde_json::to_string(&events.events())
@@ -505,7 +521,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 .contains("raw-tool-secret")
         );
         assert!(
-            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("withheld"))
+            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.starts_with("Withheld: "))
         );
     }
 }
@@ -513,6 +529,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
 struct Observer {
     seen: Arc<Mutex<Vec<&'static str>>>,
 }
+
 #[async_trait]
 impl Hook for Observer {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
@@ -557,6 +574,7 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
 }
 
 struct CustomContinue;
+
 #[async_trait]
 impl Hook for CustomContinue {
     async fn finish_step(&self, step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
@@ -614,15 +632,9 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
 #[tokio::test]
 async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
     let hook = RedactSecrets::new(["", "token", "token-long", "令牌"].into_iter().map(str::to_string));
-    let call = ToolCall {
-        id: "c".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    };
     let output = hook
         .after_tool(
-            &call,
+            &tool_call("echo"),
             ToolOutput::error("token-long，令牌 token"),
             &zx_testing::hook_context(),
         )
@@ -630,15 +642,6 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
         .unwrap();
     assert_eq!(output.content, "[REDACTED]，[REDACTED] [REDACTED]");
     assert!(output.is_error);
-}
-
-fn redaction_call() -> ToolCall {
-    ToolCall {
-        id: "c".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    }
 }
 
 #[tokio::test]
@@ -649,7 +652,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([token.clone()]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("a first-token b"),
             &zx_testing::hook_context(),
         )
@@ -660,7 +663,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
     std::fs::write(&token, "second-token").unwrap();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("first-token second-token"),
             &zx_testing::hook_context(),
         )
@@ -677,7 +680,7 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
     let hook = RedactSecrets::new(["key".to_string()]).with_secret_files([dir.path().join("absent"), empty]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("key stays out, the rest stays"),
             &zx_testing::hook_context(),
         )
@@ -692,17 +695,14 @@ async fn a_secret_file_that_is_not_utf8_is_redacted_as_tools_print_it() {
     // "pässword" in Latin-1: the tools decode output lossily, so it prints as "p\u{FFFD}ssword".
     std::fs::write(dir.path().join("password"), b"p\xe4ssword\n").unwrap();
     let printed = BashTool::default()
-        .execute(
-            json!({"command": "cat password"}),
-            &ToolContext::new(dir.path().to_path_buf(), CancellationToken::new()),
-        )
+        .execute(json!({"command": "cat password"}), &tool_context(dir.path()))
         .await
         .unwrap();
     assert!(printed.content.contains("p\u{FFFD}ssword"), "{}", printed.content);
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().join("password")]);
 
     let output = hook
-        .after_tool(&redaction_call(), printed, &zx_testing::hook_context())
+        .after_tool(&tool_call("echo"), printed, &zx_testing::hook_context())
         .await
         .unwrap();
 
@@ -717,7 +717,11 @@ async fn a_secret_file_over_the_limit_fails_the_hook() {
     std::fs::write(&large, "x".repeat(64 * 1024 + 1)).unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([large]);
     let error = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("output"), &zx_testing::hook_context())
+        .after_tool(
+            &tool_call("echo"),
+            ToolOutput::ok("output"),
+            &zx_testing::hook_context(),
+        )
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
@@ -786,7 +790,7 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("token-a token-hidden token-x"),
             &zx_testing::hook_context(),
         )
@@ -797,7 +801,7 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     std::fs::write(dir.path().join("cluster-b"), "token-b").unwrap();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("token-b"),
             &zx_testing::hook_context(),
         )
@@ -821,7 +825,7 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     let all: Vec<String> = (0..count).map(|index| format!("token-{index:02}")).collect();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok(all.join(" ")),
             &zx_testing::hook_context(),
         )
@@ -830,21 +834,22 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
 }
 
-struct NextTurn(StepDecision);
+struct NextStep(StepDecision);
+
 #[async_trait]
-impl Hook for NextTurn {
+impl Hook for NextStep {
     async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Ok(self.0.clone())
     }
 }
 
 #[tokio::test]
-async fn a_hook_follow_up_obeys_the_step_budget() {
+async fn a_hook_follow_up_obeys_the_model_request_limit() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config
         .hooks
-        .push("next_turn", Arc::new(NextTurn(StepDecision::FollowUp("next".into()))));
+        .push("next_step", Arc::new(NextStep(StepDecision::FollowUp("next".into()))));
     let (runner, _) = RunnerSetup {
         limits: RunLimits {
             max_model_requests: Some(1),
@@ -866,6 +871,7 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
 }
 
 struct StopAndQueue;
+
 #[async_trait]
 impl Hook for StopAndQueue {
     async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
@@ -874,6 +880,7 @@ impl Hook for StopAndQueue {
         }
         Ok(())
     }
+
     async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Ok(StepDecision::Stop)
     }
@@ -894,6 +901,7 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
 }
 
 struct FinishFailure;
+
 #[async_trait]
 impl Hook for FinishFailure {
     async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
@@ -946,6 +954,7 @@ struct HoldInput {
     holding: Arc<tokio::sync::Notify>,
     released: Arc<AtomicBool>,
 }
+
 #[async_trait]
 impl Hook for HoldInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
@@ -990,7 +999,7 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
     });
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
-    assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
+    assert_eq!(mentions(&runner.transcript().messages(), "rotate the logs"), 0);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:next"]);
@@ -1026,7 +1035,7 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
         () = hold.holding.notified() => {}
     }
 
-    assert_eq!(mentions(&runner.session().messages(), "check the disk"), 0);
+    assert_eq!(mentions(&runner.transcript().messages(), "check the disk"), 0);
     hold.released.store(true, Ordering::SeqCst);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -1036,7 +1045,7 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     );
 }
 
-/// The policy verdicts and approvals of a run, in order, as `(call, what)` pairs.
+/// The policy decisions and approvals of a run, in order, as `(call, what)` pairs.
 fn approvals(events: &zx_testing::Collect) -> Vec<(String, String)> {
     events
         .events()
@@ -1062,14 +1071,14 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
-    for verdict in [PolicyDecision::Allow, PolicyDecision::Deny("not on the list".into())] {
+async fn the_policy_decision_of_every_call_is_reported_with_its_reason() {
+    for decision in [PolicyDecision::Allow, PolicyDecision::Deny("not on the list".into())] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c1", "echo", json!({})),
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.policies.push("verdict", Arc::new(Verdict(verdict.clone())));
+        config.policies.push("decision", Arc::new(Decides(decision.clone())));
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1081,7 +1090,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
                 _ => None,
             })
             .collect();
-        assert_eq!(decisions, [verdict]);
+        assert_eq!(decisions, [decision]);
         assert_eq!(approvals(&events).len(), 1, "nobody is asked");
     }
 }
@@ -1132,8 +1141,8 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-        let host = Arc::new(Approver {
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
+        let host = Arc::new(CountingApprover {
             approval,
             calls: AtomicUsize::new(0),
         });
@@ -1146,6 +1155,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
 
 /// Answers after `delay`, like a person who takes a moment.
 struct SlowApprover(Duration);
+
 #[async_trait]
 impl zx_testing::Approver for SlowApprover {
     async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
@@ -1163,7 +1173,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let host = Arc::new(SlowApprover(Duration::from_millis(20)));
 
     let (_, events) = run_approved(config, host, "go").await;
@@ -1193,7 +1203,7 @@ async fn an_approval_ends_as_denied_without_anyone_to_ask_and_as_timed_out_witho
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
         config
             .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+            .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
         config.approvals = approvals;
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
@@ -1222,7 +1232,7 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config
         .policies
-        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
     let (runner, events) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
@@ -1247,6 +1257,7 @@ struct Kinds {
     seen: Arc<Mutex<Vec<&'static str>>>,
     all: bool,
 }
+
 #[async_trait]
 impl Hook for Kinds {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
@@ -1298,6 +1309,7 @@ struct ContextProbe {
     seen: Seen,
     cancel: Arc<Mutex<Option<CancelSignal>>>,
 }
+
 impl ContextProbe {
     fn record(&self, method: &'static str, ctx: &HookContext) {
         assert!(!ctx.cancel.is_cancelled(), "{method} ran in a cancelled run");
@@ -1308,24 +1320,29 @@ impl ContextProbe {
         *self.cancel.lock().unwrap() = Some(ctx.cancel.clone());
     }
 }
+
 #[async_trait]
 impl Hook for ContextProbe {
     async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
         self.record("on_input", ctx);
         Ok(text)
     }
+
     async fn transform_context(&self, _messages: &[Message], ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         self.record("transform_context", ctx);
         Ok(Vec::new())
     }
+
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         self.record("after_tool", ctx);
         Ok(output)
     }
+
     async fn finish_step(&self, _step: &FinishedStep<'_>, ctx: &HookContext) -> HookResult<StepDecision> {
         self.record("finish_step", ctx);
         Ok(StepDecision::Default)
     }
+
     async fn on_event(&self, _event: &Event, ctx: &HookContext) -> HookResult<()> {
         self.record("on_event", ctx);
         Ok(())
@@ -1350,7 +1367,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
 
     runner.run("go").await;
 
-    let session_id = runner.session().header().id.clone();
+    let session_id = runner.transcript().header().id.clone();
     let run_id = events.envelopes()[0].run_id.clone();
     let seen = probe.seen.lock().unwrap().clone();
     let mut methods: Vec<&str> = seen.iter().map(|(method, ..)| *method).collect();
@@ -1370,6 +1387,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
 }
 
 struct FailingObserver;
+
 #[async_trait]
 impl Hook for FailingObserver {
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
@@ -1404,12 +1422,14 @@ struct Staged {
     tag: &'static str,
     order: Arc<Mutex<Vec<String>>>,
 }
+
 #[async_trait]
 impl Hook for Staged {
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         self.order.lock().unwrap().push(format!("after:{}", self.tag));
         Ok(output)
     }
+
     fn stage(&self) -> HookStage {
         self.stage
     }
@@ -1451,6 +1471,7 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
 
 /// An extension that copies a secret into tool output.
 struct LeakSecret;
+
 #[async_trait]
 impl Hook for LeakSecret {
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
@@ -1550,6 +1571,7 @@ fn tools_with_the_same_name_refuse_the_agent() {
 }
 
 struct AppendSystem;
+
 #[async_trait]
 impl Hook for AppendSystem {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
@@ -1580,6 +1602,7 @@ async fn a_hook_cannot_append_system_messages() {
 }
 
 struct PanickingObserver;
+
 #[async_trait]
 impl Hook for PanickingObserver {
     fn observes(&self, _event: &EventKind) -> bool {
@@ -1611,6 +1634,7 @@ impl zx_agent::tools::Tool for Declared {
     fn name(&self) -> &str {
         self.name
     }
+
     fn definition(&self) -> zx_agent::ai::ToolDef {
         assert!(!self.panics, "definition is broken");
         zx_agent::ai::ToolDef {
@@ -1619,6 +1643,7 @@ impl zx_agent::tools::Tool for Declared {
             parameters: json!({"type": "object"}),
         }
     }
+
     async fn execute(
         &self,
         _args: serde_json::Value,
@@ -1664,6 +1689,7 @@ impl zx_agent::tools::Tool for CancelsItself {
     fn name(&self) -> &str {
         "stop"
     }
+
     fn definition(&self) -> zx_agent::ai::ToolDef {
         zx_agent::ai::ToolDef {
             name: "stop".into(),
@@ -1671,6 +1697,7 @@ impl zx_agent::tools::Tool for CancelsItself {
             parameters: json!({"type": "object"}),
         }
     }
+
     async fn execute(
         &self,
         _args: serde_json::Value,

@@ -14,9 +14,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::Notify;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, Message, Role, StopReason, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::builtin::output_store::{OutputStore, OutputStoreConfig, ReadOutputTool};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
@@ -26,11 +25,13 @@ use zx_agent::hooks::Hook;
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Entry;
-
-use common::zx_agent_in;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, fake_model_config, write_config};
-use zx_testing::{Collect, Driven, EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer};
+use zx_testing::{
+    Collect, Driven, EchoTool, RunnerSetup, Seed, config, header, read_lines, stderr, tool_call_answer, tool_call_block,
+};
+
+use self::common::zx_agent_in;
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -53,15 +54,19 @@ impl Tool for StartProbe {
     fn name(&self) -> &str {
         self.name
     }
+
     fn definition(&self) -> ToolDef {
         definition(self.name)
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     fn execution_mode(&self) -> ExecutionMode {
         self.mode
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         let text = std::fs::read_to_string(&self.session).map_err(|error| error.to_string())?;
         let starts = text
@@ -108,12 +113,15 @@ impl Tool for Counted {
     fn name(&self) -> &str {
         self.name
     }
+
     fn definition(&self) -> ToolDef {
         definition(self.name)
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::ok("ran"))
@@ -140,12 +148,15 @@ impl Tool for Hang {
     fn name(&self) -> &str {
         "hang"
     }
+
     fn definition(&self) -> ToolDef {
         definition("hang")
     }
+
     fn effects(&self) -> Effects {
         self.effects
     }
+
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.started.notify_one();
         std::future::pending().await
@@ -154,20 +165,13 @@ impl Tool for Hang {
 
 /// An answer that asked for `calls`, given as `(id, name)`.
 fn answer(calls: &[(&str, &str)]) -> Message {
-    let mut answer = AssistantMessage::failure("faux", "test-model", StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = calls
-        .iter()
-        .map(|(id, name)| {
-            ContentBlock::ToolCall(ToolCall {
-                id: (*id).into(),
-                name: (*name).into(),
-                arguments: json!({}),
-                arguments_error: None,
-            })
-        })
-        .collect();
-    Message::Assistant(answer)
+    let calls = calls.iter().map(|(id, name)| tool_call_block(id, name, json!({})));
+    Message::Assistant(AssistantMessage::new(
+        "faux",
+        "test-model",
+        StopReason::ToolUse,
+        calls.collect(),
+    ))
 }
 
 fn result(id: &str, name: &str, content: &str) -> Message {
@@ -309,22 +313,21 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store
-        .append_message(answer(&[
-            ("c1", "write"),
-            ("c2", "write"),
-            ("c3", "write"),
-            ("c4", "read"),
-            ("c5", "gone"),
-        ]))
-        .await
-        .unwrap();
-    store.record_tool_call_started("c1", "write").await.unwrap();
-    store.record_tool_call_started("c2", "write").await.unwrap();
-    store.append_message(result("c1", "write", "written")).await.unwrap();
-    drop(store);
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(answer(&[
+        ("c1", "write"),
+        ("c2", "write"),
+        ("c3", "write"),
+        ("c4", "read"),
+        ("c5", "gone"),
+    ]))
+    .await
+    .unwrap();
+    seed.record_tool_call_started("c1", "write").await.unwrap();
+    seed.record_tool_call_started("c2", "write").await.unwrap();
+    seed.append_message(result("c1", "write", "written")).await.unwrap();
+    drop(seed);
     let write = Counted::new("write", Effects::SideEffects);
     let read = Counted::new("read", Effects::ReadOnly);
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
@@ -351,18 +354,18 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     );
     let sent = &provider.requests()[0].messages;
     // Results follow their calls, before the new input.
-    let roles: Vec<&str> = sent.iter().map(Message::role).collect();
+    let roles: Vec<Role> = sent.iter().map(Message::role).collect();
     assert_eq!(
         roles,
         [
-            "user",
-            "assistant",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "toolResult",
-            "user"
+            Role::User,
+            Role::Assistant,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::User
         ]
     );
     let results = results(sent);
@@ -389,19 +392,19 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
 #[tokio::test]
 async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
     for stop_reason in [StopReason::Error, StopReason::Aborted] {
-        let mut store = Seed::in_memory(header()).await;
-        store.append_message(Message::user("fix it")).await.unwrap();
+        let mut seed = Seed::in_memory(header()).await;
+        seed.append_message(Message::user("fix it")).await.unwrap();
         let Message::Assistant(mut failed) = answer(&[("c1", "write"), ("c2", "read")]) else {
             panic!("answer builds an assistant message");
         };
         failed.stop_reason = stop_reason;
-        store.append_message(Message::Assistant(failed)).await.unwrap();
+        seed.append_message(Message::Assistant(failed)).await.unwrap();
         let write = Counted::new("write", Effects::SideEffects);
         let read = Counted::new("read", Effects::ReadOnly);
         let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
         let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
         let (runner, events) = RunnerSetup {
-            session: store.into(),
+            session: seed.into(),
             ..RunnerSetup::new(config(provider.clone(), tools))
         }
         .build()
@@ -431,13 +434,13 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
 
 #[tokio::test]
 async fn the_recovery_event_follows_the_recorded_result() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store.append_message(answer(&[("c1", "write")])).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(answer(&[("c1", "write")])).await.unwrap();
     let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build()
@@ -595,7 +598,7 @@ async fn results_of_a_batch_cancelled_at_its_first_call(mode: ExecutionMode) -> 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(act.runs.load(Ordering::SeqCst), 0);
     assert!(!hook_failed(&events.events()), "{:?}", events.events());
-    results(&session.session().messages())
+    results(&session.transcript().messages())
 }
 
 /// Every call of the answer has a result that says the run was cancelled before it started.
@@ -635,7 +638,7 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
     // so in the kernel's words, which no hook withholds.
     assert_eq!((report.outcome, report.denied_calls), (RunOutcome::Cancelled, 0));
     assert_eq!(act.calls.load(Ordering::SeqCst), 0);
-    let transcript = session.session();
+    let transcript = session.transcript();
     let started = transcript
         .entries()
         .iter()
@@ -653,36 +656,32 @@ async fn a_run_cancelled_while_a_call_waits_for_approval_starts_no_call() {
 
 /// `zx-agent run` with bash against the mock server, without retries.
 fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
-    const KEY_VAR: &str = "ZX_P6_RECOVERY_TEST_KEY";
-    let home = dir.join(".home");
+    const KEY_VAR: &str = "ZX_RECOVERY_TEST_KEY";
+    let home = dir.join(".zx-agent-home");
     write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["run", "--model", "mock", "--tools", "bash"])
         .args(args)
         .env("ZX_BASE_URL", &server.base_url)
-        .env(KEY_VAR, "sk-p6-test")
+        .env(KEY_VAR, "sk-recovery-test")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
 }
 
 /// The tool message that the mock server's request `index` carried.
-fn sent_tool_result(server: &MockServer, index: usize) -> Value {
-    server.requests()[index].tool_results().remove(0)
-}
-
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = zx_testing::create_session_file(&dir.path().join("session.jsonl"), header())
+    let mut seed = zx_testing::create_session_file(&dir.path().join("session.jsonl"), header())
         .await
         .unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
-    store.append_message(call).await.unwrap();
-    store.record_tool_call_started("c1", "bash").await.unwrap();
-    drop(store);
+    seed.append_message(call).await.unwrap();
+    seed.record_tool_call_started("c1", "bash").await.unwrap();
+    drop(seed);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
     let output = run_command(&server, dir.path(), &["--session", "session.jsonl", "continue"])
@@ -697,7 +696,7 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
         "{stderr}"
     );
     assert!(!dir.path().join("ran-again").exists(), "the command ran again");
-    let tool = sent_tool_result(&server, 0);
+    let tool = server.requests()[0].tool_results().remove(0);
     assert_eq!(tool["tool_call_id"], "c1");
     assert!(
         tool["content"]
@@ -758,7 +757,7 @@ async fn a_killed_run_is_recovered_by_the_next_run_without_repeating_the_command
         "ran\n",
         "the command ran again"
     );
-    let tool = sent_tool_result(&server, 1);
+    let tool = server.requests()[1].tool_results().remove(0);
     assert_eq!(tool["tool_call_id"], "c1");
     assert!(
         tool["content"]

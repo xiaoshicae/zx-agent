@@ -1,5 +1,5 @@
-//! What guards the kernel's calls into host code, such as a hook or a policy: the run's
-//! cancellation as that code sees it, and the bound every such call gets.
+//! What guards the kernel's calls into host code: the run's cancellation as that code sees
+//! it, and the bound that the calls into hooks, policies and summarizers get.
 
 use std::fmt;
 use std::future::Future;
@@ -61,7 +61,7 @@ pub(crate) enum Stopped {
 impl fmt::Display for Stopped {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TimedOut(timeout) => write!(formatter, "timed out after {}ms", timeout.as_millis()),
+            Self::TimedOut(timeout) => write!(formatter, "timed out after {timeout:?}"),
             Self::Panicked => formatter.write_str("panicked"),
             Self::Cancelled => formatter.write_str("was cancelled"),
         }

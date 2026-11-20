@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt};
+use zx_ai::{
+    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, MISSING_TOOL_RESULT, Message, Reasoning, Request, SystemPrompt,
+};
 
 use crate::accumulate::REASONING_FIELDS;
 use crate::config::{BodyOptions, ReasoningFormat, SystemUpdates};
@@ -41,13 +43,16 @@ pub(crate) fn request_options(options: &BodyOptions) -> Value {
     serde_json::to_value(record).expect("strings, numbers, booleans and a JSON map serialize")
 }
 
-/// Rebuild a Chat Completions JSON body from a persisted RequestConfig and Request.
-/// Credentials, URLs and HTTP headers are intentionally absent. Rejects an unknown option
-/// format, any version but the current one and an option it does not know, rather than
-/// silently applying a different conversion policy.
+/// Rebuild the JSON body of a Chat Completions request from a recorded request and the
+/// options recorded with it, for the request audit. Credentials, URLs and HTTP headers are
+/// not in it. Rejects another conversion, any version but this one and an option it does not
+/// know, rather than apply a different conversion.
 pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
     let Conversion { format, version } = Conversion::deserialize(options)?;
-    anyhow::ensure!(format == FORMAT, "unsupported request conversion format");
+    anyhow::ensure!(
+        format == FORMAT,
+        "request conversion format {format:?} is not supported; only {FORMAT:?} can be replayed"
+    );
     anyhow::ensure!(
         version == VERSION,
         "request conversion version {version} is not supported; only version {VERSION} can be replayed"
@@ -159,12 +164,12 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
                 }
             }
             Message::ToolResult(result) => {
-                let Some(pos) = pending.iter().position(|id| *id == result.tool_call_id) else {
+                let Some(position) = pending.iter().position(|id| *id == result.tool_call_id) else {
                     continue;
                 };
-                pending.remove(pos);
+                pending.remove(position);
                 let content = if result.content.is_empty() {
-                    "(no output)"
+                    EMPTY_TOOL_RESULT
                 } else {
                     result.content.as_str()
                 };
@@ -260,7 +265,7 @@ fn fill_missing_reasoning(messages: &mut [Value]) {
 
 fn flush_missing_results(out: &mut Vec<Value>, pending: &mut Vec<String>) {
     for id in pending.drain(..) {
-        out.push(json!({ "role": "tool", "tool_call_id": id, "content": "No result provided" }));
+        out.push(json!({ "role": "tool", "tool_call_id": id, "content": MISSING_TOOL_RESULT }));
     }
 }
 

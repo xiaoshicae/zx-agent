@@ -5,14 +5,13 @@ use serde_json::{Value, json};
 use zx_agent::events::ApprovalResult;
 use zx_util::sync::lock;
 
-use crate::platform::report;
-use crate::{
-    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
-    ThreadId, UserId,
-};
-
 use super::FeishuChannel;
 use super::connection::PREFIX;
+use crate::platform::report;
+use crate::{
+    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
+    MessageId, ThreadId, UserId,
+};
 
 impl FeishuChannel {
     /// The messages and clicks in one event. A message is named by its `message_id`, which
@@ -31,10 +30,15 @@ impl FeishuChannel {
         match value["header"]["event_type"].as_str() {
             Some("im.message.receive_v1") => match message(&value["event"]) {
                 Some(said) => {
-                    if said.chat == ChatKind::Direct {
-                        lock(&self.direct).insert(said.at.conversation.0.clone());
+                    if let Inbound::Message {
+                        chat: ChatKind::Direct,
+                        at,
+                        ..
+                    } = &said
+                    {
+                        lock(&self.direct).insert(at.conversation.0.clone());
                     }
-                    vec![said.into_inbound()]
+                    vec![said]
                 }
                 // Not for the bot.
                 None => Vec::new(),
@@ -46,33 +50,10 @@ impl FeishuChannel {
     }
 }
 
-/// A text message from a person, as [`Inbound::Message`] carries it.
-struct Said {
-    id: MessageId,
-    at: Destination,
-    chat: ChatKind,
-    addressee: Addressee,
-    sender: UserId,
-    text: String,
-}
-
-impl Said {
-    fn into_inbound(self) -> Inbound {
-        Inbound::Message {
-            id: self.id,
-            at: self.at,
-            chat: self.chat,
-            addressee: self.addressee,
-            sender: self.sender,
-            text: self.text,
-        }
-    }
-}
-
 /// A text message from a person: in a direct chat, in a group with a bot mentioned, or a
 /// reply in a group's thread. Replies that do not mention the bot arrive only with the
 /// permission to read every group message (`im:message.group_msg`).
-fn message(event: &Value) -> Option<Said> {
+fn message(event: &Value) -> Option<Inbound> {
     if event["sender"]["sender_type"] != "user" {
         return None;
     }
@@ -107,7 +88,7 @@ fn message(event: &Value) -> Option<Said> {
     // The content of a text message is a JSON object with `text`; anything else is not text
     // this channel reads.
     let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    Some(Said {
+    Some(Inbound::Message {
         id: MessageId(message["message_id"].as_str()?.into()),
         at: Destination {
             conversation: ConversationId(message["chat_id"].as_str()?.into()),
@@ -178,7 +159,7 @@ const ZERO_WIDTH_SPACE: char = '\u{200B}';
 
 /// `text` with every mention tag (`<at …>`, which notifies people, everyone with
 /// `user_id="all"`) broken by a zero-width space after its `<`.
-pub(super) fn without_mentions(text: &str) -> String {
+fn without_mentions(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find('<') {
@@ -194,8 +175,21 @@ pub(super) fn without_mentions(text: &str) -> String {
 
 /// `text` with no run of three backticks, which would end the code block of a card that
 /// shows it: a zero-width space goes between every two.
-pub(super) fn without_fences(text: &str) -> String {
+fn without_fences(text: &str) -> String {
     text.replace("``", &format!("`{ZERO_WIDTH_SPACE}`"))
+}
+
+/// What a card shows of the request `card`, open and once closed. What the request says
+/// mentions nobody, and its summary stays in the code block.
+pub(super) fn card_request(labels: &CardLabels, card: &ApprovalCard) -> String {
+    format!(
+        "**{}**: `{}`\n```\n{}\n```\n{}: {}",
+        labels.title,
+        without_mentions(&card.tool),
+        without_fences(&without_mentions(&card.summary)),
+        labels.reason,
+        without_mentions(&card.reason)
+    )
 }
 
 /// A card in JSON 2.0 that can be updated, as a string.

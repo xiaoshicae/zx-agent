@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::truncate::{MAX_LINES, truncate_head};
 pub use crate::files::Links;
-use crate::files::{open_without_blocking, read_bounded};
+use crate::files::{Unreadable, read_regular};
 
 /// How a tool returns long text a page at a time.
 ///
@@ -57,10 +57,7 @@ impl Pager<'_> {
     /// The footer that tells the model to read on from byte `next`.
     fn footer(&self, next: usize) -> String {
         let (name, value) = self.argument;
-        format!(
-            "\n[Use {} with {name}={value:?}, offset={next} to continue.]",
-            self.tool
-        )
+        format!("\n[use {} with {name}={value:?}, offset={next} to continue]", self.tool)
     }
 }
 
@@ -73,36 +70,14 @@ impl Pager<'_> {
 /// `cannot read tool output: <error>`. Callers that must respond to cancellation race this
 /// future against their token.
 pub async fn read_text(path: &Path, max_bytes: u64, links: Links) -> Result<String, String> {
-    let unreadable = |error: std::io::Error| format!("{}: {error}", path.display());
-    let not_regular = || format!("{} is not a regular file", path.display());
-    let over_limit = || format!("{} is over the {max_bytes} byte file limit", path.display());
-    // Opening a special file can act by itself: it releases the writer of a FIFO, and some
-    // devices start working. So only a regular file is opened, and the open checks again
-    // what it found, as another file may have taken its place since.
-    let checked = match links {
-        Links::Follow => tokio::fs::metadata(path).await,
-        Links::Refuse => tokio::fs::symlink_metadata(path).await,
-    }
-    .map_err(unreadable)?;
-    if checked.file_type().is_symlink() {
-        return Err(format!("{} is a symbolic link, which is not followed", path.display()));
-    }
-    if !checked.is_file() {
-        return Err(not_regular());
-    }
-    let (file, meta) = open_without_blocking(path, links).await.map_err(unreadable)?;
-    if !meta.is_file() {
-        return Err(not_regular());
-    }
-    if meta.len() > max_bytes {
-        return Err(over_limit());
-    }
-    let bytes = read_bounded(file, max_bytes).await.map_err(unreadable)?;
-    // The metadata can be stale, as for a file that grows while it is read.
-    let read = u64::try_from(bytes.len()).map_err(|error| format!("{}: {error}", path.display()))?;
-    if read > max_bytes {
-        return Err(over_limit());
-    }
+    let bytes = read_regular(path, max_bytes, links)
+        .await
+        .map_err(|unreadable| match unreadable {
+            Unreadable::Io(error) => format!("{}: {error}", path.display()),
+            Unreadable::Link => format!("{} is a symbolic link, which is not followed", path.display()),
+            Unreadable::Directory | Unreadable::Special => format!("{} is not a regular file", path.display()),
+            Unreadable::Over => format!("{} is over the {max_bytes} byte limit", path.display()),
+        })?;
     String::from_utf8(bytes).map_err(|error| format!("{} is not UTF-8 text: {error}", path.display()))
 }
 
@@ -120,7 +95,7 @@ mod tests {
 
     /// The text of `page` and the offset its footer names, if it has one.
     fn split(page: &str) -> (&str, Option<usize>) {
-        match page.split_once("\n[Use read_text with name=\"notes\", offset=") {
+        match page.split_once("\n[use read_text with name=\"notes\", offset=") {
             Some((text, footer)) => (text, footer.split(' ').next().and_then(|next| next.parse().ok())),
             None => (page, None),
         }
@@ -194,7 +169,7 @@ mod tests {
         for (path, expected) in [
             (dir.path().join("missing.txt"), "missing.txt: "),
             (dir.path().to_path_buf(), "is not a regular file"),
-            (large, "large.txt is over the 10 byte file limit"),
+            (large, "large.txt is over the 10 byte limit"),
             (binary, "binary.txt is not UTF-8 text"),
         ] {
             let error = read_text(&path, 10, Links::Follow).await.unwrap_err();
@@ -223,13 +198,7 @@ mod tests {
     async fn a_fifo_is_refused_without_waiting_for_a_writer() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::test_support::make_fifo(&fifo);
 
         // A read that waited for a writer would never end: nothing writes.
         let read = tokio::time::timeout(std::time::Duration::from_secs(5), read_text(&fifo, 10, Links::Follow)).await;

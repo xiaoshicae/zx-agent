@@ -8,16 +8,21 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde_json::Value;
-
-use crate::ai::ToolCall;
-use crate::files::read_regular_file;
-use crate::sync::lock;
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_core::tools::ToolOutput;
 
+use crate::ai::ToolCall;
+use crate::files::{Links, Unreadable, read_regular_blocking};
+use crate::sync::lock;
+
 /// The largest secret file read, such as a token: anything bigger is not a single secret, and
 /// it could never be matched whole in the bounded output of a built-in tool.
-const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
+pub const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
+
+/// Values shorter than this many characters are still redacted, but every occurrence of the
+/// same text is replaced too, wherever it appears. GitLab masks only values of at least 8
+/// characters (<https://docs.gitlab.com/ci/variables/>).
+pub const MIN_SECRET_CHARS: usize = 8;
 
 /// Earlier values read from secret files that stay redacted after the files change, oldest
 /// dropped first; current values are always redacted. A rotated credential, such as a
@@ -58,7 +63,8 @@ impl RedactSecrets {
     /// covered and earlier values stay redacted; surrounding whitespace is ignored. Content
     /// that is not UTF-8 is matched as the built-in tools print it, decoded lossily. A file
     /// that is missing, or that this process may not read, is skipped: commands running as
-    /// the same user cannot read it either. Any other failure, such as a file over 64 KiB or
+    /// the same user cannot read it either. Any other failure, such as a file over
+    /// [`MAX_SECRET_FILE_BYTES`] or
     /// one that is not a regular file, fails the hook, which discards the tool output; check
     /// the files with [`check_secret_files`] before use to report those at startup.
     pub fn with_secret_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
@@ -104,12 +110,17 @@ fn current_values(paths: &[PathBuf]) -> Result<Vec<String>, String> {
     let mut current = Vec::new();
     for path in paths {
         for file in secret_files_at(path)? {
-            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+            match read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) {
                 // The built-in tools decode output the same way, so a value that is not
                 // UTF-8 appears in their output exactly like this.
                 Ok(bytes) => current.push(String::from_utf8_lossy(&bytes).trim().to_string()),
-                Err(error) if is_unreadable(&error) => {}
-                Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
+                Err(unreadable) if is_missing_or_forbidden(&unreadable) => {}
+                Err(unreadable) => {
+                    return Err(format!(
+                        "cannot read a secret file to redact tool output: {}",
+                        unreadable.describe(&file, MAX_SECRET_FILE_BYTES)
+                    ));
+                }
             }
         }
     }
@@ -121,6 +132,9 @@ fn current_values(paths: &[PathBuf]) -> Result<Vec<String>, String> {
 /// directly inside it whose names do not start with a dot. That skips the `..data` links that
 /// Kubernetes keeps in Secret volumes; subdirectories are skipped too. A directory that is
 /// missing or that this process may not list yields nothing, like an unreadable file.
+///
+/// `current_values`, `check_secret_files` and `short_secret_files` each walk these files and
+/// read them; they differ in what a failure means, so each keeps its own loop.
 fn secret_files_at(path: &Path) -> Result<Vec<PathBuf>, String> {
     if !path.is_dir() {
         // A file, or nothing at all: reading it decides, with the same rules as for files.
@@ -200,7 +214,8 @@ fn redact_json(value: &mut Value, secrets: &[&str]) {
 /// Check before use that the secret files registered at `paths`, given as to
 /// [`RedactSecrets::with_secret_files`], can be redacted.
 ///
-/// Each must be a regular file of at most 64 KiB. A larger file could never be matched whole
+/// Each must be a regular file of at most [`MAX_SECRET_FILE_BYTES`]. A larger file could never
+/// be matched whole
 /// in the output of a built-in tool, and it usually holds structured data, whose single
 /// values should be registered instead. Content that is not UTF-8 is fine. Files that are
 /// missing or that this process may not read are not errors here: the redaction skips them.
@@ -210,10 +225,10 @@ pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
     let mut problems = Vec::new();
     for path in paths {
         for file in secret_files_at(path)? {
-            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+            match read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) {
                 Ok(_) => {}
-                Err(error) if is_unreadable(&error) => {}
-                Err(error) => problems.push(format!("{error:#}")),
+                Err(unreadable) if is_missing_or_forbidden(&unreadable) => {}
+                Err(unreadable) => problems.push(unreadable.describe(&file, MAX_SECRET_FILE_BYTES)),
             }
         }
     }
@@ -226,11 +241,6 @@ pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
         ))
     }
 }
-
-/// Values shorter than this many characters are still redacted, but every occurrence of the
-/// same text is replaced too, wherever it appears. GitLab masks only values of at least 8
-/// characters (<https://docs.gitlab.com/ci/variables/>).
-pub const MIN_SECRET_CHARS: usize = 8;
 
 /// The files at `paths`, given as to [`RedactSecrets::with_secret_files`], whose value is
 /// shorter than [`MIN_SECRET_CHARS`] characters, for a notice at startup.
@@ -248,7 +258,7 @@ pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
         };
         for file in files {
             // Likewise for a file that cannot be read.
-            let Ok(bytes) = read_regular_file(&file, MAX_SECRET_FILE_BYTES) else {
+            let Ok(bytes) = read_regular_blocking(&file, MAX_SECRET_FILE_BYTES, Links::Follow) else {
                 continue;
             };
             let chars = String::from_utf8_lossy(&bytes).trim().chars().count();
@@ -261,8 +271,6 @@ pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Whether a secret file is missing or not readable by this process.
-fn is_unreadable(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|error| matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied))
+fn is_missing_or_forbidden(unreadable: &Unreadable) -> bool {
+    matches!(unreadable, Unreadable::Io(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied))
 }

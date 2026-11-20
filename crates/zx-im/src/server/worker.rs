@@ -8,7 +8,11 @@
 //! the others it records in the session as context for the next answer.
 //!
 //! - `input`: bounded message admission and recording heard context
+//! - `commands`: `/cancel`, `/new` and `/compact`
+//! - `cards`: the approval cards, from their posting to their closing
 
+mod cards;
+mod commands;
 mod input;
 
 use std::future::Future;
@@ -17,28 +21,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError, mpsc};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use zx_agent::ai::now_ms;
-use zx_agent::input::PendingInput;
-use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
+use zx_agent::transcript::CustomMessage;
 
-use crate::{Addressee, ApprovalCard, ApprovalId, Choice, ImChannel, MessageRef, Post, Replacement, UserId};
-
+use self::cards::Card;
+pub(super) use self::commands::Command;
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Finished, Opened, Outlet};
 use super::received::Receipt;
-use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
+use super::render::answer_of;
+use super::{ServerEvent, SessionKey, Shared};
+use crate::{Addressee, ApprovalId, Choice, ImChannel, MessageRef, UserId};
 
-/// Sent alone, cancels the conversation's run.
-const CANCEL_COMMAND: &str = "/cancel";
-/// Sent alone, starts a new session for the conversation, as chat's `/new` does.
-const NEW_COMMAND: &str = "/new";
-/// Sent alone, summarizes the earlier part of the conversation, as chat's `/compact` does.
-const COMPACT_COMMAND: &str = "/compact";
 /// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
 const UPDATE_CAPACITY: usize = 16;
 
@@ -76,7 +74,7 @@ pub(super) struct WorkerSetup {
     pub(super) shared: Arc<Shared>,
     pub(super) inbox: mpsc::Receiver<WorkerInput>,
     pub(super) budget: Arc<InputBudget>,
-    pub(super) retire: mpsc::Sender<Retire>,
+    pub(super) retire_to: mpsc::Sender<Retire>,
     pub(super) stop: CancellationToken,
 }
 
@@ -88,41 +86,40 @@ pub(super) struct WorkerSetup {
 /// stays in the backlog, for the next start.
 pub(super) async fn run(setup: WorkerSetup) {
     let mut worker = Worker::new(setup);
-    let mut lifecycle = Lifecycle::Serving;
     loop {
-        if lifecycle == Lifecycle::Draining && matches!(worker.phase, Phase::Idle { .. }) {
+        if worker.lifecycle == Lifecycle::Draining && matches!(worker.phase, Phase::Idle { .. }) {
             break;
         }
         tokio::select! {
             // Updates first: a card is registered, and closed, before the run that asked ends.
             biased;
             Some(update) = worker.updated.recv() => worker.approval(update).await,
-            () = worker.stop.cancelled(), if !lifecycle.closing() => {
-                lifecycle = Lifecycle::Stopping;
+            () = worker.stop.cancelled(), if !worker.lifecycle.closing() => {
+                worker.lifecycle = Lifecycle::Stopping;
                 // Input waiting for a slot will not run. A run stops through its token and
                 // ends as usual.
                 worker.stop_waiting();
             }
-            input = worker.inbox.recv(), if lifecycle.inbox_open() => match input {
+            input = worker.inbox.recv(), if worker.lifecycle.inbox_open() => match input {
                 Some(input) => {
                     worker.received += 1;
-                    if lifecycle == Lifecycle::Retiring {
-                        lifecycle = Lifecycle::Serving;
+                    if worker.lifecycle == Lifecycle::Retiring {
+                        worker.lifecycle = Lifecycle::Serving;
                     }
                     // Input that arrives while the server stops does not run: a message stays
                     // in the backlog, and a click finds its approval ended by the stop.
-                    if !lifecycle.closing() {
+                    if !worker.lifecycle.closing() {
                         worker.input(input).await;
                     }
                 }
                 // The router ended this conversation, or the server is stopping.
-                None => lifecycle = Lifecycle::Draining,
+                None => worker.lifecycle = Lifecycle::Draining,
             },
             // A closing conversation waits for its inbox to close, not for the idle time.
-            step = step(&mut worker.phase, worker.out.shared.idle, lifecycle.ending()) => match step {
-                Step::Slot(slot) => worker.slot(slot).await,
-                Step::Ended(ended) => worker.ended(ended, lifecycle.closing()).await,
-                Step::Idle => lifecycle = worker.retire().await,
+            step = step(&mut worker.phase, worker.out.shared.idle, worker.lifecycle) => match step {
+                Step::Slot(slot, waiting) => worker.slot(slot, waiting).await,
+                Step::Ended(ended, running) => worker.ended(ended, running).await,
+                Step::Idle => worker.retire().await,
             },
         }
     }
@@ -162,28 +159,36 @@ type Slot = Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireErro
 
 enum Phase {
     /// No run and no input waiting; the session is held until the idle time, or released.
-    Idle { since: Instant, open: Option<Opened> },
-    /// Input waits for a run slot. The future keeps its place in the queue. With nothing
-    /// asked, the slot is only for opening the session to record what was heard.
-    Waiting {
-        slot: Slot,
-        asked: Vec<Asked>,
+    Idle {
+        since: Instant,
         open: Option<Opened>,
-        /// The message that asked, which a first session reads the thread up to.
-        trigger: Option<MessageRef>,
     },
-    /// A prompt, or `/compact`, runs in its own task and holds a run slot; `status` is the
-    /// message that says so, replaced by the answer at the end.
-    Running {
-        task: JoinHandle<Result<Finished, SessionError>>,
-        slot: OwnedSemaphorePermit,
-        status: Option<MessageRef>,
-        open: Opened,
-        after: AfterRun,
-        /// What was asked once `/cancel` or `/new` stopped the run, which takes no more
-        /// input: it runs next, as `after` says.
-        asked: Vec<Asked>,
-    },
+    Waiting(Waiting),
+    Running(Running),
+}
+
+/// Input waits for a run slot. With nothing asked, the slot is only for opening the session to
+/// record what was heard.
+struct Waiting {
+    /// Keeps the conversation's place in the queue for a slot.
+    slot: Slot,
+    asked: Vec<Asked>,
+    open: Option<Opened>,
+    /// The message that asked, which a first session reads the thread up to.
+    trigger: Option<MessageRef>,
+}
+
+/// A prompt, or `/compact`, runs in its own task and holds a run slot.
+struct Running {
+    task: JoinHandle<Result<Finished, SessionError>>,
+    slot: OwnedSemaphorePermit,
+    /// The message that says that the work goes on, replaced by its answer at the end.
+    status: Option<MessageRef>,
+    open: Opened,
+    after: AfterRun,
+    /// What was asked once `/cancel` or `/new` stopped the run, which takes no more input: it
+    /// runs next, as `after` says.
+    asked: Vec<Asked>,
 }
 
 /// What follows a run once it has ended, as the input during the run asked.
@@ -206,54 +211,65 @@ impl Phase {
             open,
         }
     }
+
+    /// The phase, leaving the conversation idle without a session in its place; the caller
+    /// sets what follows.
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::idle(None))
+    }
 }
 
 enum Step {
-    Slot(Result<OwnedSemaphorePermit, AcquireError>),
-    Ended(Result<Result<Finished, SessionError>, JoinError>),
+    /// A run slot came for what waited, or the slots closed.
+    Slot(Result<OwnedSemaphorePermit, AcquireError>, Waiting),
+    /// The work ended: how, or why it gave no report.
+    Ended(Result<Finished, String>, Running),
     Idle,
 }
 
-/// What the current phase waits for. The futures stay in `phase`, so a step that another
-/// branch interrupts loses nothing. `ending` is set once the conversation retires or closes.
-async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
+/// What the current phase waits for. The futures stay in `phase` until they are done, so a
+/// step that another branch interrupts loses nothing; the phase that waited then goes with the
+/// step, leaving the conversation idle without a session until the step's handler sets what
+/// follows. Nothing waits for the idle time once the conversation's `lifecycle` ends it.
+async fn step(phase: &mut Phase, idle: Duration, lifecycle: Lifecycle) -> Step {
     match phase {
         Phase::Idle { since, .. } => {
             match since.checked_add(idle) {
-                Some(deadline) if !ending => tokio::time::sleep_until(deadline).await,
+                Some(deadline) if !lifecycle.ending() => tokio::time::sleep_until(deadline).await,
                 // Ending already, or an idle time too long to schedule: nothing to wait for.
                 _ => std::future::pending::<()>().await,
             }
             Step::Idle
         }
-        Phase::Waiting { slot, .. } => Step::Slot(slot.as_mut().await),
-        Phase::Running { task, .. } => Step::Ended(task.await),
+        Phase::Waiting(waiting) => {
+            let slot = waiting.slot.as_mut().await;
+            let Phase::Waiting(waiting) = phase.take() else {
+                unreachable!("the phase that waited for the slot is still there");
+            };
+            Step::Slot(slot, waiting)
+        }
+        Phase::Running(running) => {
+            let ended = match (&mut running.task).await {
+                // The session refused the work: only this worker prompts it, one run at a
+                // time, so never for being busy.
+                Ok(ended) => ended.map_err(|error| error.to_string()),
+                // The work panicked.
+                Err(error) => Err(error.to_string()),
+            };
+            let Phase::Running(running) = phase.take() else {
+                unreachable!("the phase that ran the work is still there");
+            };
+            Step::Ended(ended, running)
+        }
     }
 }
 
-/// Whether `text` is one of the conversation's commands rather than something to answer.
-pub(super) fn is_command(text: &str) -> bool {
-    matches!(text.trim(), CANCEL_COMMAND | NEW_COMMAND | COMPACT_COMMAND)
-}
-
-/// A card waiting for its result.
-struct Pending {
-    id: ApprovalId,
-    /// What the card shows, shown again once it is closed.
-    card: ApprovalCard,
-    /// The card as posted.
-    posted: MessageRef,
-    decision: Decision,
-}
-
-/// How far a card's decision has come.
-enum Decision {
-    /// Nobody has clicked yet; the first approver's click decides.
-    Open,
-    /// Who decided.
-    By(UserId),
-    /// A click came after the run stopped waiting; the card closes without a decider.
-    Lapsed,
+/// Why the conversation has no session to run or record in.
+enum OpenFailure {
+    /// The stop ended the wait: what was asked and heard stays in the backlog.
+    Stopped,
+    /// The session could not be opened, for this reason.
+    Failed(String),
 }
 
 struct Worker {
@@ -266,13 +282,21 @@ struct Worker {
     stop: CancellationToken,
     updates: mpsc::Sender<ApprovalUpdate>,
     updated: mpsc::Receiver<ApprovalUpdate>,
+    lifecycle: Lifecycle,
     phase: Phase,
-    pending: Vec<Pending>,
+    cards: Vec<Card>,
     /// The person whose message the bot took last, as long as nobody else spoke since: their
     /// next message is meant for the bot even without a mention.
     answering: Option<UserId>,
     /// Messages not answered and not yet in the session, which a run holds meanwhile.
-    heard: Vec<PendingInput>,
+    heard: Vec<Heard>,
+}
+
+/// What someone said that the bot does not answer, until the session records it.
+struct Heard {
+    message: CustomMessage,
+    /// Its share of the budget and its receipt, which go once it is recorded.
+    hold: (InputPermit, Receipt),
 }
 
 impl Worker {
@@ -283,7 +307,7 @@ impl Worker {
             shared,
             inbox,
             budget,
-            retire,
+            retire_to,
             stop,
         } = setup;
         let (updates, updated) = mpsc::channel(UPDATE_CAPACITY);
@@ -297,45 +321,15 @@ impl Worker {
             inbox,
             budget,
             received: 0,
-            retire_to: retire,
+            retire_to,
             stop,
             updates,
             updated,
+            lifecycle: Lifecycle::Serving,
             phase: Phase::idle(None),
-            pending: Vec::new(),
+            cards: Vec::new(),
             answering: None,
             heard: Vec::new(),
-        }
-    }
-
-    /// `/new`: the conversation goes on in a new session. A run in progress is cancelled
-    /// first, and its end starts the new session; input that waited for a run slot is
-    /// dropped with the session it was meant for.
-    async fn renew(&mut self) {
-        self.answering = None;
-        self.heard.clear();
-        if let Phase::Running { open, after, .. } = &mut self.phase {
-            *after = AfterRun::Renew;
-            open.session.cancel();
-            return;
-        }
-        self.stop_waiting();
-        self.start_over().await;
-    }
-
-    /// Create a new session and hold it in place of the one held so far, then say so in the
-    /// conversation. Created at once, it is the conversation's latest session whatever
-    /// happens before the next message: a conversation that is released, or a process that
-    /// restarts, goes on in it. A session that cannot be created is reported in the
-    /// conversation, which then stays in the session it had. Only while idle.
-    async fn start_over(&mut self) {
-        match self.out.create().await {
-            Ok(opened) => {
-                // The session held so far is closed here; it stays in the storage.
-                self.phase = Phase::idle(Some(opened));
-                self.out.post(self.out.replies().new_session.clone()).await;
-            }
-            Err(error) => self.out.cannot_open(&error).await,
         }
     }
 
@@ -347,20 +341,17 @@ impl Worker {
             Ok(slot) => self.open_and_start(open, asked, slot, trigger.as_ref()).await,
             Err(TryAcquireError::NoPermits) => {
                 let answers_wait = !asked.is_empty();
-                self.phase = Phase::Waiting {
+                self.phase = Phase::Waiting(Waiting {
                     slot: Box::pin(Arc::clone(&self.out.shared.permits).acquire_owned()),
                     asked,
                     open,
                     trigger,
-                };
+                });
                 if answers_wait {
                     self.out.post(self.out.replies().queued.clone()).await;
                 }
             }
-            Err(TryAcquireError::Closed) => {
-                self.phase = Phase::idle(open);
-                self.out.failed("the run slots are closed".into());
-            }
+            Err(TryAcquireError::Closed) => self.slots_closed(open),
         }
     }
 
@@ -373,8 +364,19 @@ impl Worker {
         slot: OwnedSemaphorePermit,
         trigger: Option<&MessageRef>,
     ) {
-        let Some(open) = self.opened(open, trigger, !asked.is_empty()).await else {
-            return;
+        let open = match self.opened(open, trigger).await {
+            Ok(open) => open,
+            Err(OpenFailure::Stopped) => return,
+            // Nobody asked, so only the operator hears of it.
+            Err(OpenFailure::Failed(error)) if asked.is_empty() => {
+                self.out.failed(format!(
+                    "cannot open the session; {} message(s) not recorded: {error}",
+                    self.heard.len()
+                ));
+                self.heard.clear();
+                return;
+            }
+            Err(OpenFailure::Failed(error)) => return self.out.cannot_open(&error).await,
         };
         if asked.is_empty() {
             self.phase = Phase::idle(Some(open));
@@ -386,38 +388,18 @@ impl Worker {
     }
 
     /// The conversation's session with what was heard written into it, opened unless `open`
-    /// still holds it; `None` when it cannot be opened or the stop ends the wait. The
-    /// conversation hears why only when something was `asked` of it. Opening waits as long as
-    /// what it waits for: the platform's calls, each bounded, and the session's setup.
-    async fn opened(&mut self, open: Option<Opened>, trigger: Option<&MessageRef>, asked: bool) -> Option<Opened> {
+    /// still holds it. Opening waits as long as what it waits for: the platform's calls, each
+    /// bounded, and the session's setup.
+    async fn opened(&mut self, open: Option<Opened>, trigger: Option<&MessageRef>) -> Result<Opened, OpenFailure> {
         let open = match open.filter(Opened::still_open) {
             Some(open) => open,
-            None => {
-                let opened = tokio::select! {
-                    // What was asked and heard stays in the backlog.
-                    () = self.stop.cancelled() => return None,
-                    opened = self.out.open(trigger) => opened,
-                };
-                match opened {
-                    Ok(open) => open,
-                    Err(error) if asked => {
-                        self.out.cannot_open(&error).await;
-                        return None;
-                    }
-                    // Nobody asked, so only the operator hears of it.
-                    Err(error) => {
-                        self.out.failed(format!(
-                            "cannot open the session; {} message(s) not recorded: {error}",
-                            self.heard.len()
-                        ));
-                        self.heard.clear();
-                        return None;
-                    }
-                }
-            }
+            None => tokio::select! {
+                () = self.stop.cancelled() => return Err(OpenFailure::Stopped),
+                opened = self.out.open(trigger) => opened.map_err(OpenFailure::Failed)?,
+            },
         };
         self.record_in(&open.session).await;
-        Some(open)
+        Ok(open)
     }
 
     /// Post that work started, then do `work`, a prompt's run or `/compact`'s, in a task of
@@ -434,113 +416,69 @@ impl Worker {
             // start replaces this status.
             self.out.shared.keep_status(&self.out.key, status).await;
         }
-        self.phase = Phase::Running {
+        self.phase = Phase::Running(Running {
             task: tokio::spawn(work),
             slot,
             status,
             open,
             after: AfterRun::Continue,
             asked: Vec::new(),
-        };
+        });
     }
 
-    /// `/compact`: summarize the earlier part of the conversation, as work of its own that
-    /// holds a run slot, shows its status, and that `/cancel`, `/new` and the stop end like a
-    /// run. Only while the conversation is idle and a slot is free: otherwise it says that it
-    /// is busy, and the command is to be sent again. A conversation without a session has
-    /// nothing to summarize, and none is made for the command.
-    async fn compact(&mut self) {
-        let free = match self.take_phase() {
-            Phase::Idle { open, .. } => {
-                if open.is_none() && self.out.shared.session_of(&self.out.key).is_none() {
-                    self.out.post(self.out.replies().nothing_to_compact.clone()).await;
-                    return;
-                }
-                match Arc::clone(&self.out.shared.permits).try_acquire_owned() {
-                    Ok(slot) => Ok((open, slot)),
-                    Err(_) => Err(Phase::idle(open)),
-                }
-            }
-            busy @ (Phase::Waiting { .. } | Phase::Running { .. }) => Err(busy),
-        };
-        let (open, slot) = match free {
-            Ok(free) => free,
-            Err(busy) => {
-                self.phase = busy;
-                self.out.post(self.out.replies().busy.clone()).await;
-                return;
-            }
-        };
-        let Some(open) = self.opened(open, None, true).await else {
-            return;
-        };
-        let work = self.out.compact(&open.session, self.stop.clone());
-        self.start(open, slot, work).await;
-    }
-
-    /// Take the phase, leaving Idle without a session; the caller sets what follows.
-    fn take_phase(&mut self) -> Phase {
-        std::mem::replace(&mut self.phase, Phase::idle(None))
-    }
-
-    async fn slot(&mut self, slot: Result<OwnedSemaphorePermit, AcquireError>) {
-        let (asked, open, trigger) = match self.take_phase() {
-            Phase::Waiting {
-                asked, open, trigger, ..
-            } => (asked, open, trigger),
-            // Only a waiting conversation gets a slot.
-            other => {
-                self.phase = other;
-                return;
-            }
-        };
+    /// Go on with what `waiting` held once its run slot came: run what was asked, or record
+    /// what was heard.
+    async fn slot(&mut self, slot: Result<OwnedSemaphorePermit, AcquireError>, waiting: Waiting) {
+        let Waiting {
+            asked, open, trigger, ..
+        } = waiting;
         match slot {
             Ok(slot) => self.open_and_start(open, asked, slot, trigger.as_ref()).await,
-            // The server never closes its semaphore.
-            Err(_) => {
-                self.phase = Phase::idle(open);
-                self.out.failed("the run slots are closed".into());
-            }
+            Err(_) => self.slots_closed(open),
         }
     }
 
-    /// Post the answer and record what was heard meanwhile, then run what was asked as the run
-    /// ended. The run gives up its slot first, so that the next run waits its turn like any
-    /// other. After `/new` that input runs in the new session, after `/cancel` it is dropped,
-    /// and while the server stops it stays in the backlog, with what was heard.
-    async fn ended(&mut self, ended: Result<Result<Finished, SessionError>, JoinError>, closing: bool) {
-        let (status, open, after, asked) = match self.take_phase() {
-            Phase::Running {
-                slot,
-                status,
-                open,
-                after,
-                asked,
-                ..
-            } => {
-                drop(slot);
-                (status, open, after, asked)
-            }
-            // Only a running conversation ends a run.
-            other => {
-                self.phase = other;
-                return;
-            }
+    /// The server never closes its run slots; should they be closed, what was asked is dropped,
+    /// and the operator hears of it.
+    fn slots_closed(&mut self, open: Option<Opened>) {
+        self.phase = Phase::idle(open);
+        self.out.failed("the run slots are closed".into());
+    }
+
+    /// Post the answer of the work `running` did, then run what was asked as it ended, after
+    /// what was heard meanwhile is written. The work gives up its slot first, so that the next
+    /// run waits its turn like any other. After `/new` that input runs in the new session,
+    /// after `/cancel` it is dropped, and while the server stops it stays in the backlog, with
+    /// what was heard.
+    async fn ended(&mut self, ended: Result<Finished, String>, running: Running) {
+        let Running {
+            slot,
+            status,
+            open,
+            after,
+            asked,
+            ..
+        } = running;
+        drop(slot);
+        let cancelled = matches!(&ended, Ok(finished) if finished.cancelled());
+        let answer = if cancelled && self.lifecycle.closing() {
+            // The stop cancels runs through their token. A `/cancel` just before the stop ends
+            // the same way and is told the same.
+            self.out.replies().stopped.clone()
+        } else {
+            answer_of(ended, self.out.replies())
         };
-        let cancelled = matches!(&ended, Ok(Ok(finished)) if finished.cancelled());
-        self.out.answer(ended, status, closing).await;
-        let leftover = self.leftover(open);
-        if closing {
+        self.out.answer(answer, status).await;
+        let (open, leftover) = self.leftover(open);
+        if self.lifecycle.closing() {
             // A stopping server writes nothing more: what was asked or heard and not written
             // stays in the backlog, for the next start.
+            self.phase = Phase::idle(open);
             return;
         }
-        let leftover = match after {
-            AfterRun::Continue => leftover,
-            AfterRun::Renew => {
-                self.start_over().await;
-                leftover
-            }
+        let (open, leftover) = match after {
+            AfterRun::Continue => (open, leftover),
+            AfterRun::Renew => (self.out.start_over(open, &self.stop).await, leftover),
             AfterRun::Cancel => {
                 // The run had ended on its own before the cancel reached it, so its answer
                 // does not say what the cancel did.
@@ -554,67 +492,47 @@ impl Worker {
                     self.out.post(reply).await;
                 }
                 // Dropping them returns their share of the budget.
-                Vec::new()
+                (open, Vec::new())
             }
         };
         // What was asked while the run was being stopped runs after what it left.
-        let leftover: Vec<Asked> = leftover.into_iter().chain(asked).collect();
-        self.record_heard().await;
-        if leftover.is_empty() {
-            return;
-        }
-        match self.take_phase() {
-            Phase::Idle { open, .. } => self.begin(open, leftover, None).await,
-            // Recording what was heard waits for a slot: the input waits with it.
-            Phase::Waiting {
-                slot,
-                mut asked,
-                open,
-                trigger,
-            } => {
-                asked.extend(leftover);
-                self.phase = Phase::Waiting {
-                    slot,
-                    asked,
-                    open,
-                    trigger,
-                };
-                self.out.post(self.out.replies().queued.clone()).await;
-            }
-            running @ Phase::Running { .. } => self.phase = running,
+        let asked: Vec<Asked> = leftover.into_iter().chain(asked).collect();
+        if asked.is_empty() {
+            self.phase = Phase::idle(open);
+            self.record_heard().await;
+        } else {
+            // Opening the session for the run writes what was heard first.
+            self.begin(open, asked, None).await;
         }
     }
 
-    /// What was asked after the run's last look at the queue, leaving the session as the
-    /// conversation keeps it: held, or let go when it was closed under the conversation, as
-    /// a session closes itself when it can no longer write its records. What a closed session
-    /// had queued was acknowledged, so it is taken back, to be answered in the session opened
-    /// again.
-    fn leftover(&mut self, open: Opened) -> Vec<Asked> {
-        let asked = match open.leftover() {
-            Ok(asked) => asked,
+    /// What was asked after the run's last look at the queue, and the session the
+    /// conversation keeps: `open`, or none once it was closed under the conversation, as a
+    /// session closes itself when it can no longer write its records; it is then let go. What
+    /// a closed session had queued was acknowledged, so it is taken back, to be answered in
+    /// the session opened again.
+    fn leftover(&self, open: Opened) -> (Option<Opened>, Vec<Asked>) {
+        match open.leftover() {
+            Ok(asked) => (Some(open), asked),
             Err(SessionError::Closed) => {
                 let asked = open.taken_back();
-                self.phase = Phase::idle(Some(open));
-                self.release();
-                return asked;
+                self.let_go(open);
+                (None, asked)
             }
             Err(error) => {
                 self.out.failed(format!("cannot take the queued input: {error}"));
-                Vec::new()
+                (Some(open), Vec::new())
             }
-        };
-        self.phase = Phase::idle(Some(open));
-        asked
+        }
     }
 
     /// Leave Waiting for Idle, keeping the session: what was asked and waited, or `None`
     /// when the conversation was not waiting.
     fn stop_waiting(&mut self) -> Option<Vec<Asked>> {
-        match self.take_phase() {
-            Phase::Waiting { asked, open, .. } => {
-                self.phase = Phase::idle(open);
-                Some(asked)
+        match self.phase.take() {
+            Phase::Waiting(waiting) => {
+                self.phase = Phase::idle(waiting.open);
+                Some(waiting.asked)
             }
             other => {
                 self.phase = other;
@@ -625,141 +543,17 @@ impl Worker {
 
     /// Release the session and tell the router, which ends the conversation unless a message
     /// is on its way: the conversation retires, or stops when the router no longer reads.
-    async fn retire(&mut self) -> Lifecycle {
+    async fn retire(&mut self) {
         self.release();
         let retire = Retire {
             key: self.out.key.clone(),
             received: self.received,
         };
-        match self.retire_to.send(retire).await {
+        self.lifecycle = match self.retire_to.send(retire).await {
             Ok(()) => Lifecycle::Retiring,
             // The router no longer reads: the server is stopping.
             Err(_) => Lifecycle::Stopping,
-        }
-    }
-
-    async fn cancel(&mut self) {
-        if let Phase::Running { open, after, .. } = &mut self.phase {
-            // The run ends as aborted, and its status message then says so. What was steered
-            // into it is dropped with it, also when the run ended just before; what is asked
-            // from now on waits for the next run.
-            open.session.cancel();
-            if *after == AfterRun::Continue {
-                *after = AfterRun::Cancel;
-            }
-            return;
-        }
-        let asked = self.stop_waiting().unwrap_or_default();
-        let replies = self.out.replies();
-        let text = if asked.is_empty() {
-            replies.nothing_to_cancel.clone()
-        } else {
-            replies.cancelled.clone()
         };
-        self.out.post(text).await;
-        // Waiting only to record what was heard is not something to cancel: that waits again.
-        self.record_heard().await;
-    }
-
-    async fn decide(&mut self, user: UserId, approval: ApprovalId, choice: Choice) {
-        let Some(index) = self.pending.iter().position(|pending| pending.id == approval) else {
-            // The card was closed already; a late click changes nothing.
-            return;
-        };
-        if !self.out.shared.is_approver(&self.out.key.platform, &user) {
-            self.out.post(self.out.replies().not_approver.clone()).await;
-            return;
-        }
-        // The first approver's click decides; later clicks on the card change nothing.
-        if !matches!(self.pending[index].decision, Decision::Open) {
-            return;
-        }
-        let decision = match choice {
-            Choice::AllowOnce => ApprovalDecision::AllowOnce,
-            Choice::Deny => ApprovalDecision::Deny(format!("denied in the chat by {user}")),
-        };
-        // The run may have stopped waiting (timeout or cancellation); its approval_resolved
-        // event then closes the card without a decider.
-        self.pending[index].decision = match self.answer(&approval, decision) {
-            Ok(()) => Decision::By(user),
-            Err(_) => Decision::Lapsed,
-        };
-    }
-
-    /// Answer the approval request `id` of the run in progress.
-    fn answer(&self, id: &ApprovalId, decision: ApprovalDecision) -> Result<(), SessionError> {
-        match &self.phase {
-            Phase::Running { open, .. } => open.session.resolve_approval(&id.0, decision),
-            // Without a run, no request waits.
-            Phase::Idle { .. } | Phase::Waiting { .. } => Err(SessionError::UnknownApproval),
-        }
-    }
-
-    /// A call waits for approval: post its card. Without a card nobody can decide, so the
-    /// call is denied, and the model hears why.
-    async fn ask(&mut self, id: ApprovalId, card: ApprovalCard) {
-        let request = Post::ApprovalRequest {
-            id: id.clone(),
-            card: card.clone(),
-        };
-        match self.out.ask(&request).await {
-            Ok(posted) => self.pending.push(Pending {
-                id,
-                card,
-                posted,
-                decision: Decision::Open,
-            }),
-            Err(error) => {
-                // The request may have ended meanwhile; then there is nothing to deny.
-                drop(self.answer(&id, ApprovalDecision::Deny(error)));
-            }
-        }
-    }
-
-    async fn approval(&mut self, update: ApprovalUpdate) {
-        match update {
-            ApprovalUpdate::Requested { id, card } => self.ask(id, card).await,
-            ApprovalUpdate::Resolved {
-                id,
-                tool_call_id,
-                tool,
-                result,
-            } => {
-                let pending = self
-                    .pending
-                    .iter()
-                    .position(|pending| Some(&pending.id) == id.as_ref())
-                    .map(|index| self.pending.swap_remove(index));
-                let (approval, user) = match pending {
-                    Some(pending) => {
-                        let user = match pending.decision {
-                            Decision::By(user) => Some(user),
-                            Decision::Open | Decision::Lapsed => None,
-                        };
-                        let closed = Replacement::ApprovalResolved {
-                            id: pending.id.clone(),
-                            card: pending.card,
-                            user: user.clone(),
-                            result,
-                        };
-                        // A card left open was reported; the decision stands either way.
-                        self.out.replace(&pending.posted, &closed).await;
-                        (Some(pending.id), user)
-                    }
-                    // No card: nobody was asked, or posting it failed.
-                    None => (None, None),
-                };
-                self.out.shared.sink.emit(&ServerEvent::Approval(ApprovalRecord {
-                    key: self.out.key.clone(),
-                    tool_call_id,
-                    tool,
-                    approval,
-                    user,
-                    result,
-                    ended_ms: now_ms(),
-                }));
-            }
-        }
     }
 
     /// Let go of the session an idle conversation holds, after the idle time or because it
@@ -768,10 +562,16 @@ impl Worker {
         if let Phase::Idle { open, .. } = &mut self.phase
             && let Some(opened) = open.take()
         {
-            drop(opened);
-            self.out.shared.sink.emit(&ServerEvent::Released {
-                key: self.out.key.clone(),
-            });
+            self.let_go(opened);
         }
+    }
+
+    /// Let go of `open`, which closes the session, and tell the operator: the next message
+    /// opens it again.
+    fn let_go(&self, open: Opened) {
+        drop(open);
+        self.out.shared.sink.emit(&ServerEvent::Released {
+            key: self.out.key.clone(),
+        });
     }
 }

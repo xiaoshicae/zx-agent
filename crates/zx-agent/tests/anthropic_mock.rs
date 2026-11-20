@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-
 use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, DEFAULT_API_VERSION};
-use zx_agent::ai::{Message, PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
+use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::events::RunOutcome;
 use zx_testing::mock_server::{MockServer, Reply};
@@ -80,17 +79,7 @@ fn answer(parts: Vec<Vec<Value>>) -> Reply {
 
 fn error_reply(status: u16, headers: &str, kind: &str, message: &str) -> Reply {
     let body = json!({"type": "error", "error": {"type": kind, "message": message}}).to_string();
-    Reply::Raw(format!(
-        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
-        body.len()
-    ))
-}
-
-fn provider_error(runner: &zx_testing::Driven) -> ProviderError {
-    match runner.session().messages().last() {
-        Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
-        other => panic!("expected a failed assistant message: {other:?}"),
-    }
+    Reply::error(status, headers, &body)
 }
 
 #[tokio::test]
@@ -145,7 +134,7 @@ async fn a_tool_round_trip_sends_thinking_back_with_its_signature() {
 }
 
 #[tokio::test]
-async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
+async fn thinking_bound_to_another_conversation_fails_the_request_as_the_api_answered() {
     let refused = error_reply(
         400,
         "",
@@ -160,7 +149,6 @@ async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
             ended("end_turn"),
         ]),
         refused,
-        answer(vec![started(), text(0, "second"), ended("end_turn")]),
     ])
     .await;
     let (runner, _) = setup(&server).build().await;
@@ -168,18 +156,40 @@ async fn thinking_bound_to_another_conversation_is_left_out_of_one_more_try() {
 
     let report = runner.run("two").await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Completed, 0));
+    // Nothing leaves the thinking out unrecorded: the API drops it only when the request's
+    // `thinking.block_binding` asks it to.
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("bound to a different conversation"), "{error}");
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].body["messages"][1]["content"][0]["type"], json!("thinking"));
-    assert_eq!(
-        requests[2].body["messages"][1]["content"],
-        json!([{"type": "text", "text": "first"}])
-    );
 }
 
 #[tokio::test]
-async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused() {
+async fn a_spend_cap_denies_access_and_is_not_retried() {
+    let body = json!({"type": "error", "error": {
+        "type": "rate_limit_error",
+        "message": "You have reached your monthly spend limit.",
+        "details": {"error_code": "enforced_spend_limit_reached"},
+    }});
+    let server = MockServer::start(vec![Reply::error(429, "", &body.to_string())]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(2),
+        ..setup(&server)
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert_eq!(runner.provider_error().kind, ProviderErrorKind::AccessDenied);
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_overloaded_api_is_unavailable_with_its_wait() {
     let server = MockServer::start(vec![error_reply(
         529,
         "retry-after: 2\r\n",
@@ -198,7 +208,7 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::Unavailable,
             status: Some(529),
@@ -207,7 +217,10 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
         }
     );
     assert!(report.error.unwrap().contains("HTTP 529: Overloaded"));
+}
 
+#[tokio::test]
+async fn a_refusal_fails_the_run_as_refused() {
     let server = MockServer::start(vec![Reply::Sse(vec![
         started()[0].clone(),
         json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal", "category": "cyber"}}}),
@@ -219,6 +232,6 @@ async fn an_overloaded_api_is_unavailable_with_its_wait_and_a_refusal_is_refused
     let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
-    assert_eq!(provider_error(&runner).kind, ProviderErrorKind::Refused);
+    assert_eq!(runner.provider_error().kind, ProviderErrorKind::Refused);
     assert!(report.error.unwrap().contains("the model refused the request (cyber)"));
 }

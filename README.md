@@ -5,7 +5,7 @@
 当前版本为 v0.1.0，已实现：
 
 - 两个程序：`zx-agent` 的子命令有无人值守的 `run`，终端对话 `chat`（应急与脚本化入口），ACP agent `acp`（交互式界面由 ACP 客户端提供），列出会话的 `sessions`；`zx-im` 是 IM 服务。
-- 流式 provider：OpenAI 兼容服务与 Anthropic Messages API，带错误分类、自动重试与响应大小上限；由 `config.toml` 的 `provider.api` 按名字选用，嵌入方可注册自己的。
+- 流式 provider：OpenAI 兼容服务与 Anthropic Messages API，带错误分类、自动重试与响应大小上限；由 `config.toml` 的 `provider.api` 按名字选用，宿主可注册自己的。
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
@@ -137,7 +137,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 
 ## 作为库使用
 
-`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、ACP、配置文件、追踪导出与 IM；要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `crates/zx-agent/examples/library.rs`，接口与契约见 rustdoc（`cargo doc --no-deps --open`）。
+`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、ACP、配置文件、追踪导出与 IM；要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要宿主给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `crates/zx-agent/examples/library.rs`，接口与契约见 rustdoc（`cargo doc --no-deps --open`）。
 
 ## 文档
 
@@ -159,7 +159,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
 cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-builtin
 cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings      # 不带 ⚑ D:5/CHINA FLAG: 飞书平台的 zx-im
-cargo fmt --check
+cargo fmt --check -- --config group_imports=StdExternalCrate   # 导入按规则 01 分组
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 

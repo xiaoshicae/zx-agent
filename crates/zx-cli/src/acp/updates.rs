@@ -12,30 +12,24 @@ use agent_client_protocol::v1::schema::{
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::Value;
-
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
+    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, Role, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
-use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
+use zx_agent::builtin::tools::WRITE_FILE;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
+use zx_util::stdio::eprint_line;
 
 use super::tool_kind;
-use crate::process::eprint_line;
-use crate::render::call_label;
+use crate::render::{call_label, patch_of};
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.
 pub(super) struct Updates {
     cx: ConnectionTo<Client>,
     session_id: SessionId,
     cwd: PathBuf,
-    state: UpdateState,
-}
-
-#[derive(Default)]
-struct UpdateState {
     /// The answer in progress streamed text, so its end need not repeat it.
     wrote_text: bool,
     /// Arguments of the tool calls in progress, by call ID, for their results.
@@ -48,7 +42,8 @@ impl Updates {
             cx,
             session_id,
             cwd,
-            state: UpdateState::default(),
+            wrote_text: false,
+            calls: HashMap::new(),
         }
     }
 
@@ -60,15 +55,15 @@ impl Updates {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
     }
 
-    /// Replay the conversation `store` holds to a client that loads the session: what it
+    /// Replay the conversation `transcript` holds to a client that loads the session: what it
     /// would have seen as the turns ran, without the streaming. That is every turn of the
     /// branch, also those a summary stands in for in what the model reads.
     ///
     /// The person's prompts, the answers with their thoughts, and the tool calls with their
     /// results; an extension's message when it asked to be shown. Summaries and the model's
     /// own continuations are the model's, not the person's.
-    pub(super) fn replay(&self, store: &Transcript) {
-        let projection = store.raw_projection();
+    pub(super) fn replay(&self, transcript: &Transcript) {
+        let projection = transcript.raw_projection();
         for (index, item) in projection.iter().enumerate() {
             match &item.message {
                 Message::User {
@@ -81,7 +76,7 @@ impl Updates {
                     kind: UserMessageKind::Custom,
                     ..
                 } => {
-                    if let Some(Entry::CustomMessage(entry)) = store.get(&item.entry_id)
+                    if let Some(Entry::CustomMessage(entry)) = transcript.get(&item.entry_id)
                         && entry.message.display
                     {
                         self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content)));
@@ -104,9 +99,12 @@ impl Updates {
                             }
                             MessageBlock::Text { .. } | MessageBlock::Thinking { .. } => {}
                             MessageBlock::ToolCall(MessageCall {
-                                id, name, arguments, ..
+                                id,
+                                name,
+                                arguments: args,
+                                ..
                             }) => {
-                                let call = self.recorded_call(id, name, arguments, &projection[index + 1..]);
+                                let call = self.recorded_call(id, name, args, &projection[index + 1..]);
                                 self.send(SessionUpdate::ToolCall(call));
                             }
                         }
@@ -118,15 +116,15 @@ impl Updates {
 
     /// A recorded call as one update: with its result when a later message holds one, else
     /// still pending, which the next run settles.
-    fn recorded_call(&self, id: &str, name: &str, arguments: &Value, later: &[ProjectedMessage]) -> ToolCall {
-        let call = self.call(id, name, arguments);
+    fn recorded_call(&self, id: &str, name: &str, args: &Value, later: &[ProjectedMessage]) -> ToolCall {
+        let call = self.call(id, name, args);
         let result = later.iter().find_map(|item| match &item.message {
             Message::ToolResult(result) if result.tool_call_id == id => Some(result),
             _ => None,
         });
         match result {
             Some(result) => {
-                let (status, content, raw_output) = self.result_fields(name, Some(arguments), result);
+                let (status, content, raw_output) = self.result_fields(name, Some(args), result);
                 call.status(status).content(content).raw_output(raw_output)
             }
             None => call.status(ToolCallStatus::Pending),
@@ -205,11 +203,7 @@ impl Updates {
         {
             shown.push(ToolCallContent::Diff(Diff::new(self.absolute(path), text)));
         }
-        let patch = details.and_then(|details| details.get("patch")).and_then(Value::as_str);
-        let text = match patch {
-            Some(patch) if name == EDIT_FILE => patch,
-            Some(_) | None => content,
-        };
+        let text = patch_of(name, details).unwrap_or(content);
         if !text.is_empty() {
             shown.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
                 TextContent::new(text),
@@ -220,31 +214,22 @@ impl Updates {
 
     /// Streamed answer text, which the answer's end then need not repeat.
     fn text_streamed(&mut self, text: &str) {
-        self.state.wrote_text = true;
+        self.wrote_text = true;
         self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(text)));
     }
 
-    /// The answer ended: its text when none was streamed, and the arguments of its calls
-    /// kept for their results.
-    fn answer_ended(&mut self, message: &AssistantMessage) {
+    /// The answer ended: its text, when none was streamed. Its calls are kept as each starts,
+    /// which every call of the run does before its result.
+    fn answer_ended(&self, message: &AssistantMessage) {
         let text = message.text();
-        let wrote_text = {
-            let state = &mut self.state;
-            for block in &message.content {
-                if let MessageBlock::ToolCall(MessageCall { id, arguments, .. }) = block {
-                    state.calls.insert(id.clone(), arguments.clone());
-                }
-            }
-            state.wrote_text
-        };
-        if !wrote_text && !text.is_empty() {
+        if !self.wrote_text && !text.is_empty() {
             self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(&text)));
         }
     }
 
     /// A call starts: the client lists it as pending.
     fn tool_started(&mut self, tool_call_id: &str, tool_name: &str, args: &Value) {
-        self.state.calls.insert(tool_call_id.to_string(), args.clone());
+        self.calls.insert(tool_call_id.to_string(), args.clone());
         self.send(SessionUpdate::ToolCall(
             self.call(tool_call_id, tool_name, args).status(ToolCallStatus::Pending),
         ));
@@ -252,7 +237,7 @@ impl Updates {
 
     /// A call ended: its status, what it shows and the raw output.
     fn tool_ended(&mut self, result: &ToolResultMessage) {
-        let args = self.state.calls.remove(&result.tool_call_id);
+        let args = self.calls.remove(&result.tool_call_id);
         let (status, content, raw_output) = self.result_fields(&result.tool_name, args.as_ref(), result);
         self.tool_update(
             &result.tool_call_id,
@@ -280,15 +265,22 @@ impl Updates {
     }
 
     /// The state of the compaction that runs as `run_id`.
-    fn compaction_update(&self, run_id: &str, status: CompactionStatus) {
-        self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
-            CompactionId::new(run_id),
-            status,
-        )));
+    fn compaction_update(&self, run_id: &str, status: CompactionStatus, error: Option<&str>) {
+        let update = CompactionUpdate::new(CompactionId::new(run_id), status);
+        let update = match error {
+            Some(error) => update.error(error.to_string()),
+            None => update,
+        };
+        self.send(SessionUpdate::CompactionUpdate(update));
     }
 }
 
 /// Send `update` about `session_id` to the client.
+///
+/// The SDK queues it without a bound and without waiting (`send_notification` puts it on
+/// an unbounded channel): a client that stops reading stdout lets streamed updates pile up
+/// in memory, though the run's own events are bounded. A bound needs a send that can wait,
+/// which the SDK does not offer.
 pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
     if let Err(error) = cx.send_notification(SessionNotification::new(session_id.clone(), update)) {
         // The connection is going away; what was underway still ends, and its response says how.
@@ -300,7 +292,7 @@ impl Updates {
     /// Send what `event` of a run means to the client.
     pub(super) fn emit(&mut self, event: &Event) {
         match &event.event {
-            EventKind::MessageStart { role: "assistant" } => self.state.wrote_text = false,
+            EventKind::MessageStart { role: Role::Assistant } => self.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => self.text_streamed(text),
@@ -352,12 +344,15 @@ impl Updates {
             EventKind::HookFailed { hook, phase, error } => {
                 self.notice(NoticeSeverity::Error, format!("Hook {hook} failed in {phase}"), error);
             }
-            EventKind::CompactionStart { .. } => self.compaction_update(&event.run_id, CompactionStatus::InProgress),
-            EventKind::CompactionEnd { .. } => self.compaction_update(&event.run_id, CompactionStatus::Completed),
-            EventKind::CompactionFailed { error, .. } => self.send(SessionUpdate::CompactionUpdate(
-                CompactionUpdate::new(CompactionId::new(event.run_id.as_str()), CompactionStatus::Failed)
-                    .error(error.clone()),
-            )),
+            EventKind::CompactionStart { .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::InProgress, None);
+            }
+            EventKind::CompactionEnd { .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::Completed, None);
+            }
+            EventKind::CompactionFailed { error, .. } => {
+                self.compaction_update(&event.run_id, CompactionStatus::Failed, Some(error));
+            }
             EventKind::RunStart { .. }
             | EventKind::RunEnd { .. }
             | EventKind::AttemptStart { .. }

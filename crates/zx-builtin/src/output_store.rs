@@ -1,7 +1,8 @@
 //! Persistent, bounded tool results and a UUID-only paging tool.
 //!
-//! Install the spill hook after redaction. Stored text is the tool's already bounded
-//! result, not data discarded by that tool's own truncation. Files are not auto-deleted.
+//! The spill hook stores what redaction left: it runs at the storage stage, after redaction,
+//! however it is registered. Stored text is the tool's already bounded result, not data
+//! discarded by that tool's own truncation. Files are not auto-deleted.
 //! When storing fails, the result stays inline: storage is an optimisation, not a filter.
 //!
 //! Only the agent stores results, but the host may put their directory in the working
@@ -17,12 +18,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
+use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
+use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 use crate::ai::{ToolCall, ToolDef};
 use crate::tools::paging::{Links, Pager, read_text};
-use crate::tools::{READ_OUTPUT, parse_args, unless_cancelled};
-use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
-use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
+use crate::tools::{READ_CANCELLED, READ_OUTPUT, parse_args, unless_cancelled};
 
 /// The largest stored result, and so the largest [`OutputStoreConfig::max_file_bytes`].
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -30,7 +31,10 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 /// included, and the footer alone takes about a hundred bytes.
 pub const MIN_THRESHOLD_BYTES: usize = 256;
 /// The threshold by default, and the size of a page when nothing is stored.
-const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
+pub const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
+/// How long storing one result may take by default: under the default hook timeout, so that
+/// a slow disk keeps the result inline rather than losing it to that timeout.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Written into the output directory when the store creates it: stored results may contain
 /// sensitive data, and the directory may lie inside a working tree under version control.
 const GITIGNORE: &str = "# Stored tool results may contain sensitive data.\n*\n";
@@ -48,15 +52,23 @@ pub struct OutputStoreConfig {
     /// Hard file size limit, at most [`MAX_FILE_BYTES`]. It applies to both writes and actual
     /// reads.
     pub max_file_bytes: usize,
+    /// How long storing one result may take before it stays inline instead. Keep it below the
+    /// timeout the spill hook is registered with
+    /// ([`DEFAULT_HOOK_TIMEOUT`](zx_core::hooks::DEFAULT_HOOK_TIMEOUT) by default): when that
+    /// one fires first, the tool's output is withheld. A write that runs out of time may still
+    /// finish later and leave its file behind.
+    pub write_timeout: Duration,
 }
 
 impl OutputStoreConfig {
-    /// Settings that store results in `directory`: those over 8 KiB, up to 1 MiB each.
+    /// Settings that store results in `directory`: those over [`DEFAULT_PAGE_BYTES`], up to
+    /// [`MAX_FILE_BYTES`] each, within [`DEFAULT_WRITE_TIMEOUT`].
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
             threshold_bytes: Some(DEFAULT_PAGE_BYTES),
             max_file_bytes: MAX_FILE_BYTES,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 
@@ -113,15 +125,36 @@ impl fmt::Display for InvalidOutputStoreConfig {
 
 impl std::error::Error for InvalidOutputStoreConfig {}
 
+/// The paths on the way from `cwd` to `cwd.join(below)` that are below `cwd`, as `below`
+/// names them. A `..` back to `cwd` is followed, as the directories after it are below it
+/// again; one above `cwd` leaves it, and what comes after is not below it.
+fn on_the_way(cwd: &Path, below: &Path) -> Vec<PathBuf> {
+    let (mut path, mut depth, mut paths) = (cwd.to_path_buf(), 0_usize, Vec::new());
+    for part in below.components() {
+        path.push(part);
+        match part {
+            Component::Normal(_) => {
+                depth += 1;
+                paths.push(path.clone());
+            }
+            Component::ParentDir if depth == 0 => break,
+            Component::ParentDir => depth -= 1,
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    paths
+}
+
 /// The filesystem address and settings of the stored results. The writer hook and the
 /// reading tool own independent copies; no open file or in-memory catalog is shared between
 /// them.
 #[derive(Clone)]
 pub struct OutputStore {
     config: OutputStoreConfig,
-    /// The directory and the directories above it, up to the working directory and without
-    /// it, outermost first; none for a directory outside the working directory. Commands
-    /// write the working directory, so none of these may be a symbolic link.
+    /// The directories on the way to the directory, as its path names them, while they are
+    /// below the working directory, outermost first; none for a directory outside the working
+    /// directory. Commands write the working directory, so none of these may be a symbolic
+    /// link.
     below_cwd: Vec<PathBuf>,
 }
 
@@ -133,15 +166,8 @@ impl OutputStore {
         config.validate()?;
         config.directory = cwd.join(config.directory);
         let below_cwd = match config.directory.strip_prefix(cwd) {
-            // A path that goes up again is not below the working directory.
-            Ok(below) if !below.components().any(|part| part == Component::ParentDir) => below
-                .components()
-                .scan(cwd.to_path_buf(), |path, part| {
-                    path.push(part);
-                    Some(path.clone())
-                })
-                .collect(),
-            Ok(_) | Err(_) => Vec::new(),
+            Ok(below) => on_the_way(cwd, below),
+            Err(_) => Vec::new(),
         };
         Ok(Self { config, below_cwd })
     }
@@ -202,10 +228,10 @@ impl OutputStore {
     }
 
     /// Store `text` in a new file and return its output ID.
-    async fn write(&self, text: &str) -> HookResult<String> {
+    async fn write(&self, text: &str) -> Result<String, String> {
         if text.len() > self.config.max_file_bytes {
             return Err(format!(
-                "tool result is {} bytes, over the {} byte file limit",
+                "tool result is {} bytes, over the {} byte limit",
                 text.len(),
                 self.config.max_file_bytes
             ));
@@ -250,8 +276,8 @@ impl OutputStore {
     /// directory can put one there, and it would lead to any file this process can read.
     async fn read(&self, path: &Path) -> Result<String, String> {
         self.check_directory().await?;
-        let max = u64::try_from(self.config.max_file_bytes)
-            .map_err(|error| format!("output byte limit is out of range: {error}"))?;
+        // A limit beyond a u64 does not limit what a file can hold.
+        let max = u64::try_from(self.config.max_file_bytes).unwrap_or(u64::MAX);
         read_text(path, max, Links::Refuse).await
     }
 
@@ -265,20 +291,14 @@ impl OutputStore {
     }
 }
 
-/// How long storing one result may take before the result stays inline instead. It is under
-/// the default hook timeout, so a slow disk keeps the result rather than losing it to that
-/// timeout.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// The hook that stores a long tool result as a file and leaves its first page in its
 /// place, as [`ReadOutputTool`] would return it: with a footer that says how to read on.
 ///
-/// Register it after secret filtering, and exempt the tools that page their own output, so
-/// that a page is not stored again; the hook chain bounds and cancels its I/O.
+/// Exempt the tools that page their own output, so that a page is not stored again. It runs
+/// after secret filtering by its stage, and the hook chain bounds and cancels its I/O.
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,
-    write_timeout: Duration,
 }
 
 impl SpillOutputs {
@@ -289,18 +309,8 @@ impl SpillOutputs {
         let hook = Self {
             store: store.clone(),
             exempt_tools,
-            write_timeout: WRITE_TIMEOUT,
         };
         (hook, ReadOutputTool::new(store))
-    }
-
-    /// Keep a result inline when storing it takes longer than `timeout` (3 seconds by
-    /// default). Keep it below the timeout this hook is registered with (5 seconds by
-    /// default): when that one fires first, the tool's output is withheld. A write that runs
-    /// out of time may still finish later and leave its file behind.
-    pub fn write_timeout(mut self, timeout: Duration) -> Self {
-        self.write_timeout = timeout;
-        self
     }
 }
 
@@ -319,9 +329,10 @@ impl Hook for SpillOutputs {
                 .threshold_bytes
                 .is_some_and(|limit| output.content.len() > limit)
         {
-            let stored = match tokio::time::timeout(self.write_timeout, self.store.write(&output.content)).await {
+            let limit = self.store.config.write_timeout;
+            let stored = match tokio::time::timeout(limit, self.store.write(&output.content)).await {
                 Ok(stored) => stored,
-                Err(_) => Err(format!("storing took longer than {:?}", self.write_timeout)),
+                Err(_) => Err(format!("storing took longer than {limit:?}")),
             };
             match stored {
                 // The first page, not only a reference: the model sees how the result starts
@@ -367,15 +378,13 @@ impl Tool for ReadOutputTool {
     fn name(&self) -> &str {
         READ_OUTPUT
     }
-    fn effects(&self) -> Effects {
-        Effects::ReadOnly
-    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: READ_OUTPUT.into(),
             description: "Read on in a tool result that was too long to show whole. Such a result ends with a \
                           footer that names its id and the UTF-8 byte offset of the next page; pass both. Only \
-                          results this agent stored are readable."
+                          results this agent stored are readable. Read-only."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -393,6 +402,10 @@ impl Tool for ReadOutputTool {
         }
     }
 
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
+    }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
         let args: Args = parse_args(args)?;
         self.store.path(&args.id).map(|_| ())
@@ -403,7 +416,7 @@ impl Tool for ReadOutputTool {
         let path = self.store.path(&args.id)?;
         let read = unless_cancelled(ctx, self.store.read(&path)).await;
         let text = read
-            .ok_or_else(|| "output read cancelled".to_string())?
+            .ok_or(READ_CANCELLED)?
             .map_err(|error| format!("cannot read tool output: {error}"))?;
         Ok(ToolOutput::ok(self.store.pager(&args.id).page(&text, args.offset)?))
     }
@@ -417,6 +430,30 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::test_support::make_fifo;
+
+    #[tokio::test]
+    async fn a_directory_named_through_dot_dot_is_checked_for_links_on_its_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("b")).unwrap();
+        let store = OutputStore::new(dir.path(), OutputStoreConfig::new("a/../b/outputs")).unwrap();
+
+        let error = store.check_directory().await.unwrap_err();
+
+        assert!(error.contains("through the symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn only_the_directories_below_the_working_directory_are_on_the_way() {
+        let cwd = Path::new("/w");
+        let way = |below: &str| on_the_way(cwd, Path::new(below));
+        assert_eq!(way("a/b"), [cwd.join("a"), cwd.join("a/b")]);
+        assert_eq!(way("a/../b"), [cwd.join("a"), cwd.join("a/../b")]);
+        assert_eq!(way("a/../../x"), [cwd.join("a")]);
+        assert!(way("../x").is_empty());
+    }
 
     #[tokio::test]
     async fn a_named_pipe_in_place_of_an_output_is_refused() {
@@ -426,14 +463,7 @@ mod tests {
         std::fs::create_dir_all(&outputs).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let path = outputs.join(format!("{id}.txt"));
-        assert!(
-            tokio::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
+        make_fifo(&path);
         let writer_path = path.clone();
         // A reader that waits for a writer gets this one and then reads what it wrote, so
         // that such a reader fails the test instead of blocking it.

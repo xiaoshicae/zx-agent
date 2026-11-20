@@ -7,9 +7,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
-use zx_agent::hooks::{ContextEdit, FinishedStep, HookContext, RequestSettings, StepDecision, StepDisposition};
+use zx_agent::hooks::{
+    ContextEdit, FinishedStep, HookContext, RequestPlan, RequestSettings, StepDecision, StepDisposition,
+};
 use zx_agent::policy::{ApprovalDecision, PolicyDecision};
 use zx_agent::tools::ToolOutput;
 
@@ -20,7 +21,7 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
 }
 
 #[test]
-fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
+fn decisions_are_named_and_give_a_reason_to_deny_or_ask() {
     round_trip(&PolicyDecision::Allow, json!({"decision": "allow"}));
     round_trip(
         &PolicyDecision::Deny("not on the list".into()),
@@ -51,7 +52,7 @@ fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
 }
 
 #[test]
-fn turn_decisions_carry_the_text_of_a_continuation_or_follow_up() {
+fn step_decisions_carry_the_text_of_a_continuation_or_follow_up() {
     round_trip(&StepDecision::Default, json!({"decision": "default"}));
     round_trip(&StepDecision::Stop, json!({"decision": "stop"}));
     round_trip(
@@ -188,11 +189,29 @@ fn the_hook_context_names_the_labels_and_the_actor_when_it_has_them() {
 }
 
 #[test]
-fn a_step_summary_serializes_for_hook_processes() {
-    let mut response = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    response.error_message = None;
+fn a_request_plan_serializes_for_hook_processes() {
     let messages = vec![Message::user("go")];
-    let summary = FinishedStep {
+    let settings = RequestSettings {
+        model: "m".into(),
+        reasoning: None,
+    };
+    let plan = RequestPlan {
+        messages: &messages,
+        step: 2,
+        settings: &settings,
+    };
+
+    assert_eq!(
+        serde_json::to_value(plan).unwrap(),
+        json!({"messages": serde_json::to_value(&messages).unwrap(), "step": 2, "settings": {"model": "m"}})
+    );
+}
+
+#[test]
+fn a_finished_step_serializes_for_hook_processes() {
+    let response = AssistantMessage::new("p", "m", StopReason::Stop, Vec::new());
+    let messages = vec![Message::user("go")];
+    let finished = FinishedStep {
         response: &response,
         messages: &messages,
         step: 2,
@@ -201,14 +220,10 @@ fn a_step_summary_serializes_for_hook_processes() {
         disposition: StepDisposition::Stop,
     };
 
-    let value = serde_json::to_value(&summary).unwrap();
+    let value = serde_json::to_value(&finished).unwrap();
 
     assert_eq!(value["response"], serde_json::to_value(&response).unwrap());
     assert_eq!(value["messages"], serde_json::to_value(&messages).unwrap());
-    assert_eq!(value["answerContinuations"], 1);
-    assert_eq!(value["remainingModelRequests"], 8);
-    assert!(value.get("continuations").is_none());
-    assert!(value.get("remainingTurns").is_none());
     assert_eq!(
         (
             &value["step"],

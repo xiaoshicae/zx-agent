@@ -1,10 +1,10 @@
 //! The command policy of the `bash` tool: denied patterns and programs.
 
 use async_trait::async_trait;
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 use super::{BashCall, bash_call, non_empty, normalize};
 use crate::ai::ToolCall;
-use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,
@@ -130,10 +130,11 @@ impl CommandPolicy {
         }
     }
 
-    /// Add substrings to reject in every command.
+    /// Add substrings to reject in every command, compared like the default ones, lowercased
+    /// and with each run of whitespace as one space; empty ones are ignored, since every
+    /// command holds the empty text.
     pub fn deny_also(mut self, patterns: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        self.denied_patterns
-            .extend(patterns.into_iter().map(|pattern| normalize(pattern.as_ref())));
+        self.denied_patterns.extend(non_empty(patterns, normalize));
         self
     }
 
@@ -172,9 +173,9 @@ impl CommandPolicy {
         PolicyDecision::Allow
     }
 
-    /// The verdict on `call`: every tool but `bash` is allowed, and a bash call without a
+    /// The decision on `call`: every tool but `bash` is allowed, and a bash call without a
     /// command is denied.
-    pub fn verdict(&self, call: &ToolCall) -> PolicyDecision {
+    pub fn decision(&self, call: &ToolCall) -> PolicyDecision {
         match bash_call(call) {
             BashCall::Other => PolicyDecision::Allow,
             BashCall::NoCommand => PolicyDecision::Deny("missing \"command\" argument".to_string()),
@@ -219,7 +220,7 @@ impl CommandPolicy {
 #[async_trait]
 impl ToolPolicy for CommandPolicy {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
-        self.verdict(call)
+        self.decision(call)
     }
 }
 
@@ -228,11 +229,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::policy::test_support::call;
-
-    fn denied(decision: &PolicyDecision) -> bool {
-        matches!(decision, PolicyDecision::Deny(_))
-    }
+    use crate::policy::test_support::{call, denied};
 
     #[test]
     fn denied_patterns_apply_and_other_commands_run() {
@@ -240,6 +237,12 @@ mod tests {
         assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
         assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
         assert!(denied(&policy.evaluate("systemctl reboot")));
+    }
+
+    #[test]
+    fn an_empty_denied_pattern_denies_nothing() {
+        let policy = CommandPolicy::new().deny_also(["", "  "]);
+        assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
     }
 
     #[test]
@@ -374,9 +377,9 @@ mod tests {
     fn only_bash_is_checked() {
         let policy = CommandPolicy::new();
         assert_eq!(
-            policy.verdict(&call("read_file", json!({"path": "/etc/hosts"}))),
+            policy.decision(&call("read_file", json!({"path": "/etc/hosts"}))),
             PolicyDecision::Allow
         );
-        assert!(denied(&policy.verdict(&call("bash", json!({})))));
+        assert!(denied(&policy.decision(&call("bash", json!({})))));
     }
 }

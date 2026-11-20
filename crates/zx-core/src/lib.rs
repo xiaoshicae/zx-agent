@@ -1,7 +1,7 @@
 //! Kernel of zx-agent: the agent and its sessions, the runner and the step loop, and the
 //! interfaces the kernel defines for everything scenario-specific (tools, policies, hooks,
-//! session storage, session setup). The `zx-agent` crate re-exports it whole, module by
-//! module.
+//! extensions, summarizers, session storage, session setup). The `zx-agent` crate re-exports
+//! it whole, module by module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
 //! it, named in brackets where it uses any:
@@ -9,7 +9,7 @@
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
 //!   rules, the projection the model sees, and where sessions are kept (pi: SessionManager)
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
-//!   every call into host code
+//!   the calls into hooks, policies and summarizers
 //! - [`tools`]: the tool interface, the tools of a session, and which of them a run offers
 //! - [`input`] (transcript): the messages given to a run and the queues that hold them while
 //!   it runs
@@ -29,6 +29,7 @@
 //!   prompt, continuation or compaction returns: its events and its result
 //! - [`agent`] (all of the above): the role every session plays, the host's setup of what
 //!   belongs to one session, and the sessions that are open
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 //!
 //! # Where each feature lives
 //!
@@ -59,15 +60,15 @@
 //!   - records: `transcript.rs` (the rules of an edit), `transcript/projection.rs` (applying
 //!     edits)
 //!   - acts: `hooks.rs` (checking a hook's plan of edits before any is recorded),
-//!     `runner/step_loop/context.rs` (input and hook edits), `runner/run_scope.rs` (omitting
-//!     a failed answer)
+//!     `runner/step_loop/context.rs` (input and hook edits), `runner/failure.rs` (omitting a
+//!     failed answer before another attempt or a continuation)
 //! - **Session names**
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),
 //!     `transcript/storage.rs` (the name a listing shows)
 //!   - acts: `session.rs` (naming a session while idle)
 //! - **Tool policies and approval**
-//!   - records: none; verdicts and approvals are not recorded
-//!   - acts: `policy.rs` (the policy interface and its verdict), `policy/chain.rs` (asking
+//!   - records: none; decisions and approvals are not recorded
+//!   - acts: `policy.rs` (the policy interface and its decision), `policy/chain.rs` (asking
 //!     every policy, each bounded), `policy/approval.rs` (the gate where a call waits for the
 //!     host's answer, and the session's grants), `runner/step_loop/tools.rs` (checking a
 //!     call and waiting at the gate), `session.rs` (the host's answer)
@@ -79,14 +80,15 @@
 //!
 //! An [`Agent`] creates and opens sessions. A session holds a conversation across runs. Each
 //! [`Session::send`] starts a [`Run`], which processes one prompt and may retry a failed
-//! provider response as another loop attempt. A task step is one task response and its tool calls; a model request may also
-//! be a compaction summary, which consumes the request budget without creating a separate
-//! task step. Retries and summary requests both consume the run's model-request budget.
+//! provider response as another loop attempt. A task step is one task response and its tool
+//! calls; a model request may also be a compaction summary, which consumes the request budget
+//! without creating a separate task step. Retries and summary requests both consume the
+//! run's model-request budget.
 //!
-//! Embedders make an [`Agent`] from an [`AgentConfig`], ask it for a [`Session`], and read
+//! A host makes an [`Agent`] from an [`AgentConfig`], asks it for a [`Session`], and reads
 //! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],
 //! [`policy::ToolPolicy`], [`hooks::Hook`], [`extensions::Extension`],
-//! [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
+//! [`compaction::Summarizer`], [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
 //! [`transcript::SessionLog`]; approvals are answered through the session. The storage in
 //! memory ships with the kernel; the storage of session files, the built-in tools,
 //! executors, policies and hooks live in the `zx-builtin` crate, providers in crates such as
@@ -106,9 +108,11 @@ pub mod input;
 pub mod policy;
 mod runner;
 pub mod session;
+#[cfg(test)]
+mod test_support;
 pub mod tools;
 pub mod transcript;
 
-pub use agent::{Agent, AgentConfig};
-pub use guard::CancelSignal;
-pub use session::{Run, Session, SessionOptions};
+pub use self::agent::{Agent, AgentConfig};
+pub use self::guard::CancelSignal;
+pub use self::session::{Run, Session, SessionOptions};

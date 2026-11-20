@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -14,10 +13,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::WAIT;
 use crate::http::{read_request, response};
-
-/// Only reached when an expected frame or call never comes.
-const WAIT: Duration = Duration::from_secs(10);
 
 /// One API call.
 #[derive(Clone, Debug)]
@@ -207,13 +204,7 @@ impl Socket {
 
     /// Whether the client closed the connection, waiting for it.
     pub async fn closed_by_client(&mut self) -> bool {
-        loop {
-            match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
-                Ok(Some(Ok(_))) => {}
-                Err(_) => return false,
-            }
-        }
+        crate::http::closed_by_client(&mut self.stream).await
     }
 }
 
@@ -282,6 +273,7 @@ impl TestFrame {
                 out.push(byte | 0x80);
             }
         }
+
         fn field(out: &mut Vec<u8>, number: u64, bytes: &[u8]) {
             varint(out, number << 3 | 2);
             varint(out, bytes.len() as u64);
@@ -324,6 +316,7 @@ impl TestFrame {
                 shift += 7;
             }
         }
+
         fn chunk<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
             let length = usize::try_from(varint(bytes)).unwrap();
             let (field, rest) = bytes.split_at(length);

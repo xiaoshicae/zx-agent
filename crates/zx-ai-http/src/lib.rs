@@ -21,8 +21,8 @@ pub mod stream;
 
 use std::time::Duration;
 
-pub use failure::Failure;
-pub use sse::DEFAULT_MAX_EVENT_BYTES;
+pub use self::failure::Failure;
+pub use self::sse::DEFAULT_MAX_EVENT_BYTES;
 
 /// Longest wait for a connection to the server to be established. Fixed, unlike a provider's
 /// idle timeout: how long a server takes to answer varies with the model and the request, how

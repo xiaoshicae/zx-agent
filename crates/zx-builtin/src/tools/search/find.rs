@@ -5,18 +5,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 use super::{
-    VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, glob_of, positive, quote, ripgrep_excludes, search,
-    search_path,
+    VCS_DIRECTORIES, WITHOUT_DOT_SLASH, Wording, choose_engine, finish, first_lines, glob_of, limit_or, quote,
+    ripgrep_excludes, search, search_path,
 };
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
-use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// Paths shown by default (pi: find's `DEFAULT_LIMIT`).
-const FIND_LIMIT: usize = 1000;
+const DEFAULT_LIMIT: usize = 1000;
 /// In a glob, any number of directories, none included.
 const ANY_DEPTH: &str = "**/";
 /// The most [`ANY_DEPTH`] in one glob: each doubles the patterns find is given.
@@ -39,7 +39,7 @@ impl Default for FindTool {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FindArgs {
+struct Args {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
@@ -47,8 +47,9 @@ struct FindArgs {
     limit: Option<usize>,
 }
 
-impl FindArgs {
-    fn parse(args: &Value) -> Result<Self, String> {
+impl Args {
+    /// The arguments of a call, checked, and the most paths it shows.
+    fn parse(args: &Value) -> Result<(Self, usize), String> {
         let args: Self = parse_args(args)?;
         let glob = glob_of(&args.pattern);
         if glob.is_empty() {
@@ -59,8 +60,8 @@ impl FindArgs {
                 "pattern has more than {MAX_ANY_DEPTH} `{ANY_DEPTH}`; write one with fewer"
             ));
         }
-        positive(args.limit, FIND_LIMIT, "limit")?;
-        Ok(args)
+        let limit = limit_or(args.limit, DEFAULT_LIMIT)?;
+        Ok((args, limit))
     }
 
     /// The shell script, run in the search directory: `rg --files` when installed, otherwise
@@ -103,7 +104,7 @@ fn posix_find(glob: &str) -> String {
         .map(|directory| format!("-name {directory}"))
         .collect::<Vec<_>>()
         .join(" -o ");
-    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | sed 's|^\\./||'")
+    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | {WITHOUT_DOT_SLASH}")
 }
 
 /// The patterns that find's `-path` takes for `glob`, which together match what it matches.
@@ -121,7 +122,9 @@ fn find_paths(glob: &str) -> Vec<String> {
 
 #[async_trait]
 impl Tool for FindTool {
-    search_tool_basics!(crate::tools::FIND);
+    fn name(&self) -> &str {
+        crate::tools::FIND
+    }
 
     fn definition(&self) -> ToolDef {
         ToolDef {
@@ -129,14 +132,14 @@ impl Tool for FindTool {
             description: format!(
                 "Find files by glob, such as '*.rs', '**/*.json' or 'src/**/*.spec.ts'; returns paths relative to the \
                  searched directory, sorted. A pattern without '/' matches file names at any depth. Respects .gitignore \
-                 when ripgrep is installed. Shows at most {FIND_LIMIT} paths by default. Read-only."
+                 when ripgrep is installed. Shows at most {DEFAULT_LIMIT} paths by default. Read-only."
             ),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob for the file paths" },
                     "path": { "type": "string", "description": "Directory to search (default: working directory)" },
-                    "limit": { "type": "integer", "minimum": 1, "description": format!("Most paths to show (default: {FIND_LIMIT})") }
+                    "limit": { "type": "integer", "minimum": 1, "description": format!("Most paths to show (default: {DEFAULT_LIMIT})") }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -144,13 +147,20 @@ impl Tool for FindTool {
         }
     }
 
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
+    }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        FindArgs::parse(args).map(|_| ())
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args = FindArgs::parse(&args)?;
-        let limit = positive(args.limit, FIND_LIMIT, "limit")?;
+        let (args, limit) = Args::parse(&args)?;
         let searched = search(self.executor.as_ref(), &args.script(limit), ctx).await?;
         finish(
             &searched,
@@ -158,8 +168,9 @@ impl Tool for FindTool {
             Wording {
                 empty: "No files found.",
                 more: "more files match",
-                advice: "Narrow the pattern or path, or raise limit",
-                long_lines: "long paths were cut",
+                advice: "narrow the pattern or path, or raise limit",
+                long_lines: "long paths were truncated",
+                also_not_applied: None,
             },
         )
     }
@@ -172,7 +183,7 @@ mod tests {
     #[test]
     fn find_turns_a_glob_with_a_slash_into_a_path_test() {
         let script = |pattern: &str| {
-            FindArgs {
+            Args {
                 pattern: pattern.into(),
                 path: None,
                 limit: None,
@@ -187,15 +198,15 @@ mod tests {
 
     #[test]
     fn a_glob_that_starts_at_the_search_directory_reaches_ripgrep_without_the_dot() {
-        let script = FindArgs::parse(&json!({"pattern": "./a/*.txt"})).unwrap().script(10);
+        let script = Args::parse(&json!({"pattern": "./a/*.txt"})).unwrap().0.script(10);
         assert!(script.contains("--glob 'a/*.txt'"), "{script}");
     }
 
     #[test]
     fn a_glob_names_any_depth_a_few_times_at_most() {
         let pattern = |times: usize| json!({"pattern": format!("{}x", "**/".repeat(times))});
-        assert!(FindArgs::parse(&pattern(MAX_ANY_DEPTH)).is_ok());
-        let error = FindArgs::parse(&pattern(MAX_ANY_DEPTH + 1)).err().unwrap();
+        assert!(Args::parse(&pattern(MAX_ANY_DEPTH)).is_ok());
+        let error = Args::parse(&pattern(MAX_ANY_DEPTH + 1)).err().unwrap();
         assert_eq!(error, "pattern has more than 4 `**/`; write one with fewer");
     }
 
@@ -235,7 +246,7 @@ mod tests {
 
     #[test]
     fn version_control_is_excluded_after_the_models_glob() {
-        let script = FindArgs::parse(&json!({"pattern": "*"})).unwrap().script(10);
+        let script = Args::parse(&json!({"pattern": "*"})).unwrap().0.script(10);
         let model = script.find("--glob '*'").unwrap();
         let excluded = script.find("--glob '!.git'").unwrap();
         assert!(model < excluded, "{script}");
@@ -243,8 +254,8 @@ mod tests {
 
     #[test]
     fn a_blank_pattern_is_refused() {
-        assert!(FindArgs::parse(&json!({"pattern": " "})).is_err());
-        assert!(FindArgs::parse(&json!({"pattern": "./"})).is_err());
-        assert!(FindArgs::parse(&json!({"pattern": "*.rs", "limit": 0})).is_err());
+        assert!(Args::parse(&json!({"pattern": " "})).is_err());
+        assert!(Args::parse(&json!({"pattern": "./"})).is_err());
+        assert!(Args::parse(&json!({"pattern": "*.rs", "limit": 0})).is_err());
     }
 }

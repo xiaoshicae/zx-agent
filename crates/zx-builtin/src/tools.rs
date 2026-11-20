@@ -1,4 +1,6 @@
-//! Built-in tools (pi: coding-agent/src/core/tools).
+//! Built-in tools (pi: coding-agent/src/core/tools). Each reads and checks its arguments in
+//! one `Args::parse`: before policy and approval, in `validate_arguments`, and again in
+//! `execute`, which a host may call directly.
 //!
 //! - `bash`: run a shell command
 //! - `read`, `write` and `edit`: read a file in pages, write a whole file, replace exact text;
@@ -26,16 +28,15 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
-
-pub use bash::BashTool;
-pub use edit::EditFileTool;
-pub use mutation::FileMutationQueue;
-pub use read::ReadFileTool;
-pub use search::{FindTool, GrepTool, LsTool};
-pub use write::WriteFileTool;
-
-use crate::executor::Executor;
 use zx_core::tools::{Tool, ToolContext};
+
+pub use self::bash::BashTool;
+pub use self::edit::EditFileTool;
+pub use self::mutation::FileMutationQueue;
+pub use self::read::ReadFileTool;
+pub use self::search::{FindTool, GrepTool, LsTool};
+pub use self::write::WriteFileTool;
+use crate::executor::Executor;
 
 /// Name of the built-in shell tool.
 pub const BASH: &str = "bash";
@@ -43,6 +44,9 @@ pub const BASH: &str = "bash";
 pub const READ_FILE: &str = "read_file";
 /// Name of the built-in tool that replaces text in a file.
 pub const EDIT_FILE: &str = "edit_file";
+/// The key of [`EDIT_FILE`]'s result details that holds the unified patch of its change,
+/// for a front end that shows what changed.
+pub const PATCH_DETAIL: &str = "patch";
 /// Name of the built-in tool that creates or overwrites a file.
 pub const WRITE_FILE: &str = "write_file";
 /// Name of the built-in tool that searches file contents.
@@ -62,7 +66,7 @@ pub const EXECUTOR_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FIL
 
 /// The largest file edit_file edits and, by default, read_file reads: enough for any source
 /// file, and far more than one call can show.
-const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Build the tools of [`EXECUTOR_TOOL_NAMES`] named in `names`, in the given order, without
 /// duplicates, running commands and reading and writing files through `executor`, which also
@@ -117,18 +121,16 @@ pub fn executor_tools(
     Ok(tools)
 }
 
-/// `args` as a tool's argument type; the error tells the model what was wrong.
-pub(crate) fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
+/// `args` as a tool's argument type; the error tells the model what was wrong. Public, not
+/// part of the API: zx-app's read_skill uses it.
+#[doc(hidden)]
+pub fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
     T::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))
 }
 
 /// `raw` as a path, read with [`path_text`], and against `cwd` when relative.
 pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
-    let raw = path_text(raw);
-    if raw.is_empty() {
-        return Err("path is empty".to_string());
-    }
-    let path = Path::new(raw);
+    let path = Path::new(path_text(raw)?);
     Ok(if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -137,16 +139,20 @@ pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
 }
 
 /// The path a model wrote as `raw`: trimmed, and without a leading `@`, which some models put
-/// before paths.
-fn path_text(raw: &str) -> &str {
+/// before paths. Errors when nothing is left.
+fn path_text(raw: &str) -> Result<&str, String> {
     let raw = raw.trim();
-    raw.strip_prefix('@').unwrap_or(raw)
+    let path = raw.strip_prefix('@').unwrap_or(raw);
+    if path.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    Ok(path)
 }
 
 /// Check that `raw` names a path, before the call runs: the working directory is not known
-/// yet, so only the form is checked, as [`resolve`] reads it.
+/// yet, so only the form is checked, as [`path_text`] reads it.
 pub(crate) fn check_path(raw: &str) -> Result<(), String> {
-    resolve(Path::new("."), raw).map(|_| ())
+    path_text(raw).map(|_| ())
 }
 
 /// How far into a file the text tools look for a NUL byte, which marks a binary file.
@@ -157,8 +163,15 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
 }
 
-/// `operation`, unless the call is cancelled first.
-pub(crate) async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
+/// The error of a read that the call's cancellation stopped. Public, not part of the API:
+/// zx-app's read_skill uses it.
+#[doc(hidden)]
+pub const READ_CANCELLED: &str = "the read was cancelled";
+
+/// `operation`, unless the call is cancelled first. Public, not part of the API: zx-app's
+/// read_skill uses it.
+#[doc(hidden)]
+pub async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
     tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => None,
@@ -184,6 +197,13 @@ mod tests {
         let requested = ["read_file", " bash ", "read_file", ""].map(String::from);
         let tools = executor_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
         assert_eq!(names(&tools), ["read_file", "bash"]);
+    }
+
+    #[test]
+    fn every_executor_tool_name_builds_its_tool() {
+        let requested: Vec<String> = EXECUTOR_TOOL_NAMES.iter().map(ToString::to_string).collect();
+        let tools = executor_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
+        assert_eq!(names(&tools), EXECUTOR_TOOL_NAMES);
     }
 
     #[test]

@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
@@ -29,14 +28,14 @@ struct Tables {
 #[derive(Default)]
 struct TableStorage(Arc<Tables>);
 
-struct TableLog {
+struct TableStorageLog {
     tables: Arc<Tables>,
     id: String,
 }
 
 impl TableStorage {
     fn log(&self, id: &str) -> Box<dyn SessionLog> {
-        Box::new(TableLog {
+        Box::new(TableStorageLog {
             tables: Arc::clone(&self.0),
             id: id.to_string(),
         })
@@ -44,7 +43,7 @@ impl TableStorage {
 }
 
 #[async_trait]
-impl SessionLog for TableLog {
+impl SessionLog for TableStorageLog {
     async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
         let mut records = self.tables.records.lock().unwrap();
         let key = (self.id.clone(), record.seq);

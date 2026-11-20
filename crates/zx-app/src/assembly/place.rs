@@ -7,16 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-use crate::config;
 use zx_agent::builtin::jsonl::JsonlStorage;
 use zx_agent::transcript::{MemoryStorage, SessionList, SessionQuery, SessionStorage};
+
+use crate::config;
 
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";
 
 /// Where a configured agent keeps its sessions. Clones share the same storage; constructors
-/// keep its layout private so a single-file store cannot be confused with a directory.
+/// keep its layout private so a single-file storage cannot be confused with a directory.
 #[derive(Clone)]
 pub struct SessionPlace(Place);
 
@@ -25,11 +25,9 @@ enum Place {
     /// In memory. A session is kept while it is open and forgotten once it is closed, so
     /// that a process that runs for long keeps nothing of the conversations it has had.
     Memory(Arc<MemoryStorage>),
-    /// One file, which holds one session.
-    File(Arc<JsonlStorage>),
-    /// Session files under one directory, with a directory of its own for each working
-    /// directory.
-    Directory(Arc<JsonlStorage>),
+    /// Session files: one file that holds one session, or a directory of them, as the
+    /// storage was made.
+    Files(Arc<JsonlStorage>),
     /// The host's own storage, such as a database.
     Storage(Arc<dyn SessionStorage>),
 }
@@ -43,12 +41,12 @@ impl SessionPlace {
     /// Keep at most one session in this JSONL file: the storage holds none while the file
     /// does not exist, and creating a second session fails.
     pub fn file(path: &Path) -> Self {
-        Self(Place::File(Arc::new(JsonlStorage::file(path))))
+        Self(Place::Files(Arc::new(JsonlStorage::file(path))))
     }
 
     /// Keep session files under this explicit root, grouped by working directory.
     pub fn directory(root: &Path) -> Self {
-        Self(Place::Directory(Arc::new(JsonlStorage::in_directory(root))))
+        Self(Place::Files(Arc::new(JsonlStorage::in_directory(root))))
     }
 
     /// Keep the sessions in `storage`, the host's own, such as a database: closed sessions
@@ -74,7 +72,7 @@ impl SessionPlace {
     pub fn storage(&self) -> Arc<dyn SessionStorage> {
         match &self.0 {
             Place::Memory(storage) => storage.clone(),
-            Place::File(storage) | Place::Directory(storage) => storage.clone(),
+            Place::Files(storage) => storage.clone(),
             Place::Storage(storage) => Arc::clone(storage),
         }
     }
@@ -82,7 +80,7 @@ impl SessionPlace {
     fn files(&self) -> Option<&JsonlStorage> {
         match &self.0 {
             Place::Memory(_) | Place::Storage(_) => None,
-            Place::File(storage) | Place::Directory(storage) => Some(storage),
+            Place::Files(storage) => Some(storage),
         }
     }
 
@@ -154,11 +152,11 @@ mod tests {
         drop(create(&place, &header).await);
 
         let error = place
-            .naming_file(&header.id, anyhow::anyhow!("entry 1: no parent"))
+            .naming_file(&header.id, anyhow::anyhow!("record 1: no parent"))
             .await;
         assert_eq!(
             format!("{error:#}"),
-            format!("cannot open the session in {}: entry 1: no parent", path.display())
+            format!("cannot open the session in {}: record 1: no parent", path.display())
         );
 
         let kept_in_memory = SessionPlace::memory()

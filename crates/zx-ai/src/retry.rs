@@ -56,9 +56,15 @@ impl RetryPolicy {
         self.jittered(self.delay(retry)).max(hint).min(self.max_delay)
     }
 
-    /// `delay` shortened by a random share of at most `jitter`.
+    /// `delay` shortened by a random share of at most `jitter`; a jitter that is not a number
+    /// takes nothing off, as `clamp` would keep it and `mul_f64` panic on it.
     fn jittered(&self, delay: Duration) -> Duration {
-        let share = self.jitter.clamp(0.0, 1.0) * random_fraction();
+        let jitter = if self.jitter.is_nan() {
+            0.0
+        } else {
+            self.jitter.clamp(0.0, 1.0)
+        };
+        let share = jitter * random_fraction();
         delay.mul_f64(1.0 - share)
     }
 }
@@ -145,6 +151,18 @@ mod tests {
         ProviderErrorKind::ResourceLimit,
         ProviderErrorKind::Other,
     ];
+
+    #[test]
+    fn a_jitter_that_is_not_a_number_takes_nothing_off() {
+        let policy = RetryPolicy {
+            jitter: f64::NAN,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(
+            policy.delay_for(1, &failed(ProviderErrorKind::Unavailable)),
+            policy.delay(1)
+        );
+    }
 
     #[test]
     fn backoff_doubles_and_caps() {

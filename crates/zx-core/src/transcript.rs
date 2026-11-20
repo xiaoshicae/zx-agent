@@ -7,8 +7,8 @@
 //!
 //! A [`SessionStorage`] keeps the sessions, and the [`SessionLog`] it hands out keeps one
 //! session's entries: memory ([`MemoryStorage`]), session files (`JsonlStorage` of the
-//! zx-builtin crate), or a backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
-//! written.
+//! zx-builtin crate), or a backend of the host's choice. Only the current format,
+//! [`SESSION_VERSION`], is read and written.
 //!
 //! - `entry`: the header and the entries of the tree
 //! - `storage` and `log`: the interfaces of where sessions are kept: a storage of sessions,
@@ -37,29 +37,31 @@ mod storage;
 mod test_support;
 #[cfg(test)]
 mod tests;
-pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, SummarizedBy, SummaryFact,
-    SummaryRequest,
-};
-pub(crate) use compaction::{CompactionPlan, MAX_SUMMARY_BYTES, summary_input, summary_messages};
-pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
-pub use log::{LoadedSession, LogRecord, SessionLog};
-pub use memory::MemoryStorage;
-pub use name::{SessionInfoEntry, SessionName};
-pub use projection::ProjectedMessage;
-pub(crate) use projection::{replace_text, without_details};
-pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
-pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
-pub use storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
-#[cfg(test)]
-pub(crate) use test_support::{FailingWriter, WriterLog};
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
+pub use self::compaction::{
+    CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, MAX_SUMMARY_BYTES,
+    MAX_SUMMARY_STATEMENTS, SummarizedBy, SummaryFact, SummaryRequest,
+};
+pub(crate) use self::compaction::{CompactionPlan, summary_input, summary_messages};
+pub use self::entry::{
+    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader,
+};
+pub use self::log::{LoadedSession, LogRecord, SessionLog};
+pub use self::memory::MemoryStorage;
+pub use self::name::{SessionInfoEntry, SessionName};
+pub use self::projection::ProjectedMessage;
+pub(crate) use self::projection::{replace_text, without_details};
+pub use self::recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
+pub use self::request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
+pub use self::storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
+#[cfg(test)]
+pub(crate) use self::test_support::{FailingWriter, WriterLog};
 use crate::ai::{Message, UserMessageKind, now_ms};
 
 /// The session format: written to every new header, and the only version a session may have
@@ -94,13 +96,7 @@ enum WritesStopped {
 /// Whether `message` is a prompt: what a person sent, or what a hook asked for in a
 /// person's place.
 fn is_prompt(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::User {
-            kind: UserMessageKind::Prompt,
-            ..
-        }
-    )
+    message.user_kind() == Some(UserMessageKind::Prompt)
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].
@@ -161,18 +157,18 @@ impl Transcript {
     /// leaves out ([`Transcript::incomplete_tail_bytes`]); damage anywhere else is an error,
     /// and the stored session is left unchanged.
     pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
-        let mut store = Self::replay(loaded)?;
-        store.log = Some(log);
-        Ok(store)
+        let mut transcript = Self::replay(loaded)?;
+        transcript.log = Some(log);
+        Ok(transcript)
     }
 
     /// A stored session to read, not to write: what [`SessionStorage::read`] returned, also
     /// of a session that another transcript is writing. Checked like [`Transcript::load`]; every
     /// append to the snapshot fails.
     pub fn snapshot(loaded: LoadedSession) -> Result<Self> {
-        let mut store = Self::replay(loaded)?;
-        store.stopped = Some(WritesStopped::ReadOnly);
-        Ok(store)
+        let mut transcript = Self::replay(loaded)?;
+        transcript.stopped = Some(WritesStopped::ReadOnly);
+        Ok(transcript)
     }
 
     fn replay(loaded: LoadedSession) -> Result<Self> {
@@ -182,16 +178,16 @@ impl Transcript {
             incomplete_tail_bytes,
         } = loaded;
         header.check_version()?;
-        let mut store = Self::in_memory(header);
+        let mut transcript = Self::in_memory(header);
         for (position, record) in (1..).zip(&records) {
-            let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
-            store
+            let entry: Entry = serde_json::from_str(record).with_context(|| format!("record {position}"))?;
+            transcript
                 .validate_entry(&entry)
-                .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
-            store.insert(entry);
+                .with_context(|| format!("record {position}"))?;
+            transcript.insert(entry);
         }
-        store.incomplete_tail_bytes = incomplete_tail_bytes;
-        Ok(store)
+        transcript.incomplete_tail_bytes = incomplete_tail_bytes;
+        Ok(transcript)
     }
 
     /// Whether an append failed, timed out or was interrupted, so that this transcript, which
@@ -217,8 +213,7 @@ impl Transcript {
     }
 
     /// Bytes of an incomplete final record that the storage left out when the session was
-    /// loaded; zero if there was none. A session file cuts them off before its next record.
-    /// Complete corrupt records are errors and are never silently removed.
+    /// loaded ([`LoadedSession::incomplete_tail_bytes`]); zero if there was none.
     pub fn incomplete_tail_bytes(&self) -> usize {
         self.incomplete_tail_bytes
     }
@@ -310,9 +305,10 @@ impl Transcript {
 
     /// The rules every record follows, when it is appended and when a session is loaded.
     fn validate_entry(&self, entry: &Entry) -> Result<()> {
+        ensure!(!entry.id().is_empty(), "an entry has an empty ID");
         ensure!(
-            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
-            "duplicate or empty entry ID {:?}",
+            !self.index.contains_key(entry.id()),
+            "duplicate entry ID {:?}",
             entry.id()
         );
         if let Some(parent) = entry.parent_id() {
@@ -326,8 +322,8 @@ impl Transcript {
             ),
             // A name is valid by its type, whether appended or loaded.
             Entry::SessionInfo(_) => {}
-            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
-            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
+            Entry::Custom(custom) => check_custom_type(&custom.custom_type)?,
+            Entry::CustomMessage(custom) => check_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
             Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
             Entry::Compaction(done) => self.validate_compaction(done)?,
@@ -346,7 +342,7 @@ impl Transcript {
         let target = edit.target_id.as_str();
         match self.get(target) {
             Some(Entry::Message(entry)) => {
-                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.is_some()) {
+                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.as_deref()) {
                     bail!("entry {target} {reason}");
                 }
             }
@@ -481,12 +477,12 @@ impl Transcript {
                 Ok(Ok(())) => self.stopped = None,
                 Ok(Err(error)) => {
                     self.stopped = Some(WritesStopped::Failed(format!("{error:#}")));
-                    return Err(error.context("cannot write session entry"));
+                    return Err(error);
                 }
                 Err(_) => {
                     let timeout = self.append_timeout;
                     self.stopped = Some(WritesStopped::TimedOut(timeout));
-                    bail!("cannot write session entry: the log did not answer within {timeout:?}");
+                    bail!("the session log did not answer within {timeout:?}");
                 }
             }
         }
@@ -496,12 +492,15 @@ impl Transcript {
     }
 
     fn insert(&mut self, entry: Entry) {
-        let request_config = match &entry {
-            Entry::RequestConfig(_) => Some(self.entries.len()),
-            _ => entry
+        // A request configuration is in force from its own entry; any other entry inherits
+        // its parent's.
+        let request_config = if matches!(entry, Entry::RequestConfig(_)) {
+            Some(self.entries.len())
+        } else {
+            entry
                 .parent_id()
                 .and_then(|id| self.index.get(id))
-                .and_then(|&parent| self.request_configs[parent]),
+                .and_then(|&parent| self.request_configs[parent])
         };
         self.request_configs.push(request_config);
         let id = entry.id().to_string();
@@ -521,26 +520,33 @@ impl Transcript {
     }
 }
 
-/// Why a context edit may not change `message`, if it may not. A system message is never
-/// edited: prompt changes are new system messages. A text replacement (`replaces_text`) does
-/// not erase tool calls, whose results would otherwise lose their call.
+/// Why a context edit may not change `message` to `replacement`, or omit it when that is
+/// `None`, if it may not. A system message is never edited: prompt changes are new system
+/// messages. A text replacement does not erase tool calls, whose results would otherwise
+/// lose their call.
 ///
 /// The transcript applies this to every edit it records or loads, and the hook chain to a whole
 /// plan of edits before any of them is recorded, so both refuse the same edits.
-pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Option<&'static str> {
+pub(crate) fn context_edit_refusal(message: &Message, replacement: Option<&str>) -> Option<&'static str> {
     match message {
         Message::System(_) => Some("is a system message; record prompt changes as new system messages"),
-        Message::Assistant(answer) if replaces_text && !answer.tool_calls().is_empty() => {
+        Message::Assistant(answer) if replacement.is_some() && !answer.tool_calls().is_empty() => {
             Some("has tool calls, which a text replacement would erase")
         }
         Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => None,
     }
 }
 
-/// A custom type names what an extension recorded; a blank one would name nothing.
-fn ensure_custom_type(custom_type: &str) -> Result<()> {
+/// A custom record whose custom type is blank: the type names what an extension recorded, and
+/// a blank one would name nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a custom record needs a customType")]
+pub struct BlankCustomType;
+
+/// Refuse a blank `custom_type`.
+pub(crate) fn check_custom_type(custom_type: &str) -> Result<(), BlankCustomType> {
     if custom_type.trim().is_empty() {
-        bail!("a custom record needs a customType");
+        return Err(BlankCustomType);
     }
     Ok(())
 }

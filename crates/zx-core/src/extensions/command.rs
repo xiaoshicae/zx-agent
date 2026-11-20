@@ -30,10 +30,10 @@ pub trait SlashCommand: Send + Sync {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct CommandContext {
-    /// The tools' working directory.
-    pub cwd: PathBuf,
     /// The session's ID.
     pub session_id: String,
+    /// The tools' working directory.
+    pub cwd: PathBuf,
     /// The conversation's queues: a command sends the model a message with `steer` or
     /// `follow_up`, and records state with `append_custom_entry`.
     pub queues: Arc<InputQueues>,
@@ -42,10 +42,11 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
-    pub fn new(cwd: PathBuf, session_id: String, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
+    /// The context of a command run in the session `session_id`, whose tools work in `cwd`.
+    pub fn new(session_id: String, cwd: PathBuf, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
         Self {
-            cwd,
             session_id,
+            cwd,
             queues,
             active_tools,
         }
@@ -61,21 +62,6 @@ pub struct CommandOutcome {
     /// with `triggerTurn`, or `sendUserMessage`). While a run is in progress the frontend
     /// queues it instead.
     pub prompt: Option<Input>,
-}
-
-/// Why [`crate::Session::run_command`] returned no outcome.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CommandError {
-    /// No extension registered a command with that name.
-    #[error("unknown command")]
-    Unknown,
-    /// The command ran and failed with this message.
-    #[error("command failed: {0}")]
-    Failed(String),
-    /// The session is closed, as [`SessionError::Closed`](crate::session::SessionError::Closed)
-    /// says.
-    #[error("session is closed; the agent opens it again from its storage")]
-    Closed,
 }
 
 /// The rule a command name follows: ASCII letters, digits, `_` and `-`, starting with a

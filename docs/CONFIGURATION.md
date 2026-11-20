@@ -38,7 +38,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 |---|---|
 | `model` | 模型 ID |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
-| `maxTokens` | 每次回复的输出 token 上限，不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
+| `maxTokens` | 每次回复的输出 token 上限，大于零；不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
@@ -76,10 +76,18 @@ api = "anthropic"                  # API key 默认取 ANTHROPIC_API_KEY
 
 - 请求带 `anthropic-version: 2026-10-21`；`headers` 中的 `anthropic-version` 替换它，`anthropic-beta` 等其他请求头原样发送。
 - 不设 `maxTokens` 时每次请求的输出上限为 64000 token（这个 API 要求每次请求给出上限）；模型允许的输出上限更低时设 `maxTokens`。
-- `reasoning` 写成自适应思考（`thinking` 为 `{ type = "adaptive", display = "summarized" }`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking = { type = "disabled" }`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
+- `reasoning` 写成自适应思考（`thinking` 的 `type = "adaptive"`、`display = "summarized"`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking.type = "disabled"`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。`requestFields` 中 `thinking` 与 `output_config` 的其他键（如 `thinking.block_binding`）照常发送，`thinking.type`、`thinking.display` 与 `output_config.effort` 则与 `reasoning` 冲突。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
 - 思考块连同签名记入会话，只回传给产生它的 provider 名与模型；换了模型之后，较早回答中的思考不再发送。
 - 系统提示词、工具定义与对话末尾标为缓存断点（`cache_control`），以便下一次请求读取这一次写入的缓存；回答的输入 token 包括读写缓存的部分，与 `[[models]]` 的 `cacheRead`、`cacheWrite` 单价对应。`collapse` 下系统提示词有变化时，开头的缓存失效。
-- 服务以“思考块属于另一段对话”拒绝请求时（请求的开头与产生思考时不同，如 `collapse` 下系统提示词变了），provider 去掉报错指出的消息及其后的思考块，重发一次。
+- 思考块的签名绑定产生它时的对话：系统提示词、工具与此前的消息。之后的请求开头与那时不同时（如 `collapse` 下系统提示词变了，或摘要之后原样保留的近期消息中的思考），服务按 `thinking.block_binding.prefix_mismatch_behavior` 处理：`"error"` 以 400 拒绝请求，`"drop_block"` 丢掉这些思考块后照常回答；不设时是否拒绝由模型与账号决定（Claude Fable 5.2 一律拒绝）。provider 不改写请求：被拒绝时这次请求失败，不重发。要让服务丢掉这些思考块，带上请求头并设这个字段（只设字段、不带请求头时服务以 400 拒绝；不设 `reasoning` 时 `thinking` 还要写 `type`，如 `"adaptive"`）；模型接受对话中间的 system 消息时，`systemUpdates = "inline"` 让系统提示词的变化不改动开头：
+
+```toml
+[provider]
+api = "anthropic"
+systemUpdates = "inline"
+headers = { anthropic-beta = "thinking-binding-controls-2026-08-01" }
+requestFields = { thinking = { block_binding = { prefix_mismatch_behavior = "drop_block" } } }
+```
 
 ### provider 示例：⚑ D:5/CHINA FLAG: DeepSeek
 
@@ -232,7 +240,7 @@ tools = ["query", "query_range"]
 
 ## skills
 
-skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[Use read_skill with name="<名称>", offset=<偏移> to continue.]`。
+skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[use read_skill with name="<名称>", offset=<偏移> to continue]`。
 
 ## 上下文管理
 
@@ -251,7 +259,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ## 工具结果落盘
 
-agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页至多 2000 行，放得下时是整行（超长的一行在字符边界切开，下一页接着读），连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
+agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[use read_output with id="<输出 ID>", offset=<偏移> to continue]`），其余由模型用 `read_output` 分页读取；一页至多 2000 行，放得下时是整行（超长的一行在字符边界切开，下一页接着读），连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
 
 | 键 | 语义 |
 |---|---|
@@ -284,7 +292,7 @@ approvers = ["slack:U0123456789"]       # 只有这些用户能批准或拒绝�
 
 [limits]
 maxRunning = 4               # 同时运行的会话数，默认 4，其余排队
-maxConversations = 128       # 运行、排队和空闲的会话 worker 总数，默认 128
+maxConversations = 128       # 同时服务的会话数：运行的、排队的与空闲而会话尚未释放的，默认 128
 maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
 maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
 idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文件），默认 1800
@@ -303,4 +311,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.27 · 2026年11月
+CONFIGURATION.md · v0.31 · 2026年11月

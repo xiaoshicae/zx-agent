@@ -23,6 +23,7 @@ use zx_app::{
 };
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
+use zx_testing::program::{agent_text, write_agent_file};
 use zx_util::sync::lock;
 
 /// The value of a secret file of the configuration, which tool results must not show.
@@ -42,14 +43,10 @@ fn configured() -> Config {
 }
 
 /// The user's file of the built-in agent `unattended` in `home`, with `front` in its front
-/// matter.
+/// matter and instructions of its own.
 fn agent_in(home: &Path, front: &str) {
-    std::fs::create_dir_all(home.join("agents")).unwrap();
-    std::fs::write(
-        home.join("agents/unattended.md"),
-        format!("+++\nextends = \"unattended\"\n{front}\n[context]\ndiscover = false\n+++\nExplicit host role.\n"),
-    )
-    .unwrap();
+    let front = format!("extends = \"unattended\"\n{front}\n[context]\ndiscover = false");
+    write_agent_file(home, "unattended", &agent_text(&front, "Explicit host role.\n"));
 }
 
 fn role_in(home: &Path) {
@@ -106,7 +103,7 @@ fn offered(request: &Captured) -> Vec<String> {
 
 /// What the first tool result of `request` says.
 fn first_result(request: &Captured) -> String {
-    request.tool_results()[0]["content"].as_str().unwrap().to_string()
+    request.tool_result_texts().remove(0)
 }
 
 /// Puts the secret into every tool result, as a careless hook might.
@@ -144,6 +141,15 @@ impl Extension for Probes {
 
     fn tools(&self) -> Vec<Arc<dyn Tool>> {
         vec![Arc::new(EchoTool::new(self.0))]
+    }
+}
+
+/// An extension named `.0`, with nothing else.
+struct Named(&'static str);
+
+impl Extension for Named {
+    fn name(&self) -> &str {
+        self.0
     }
 }
 
@@ -216,7 +222,7 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
 }
 
 #[tokio::test]
-async fn an_explicit_host_gets_sanitized_notices_and_rejects_unusable_secret_files() {
+async fn a_notice_about_a_short_secret_names_its_file_but_not_its_value() {
     let dir = tempfile::tempdir().unwrap();
     let secret = dir.path().join("secret.txt");
     std::fs::write(&secret, "Q7z").unwrap();
@@ -228,7 +234,11 @@ async fn an_explicit_host_gets_sanitized_notices_and_rejects_unusable_secret_fil
     assert_eq!(app.notices().len(), 1);
     assert!(app.notices()[0].contains(&secret.display().to_string()));
     assert!(!app.notices()[0].contains("Q7z"));
-    std::fs::remove_file(secret).unwrap();
+}
+
+#[tokio::test]
+async fn a_secret_file_that_cannot_be_used_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
     let mut config = configured();
     config.secret_files.push(dir.path().join("secret.txt"));
     let error = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
@@ -302,7 +312,10 @@ async fn an_explicit_configuration_is_checked_as_a_file_would_be() {
         Ok(_) => panic!("an approval that times out at once was accepted"),
         Err(error) => format!("{error:#}"),
     };
-    assert!(error.contains("approvalTimeoutSecs must be at least 1"), "{error}");
+    assert!(
+        error.contains("approvalTimeoutSecs must be greater than zero"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -336,7 +349,7 @@ async fn the_agents_permissions_ask_about_a_tool_the_host_adds() {
     ask(&app).await;
     // Asked about, with nobody to answer.
     let result = first_result(&server.requests()[1]);
-    assert!(result.starts_with("Approval denied"), "{result}");
+    assert!(result.starts_with("Not executed: approval denied"), "{result}");
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -379,7 +392,7 @@ async fn the_tools_of_an_extension_of_the_host_ask_as_those_of_mcp_servers_do() 
     assert_eq!(offered(&requests[0]), ["ext_probe"]);
     // Asked about, with nobody to answer.
     let result = first_result(&requests[1]);
-    assert!(result.starts_with("Approval denied"), "{result}");
+    assert!(result.starts_with("Not executed: approval denied"), "{result}");
 }
 
 /// Gives an application parts of the host's.
@@ -390,7 +403,7 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     agent_in(&home, "tools = [\"probe\"]");
-    let cases: [(Adding, &str); 6] = [
+    let cases: [(Adding, &str); 9] = [
         (
             |app| app.add_tool(Arc::new(EchoTool::new("bash"))),
             "the host's tool \"bash\" has the name of a built-in tool",
@@ -401,21 +414,14 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
         ),
         (
             |app| app.add_hook("redact_secrets", Arc::new(Leaky)),
-            "the host's hook or policy \"redact_secrets\" has a name",
-        ),
-        (
-            |app| {
-                app.add_hook("audit", Arc::new(Leaky))
-                    .add_policy("audit", Arc::new(ProbeOff))
-            },
-            "the host's hook or policy \"audit\" has a name",
+            "the host's hook \"redact_secrets\" has a name",
         ),
         (
             |app| {
                 app.add_extension(Arc::new(Probes("ext_probe")))
                     .add_policy("probes", Arc::new(ProbeOff))
             },
-            "the host's hook or policy \"probes\" has a name",
+            "the host's policy \"probes\" has a name",
         ),
         (
             |app| {
@@ -423,6 +429,25 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
                     .add_tool(Arc::new(EchoTool::new("probe")))
             },
             "more than one tool is named \"probe\"",
+        ),
+        (
+            |app| app.add_extension(Arc::new(Named("redact_secrets"))),
+            "the extension \"redact_secrets\" has the name of a built-in hook or policy",
+        ),
+        (
+            |app| app.add_prompt_section("environment", "Elsewhere."),
+            "the host's prompt section \"environment\" has a name",
+        ),
+        (
+            |app| app.add_prompt_section("preamble", "Other instructions."),
+            "the host's prompt section \"preamble\" has a name",
+        ),
+        (
+            |app| {
+                app.add_prompt_section("notes", "One.")
+                    .add_prompt_section("notes", "Two.")
+            },
+            "the host's prompt section \"notes\" has a name",
         ),
     ];
     for (add, expected) in cases {
@@ -441,6 +466,19 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
             .unwrap();
         assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
     }
+}
+
+#[tokio::test]
+async fn a_hook_and_a_policy_of_the_host_may_share_a_name() {
+    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .add_hook("audit", Arc::new(Leaky))
+        .add_policy("audit", Arc::new(ProbeOff));
+
+    let built = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+
+    assert!(built.is_ok(), "{:#}", built.err().unwrap());
 }
 
 #[tokio::test]
@@ -576,6 +614,30 @@ async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_sess
 }
 
 #[tokio::test]
+async fn the_variables_a_host_hides_are_hidden_beside_the_api_key() {
+    let noting = Arc::new(Noting::default());
+    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
+        .await
+        .unwrap()
+        .register_executor("noting", noting.clone())
+        .add_hidden_env("ZX_APPLICATION_TEST_TOKEN")
+        .add_hidden_env("ZX_APPLICATION_TEST_SECRET");
+    let agent = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    agent.create(None).await.unwrap();
+    let started = lock(&noting.started).clone();
+    let hidden_env = &started[0].1;
+    for name in [
+        "ZX_APPLICATION_TEST_UNUSED_KEY",
+        "ZX_APPLICATION_TEST_TOKEN",
+        "ZX_APPLICATION_TEST_SECRET",
+    ] {
+        assert!(hidden_env.contains(&name.to_string()), "{name}: {hidden_env:?}");
+    }
+}
+
+#[tokio::test]
 async fn approving_every_call_needs_an_executor_that_isolates_commands() {
     let dir = tempfile::tempdir().unwrap();
     agent_in(dir.path(), "[permissions]\napproveAll = true\nask = []");
@@ -617,8 +679,7 @@ async fn approving_every_call_needs_an_executor_that_isolates_commands() {
 
 #[tokio::test]
 async fn a_name_no_factory_is_registered_under_or_two_are_fails_the_build() {
-    type Registering = fn(Application) -> Application;
-    let cases: [(Config, Registering, &str); 4] = [
+    let cases: [(Config, Adding, &str); 4] = [
         (
             with_provider("nowhere", ""),
             |app| app,

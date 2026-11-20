@@ -17,15 +17,14 @@ use std::collections::HashSet;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use self::source::{summary_input, summary_messages};
 use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
 
-pub(crate) use source::{summary_input, summary_messages};
-
-/// The largest serialized summary.
-pub(crate) const MAX_SUMMARY_BYTES: usize = 64 * 1024;
+/// The largest summary, serialized as JSON, in bytes.
+pub const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 
 /// The most facts, inferences or plans one summary holds.
-const MAX_STATEMENTS: usize = 128;
+pub const MAX_SUMMARY_STATEMENTS: usize = 128;
 
 /// Every fact cites only records in `ids`.
 fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
@@ -68,7 +67,8 @@ impl CompactionSummary {
         cite_only(&self.facts, ids)
     }
 
-    /// The bounds every summary keeps: at most 64 KiB and 128 statements of each kind,
+    /// The bounds every summary keeps: at most [`MAX_SUMMARY_BYTES`], and
+    /// [`MAX_SUMMARY_STATEMENTS`] statements of each kind,
     /// nothing empty, and every fact cites at least one record.
     fn validate_limits(&self) -> Result<()> {
         ensure!(
@@ -76,10 +76,10 @@ impl CompactionSummary {
             "summary exceeds {MAX_SUMMARY_BYTES} bytes"
         );
         ensure!(
-            self.facts.len() <= MAX_STATEMENTS
-                && self.inferences.len() <= MAX_STATEMENTS
-                && self.plans.len() <= MAX_STATEMENTS,
-            "too many summary statements: {} facts, {} inferences, {} plans; at most {MAX_STATEMENTS} of each",
+            self.facts.len() <= MAX_SUMMARY_STATEMENTS
+                && self.inferences.len() <= MAX_SUMMARY_STATEMENTS
+                && self.plans.len() <= MAX_SUMMARY_STATEMENTS,
+            "too many summary statements: {} facts, {} inferences, {} plans; at most {MAX_SUMMARY_STATEMENTS} of each",
             self.facts.len(),
             self.inferences.len(),
             self.plans.len()
@@ -131,7 +131,7 @@ impl CompactionSummary {
 /// What a summary request was sent with, besides the records it read: enough to rebuild the
 /// request from the session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct SummaryRequest {
     pub provider: String,
     pub model: String,
@@ -163,8 +163,8 @@ pub struct CompactionStartedEntry {
     pub timestamp: u64,
     pub first_kept_entry_id: String,
     /// The latest input before the boundary, when the boundary falls among what followed
-    /// that input. The summary reads it like every record before the boundary, and it also
-    /// stays in the context as it was sent, before the summary: work summarized in its
+    /// that input. The summary reads it like every record before the boundary, and it is
+    /// also kept in the context as it was sent, before the summary: work summarized in its
     /// middle keeps the request it answers. Absent when the boundary is at or before the
     /// latest input, which is then kept anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,7 +200,7 @@ pub struct CompactionFailedEntry {
     pub compaction_id: String,
     pub error: String,
     pub usage: Usage,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<AssistantMessage>,
 }
 

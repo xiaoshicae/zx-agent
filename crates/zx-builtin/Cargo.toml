@@ -1,11 +1,20 @@
 [package]
 name = "zx-builtin"
-description = "Built-in tools, executors, tool policies, built-in hooks and the MCP client of zx-agent"
+description = "Built-in tools, executors, tool policies, built-in hooks, the JSONL session storage and the MCP client of zx-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["mcp"]
+# The client of external MCP servers (`mcp`), with the HTTP client and the MCP SDK it brings;
+# without it, the built-in tools, executors, policies and hooks compile without either.
+mcp = ["dep:reqwest", "dep:rmcp"]
 
 [dependencies]
 zx-ai.workspace = true
@@ -22,18 +31,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "r
 tokio-util.workspace = true
 uuid.workspace = true
 
-[features]
-default = ["mcp"]
-# The client of external MCP servers (`mcp`), with the HTTP client and the MCP SDK it brings;
-# without it, the built-in tools, executors, policies and hooks compile without either.
-mcp = ["dep:reqwest", "dep:rmcp"]
-
 [dev-dependencies]
 futures.workspace = true
 tempfile.workspace = true
 
 [target."cfg(unix)".dependencies]
 libc.workspace = true
-
-[lints]
-workspace = true

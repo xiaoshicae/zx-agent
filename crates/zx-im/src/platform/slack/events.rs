@@ -1,16 +1,15 @@
-//! What arrives over Socket Mode, people's messages and button clicks, a thread's history,
+//! What arrives over Socket Mode, messages and button clicks, a thread's history,
 //! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};
 use zx_agent::events::ApprovalResult;
 
+use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 use crate::platform::split_text;
 use crate::{
-    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId, Said,
-    ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId,
+    Said, ThreadId, UserId,
 };
-
-use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 
 /// The bot as `auth.test` names it, which tells its own posts from everyone else's.
 #[derive(Default)]
@@ -239,12 +238,13 @@ pub(super) fn split(text: &str, max: usize) -> (String, Vec<String>) {
     split_text(text, max, push_escaped)
 }
 
-/// The escaped request shown on a card, within the length of a section block.
-pub(super) fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) -> String {
-    let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(tool));
-    let tail = format!("```\n{}: {}", escape(&labels.reason), escape(reason));
+/// What a card shows of the request `card`, open and once closed: escaped, within the length
+/// of a section block.
+pub(super) fn card_request(labels: &CardLabels, card: &ApprovalCard) -> String {
+    let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(&card.tool));
+    let tail = format!("```\n{}: {}", escape(&labels.reason), escape(&card.reason));
     let room = MAX_SECTION_CHARS.saturating_sub(head.chars().count() + tail.chars().count() + 1);
-    let (mut summary, rest) = split(summary, room);
+    let (mut summary, rest) = split(&card.summary, room);
     // A part ends before the room does when the next entity would not fit, so whether the
     // request was cut shows in the parts left, not in this part's length.
     if !rest.is_empty() {
@@ -291,6 +291,15 @@ fn is_talk(message: &Value) -> bool {
 mod tests {
     use super::*;
 
+    /// A card for a bash call of `summary`, as the policy asks `why`.
+    fn bash(summary: &str) -> ApprovalCard {
+        ApprovalCard {
+            tool: "bash".into(),
+            summary: summary.into(),
+            reason: "why".into(),
+        }
+    }
+
     /// The parts of a split in order.
     fn parts((first, rest): (String, Vec<String>)) -> Vec<String> {
         let mut parts = vec![first];
@@ -336,15 +345,15 @@ mod tests {
             reason: "R".into(),
             ..CardLabels::default()
         };
-        let request = card_request(&labels, "bash", &"<".repeat(5000), "why");
+        let request = card_request(&labels, &bash(&"<".repeat(5000)));
         assert!(request.chars().count() <= MAX_SECTION_CHARS);
         assert!(request.contains("&lt;…```"), "{request}");
-        assert!(!card_request(&labels, "bash", "ls -l", "why").contains('…'));
+        assert!(!card_request(&labels, &bash("ls -l")).contains('…'));
     }
 
     #[test]
     fn a_long_request_fits_in_a_section() {
-        let request = card_request(&CardLabels::default(), "bash", &"<".repeat(5000), "why");
+        let request = card_request(&CardLabels::default(), &bash(&"<".repeat(5000)));
         assert!(
             request.chars().count() <= MAX_SECTION_CHARS,
             "{}",

@@ -17,20 +17,19 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use self::run::EVENT_BUFFER;
+pub use self::run::Run;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::events::Event;
-use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
+use crate::extensions::{CommandContext, CommandOutcome, SlashCommand};
 use crate::input::{InputQueues, PendingInput};
 use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
 use crate::sync::lock;
 use crate::tools::ActiveTools;
 use crate::transcript::{CustomMessage, SessionName, Transcript};
-
-use run::EVENT_BUFFER;
-pub use run::Run;
 
 /// What a new session starts with.
 #[derive(Clone, Debug)]
@@ -67,8 +66,10 @@ pub enum SessionError {
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
-    /// The session could not record an entry. It closes itself once this operation ends,
-    /// and the agent opens it again from its storage.
+    /// The session could not record an entry. When its storage failed, the session closes
+    /// itself once this operation ends, and the agent opens it again from its storage; an
+    /// entry it refuses before writing, such as a custom record without a custom type, leaves
+    /// it open.
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// No approval request with that ID waits for an answer: it was answered already, nobody
@@ -83,11 +84,26 @@ pub enum SessionError {
     Closed,
 }
 
+/// Why [`Session::run_command`] returned no outcome.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CommandError {
+    /// No extension registered a command with that name.
+    #[error("unknown command")]
+    Unknown,
+    /// The command ran and failed with this message.
+    #[error("command failed: {0}")]
+    Failed(String),
+    /// The session is closed, as [`SessionError::Closed`] says.
+    #[error("{}", SessionError::Closed)]
+    Closed,
+}
+
 enum State {
     // A full Runner is only needed while idle, so keep the state enum small.
     Idle(Box<Runner>),
-    /// An operation holds the Runner; the token cancels it.
-    Leased(CancellationToken),
+    /// An operation holds the Runner: a run or a compaction, which the token cancels, or one
+    /// of the short operations that read or write the session while idle, which has none.
+    Leased(Option<CancellationToken>),
     /// Closed while an operation held the Runner: the operation was cancelled, and its lease
     /// drops the Runner instead of returning it.
     Closing,
@@ -96,12 +112,19 @@ enum State {
 }
 
 impl State {
-    /// Why an operation cannot take the Runner in this state, which is not `Idle`.
+    /// Why an operation cannot take the Runner in this state, which is not `Idle`: another
+    /// operation holds it, or the session is closed.
     fn refusal(&self) -> SessionError {
-        match self {
-            Self::Idle(_) | Self::Leased(_) => SessionError::Busy,
-            Self::Closing | Self::Closed => SessionError::Closed,
+        if self.is_closed() {
+            SessionError::Closed
+        } else {
+            SessionError::Busy
         }
+    }
+
+    /// Whether the session is closed, or closes once the operation that holds it ends.
+    fn is_closed(&self) -> bool {
+        matches!(self, Self::Closing | Self::Closed)
     }
 }
 
@@ -183,6 +206,11 @@ impl Session {
     /// ([`PendingInput::held`]), which ends once the session has recorded the input, or with a
     /// run that ends without recording it. This only takes the conversation; the returned
     /// [`Run`] makes the requests as it is read. An overlap returns Busy.
+    ///
+    /// A run cancelled while the input hooks ([`Hook::on_input`](crate::hooks::Hook::on_input))
+    /// run records no input: recorded without their rewrite, it would reach the model as it
+    /// was written. Without input hooks, the input is recorded before the run notices the
+    /// cancellation.
     pub fn send(&self, input: impl Into<PendingInput>) -> Result<Run, SessionError> {
         // The conversion is host code: it runs before the conversation is leased.
         self.start(Start::Message(input.into()))
@@ -204,18 +232,18 @@ impl Session {
         self.start(Start::Continue)
     }
 
-    fn start(&self, begin: Start) -> Result<Run, SessionError> {
+    fn start(&self, from: Start) -> Result<Run, SessionError> {
         let (mut lease, link, events) = self.begin()?;
         let id = link.id.clone();
         Ok(Run::new(
             id,
             events,
-            async move { lease.runner().run(begin, &link).await },
+            async move { lease.runner().run(from, &link).await },
         ))
     }
 
     /// Summarize the old prefix of the conversation without executing a task or tools, as a
-    /// run of its own, with the same exclusive hold on the conversation as a prompt. An
+    /// run of its own, with the same exclusive lease of the conversation as a prompt. An
     /// overlap returns Busy; no eligible old prefix gives a no-op report. A cancelled or
     /// dropped run keeps an incomplete compaction out of the context.
     pub fn compact(&self) -> Result<Run<compaction::Report>, SessionError> {
@@ -228,7 +256,7 @@ impl Session {
     /// the reader's end of its events.
     fn begin(&self) -> Result<(Lease, RunLink, mpsc::Receiver<Event>), SessionError> {
         let cancel = CancellationToken::new();
-        let lease = self.lease(cancel.clone())?;
+        let lease = self.lease(Some(cancel.clone()))?;
         let (events, reader) = mpsc::channel(EVENT_BUFFER);
         let link = RunLink {
             id: uuid::Uuid::new_v4().to_string(),
@@ -278,8 +306,8 @@ impl Session {
             .find(|command| command.name() == name)
             .ok_or(CommandError::Unknown)?;
         let ctx = CommandContext::new(
-            shared.cwd.clone(),
             shared.id.clone(),
+            shared.cwd.clone(),
             shared.queues.clone(),
             shared.active_tools.clone(),
         );
@@ -323,7 +351,7 @@ impl Session {
         &self,
         append: impl AsyncFnOnce(&mut Runner) -> anyhow::Result<String>,
     ) -> Result<String, SessionError> {
-        let mut lease = self.lease(CancellationToken::new())?;
+        let mut lease = self.lease(None)?;
         append(lease.runner())
             .await
             .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
@@ -342,14 +370,13 @@ impl Session {
     }
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
-    /// result. Returns false when idle or closed. The short operations that read or write the
-    /// session while idle (`with_transcript`, `append_custom_entry`, `append_custom_message`,
-    /// `set_name`) hold the conversation as well: during one of them this returns true,
-    /// although they have nothing to cancel.
+    /// result. Returns false when there is none: idle, closed, or during one of the short
+    /// operations that read or write the session while idle (`with_transcript`,
+    /// `append_custom_entry`, `append_custom_message`, `set_name`).
     pub fn cancel(&self) -> bool {
         let cancel = match &*lock(&self.shared.state) {
-            State::Idle(_) | State::Closing | State::Closed => return false,
-            State::Leased(cancel) => cancel.clone(),
+            State::Leased(Some(cancel)) => cancel.clone(),
+            State::Idle(_) | State::Leased(None) | State::Closing | State::Closed => return false,
         };
         // Waking a waiting future can call host-provided wakers; do it unlocked.
         cancel.cancel();
@@ -361,7 +388,7 @@ impl Session {
     /// A closed handle stays closed; [`Agent::open_session`](crate::Agent::open_session)
     /// gives the session again.
     pub fn is_closed(&self) -> bool {
-        matches!(&*lock(&self.shared.state), State::Closing | State::Closed)
+        lock(&self.shared.state).is_closed()
     }
 
     /// Close the conversation: cancel the operation in progress, if there is one, and let go
@@ -378,10 +405,10 @@ impl Session {
             std::mem::replace(&mut *state, next)
         };
         match previous {
-            State::Leased(cancel) => cancel.cancel(),
+            State::Leased(Some(cancel)) => cancel.cancel(),
             // The Runner is dropped here, without the state lock: closing a storage and
             // dropping the tools and hooks is host code.
-            State::Idle(_) | State::Closing | State::Closed => {}
+            State::Idle(_) | State::Leased(None) | State::Closing | State::Closed => {}
         }
         true
     }
@@ -403,7 +430,7 @@ impl Session {
     /// `provider` as the host configured it, authentication and transport limits included,
     /// and `model`, the ID later prompts pass to it. An empty ID returns InvalidModel; a run
     /// returns Busy. History, tools, hooks, limits and exact-call approval grants are
-    /// retained. No request is made and the session header keeps its original starting model.
+    /// kept. No request is made and the session header keeps its original starting model.
     pub fn set_model(&self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Result<(), SessionError> {
         let model = model.into();
         if model.trim().is_empty() {
@@ -420,9 +447,7 @@ impl Session {
     /// server's default. A run returns Busy. The change is recorded with the next request
     /// (`request_config`); no request is made now.
     pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), SessionError> {
-        self.idle(|runner| {
-            runner.replace_reasoning(reasoning);
-        })
+        self.idle(|runner| runner.set_reasoning(reasoning))
     }
 
     /// Move the conversation to another point of its session tree while idle (pi:
@@ -453,7 +478,7 @@ impl Session {
     /// position. `f` runs with the conversation leased, as a run does: other calls get
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
     pub fn with_transcript<T>(&self, f: impl FnOnce(&Transcript) -> T) -> Result<T, SessionError> {
-        let mut lease = self.lease(CancellationToken::new())?;
+        let mut lease = self.lease(None)?;
         Ok(f(lease.runner().transcript()))
     }
 
@@ -473,9 +498,9 @@ impl Session {
         Ok(f(runner))
     }
 
-    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it,
-    /// Closed once the session is closed.
-    fn lease(&self, cancel: CancellationToken) -> Result<Lease, SessionError> {
+    /// Take the Runner for one operation, which `cancel` cancels if it is a run or a
+    /// compaction; Busy while another holds it, Closed once the session is closed.
+    fn lease(&self, cancel: Option<CancellationToken>) -> Result<Lease, SessionError> {
         let mut state = lock(&self.shared.state);
         match std::mem::replace(&mut *state, State::Leased(cancel.clone())) {
             State::Idle(runner) => Ok(Lease {
@@ -500,7 +525,7 @@ impl Session {
 struct Lease {
     shared: Arc<Shared>,
     runner: Option<Box<Runner>>,
-    cancel: CancellationToken,
+    cancel: Option<CancellationToken>,
 }
 
 impl Lease {
@@ -513,7 +538,9 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
         let runner = self
             .runner
             .take()
@@ -523,12 +550,14 @@ impl Drop for Lease {
         let unwritable = runner.transcript().lost_its_log();
         let mut state = lock(&self.shared.state);
         let released = match &*state {
-            State::Leased(_) | State::Idle(_) if !unwritable => {
+            State::Leased(_) if !unwritable => {
                 *state = State::Idle(runner);
                 None
             }
-            // Unwritable, or closed meanwhile: the Runner goes instead of coming back.
-            State::Leased(_) | State::Idle(_) | State::Closing | State::Closed => {
+            // Unwritable, or closed meanwhile: the Runner goes instead of coming back. While a
+            // lease lives only `close` changes the state, to `Closing`, so `Idle` and `Closed`
+            // do not occur here; closing is the safe end for them too.
+            State::Leased(_) | State::Closing | State::Idle(_) | State::Closed => {
                 *state = State::Closed;
                 Some(runner)
             }

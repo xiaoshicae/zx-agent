@@ -9,10 +9,16 @@ use std::str::FromStr;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use crate::executor::environment::{current_time, pretty_name};
+use crate::executor::environment::{OPENED_LABEL, OS_LABEL, WORKING_DIRECTORY_LABEL, current_time, pretty_name};
 
 /// The user commands run as when the agent itself runs as root, or off Unix: nobody.
 pub(super) const NOBODY: &str = "65534:65534";
+/// The prefix of the line of the start-up probe's output that holds `uname -m`.
+pub(super) const ARCH_FIELD: &str = "arch=";
+/// The prefix of the line of the start-up probe's output that holds `uname -r`.
+pub(super) const KERNEL_FIELD: &str = "kernel=";
+/// The line of the start-up probe's output after which the image's `/etc/os-release` follows.
+pub(super) const OS_RELEASE_HEADER: &str = "--- os-release";
 
 /// Whether the container may change a part of its file system. In configuration files,
 /// `readWrite` or `readOnly`.
@@ -53,10 +59,16 @@ pub struct ContainerConfig {
 }
 
 impl ContainerConfig {
+    /// The memory limit by default, in Docker's syntax.
+    pub const DEFAULT_MEMORY: &'static str = "1g";
+    /// The limit on processes by default.
+    pub const DEFAULT_PIDS_LIMIT: u32 = 256;
+
     /// Settings for `image` with the defaults: a writable workspace and root, the `bridge`
     /// network, the agent's own `uid:gid` (so that files written in the workspace belong to
-    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix), 1 GiB
-    /// of memory, 256 processes, no label, and the `docker` client found on `PATH`.
+    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix),
+    /// [`Self::DEFAULT_MEMORY`] of memory, [`Self::DEFAULT_PIDS_LIMIT`] processes, no label,
+    /// and the `docker` client found on `PATH`.
     pub fn new(image: impl Into<String>) -> Self {
         Self {
             image: image.into(),
@@ -65,8 +77,8 @@ impl ContainerConfig {
             root_access: Access::ReadWrite,
             network: Network::Bridge,
             user: default_user(),
-            memory: "1g".into(),
-            pids_limit: 256,
+            memory: Self::DEFAULT_MEMORY.into(),
+            pids_limit: Self::DEFAULT_PIDS_LIMIT,
             label: String::new(),
         }
     }
@@ -270,8 +282,11 @@ fn default_user() -> String {
     NOBODY.into()
 }
 
+/// The platform the start-up probe printed in `output`.
 pub(super) fn parse_platform(output: &str) -> Platform {
-    let (head, os_release) = output.split_once("--- os-release\n").unwrap_or((output, ""));
+    let (head, os_release) = output
+        .split_once(&format!("{OS_RELEASE_HEADER}\n"))
+        .unwrap_or((output, ""));
     let field = |key: &str| {
         head.lines()
             .find_map(|line| line.strip_prefix(key))
@@ -281,8 +296,8 @@ pub(super) fn parse_platform(output: &str) -> Platform {
     };
     Platform {
         os_release: os_release.to_string(),
-        kernel: field("kernel="),
-        arch: field("arch="),
+        kernel: field(KERNEL_FIELD),
+        arch: field(ARCH_FIELD),
     }
 }
 
@@ -298,13 +313,13 @@ pub(super) fn container_section(config: &ContainerConfig, workspace: &Path, plat
     };
     let (directories, mounted) = if cwd == workspace {
         (
-            format!("Working directory: {} ({access})", cwd.display()),
+            format!("{WORKING_DIRECTORY_LABEL}{} ({access})", cwd.display()),
             "the working directory",
         )
     } else {
         (
             format!(
-                "Working directory: {}\nWorkspace: {} ({access})",
+                "{WORKING_DIRECTORY_LABEL}{}\nWorkspace: {} ({access})",
                 cwd.display(),
                 workspace.display()
             ),
@@ -320,7 +335,7 @@ pub(super) fn container_section(config: &ContainerConfig, workspace: &Path, plat
         Access::ReadOnly => format!("outside {mounted} only /tmp is writable"),
     };
     format!(
-        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nSession opened: {}\n{directories}\n\
+        "{OS_LABEL}{name}, Linux kernel {} ({}), in a container from image {}\n{OPENED_LABEL}{}\n{directories}\n\
          Isolation: commands run as user {} {network}; {files}.",
         platform.kernel,
         platform.arch,
@@ -328,4 +343,205 @@ pub(super) fn container_section(config: &ContainerConfig, workspace: &Path, plat
         current_time(),
         config.user,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ContainerConfig {
+        ContainerConfig::new("debian:bookworm-slim")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_run_as_the_agents_own_user_unless_it_is_root() {
+        use std::os::unix::fs::MetadataExt;
+        // A new file belongs to the process's user. Its group may be the directory's, as on
+        // macOS, so only the user is compared.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let uid = file.as_file().metadata().unwrap().uid();
+        let user = ContainerConfig::new("image").user;
+        if uid == 0 {
+            assert_eq!(user, NOBODY);
+        } else {
+            assert_eq!(user.split(':').next(), Some(uid.to_string().as_str()), "{user}");
+        }
+    }
+
+    #[test]
+    fn invalid_settings_are_rejected_before_docker_runs() {
+        let cases = [
+            (ContainerConfig::new(" "), InvalidContainerConfig::EmptyImage),
+            (
+                ContainerConfig {
+                    user: " ".into(),
+                    ..config()
+                },
+                InvalidContainerConfig::EmptyUser,
+            ),
+            (
+                ContainerConfig {
+                    memory: String::new(),
+                    ..config()
+                },
+                InvalidContainerConfig::EmptyMemory,
+            ),
+            (
+                ContainerConfig {
+                    pids_limit: 0,
+                    ..config()
+                },
+                InvalidContainerConfig::ZeroPidsLimit,
+            ),
+            // A network built directly is held to the rule that parsing one follows.
+            (
+                ContainerConfig {
+                    network: Network::Named("host".into()),
+                    ..config()
+                },
+                InvalidContainerConfig::SharedNetwork("host".into()),
+            ),
+        ];
+        for (config, expected) in cases {
+            assert_eq!(config.validate(), Err(expected), "{config:?}");
+        }
+        assert_eq!(config().validate(), Ok(()));
+    }
+
+    #[test]
+    fn workspaces_that_docker_cannot_mount_are_rejected_before_docker_runs() {
+        for workspace in ["work", "/work,ro", "/work\"x"] {
+            assert!(check_workspace(Path::new(workspace)).is_err(), "{workspace:?}");
+        }
+        check_workspace(Path::new("/work")).unwrap();
+    }
+
+    #[test]
+    fn networks_shared_with_the_outside_are_refused() {
+        for network in ["host", " HOST ", "container:other"] {
+            let error = network.parse::<Network>().unwrap_err().to_string();
+            assert!(error.contains("outside the sandbox"), "{network:?}: {error}");
+        }
+        let error = " ".parse::<Network>().unwrap_err().to_string();
+        assert!(error.contains("is empty"), "{error}");
+    }
+
+    #[test]
+    fn network_names_are_read_case_insensitively_and_written_back_as_docker_expects() {
+        assert_eq!("bridge".parse::<Network>().unwrap(), Network::Bridge);
+        assert_eq!(" None ".parse::<Network>().unwrap(), Network::None);
+        assert_eq!("my-net".parse::<Network>().unwrap(), Network::Named("my-net".into()));
+        assert_eq!(Network::None.to_string(), "none");
+        assert_eq!(Network::Named("my-net".into()).to_string(), "my-net");
+    }
+
+    #[test]
+    fn commands_must_not_run_as_root() {
+        for user in ["0", "0:0", "00:1000", "root", "root:root", " 0 :0"] {
+            let config = ContainerConfig {
+                user: user.into(),
+                ..config()
+            };
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("is root"), "{user:?}: {error}");
+        }
+        for user in ["65534:65534", "1000", "nobody"] {
+            let config = ContainerConfig {
+                user: user.into(),
+                ..config()
+            };
+            assert!(config.validate().is_ok(), "{user:?}");
+        }
+    }
+
+    #[test]
+    fn the_probe_output_describes_the_platform() {
+        let platform = parse_platform(
+            "arch=aarch64\nkernel=6.10.14-linuxkit\n--- os-release\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n",
+        );
+        assert_eq!(platform.arch, "aarch64");
+        assert_eq!(platform.kernel, "6.10.14-linuxkit");
+        assert_eq!(platform.os_release, "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n");
+        assert_eq!(
+            parse_platform("arch=x86_64\n"),
+            Platform {
+                arch: "x86_64".into(),
+                ..Platform::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_environment_section_describes_the_container_and_its_isolation() {
+        let platform = Platform {
+            os_release: "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n".into(),
+            kernel: "6.10.14-linuxkit".into(),
+            arch: "aarch64".into(),
+        };
+        let open = ContainerConfig {
+            user: "1000:1000".into(),
+            ..ContainerConfig::new("debian:bookworm-slim")
+        };
+        let app = Path::new("/srv/app");
+        let section = container_section(&open, app, &platform, app);
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(
+            lines[0],
+            "OS: Debian GNU/Linux 12 (bookworm), Linux kernel 6.10.14-linuxkit (aarch64), in a container from image debian:bookworm-slim"
+        );
+        assert!(lines[1].starts_with("Session opened: "), "{section}");
+        assert_eq!(
+            lines[2],
+            "Working directory: /srv/app (writable; changes are made to the host's files)"
+        );
+        assert_eq!(
+            lines[3],
+            "Isolation: commands run as user 1000:1000 with network access (Docker network bridge); \
+             the container's own files are writable and are discarded with the container."
+        );
+        let unnamed = Platform::default();
+        assert!(container_section(&open, app, &unnamed, app).starts_with("OS: Linux, Linux kernel"));
+    }
+
+    fn strict() -> ContainerConfig {
+        ContainerConfig {
+            user: "65534:65534".into(),
+            workspace_access: Access::ReadOnly,
+            root_access: Access::ReadOnly,
+            network: Network::None,
+            ..ContainerConfig::new("debian:bookworm-slim")
+        }
+    }
+
+    #[test]
+    fn a_strict_container_is_described_as_read_only_and_offline() {
+        let app = Path::new("/srv/app");
+        let section = container_section(&strict(), app, &Platform::default(), app);
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(lines[2], "Working directory: /srv/app (read-only)");
+        assert_eq!(
+            lines[3],
+            "Isolation: commands run as user 65534:65534 without network access; outside the working directory only /tmp is writable."
+        );
+    }
+
+    #[test]
+    fn a_working_directory_other_than_the_workspace_is_told_apart_from_it() {
+        let section = container_section(
+            &strict(),
+            Path::new("/srv/app"),
+            &Platform::default(),
+            Path::new("/srv/app/web"),
+        );
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(
+            lines[2..4],
+            ["Working directory: /srv/app/web", "Workspace: /srv/app (read-only)"]
+        );
+        assert!(
+            lines[4].ends_with("; outside the workspace only /tmp is writable."),
+            "{section}"
+        );
+    }
 }

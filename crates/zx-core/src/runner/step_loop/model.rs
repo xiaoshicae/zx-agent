@@ -4,31 +4,30 @@ use anyhow::Context;
 use futures::StreamExt;
 
 use super::{Halt, StepLoop};
-use crate::ai::{AssistantMessage, Request, StopReason, StreamEvent};
+use crate::ai::{AssistantMessage, Request, Role, StopReason, StreamEvent};
 use crate::events::{EventKind, RequestKind};
 use crate::hooks::RequestSettings;
+use crate::runner::accounting::check_priced;
 use crate::transcript::RequestSource;
 
 impl StepLoop<'_> {
     /// Record and send the task request of step `step`, then account for its response.
     pub(super) async fn request_model(&mut self, step: u32) -> Result<AssistantMessage, Halt> {
-        let config = self.run.config;
-        let messages = self.run.transcript.messages();
+        let config = self.scope.config;
+        let messages = self.scope.transcript.messages();
         let configured = RequestSettings {
             model: config.model.clone(),
             reasoning: config.reasoning,
         };
         let prepared = config
             .hooks
-            .prepare_request(&messages, step, configured, &self.run.target.trace.context())
+            .prepare_request(&messages, step, configured, &self.scope.target.trace.hook_context())
             .await;
         let settings = match prepared {
             Ok(settings) => settings,
             Err(error) => return Err(self.hook_failed(error).await),
         };
-        self.accounting
-            .check_model(&config.models, &settings.model)
-            .map_err(Halt::Failed)?;
+        check_priced(&config.models, &settings.model, self.scope.cost_budget).map_err(Halt::Failed)?;
         let request = Request {
             model: settings.model,
             messages,
@@ -41,7 +40,7 @@ impl StepLoop<'_> {
         };
         let provider = config.provider.as_ref();
         let request_entry = self
-            .run
+            .scope
             .transcript
             .record_request(
                 &request,
@@ -62,22 +61,22 @@ impl StepLoop<'_> {
         .await;
         self.accounting.model_requests = self.accounting.model_requests.saturating_add(1);
         let model = request.model.clone();
-        let mut message = self.stream(request).await;
+        let mut message = self.stream(request, &model).await;
         message.usage.price(&config.models, &model);
         self.accounting.usage.add(&message.usage);
         Ok(message)
     }
 
-    /// Stream one response, reporting its start and its deltas. The caller records the
-    /// response and reports its end.
-    async fn stream(&self, request: Request) -> AssistantMessage {
-        let config = self.run.config;
-        let mut events = config.provider.stream(request, self.run.target.trace.cancel().clone());
+    /// Stream the response to `request`, which asks `model`, reporting its start and its
+    /// deltas. The caller records the response and reports its end.
+    async fn stream(&self, request: Request, model: &str) -> AssistantMessage {
+        let config = self.scope.config;
+        let mut events = config.provider.stream(request, self.scope.cancel().clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
                 started = true;
-                self.emit(EventKind::MessageStart { role: "assistant" }).await;
+                self.emit(EventKind::MessageStart { role: Role::Assistant }).await;
             }
             match event {
                 StreamEvent::Start => {}
@@ -85,17 +84,17 @@ impl StepLoop<'_> {
                 StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
-        let stop = if self.run.target.trace.cancel().is_cancelled() {
+        let stop = if self.scope.is_cancelled() {
             StopReason::Aborted
         } else {
             StopReason::Error
         };
         if !started {
-            self.emit(EventKind::MessageStart { role: "assistant" }).await;
+            self.emit(EventKind::MessageStart { role: Role::Assistant }).await;
         }
         AssistantMessage::failure(
             config.provider.name(),
-            &config.model,
+            model,
             stop,
             "provider stream ended without a final event",
         )

@@ -1,4 +1,10 @@
 //! One JSONL session file: a header line, then one record per line.
+//!
+//! Its functions block on the file system: the storage runs them on a blocking thread
+//! (`JsonlStorage::blocking`), and records reach the file on a writer thread of their own.
+//!
+//! - `tests`, compiled for tests only: the file's lock, reading it, repairing its end, and
+//!   appending to it
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -13,7 +19,6 @@ use async_trait::async_trait;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-
 use zx_core::transcript::{LoadedSession, LogRecord, SessionHeader, SessionLog};
 
 /// The longest header line read from a file that may not be a session at all.
@@ -32,15 +37,29 @@ fn header_line(header: &SessionHeader) -> Result<String> {
     Ok(serde_json::to_string(&HeaderLine::Session(header.clone()))?)
 }
 
-/// The header that `line`, the first line of a session file, holds.
-fn parse_header(line: &[u8]) -> Result<SessionHeader> {
-    let HeaderLine::Session(header) = serde_json::from_slice(line)?;
+/// The header in `line`, the first line of the session file at `path` that is not blank;
+/// `None` when the file has no such line.
+fn header_in(line: Option<&[u8]>, path: &Path) -> Result<SessionHeader> {
+    let line = line.ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
+    let HeaderLine::Session(header) =
+        serde_json::from_slice(line).with_context(|| format!("{}: invalid session header", path.display()))?;
     Ok(header)
+}
+
+/// Whether `line` holds nothing but whitespace.
+fn is_blank(line: &[u8]) -> bool {
+    line.iter().all(u8::is_ascii_whitespace)
+}
+
+/// What a failure to read the session file at `path` says.
+fn cannot_read(path: &Path) -> String {
+    format!("cannot read session file {}", path.display())
 }
 
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
 /// is dropped, so a second writer, in this process or another, cannot open the same file.
 pub(super) struct JsonlFile {
+    path: PathBuf,
     target: Target,
     /// The `seq` the next record must have.
     next_seq: u64,
@@ -102,8 +121,8 @@ impl Writer {
                 let Ok(first) = received.recv() else {
                     return;
                 };
-                let mut target = match open() {
-                    Ok(target) => target,
+                let mut destination = match open() {
+                    Ok(destination) => destination,
                     Err(error) => {
                         // The transcript may have stopped waiting for this write; then no one
                         // needs its result.
@@ -112,7 +131,9 @@ impl Writer {
                     }
                 };
                 for line in std::iter::once(first).chain(received) {
-                    let result = target.write_all(line.text.as_bytes()).and_then(|()| target.flush());
+                    let result = destination
+                        .write_all(line.text.as_bytes())
+                        .and_then(|()| destination.flush());
                     // As above: the transcript may have stopped waiting.
                     let _ = line.written.send(result.map_err(anyhow::Error::from));
                 }
@@ -126,15 +147,13 @@ impl Writer {
     }
 
     async fn write(&mut self, text: String) -> Result<()> {
-        let lines = self
-            .lines
-            .as_ref()
-            .ok_or_else(|| anyhow!("the session writer has stopped"))?;
+        // With no write pending the channel is empty, so a line it refuses means the thread
+        // is gone.
+        ensure!(!self.pending, "an earlier write of the session file has not finished");
+        let stopped = || anyhow!("the session writer has stopped");
+        let lines = self.lines.as_ref().ok_or_else(stopped)?;
         let (written, result) = oneshot::channel();
-        lines.try_send(Line { text, written }).map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => anyhow!("an earlier write of the session file has not finished"),
-            mpsc::TrySendError::Disconnected(_) => anyhow!("the session writer has stopped"),
-        })?;
+        lines.try_send(Line { text, written }).map_err(|_| stopped())?;
         self.pending = true;
         let result = result
             .await
@@ -182,9 +201,9 @@ impl JsonlFile {
     /// header is written immediately, so even a run that crashes before the first answer
     /// leaves a record.
     pub(super) fn create(path: &Path, header: &SessionHeader) -> Result<Self> {
-        // A header-only line and one small directory: quick, like any append.
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            super::create_private(parent)?;
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            crate::files::create_private_dir(parent)
+                .with_context(|| format!("cannot create the session directory {}", parent.display()))?;
         }
         let mut options = OpenOptions::new();
         options.append(true).create_new(true);
@@ -200,16 +219,15 @@ impl JsonlFile {
             .and_then(|()| file.flush())
             .with_context(|| format!("cannot write the header of {}", path.display()))?;
         Ok(Self {
+            path: path.to_path_buf(),
             target: Target::Writer(Writer::spawn(move || Ok(Box::new(file)))?),
             next_seq: 1,
         })
     }
 
-    /// Lock an existing file and read its header and records without changing it.
-    ///
-    /// A crash during the final write can leave an incomplete last line. It is left out of
-    /// the records, and cut off before the first record is appended; damage anywhere else is
-    /// an error.
+    /// Lock an existing file and read its header and records without changing it. An
+    /// incomplete last line is left out, and repaired before the first record is appended
+    /// ([`JsonlStorage`](super::JsonlStorage) says when it occurs).
     pub(super) fn open(path: &Path) -> Result<(LoadedSession, Self)> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -219,15 +237,15 @@ impl JsonlFile {
         // Before reading: a concurrent writer's unfinished line must not look like a crash.
         lock(&file, path)?;
         let mut content = Vec::new();
-        file.read_to_end(&mut content)
-            .with_context(|| format!("cannot read session file {}", path.display()))?;
-        let (loaded, truncate_at) = parse(&content, path)?;
-        let repair = match truncate_at {
-            Some(at) => Repair::Truncate(u64::try_from(at)?),
-            None if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
-            None => Repair::Nothing,
+        file.read_to_end(&mut content).with_context(|| cannot_read(path))?;
+        let loaded = parse(&content, path)?;
+        let repair = match loaded.incomplete_tail_bytes {
+            0 if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
+            0 => Repair::Nothing,
+            tail => Repair::Truncate(u64::try_from(content.len() - tail)?),
         };
         let opened = Self {
+            path: path.to_path_buf(),
             target: Target::Unrepaired(Unrepaired {
                 path: path.to_path_buf(),
                 file,
@@ -238,10 +256,12 @@ impl JsonlFile {
         Ok((loaded, opened))
     }
 
-    /// Records go to `writer`, so tests can make writes fail. No header is written.
+    /// Records of the file at `path` go to `writer`, so tests can make writes fail. No
+    /// header is written.
     #[cfg(test)]
-    pub(super) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
+    pub(super) fn with_writer(path: &Path, writer: Box<dyn Write + Send + Sync>) -> Self {
         Self {
+            path: path.to_path_buf(),
             target: Target::Writer(Writer::spawn(move || Ok(writer)).expect("tests can start a thread")),
             next_seq: 1,
         }
@@ -251,42 +271,40 @@ impl JsonlFile {
 /// Read a session file without locking or changing it. An incomplete last line, such as a
 /// record that a writer has not finished, is left out.
 pub(super) fn read(path: &Path) -> Result<LoadedSession> {
-    let content = std::fs::read(path).with_context(|| format!("cannot read session file {}", path.display()))?;
-    Ok(parse(&content, path)?.0)
+    let content = std::fs::read(path).with_context(|| cannot_read(path))?;
+    parse(&content, path)
 }
 
-/// Read only the header of a session file, without locking or changing it.
+/// Read only the header of a session file, without locking or changing it. Blank lines
+/// before it are skipped, as [`parse`] skips them.
 pub(super) fn read_header(path: &Path) -> Result<SessionHeader> {
-    let file = File::open(path).with_context(|| format!("cannot read session file {}", path.display()))?;
+    let file = File::open(path).with_context(|| cannot_read(path))?;
+    let mut lines = BufReader::new(file).take(MAX_HEADER_BYTES);
     let mut line = Vec::new();
-    BufReader::new(file)
-        .take(MAX_HEADER_BYTES)
-        .read_until(b'\n', &mut line)
-        .with_context(|| format!("cannot read session file {}", path.display()))?;
-    ensure!(
-        !line.iter().all(u8::is_ascii_whitespace),
-        "session file {} is empty",
-        path.display()
-    );
-    parse_header(&line).with_context(|| format!("{}: invalid session header", path.display()))
+    loop {
+        line.clear();
+        let read = lines.read_until(b'\n', &mut line).with_context(|| cannot_read(path))?;
+        if read == 0 || !is_blank(&line) {
+            break;
+        }
+    }
+    header_in((!is_blank(&line)).then_some(&line[..]), path)
 }
 
-/// The header and complete records of `content`, and where an incomplete last line starts.
-fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> {
+/// The header and complete records of `content`, with the length of an incomplete last
+/// line.
+fn parse(content: &[u8], path: &Path) -> Result<LoadedSession> {
     // A short final write can end inside a UTF-8 character, so check one record at a
     // time rather than rejecting the whole file during UTF-8 decoding.
     let mut lines = Vec::new();
     let mut offset = 0;
     for raw in content.split_inclusive(|&byte| byte == b'\n') {
-        if !raw.iter().all(u8::is_ascii_whitespace) {
+        if !is_blank(raw) {
             lines.push((offset, raw));
         }
         offset += raw.len();
     }
-    let (_, first) = lines
-        .first()
-        .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-    let header = parse_header(first).with_context(|| format!("{}: invalid session header", path.display()))?;
+    let header = header_in(lines.first().map(|&(_, first)| first), path)?;
 
     let mut records = Vec::new();
     let mut incomplete = None;
@@ -295,16 +313,14 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
             incomplete = Some(line_offset);
             break;
         }
-        let record =
-            std::str::from_utf8(raw).map_err(|error| anyhow!("{}: entry {position}: {error}", path.display()))?;
+        let record = std::str::from_utf8(raw).with_context(|| format!("{}: record {position}", path.display()))?;
         records.push(record.trim_end().to_string());
     }
-    let loaded = LoadedSession {
+    Ok(LoadedSession {
         header,
         records,
         incomplete_tail_bytes: incomplete.map_or(0, |start| content.len() - start),
-    };
-    Ok((loaded, incomplete))
+    })
 }
 
 impl Unrepaired {
@@ -313,14 +329,11 @@ impl Unrepaired {
     fn repair(self) -> Result<Box<dyn Write + Send>> {
         let Self { path, file, repair } = self;
         match repair {
-            Repair::Truncate(length) => file
-                .set_len(length)
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Terminate => (&file)
-                .write_all(b"\n")
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Nothing => {}
+            Repair::Truncate(length) => file.set_len(length),
+            Repair::Terminate => (&file).write_all(b"\n"),
+            Repair::Nothing => Ok(()),
         }
+        .with_context(|| format!("cannot repair session file {}", path.display()))?;
         Ok(Box::new(file))
     }
 }
@@ -328,17 +341,18 @@ impl Unrepaired {
 #[async_trait]
 impl SessionLog for JsonlFile {
     async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
-        ensure!(
-            record.seq == self.next_seq,
-            "record {} is out of order: the session file expects record {}",
-            record.seq,
-            self.next_seq
-        );
+        record
+            .check_seq(self.next_seq)
+            .with_context(|| format!("session file {}", self.path.display()))?;
         // The line survives a crash of this process, not of the machine: there is no fsync.
         let mut line = String::with_capacity(record.json.len() + 1);
         line.push_str(record.json);
         line.push('\n');
-        self.target.writer()?.write(line).await?;
+        self.target
+            .writer()?
+            .write(line)
+            .await
+            .with_context(|| format!("cannot write session file {}", self.path.display()))?;
         self.next_seq += 1;
         Ok(())
     }
@@ -375,12 +389,10 @@ fn lock(file: &File, path: &Path) -> Result<()> {
             // A signal interrupted the call: try again at once.
             std::io::ErrorKind::Interrupted => {}
             std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
-                // A synchronous pause: opening happens once per session, and it waits only
-                // while another descriptor holds the lock.
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(LOCK_RETRY_MAX);
             }
-            std::io::ErrorKind::WouldBlock => anyhow::bail!(
+            std::io::ErrorKind::WouldBlock => bail!(
                 "session file {} is in use: another process or session has it open for writing",
                 path.display()
             ),
@@ -417,310 +429,4 @@ fn incomplete_tail(raw: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-
-    use super::*;
-    use crate::ai::Message;
-    use crate::jsonl::test_support::{assistant, header, texts};
-    use zx_core::transcript::{SESSION_VERSION, Transcript};
-
-    /// A new session in the file `path`.
-    fn create(path: &Path) -> Result<Transcript> {
-        let header = header();
-        let file = JsonlFile::create(path, &header)?;
-        Ok(Transcript::with_log(header, Box::new(file)))
-    }
-
-    /// The session in the file `path`, loaded and open for appending.
-    fn open(path: &Path) -> Result<Transcript> {
-        let (loaded, file) = JsonlFile::open(path)?;
-        Transcript::load(loaded, Box::new(file))
-    }
-
-    /// A snapshot of the session in the file `path`.
-    fn snapshot(path: &Path) -> Result<Transcript> {
-        Transcript::snapshot(read(path)?)
-    }
-
-    /// A session file with a header followed by `entries`, one per line, unterminated.
-    fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
-        let path = dir.join("s.jsonl");
-        let header =
-            format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"h","timestamp":1,"cwd":"/","model":"m"}}"#);
-        let lines: Vec<&str> = std::iter::once(header.as_str())
-            .chain(entries.iter().copied())
-            .collect();
-        std::fs::write(&path, lines.join("\n")).unwrap();
-        path
-    }
-
-    fn user_entry(id: &str, parent: Option<&str>) -> String {
-        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
-        format!(
-            r#"{{"type":"message","id":"{id}","parentId":{parent},"timestamp":1,"message":{{"role":"user","content":"{id}","timestamp":1}}}}"#
-        )
-    }
-
-    #[tokio::test]
-    async fn a_session_file_has_one_writer_at_a_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let store = create(&path).unwrap();
-
-        let error = open(&path).err().unwrap().to_string();
-        assert!(error.contains("is in use"), "{error}");
-
-        drop(store);
-        let mut reopened = open(&path).unwrap();
-        reopened.append_message(Message::user("q")).await.unwrap();
-        let error = open(&path).err().unwrap().to_string();
-        assert!(error.contains("is in use"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_reads_a_session_in_use_without_changing_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let mut writer = create(&path).unwrap();
-        writer.append_message(Message::user("q")).await.unwrap();
-        // A record the writer has not finished yet.
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{\"type\":\"mess")
-            .unwrap();
-        let before = std::fs::read(&path).unwrap();
-
-        let mut snapshot = snapshot(&path).unwrap();
-
-        assert_eq!(texts(&snapshot), ["q"]);
-        assert_eq!(snapshot.incomplete_tail_bytes(), "{\"type\":\"mess".len());
-        let error = snapshot.append_message(Message::user("x")).await.unwrap_err();
-        assert!(error.to_string().contains("read-only"), "{error}");
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert!(open(&path).is_err(), "the writer still holds the file");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
-        // A program being started holds copies of this process's descriptors until it runs,
-        // so the lock of a transcript that was just dropped can outlive the transcript for a moment.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        drop(create(&path).unwrap());
-        let starting = std::sync::atomic::AtomicBool::new(true);
-
-        let failures = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while starting.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::process::Command::new("true").status().unwrap();
-                }
-            });
-            let failures: Vec<String> = (0..3000)
-                .filter_map(|_| open(&path).err().map(|error| error.to_string()))
-                .collect();
-            starting.store(false, std::sync::atomic::Ordering::Relaxed);
-            failures
-        });
-
-        assert!(
-            failures.is_empty(),
-            "{} reopenings failed: {:?}",
-            failures.len(),
-            failures.first()
-        );
-    }
-
-    #[test]
-    fn a_newer_session_with_a_cut_short_tail_is_left_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("future.jsonl");
-        std::fs::write(
-            &path,
-            "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\",\"model\":\"m\"}\n{\"type\":\"mess",
-        )
-        .unwrap();
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(open(&path).is_err());
-
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn damage_before_the_last_line_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &["{broken", &user_entry("a", None)]);
-        assert!(open(&path).is_err());
-    }
-
-    #[tokio::test]
-    async fn a_complete_last_line_without_newline_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None)]);
-        let mut store = open(&path).unwrap();
-        store.append_message(Message::user("b")).await.unwrap();
-        drop(store);
-        assert_eq!(texts(&open(&path).unwrap()), ["a", "b"]);
-    }
-
-    #[tokio::test]
-    async fn recovers_a_tail_cut_inside_a_utf8_character() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("utf8.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        store.append_message(Message::user("中文")).await.unwrap();
-        drop(store);
-        let bytes = std::fs::read(&path).unwrap();
-        let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
-        OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len(u64::try_from(cut).unwrap())
-            .unwrap();
-
-        let reopened = open(&path);
-
-        assert!(reopened.is_ok(), "a partial UTF-8 tail was not repaired");
-        assert_eq!(texts(&reopened.unwrap()), ["keep"]);
-    }
-
-    #[test]
-    fn does_not_delete_a_corrupt_newline_terminated_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None), "{broken}\n"]);
-        let original = std::fs::read(&path).unwrap();
-
-        let result = open(&path);
-
-        assert!(result.is_err(), "a complete corrupt record was silently discarded");
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn preserves_unknown_complete_records_even_without_a_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None), r#"{"type":"future_kind"}"#]);
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(open(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[tokio::test]
-    async fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("invalid.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        drop(store);
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{broken}\xe4\xb8")
-            .unwrap();
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(
-            open(&path).is_err(),
-            "invalid JSON was mistaken for an interrupted UTF-8 write"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[tokio::test]
-    async fn opening_changes_nothing_and_the_first_append_cuts_off_an_incomplete_tail() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("kept")).await.unwrap();
-        drop(store);
-        let complete = std::fs::read(&path).unwrap();
-        let cut_short = b"{\"type\":\"message\",\"id\":\"cut-short";
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(cut_short)
-            .unwrap();
-        let crashed = std::fs::read(&path).unwrap();
-
-        let mut reopened = open(&path).unwrap();
-
-        assert_eq!(reopened.incomplete_tail_bytes(), cut_short.len());
-        assert_eq!(std::fs::read(&path).unwrap(), crashed, "opening changed the file");
-        reopened.append_message(Message::user("next")).await.unwrap();
-        let written = std::fs::read(&path).unwrap();
-        assert!(written.starts_with(&complete) && written.len() > complete.len());
-        assert!(!written.windows(cut_short.len()).any(|bytes| bytes == cut_short));
-        drop(reopened);
-        assert_eq!(texts(&open(&path).unwrap()), ["kept", "next"]);
-    }
-
-    #[tokio::test]
-    async fn a_header_is_read_without_the_records() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let mut store = create(&path).unwrap();
-        store.append_message(Message::user("q")).await.unwrap();
-
-        // Also while the writer holds the file.
-        assert_eq!(&read_header(&path).unwrap(), store.header());
-
-        for (name, content, expected) in [
-            ("empty.jsonl", "", "is empty"),
-            ("blank.jsonl", "\n", "is empty"),
-            ("other.jsonl", "{\"type\":\"message\"}\n", "invalid session header"),
-        ] {
-            let path = dir.path().join(name);
-            std::fs::write(&path, content).unwrap();
-            let error = read_header(&path).unwrap_err();
-            assert!(format!("{error:#}").contains(expected), "{name}: {error:#}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn new_session_files_are_private_to_the_owner() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("private.jsonl");
-        create(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    #[tokio::test]
-    async fn file_round_trip_and_recovery_from_partial_last_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        {
-            let mut store = create(&path).unwrap();
-            store.append_message(Message::user("q")).await.unwrap();
-            store.append_message(assistant("a")).await.unwrap();
-        }
-        assert!(create(&path).is_err(), "never overwrites a session");
-
-        // Simulate a crash in the middle of writing a third entry.
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"{\"type\":\"message\",\"id\":\"x").unwrap();
-        drop(file);
-
-        let mut store = open(&path).unwrap();
-        assert_eq!(texts(&store), ["q", "a"]);
-        store.append_message(Message::user("again")).await.unwrap();
-        drop(store);
-        let reopened = open(&path).unwrap();
-        assert_eq!(texts(&reopened), ["q", "a", "again"]);
-        assert_eq!(reopened.header().model, "m");
-    }
-}
+mod tests;

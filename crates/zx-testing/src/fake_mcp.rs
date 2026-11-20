@@ -12,10 +12,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+use crate::WAIT;
 use crate::http::{read_request, response};
 
-/// Only reached when an expected request never comes.
-const WAIT: Duration = Duration::from_secs(10);
 /// The session the 2025-11-25 server assigns.
 pub const SESSION: &str = "session-1";
 

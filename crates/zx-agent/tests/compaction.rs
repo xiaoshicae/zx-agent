@@ -6,21 +6,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{
-    AssistantMessage, ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolCall, ToolResultMessage,
-};
+use zx_agent::ai::{ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
 use zx_agent::session::SessionError;
 use zx_agent::transcript::Entry;
-
 use zx_testing::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use zx_testing::{
-    EchoTool, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
+    EchoTool, NotifyingProvider, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session,
+    summarize, summary_json,
 };
 
 fn budget() -> Config {
@@ -33,13 +30,13 @@ fn budget() -> Config {
 
 #[tokio::test]
 async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("finished"),
     ]));
     let (session, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -79,14 +76,14 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
 }
 
 #[tokio::test]
-async fn automatic_summary_counts_against_task_request_budget_and_usage() {
-    let (store, old) = seeded_session().await;
+async fn automatic_compaction_counts_against_task_request_budget_and_usage() {
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()
@@ -104,7 +101,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     assert_eq!(report.model_requests, 2);
     assert_eq!(report.usage.total_tokens, 30);
     assert_eq!(provider.requests().len(), 2);
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     assert_eq!(provider.requests()[1].messages, messages[..messages.len() - 1]);
     // The summary request counts against the budget, but only the task request is a step.
     let steps: Vec<_> = events
@@ -127,6 +124,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
     struct SteerAfterSummary;
+
     #[async_trait]
     impl Hook for SteerAfterSummary {
         async fn on_event(&self, event: &Event, ctx: &HookContext) -> Result<(), String> {
@@ -136,7 +134,7 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
             Ok(())
         }
     }
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
@@ -144,7 +142,7 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("steer_after_summary", Arc::new(SteerAfterSummary));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -163,13 +161,13 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
 
 #[tokio::test]
 async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("must not be sent"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             max_model_requests: Some(1),
             ..RunLimits::default()
@@ -194,18 +192,18 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     assert_eq!(report.usage.total_tokens, 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
-    assert!(runner.session().latest_compaction().is_some());
+    assert!(runner.transcript().latest_compaction().is_some());
 }
 
 #[tokio::test]
 async fn a_summary_request_counts_against_the_token_budget() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("must not be sent"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             token_budget: Some(15),
             ..RunLimits::default()
@@ -229,15 +227,15 @@ async fn a_summary_request_counts_against_the_token_budget() {
     assert_eq!(report.usage.input_and_output(), 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
-    assert!(runner.session().latest_compaction().is_some());
+    assert!(runner.transcript().latest_compaction().is_some());
 }
 
 #[tokio::test]
 async fn sdk_defaults_do_not_make_summary_requests() {
-    let (store, _) = seeded_session().await;
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("normal task answer")]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
@@ -245,7 +243,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
     assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     assert_eq!(provider.requests().len(), 1);
     // Request checkpoints are always written; no compaction record may appear.
-    assert!(runner.session().entries().iter().all(|entry| matches!(
+    assert!(runner.transcript().entries().iter().all(|entry| matches!(
         entry,
         Entry::Message(_) | Entry::RequestConfig(_) | Entry::RequestStarted(_)
     )));
@@ -253,19 +251,10 @@ async fn sdk_defaults_do_not_make_summary_requests() {
 
 #[tokio::test]
 async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
-    let mut store = Seed::in_memory(header()).await;
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    let mut call = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    call.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    })];
-    store.append_message(Message::Assistant(call)).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed.append_old_observation().await;
+    let call = zx_testing::tool_call_answer("faux", "m", "echo", json!({}));
+    seed.append_message(call).await.unwrap();
     let mut result = ToolResultMessage {
         tool_call_id: "c1".into(),
         tool_name: "echo".into(),
@@ -277,17 +266,17 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
         usage: None,
     };
     let without = {
-        let mut messages = store.messages();
+        let mut messages = seed.messages();
         messages.push(Message::ToolResult(result.clone()));
         messages.push(Message::user("most recent input"));
         zx_agent::compaction::context_bytes(&messages).unwrap()
     };
     result.details = Some(json!({"marker": "for-observers-only"}));
-    store.append_message(Message::ToolResult(result)).await.unwrap();
-    store.append_message(Message::user("most recent input")).await.unwrap();
+    seed.append_message(Message::ToolResult(result)).await.unwrap();
+    seed.append_message(Message::user("most recent input")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json(&old))]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -305,14 +294,14 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
 
 #[tokio::test]
 async fn repeated_compaction_uses_originals_instead_of_a_previous_summary() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("new observation ".repeat(200)),
         FauxStep::text(summary_json(&old)),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -338,11 +327,11 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         FauxStep::tool_call("c", "bash", json!({"command":"echo no"})),
         FauxStep::fail(ProviderErrorKind::Unavailable, "temporarily unavailable"),
     ] {
-        let (store, _) = seeded_session().await;
-        let before = store.raw_projection();
+        let (seed, _) = seeded_session().await;
+        let before = seed.raw_projection();
         let provider = Arc::new(FauxProvider::new([step, FauxStep::text("should not execute")]));
         let (runner, _) = RunnerSetup {
-            session: store.into(),
+            session: seed.into(),
             retry: fast_retry(3),
             compaction: Config {
                 trigger_bytes: Some(1024),
@@ -358,10 +347,10 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         assert_eq!(report.retries, 0);
         assert!(report.final_text.is_empty());
         assert_eq!(provider.requests().len(), 1);
-        assert_eq!(&runner.session().raw_projection()[..before.len()], before);
-        assert!(runner.session().latest_compaction().is_none());
+        assert_eq!(&runner.transcript().raw_projection()[..before.len()], before);
+        assert!(runner.transcript().latest_compaction().is_none());
         assert!(matches!(
-            runner.session().entries().last(),
+            runner.transcript().entries().last(),
             Some(Entry::CompactionFailed(_))
         ));
     }
@@ -369,10 +358,10 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
 
 #[tokio::test]
 async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() {
-    let (store, _) = seeded_session().await;
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json("unknown"))]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
@@ -391,14 +380,14 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
 
 #[tokio::test]
 async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prompt() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: overloaded"),
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answered"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -418,13 +407,13 @@ async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prom
 
 #[tokio::test]
 async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
-    let (store, _) = seeded_session().await;
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text("not JSON"),
         FauxStep::text("must not be requested"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -449,6 +438,7 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
 async fn the_pause_survives_a_run_whose_future_is_dropped() {
     /// Holds the input "hold" forever, after telling the test it is waiting.
     struct Hold(Arc<tokio::sync::Notify>);
+
     #[async_trait]
     impl Hook for Hold {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> Result<String, String> {
@@ -459,7 +449,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
             Ok(text)
         }
     }
-    let (store, _) = seeded_session().await;
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text("not JSON"),
         FauxStep::text("must not be requested"),
@@ -470,7 +460,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
         .hooks
         .push_with_timeout("hold", Arc::new(Hold(waiting.clone())), Duration::from_secs(3600));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -501,7 +491,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
 
 #[tokio::test]
 async fn a_successful_manual_summary_resumes_automatic_summaries() {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         // The automatic attempt fails and pauses automatic summaries.
         FauxStep::text("not JSON"),
@@ -513,7 +503,7 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
         FauxStep::text("not JSON"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -549,12 +539,13 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.model_requests, 0);
     assert!(provider.requests().is_empty());
-    assert!(matches!(&runner.session().messages()[0], Message::User{content,..} if content == &input));
+    assert!(matches!(&runner.transcript().messages()[0], Message::User{content,..} if content == &input));
 }
 
 #[tokio::test]
 async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     struct Correct;
+
     #[async_trait]
     impl Hook for Correct {
         async fn transform_context(
@@ -574,7 +565,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
             )
         }
     }
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
@@ -582,7 +573,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("correct", Arc::new(Correct));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -595,7 +586,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     let source = serde_json::to_string(&provider.requests()[0].messages).unwrap();
     assert!(source.contains("corrected corrected"));
     assert!(!source.contains("observed observed"));
-    let entries = runner.session().entries().to_vec();
+    let entries = runner.transcript().entries().to_vec();
     assert!(matches!(entries[3], Entry::ContextEdit(_)));
     assert!(matches!(entries[4], Entry::CompactionStarted(_)));
 }
@@ -603,6 +594,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
 #[tokio::test]
 async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_written() {
     struct EditInputThenSummary;
+
     #[async_trait]
     impl Hook for EditInputThenSummary {
         async fn transform_context(
@@ -631,7 +623,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
             })
         }
     }
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
@@ -641,7 +633,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
         .hooks
         .push("edit_input_then_summary", Arc::new(EditInputThenSummary));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
@@ -657,7 +649,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
     assert!(error.contains("transform_context"), "{error}");
     assert!(!error.contains("cannot persist"), "{error}");
     assert_eq!(provider.requests().len(), 1, "only the summary request was sent");
-    let entries = runner.session().entries().to_vec();
+    let entries = runner.transcript().entries().to_vec();
     assert!(
         !entries.iter().any(|entry| matches!(entry, Entry::ContextEdit(_))),
         "no edit of the rejected plan may be written"
@@ -665,18 +657,18 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
 }
 
 #[tokio::test]
-async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
-    let (store, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
+async fn pending_compaction_shares_busy_cancel_and_drop_reuse_with_prompt() {
+    let (seed, _) = seeded_session().await;
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
     .await;
     let mut compact = Box::pin(session.compact());
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
+    provider.wait_for_start(&mut compact).await;
     assert!(events.kinds().contains(&"compaction_start"));
     assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
     assert!(matches!(session.compact().await, Err(SessionError::Busy)));
@@ -686,31 +678,30 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
 }
 
 #[tokio::test]
-async fn aborting_summary_records_failure_and_the_session_is_immediately_reusable() {
-    let (store, _) = seeded_session().await;
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
+async fn cancelling_compaction_records_failure_and_the_session_is_immediately_reusable() {
+    let (seed, _) = seeded_session().await;
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
-        ..RunnerSetup::new(config(provider, vec![]))
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
     .await;
-    let compact = session.compact();
-    tokio::pin!(compact);
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
+    let mut compact = Box::pin(session.compact());
+    provider.wait_for_start(&mut compact).await;
     assert!(session.cancel());
     assert_eq!(compact.await.unwrap().outcome, Outcome::Cancelled);
     assert_eq!(session.prompt("next").await.unwrap().final_text, "reused");
 }
 
 #[tokio::test]
-async fn summary_timeout_is_bounded_and_keeps_original_context() {
-    let (store, _) = seeded_session().await;
-    let before = store.messages();
+async fn compaction_timeout_is_bounded_and_keeps_original_context() {
+    let (seed, _) = seeded_session().await;
+    let before = seed.messages();
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             timeout: Duration::from_millis(10),
             ..budget()
@@ -722,24 +713,23 @@ async fn summary_timeout_is_bounded_and_keeps_original_context() {
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("timed out"));
-    assert_eq!(runner.session().messages(), before);
+    assert_eq!(runner.transcript().messages(), before);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
 }
 
 #[tokio::test]
-async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() {
-    let (mut store, _) = seeded_session().await;
-    store
-        .append_message(Message::user("x".repeat(2 * 1024 * 1024)))
+async fn a_source_over_its_byte_limit_is_not_sent() {
+    let (mut seed, _) = seeded_session().await;
+    seed.append_message(Message::user("x".repeat(2 * 1024 * 1024)))
         .await
         .unwrap();
-    store.append_message(Message::user("latest")).await.unwrap();
+    seed.append_message(Message::user("latest")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("should not be sent")]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -749,11 +739,14 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("source exceeds"));
     assert!(provider.requests().is_empty());
+}
 
-    let (store, _) = seeded_session().await;
+#[tokio::test]
+async fn a_summary_over_its_byte_limit_is_not_kept() {
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("x".repeat(65 * 1024))]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
@@ -762,26 +755,26 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("exceeds 65536"));
-    assert!(runner.session().latest_compaction().is_none());
+    assert!(runner.transcript().latest_compaction().is_none());
 }
 
 /// Compact the seeded session once. The model answers with the blocks `answer` makes from
 /// the ID of the old entry; the result tells whether the session now has a summary.
 async fn compact_answering(answer: impl FnOnce(&str) -> Vec<ContentBlock>) -> (Report, bool) {
-    let (store, old) = seeded_session().await;
+    let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Respond {
         blocks: answer(&old),
         stop: StopReason::Stop,
     }]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build()
     .await;
     let report = runner.compact().await.unwrap();
-    let summarized = runner.session().latest_compaction().is_some();
+    let summarized = runner.transcript().latest_compaction().is_some();
     (report, summarized)
 }
 
@@ -898,10 +891,10 @@ fn a_trigger_whose_first_summary_cannot_be_read_is_rejected() {
 
 #[tokio::test]
 async fn the_run_timeout_also_bounds_automatic_compaction() {
-    let (store, _) = seeded_session().await;
+    let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         limits: RunLimits {
             timeout: Some(Duration::from_millis(10)),
             ..RunLimits::default()
@@ -919,18 +912,9 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     assert_eq!(report.model_requests, 1);
     assert_eq!(provider.requests().len(), 1);
     assert!(matches!(
-        runner.session().entries().last(),
+        runner.transcript().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
-}
-
-/// A summary of what a summary request read, citing the first record it read.
-fn summary_of_the_source(request: &Request) -> FauxStep {
-    let Some(Message::User { content, .. }) = request.messages.last() else {
-        panic!("a summary request ends with its input");
-    };
-    let records: Vec<Value> = serde_json::from_str(content).unwrap();
-    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
 }
 
 #[tokio::test]
@@ -940,7 +924,7 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
         FauxStep::tool_call("c1", "echo", json!({"text": text})),
         FauxStep::tool_call("c2", "echo", json!({"text": text})),
         // The second result takes the context over the trigger: the summary comes first.
-        FauxStep::compute(summary_of_the_source),
+        FauxStep::compute(|request| FauxStep::text(zx_testing::summary_of_the_source(request))),
         FauxStep::text("done"),
     ]));
     let (runner, events) = RunnerSetup {
@@ -969,23 +953,23 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
     assert_eq!(context[2], "assistant:calls[c2]");
     assert!(context[3].starts_with("tool:c2=xxx"), "{}", context[3]);
     // The session alone rebuilds every request, the summary's and the one after it included.
-    assert_eq!(replayed_requests(&runner.session()), requests);
+    assert_eq!(replayed_requests(&runner.transcript()), requests);
 }
 
 #[tokio::test]
-async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_retained() {
-    let mut store = Seed::in_memory(header()).await;
-    let old = store
+async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_kept() {
+    let mut seed = Seed::in_memory(header()).await;
+    let old = seed
         .append_message(Message::user("x".repeat(300 * 1024)))
         .await
         .unwrap();
-    store.append_message(Message::user("recent input")).await.unwrap();
+    seed.append_message(Message::user("recent input")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         compaction: Config {
             trigger_bytes: Some(256 * 1024),
             ..Config::default()

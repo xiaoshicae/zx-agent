@@ -4,6 +4,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use serde::de::IntoDeserializer;
+use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zx_ai::ApiKey;
@@ -26,6 +28,15 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Request body fields that the provider sets itself, so that [`BodyOptions::extra_fields`]
 /// cannot replace them.
 pub(crate) const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "system", "tools", "max_tokens", "stream"];
+
+/// What a request's reasoning level sets in the body, as an object and a key in it. The other
+/// settings of `thinking` and `output_config` go with the level's, such as
+/// `thinking.block_binding`.
+pub(crate) const REASONING_FIELDS: [(&str, &str); 3] = [
+    ("thinking", "type"),
+    ("thinking", "display"),
+    ("output_config", "effort"),
+];
 
 /// Connection settings for the Anthropic Messages API, or a server that offers the same
 /// protocol. Debug output redacts the API key.
@@ -138,6 +149,22 @@ impl BodyOptions {
         }
         Ok(())
     }
+
+    /// The first extra field that a request's reasoning level sets too, as a dotted path such
+    /// as `thinking.type`: `thinking.type`, `thinking.display` or `output_config.effort`.
+    /// Which of the two reaches the server is not for the provider to choose, so a host that
+    /// sets a level refuses such a field.
+    pub fn reasoning_overlap(&self) -> Option<String> {
+        REASONING_FIELDS
+            .iter()
+            .find(|(object, key)| {
+                self.extra_fields
+                    .get(*object)
+                    .and_then(|value| value.get(key))
+                    .is_some()
+            })
+            .map(|(object, key)| format!("{object}.{key}"))
+    }
 }
 
 /// How system prompt changes after the first one are sent.
@@ -147,13 +174,26 @@ pub enum SystemUpdates {
     /// Fold every version into the top-level `system` of the request, which every model
     /// takes. A change rewrites the beginning of the conversation: the cache reuses less, and
     /// a model that binds thinking to the conversation refuses the earlier thinking, which
-    /// the provider then leaves out of one more try.
+    /// fails the request unless its `thinking.block_binding` lets the API drop that thinking.
     #[default]
     Collapse,
     /// Send each change as a system message in the conversation, right before the next answer
     /// of the model, so that earlier messages stay a prefix. Only models that accept
     /// mid-conversation system messages take it.
     Inline,
+}
+
+/// Parsed by the names serde gives the variants, as the named settings of the
+/// OpenAI-compatible provider are: case and surrounding whitespace are ignored, and the error
+/// lists the names.
+impl std::str::FromStr for SystemUpdates {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let name = text.trim().to_ascii_lowercase();
+        let name: StrDeserializer<'_, NameError> = name.as_str().into_deserializer();
+        Self::deserialize(name).map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -163,60 +203,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_the_client_cannot_use_are_refused() {
-        let refused = |config: AnthropicConfig| config.check().unwrap_err().to_string();
-        assert!(
-            refused(AnthropicConfig {
+    fn system_updates_parse_from_the_names_they_are_recorded_by() {
+        assert_eq!(" Inline ".parse(), Ok(SystemUpdates::Inline));
+        assert_eq!("collapse".parse(), Ok(SystemUpdates::Collapse));
+        let error = "merge".parse::<SystemUpdates>().unwrap_err();
+        assert!(error.contains("`collapse`") && error.contains("`inline`"), "{error}");
+    }
+
+    #[test]
+    fn the_extra_field_a_reasoning_level_also_sets_is_named() {
+        let overlap = |fields: Value| {
+            BodyOptions {
+                extra_fields: fields.as_object().unwrap().clone(),
+                ..BodyOptions::default()
+            }
+            .reasoning_overlap()
+        };
+        assert_eq!(
+            overlap(json!({"thinking": {"type": "enabled"}})),
+            Some("thinking.type".into())
+        );
+        assert_eq!(
+            overlap(json!({"output_config": {"effort": "max"}})),
+            Some("output_config.effort".into())
+        );
+        assert_eq!(
+            overlap(json!({"thinking": {"block_binding": {}}, "metadata": {}})),
+            None
+        );
+    }
+
+    #[test]
+    fn the_check_runs_the_shared_checks_of_the_settings() {
+        for config in [
+            AnthropicConfig {
                 base_url: "ftp://example.com".into(),
                 ..AnthropicConfig::default()
-            })
-            .contains("http or https")
-        );
-        assert!(
-            refused(AnthropicConfig {
-                base_url: "https://example.com/?key=secret".into(),
-                ..AnthropicConfig::default()
-            })
-            .contains("without a query")
-        );
-        assert!(
-            refused(AnthropicConfig {
+            },
+            AnthropicConfig {
                 idle_timeout: Duration::ZERO,
                 ..AnthropicConfig::default()
-            })
-            .contains("idle_timeout")
-        );
-        assert!(
-            refused(AnthropicConfig {
+            },
+            AnthropicConfig {
                 headers: vec![("X-Api-Key".into(), "k".into())],
                 ..AnthropicConfig::default()
-            })
-            .contains("comes from the API key")
-        );
-        let mut extra_fields = Map::new();
-        extra_fields.insert("max_tokens".into(), json!(1));
-        assert!(
-            refused(AnthropicConfig {
-                body: BodyOptions {
-                    extra_fields,
-                    ..BodyOptions::default()
-                },
-                ..AnthropicConfig::default()
-            })
-            .contains("\"max_tokens\"")
-        );
+            },
+        ] {
+            assert!(config.check().is_err());
+        }
         AnthropicConfig::default().check().unwrap();
     }
 
     #[test]
-    fn a_header_names_the_api_version_and_debug_output_hides_the_key() {
+    fn fields_the_provider_sets_itself_cannot_be_added() {
+        let mut extra_fields = Map::new();
+        extra_fields.insert("max_tokens".into(), json!(1));
         let config = AnthropicConfig {
-            api_key: ApiKey::fixed("sk-ant-secret"),
+            body: BodyOptions {
+                extra_fields,
+                ..BodyOptions::default()
+            },
+            ..AnthropicConfig::default()
+        };
+        assert!(config.check().unwrap_err().to_string().contains("\"max_tokens\""));
+    }
+
+    #[test]
+    fn a_header_names_the_api_version() {
+        let config = AnthropicConfig {
             headers: vec![("Anthropic-Version".into(), "2023-06-01".into())],
             ..AnthropicConfig::default()
         };
         assert!(config.names_version());
         assert!(!AnthropicConfig::default().names_version());
+    }
+
+    #[test]
+    fn debug_output_hides_the_key() {
+        let config = AnthropicConfig {
+            api_key: ApiKey::fixed("sk-ant-secret"),
+            ..AnthropicConfig::default()
+        };
         assert!(!format!("{config:?}").contains("sk-ant-secret"));
     }
 }

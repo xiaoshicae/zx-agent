@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use zx_agent::agent::RunLimits;
+use zx_agent::compaction::{self, BYTES_PER_TOKEN, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
-use zx_agent::agent::RunLimits;
-use zx_agent::compaction::{self, InvalidConfig, MAX_SOURCE_BYTES, MAX_SUMMARY_TOKENS, TokenTrigger};
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";
@@ -53,28 +53,31 @@ struct RawCompaction {
     timeout_secs: Option<u64>,
 }
 
+/// The `[limits]` of an agent file, and the budgets a host gives over an agent's
+/// ([`Overrides`](crate::Overrides)): each one given replaces the agent's.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawLimits {
-    max_model_requests: Option<ModelRequestLimit>,
-    timeout_secs: Option<u64>,
+pub(crate) struct RawLimits {
+    pub(crate) max_model_requests: Option<ModelRequestLimit>,
+    /// 0 disables a time limit that the extended agent set.
+    pub(crate) timeout_secs: Option<u64>,
     /// 0 disables a budget that the extended agent set.
-    token_budget: Option<u64>,
+    pub(crate) token_budget: Option<u64>,
     /// In the unit of the `[[models]]` prices; 0 disables a budget that the extended agent
     /// set.
-    cost_budget: Option<f64>,
+    pub(crate) cost_budget: Option<f64>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum ModelRequestLimit {
+pub(crate) enum ModelRequestLimit {
     Count(u32),
     Unlimited(Unlimited),
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Unlimited {
+pub(crate) enum Unlimited {
     Unlimited,
 }
 
@@ -153,9 +156,10 @@ impl AgentFile {
 }
 
 impl RawLimits {
-    fn apply(self, limits: &mut RunLimits) -> Result<()> {
-        if let Some(turns) = self.max_model_requests {
-            limits.max_model_requests = match turns {
+    /// Lay these over `limits`. A cost budget that is negative or not finite is an error.
+    pub(crate) fn apply(self, limits: &mut RunLimits) -> Result<()> {
+        if let Some(requests) = self.max_model_requests {
+            limits.max_model_requests = match requests {
                 ModelRequestLimit::Count(count) => Some(count),
                 ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
             };
@@ -189,14 +193,11 @@ impl RawCompaction {
             config.trigger_bytes = (bytes > 0).then_some(bytes);
         }
         if let Some(tokens) = self.trigger_tokens {
-            config.trigger_tokens = match tokens {
-                0 => TokenTrigger::Off,
-                tokens => TokenTrigger::Above(tokens),
-            };
+            config.trigger_tokens = (tokens > 0).then_some(TokenTrigger::Above(tokens));
         }
         // Only a token trigger that no file set follows the window, below its reserve.
         if let Some(tokens) = self.reserve_tokens
-            && let TokenTrigger::BelowWindow { reserve_tokens } = &mut config.trigger_tokens
+            && let Some(TokenTrigger::BelowWindow { reserve_tokens }) = &mut config.trigger_tokens
         {
             *reserve_tokens = tokens;
         }
@@ -221,7 +222,9 @@ pub(super) fn compaction_error(error: &InvalidConfig) -> anyhow::Error {
         InvalidConfig::ZeroTriggerTokens => {
             "compaction.triggerTokens must be greater than zero (0 turns the token trigger off)".to_string()
         }
-        InvalidConfig::TriggerTokensWithinKept => "compaction.triggerTokens must exceed a quarter of compaction.keepRecentBytes, the tokens the kept recent messages take".to_string(),
+        InvalidConfig::TriggerTokensWithinKept => format!(
+            "compaction.triggerTokens must exceed compaction.keepRecentBytes / {BYTES_PER_TOKEN}, the tokens the kept recent messages take"
+        ),
         InvalidConfig::TriggerBytesWithinKept => {
             "compaction.triggerBytes must exceed compaction.keepRecentBytes (0 turns the byte trigger off)".to_string()
         }
@@ -239,8 +242,8 @@ pub(super) fn compaction_error(error: &InvalidConfig) -> anyhow::Error {
 /// ([`TokenTrigger::BelowWindow`]) while the byte trigger is on, and is off otherwise: then
 /// nothing turns automatic compaction on.
 pub(super) fn settle_token_trigger(config: &mut compaction::Config) {
-    if config.trigger_bytes.is_none() && matches!(config.trigger_tokens, TokenTrigger::BelowWindow { .. }) {
-        config.trigger_tokens = TokenTrigger::Off;
+    if config.trigger_bytes.is_none() && matches!(config.trigger_tokens, Some(TokenTrigger::BelowWindow { .. })) {
+        config.trigger_tokens = None;
     }
 }
 

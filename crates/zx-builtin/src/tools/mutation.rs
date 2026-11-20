@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::OwnedMutexGuard;
+use zx_core::tools::ToolContext;
 
 use crate::executor::Executor;
 use crate::sync::lock;
@@ -42,14 +43,25 @@ impl FileMutationQueue {
     }
 }
 
-/// Move the file's turn into the write: a cancelled caller must neither stop a write nor
-/// let the next mutation read the file before that write has finished.
+/// The error of a write or an edit that was cancelled: always before it wrote, as a write
+/// that has begun runs to its end ([`write_locked`]).
+pub(super) const CHANGE_CANCELLED: &str = "the change was cancelled before it was written, so the file is unchanged";
+
+/// Write `contents` to `path` in the file's `turn`, unless the call is cancelled by then: the
+/// token is checked last before writing, as the executor finishes a write it has begun, also
+/// when this call is dropped meanwhile, so that no file is left empty or cut short. The turn
+/// moves into the write: a cancelled caller must neither stop a write nor let the next
+/// mutation read the file before that write has finished.
 pub(super) async fn write_locked(
+    ctx: &ToolContext,
     executor: Arc<dyn Executor>,
     path: PathBuf,
     contents: Vec<u8>,
     turn: OwnedMutexGuard<()>,
 ) -> Result<(), String> {
+    if ctx.cancel.is_cancelled() {
+        return Err(CHANGE_CANCELLED.into());
+    }
     // Not aborted on drop: the lock must live as long as the executor's actual write.
     tokio::spawn(async move {
         let _turn = turn;

@@ -15,16 +15,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+pub use self::chain::HookChain;
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 use crate::events::{Event, EventKind, HookPhase};
 use crate::guard::{CancelSignal, Stopped};
 use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
 use crate::transcript::{context_edit_refusal, replace_text};
-
-#[cfg(test)]
-use chain::HookCall;
-pub use chain::HookChain;
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,9 +48,9 @@ pub struct HookContext {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// Who sent the input the run is answering: the actor of the latest prompt of the
-    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
-    /// nobody. In `on_input` it is the sender of that input. Left out of the JSON when there
-    /// is none.
+    /// session ([`Input::User`](crate::input::Input::User)); `None` when the host named
+    /// nobody, and after a `finish_step` hook asked for a follow-up, which nobody sent. In
+    /// `on_input` it is the sender of that input. Left out of the JSON when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the hook.
@@ -82,15 +79,6 @@ impl HookContext {
             cancel: CancelSignal::new(cancel),
             queues: Arc::default(),
             active_tools: Arc::default(),
-        }
-    }
-
-    /// The same context, sharing the loop's queues and tool set.
-    pub(crate) fn with_shared(self, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
-        Self {
-            queues,
-            active_tools,
-            ..self
         }
     }
 }
@@ -126,14 +114,14 @@ impl ContextEdit {
                                 system messages; add other context instead"
                         .into());
                 }
-                if is_summary(message) {
+                if message.user_kind() == Some(UserMessageKind::Summary) {
                     return Err("only the session creates context summaries".into());
                 }
                 messages.push(message.clone());
             }
-            Self::ReplaceText { index, text } => replace_text(editable(messages, *index, true)?, text),
+            Self::ReplaceText { index, text } => replace_text(editable(messages, *index, Some(text))?, text),
             Self::Omit { index } => {
-                editable(messages, *index, false)?;
+                editable(messages, *index, None)?;
                 messages.remove(*index);
             }
         }
@@ -141,29 +129,27 @@ impl ContextEdit {
     }
 }
 
-/// The message at `index`, if an edit may change it: it exists, is not a summary, which only
-/// the session builds, and is one the session accepts an edit for ([`context_edit_refusal`]).
-fn editable(messages: &mut [Message], index: usize, replaces_text: bool) -> Result<&mut Message, String> {
-    let message = messages
-        .get_mut(index)
-        .ok_or_else(|| format!("context index {index} is out of bounds"))?;
-    if is_summary(message) {
+/// The message at `index`, if an edit may change it to `replacement`, or omit it when that is
+/// `None`: it exists, is not a summary, which only the session builds, and is one the session
+/// accepts the edit for ([`context_edit_refusal`]).
+fn editable<'m>(
+    messages: &'m mut [Message],
+    index: usize,
+    replacement: Option<&str>,
+) -> Result<&'m mut Message, String> {
+    let message = messages.get_mut(index).ok_or_else(|| out_of_bounds(index))?;
+    if message.user_kind() == Some(UserMessageKind::Summary) {
         return Err("a context summary cannot be edited or omitted; edit its source messages instead".into());
     }
-    match context_edit_refusal(message, replaces_text) {
+    match context_edit_refusal(message, replacement) {
         Some(reason) => Err(format!("context message {index} {reason}")),
         None => Ok(message),
     }
 }
 
-fn is_summary(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::User {
-            kind: UserMessageKind::Summary,
-            ..
-        }
-    )
+/// Why an edit of the context at `index` cannot be made: the context has no such message.
+pub(crate) fn out_of_bounds(index: usize) -> String {
+    format!("context index {index} is out of bounds")
 }
 
 /// The settings of one task request that [`Hook::prepare_request`] may change: the model,
@@ -178,7 +164,8 @@ pub struct RequestSettings {
 }
 
 /// What [`Hook::prepare_request`] sees of the request about to be sent.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RequestPlan<'a> {
     /// The context the request sends, as recorded in the session.
     pub messages: &'a [Message],
@@ -218,8 +205,8 @@ pub struct FinishedStep<'a> {
 
 /// What a finish hook asks for after a step; [`Hook::finish_step`] says how the decisions
 /// of several hooks combine. Input queued while the hooks ran takes precedence over
-/// `ContinueAnswer` and `FollowUp`, and either of them ends the attempt instead when the
-/// request budget leaves no request for it.
+/// `ContinueAnswer` and `FollowUp`, and either of them ends the attempt instead when a
+/// budget leaves no room for the request it needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "text", rename_all = "snake_case")]
 pub enum StepDecision {
@@ -251,6 +238,17 @@ pub enum HookStage {
     Storage,
 }
 
+impl HookStage {
+    /// The stage as messages name it: `default`, `redaction` or `storage`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Redaction => "redaction",
+            Self::Storage => "storage",
+        }
+    }
+}
+
 /// The callbacks an extension runs at the loop's extension points. Every method has a no-op
 /// default, so implementers override only what they use.
 ///
@@ -260,22 +258,23 @@ pub enum HookStage {
 #[async_trait]
 pub trait Hook: Send + Sync {
     /// Transform prompt text before it enters the model context. Transformations chain in
-    /// order. With a session, the original is recorded and a rewrite is recorded as an edit.
+    /// order. The original is recorded, and a rewrite is recorded as an edit of it.
     /// A failure rejects the input and stops the attempt; cancellation records no input.
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text)
     }
 
     /// Propose ordered edits before a task request. Each hook sees preceding edits; the full
-    /// plan is validated before it is applied. With a session, edits are recorded and affect
-    /// the session projection. Failure stops the attempt before the request.
+    /// plan is validated before it is applied. Edits are recorded and change the session's
+    /// projection. Called again when the step's preparation compacted the context, before
+    /// the same request: a hook that appends a message on every call appends it each time.
+    /// Failure stops the attempt before the request.
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(Vec::new())
     }
 
-    /// Change the model or reasoning level of the next task request, for example to use a
-    /// cheaper model for a simple step. The context is not among
-    /// the settings: what the model sees is always the session projection. Return `None` to keep the
+    /// Change the model or reasoning level of the next task request ([`RequestSettings`]),
+    /// for example to use a cheaper model for a simple step. Return `None` to keep the
     /// settings. Changes chain in hook order and last for this request only; the request
     /// audit records the settings each request used. An empty model and a failure both stop
     /// the attempt before the request; summary requests do not call this hook.
@@ -364,170 +363,14 @@ impl HookError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ai::{SectionChange, StopReason};
     use serde_json::json;
 
-    fn context() -> HookContext {
-        HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
-    }
-
-    fn call() -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: "echo".into(),
-            arguments: json!({}),
-            arguments_error: None,
-        }
-    }
-
-    struct Suffix(&'static str);
-    #[async_trait]
-    impl Hook for Suffix {
-        async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
-            Ok(text + self.0)
-        }
-        async fn after_tool(
-            &self,
-            _call: &ToolCall,
-            mut output: ToolOutput,
-            _ctx: &HookContext,
-        ) -> HookResult<ToolOutput> {
-            output.content.push_str(self.0);
-            Ok(output)
-        }
-        async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
-            let Message::User { content, .. } = &messages[0] else {
-                panic!("user input")
-            };
-            Ok(vec![ContextEdit::ReplaceText {
-                index: 0,
-                text: content.clone() + self.0,
-            }])
-        }
-    }
-
-    /// A chain of `hooks`, registered in order, each named after its position.
-    fn chain_of(hooks: Vec<Arc<dyn Hook>>) -> HookChain {
-        let mut chain = HookChain::new();
-        for (index, hook) in hooks.into_iter().enumerate() {
-            chain.push(format!("hook{index}"), hook);
-        }
-        chain
-    }
-
-    #[tokio::test]
-    async fn input_hooks_compose_in_registration_order_including_empty_unicode_input() {
-        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
-        assert_eq!(chain.on_input(String::new(), &context()).await.unwrap(), "甲乙");
-    }
-
-    #[tokio::test]
-    async fn output_hooks_receive_the_preceding_hooks_result() {
-        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
-        let output = chain.after_tool(&call(), ToolOutput::ok(""), &context()).await.unwrap();
-        assert_eq!(output.content, "甲乙");
-    }
-
-    #[tokio::test]
-    async fn context_hooks_see_the_projection_after_preceding_edits() {
-        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
-        let original = vec![Message::user("")];
-        let edits = chain.transform_context(&original, &context()).await.unwrap();
-        let mut projected = original.clone();
-        for edit in edits {
-            edit.apply(&mut projected).unwrap();
-        }
-        assert!(matches!(&projected[0], Message::User { content, .. } if content == "甲乙"));
-        assert!(matches!(&original[0], Message::User { content, .. } if content.is_empty()));
-    }
-
-    struct Finish(StepDecision);
-    #[async_trait]
-    impl Hook for Finish {
-        async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
-            Ok(self.0.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn finish_stop_dominates_and_otherwise_first_request_wins() {
-        let response = AssistantMessage::failure("p", "m", StopReason::Stop, "unused");
-        let step = FinishedStep {
-            response: &response,
-            messages: &[],
-            step: 1,
-            answer_continuations: 0,
-            remaining_model_requests: None,
-            disposition: StepDisposition::Stop,
-        };
-        let first = StepDecision::ContinueAnswer("first".into());
-        let mut chain = chain_of(vec![
-            Arc::new(Finish(first.clone())),
-            Arc::new(Finish(StepDecision::FollowUp("second".into()))),
-        ]);
-        assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), first);
-        chain.push("stop", Arc::new(Finish(StepDecision::Stop)));
-        assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), StepDecision::Stop);
-    }
-
-    fn guard() -> HookCall<'static> {
-        HookCall {
-            name: "test",
-            phase: HookPhase::AfterTool,
-            timeout: Duration::ZERO,
-        }
-    }
-
-    #[tokio::test]
-    async fn callback_errors_preserve_the_hook_and_phase() {
-        let error = guard()
-            .run(async { Err::<(), _>("rejected".into()) }, &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error,
-            HookError {
-                hook: "test".into(),
-                phase: HookPhase::AfterTool,
-                failure: HookFailure::Rejected("rejected".into())
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn callback_panics_are_caught() {
-        let error = guard()
-            .run::<()>(async { panic!("callback bug") }, &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Panicked));
-    }
-
-    #[tokio::test]
-    async fn pending_callbacks_are_bounded_by_their_timeout() {
-        let error = guard()
-            .run::<()>(std::future::pending(), &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(error.failure, HookFailure::Stopped(Stopped::TimedOut(Duration::ZERO)));
-    }
-
-    #[tokio::test]
-    async fn cancellation_interrupts_callbacks_before_their_timeout() {
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let guard = HookCall {
-            timeout: Duration::from_secs(60),
-            ..guard()
-        };
-        let error = guard.run::<()>(std::future::pending(), &cancel).await.unwrap_err();
-        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Cancelled));
-    }
+    use super::*;
+    use crate::ai::{ContentBlock, SectionChange, StopReason, SystemMessage};
 
     #[test]
     fn context_edits_preserve_system_history_and_tool_calls() {
-        let system = Message::System(crate::ai::SystemMessage {
+        let system = Message::System(SystemMessage {
             sections: vec![SectionChange {
                 name: "preamble".into(),
                 content: Some("system".into()),
@@ -545,13 +388,17 @@ mod tests {
             .is_err()
         );
         assert!(ContextEdit::Omit { index: 1 }.apply(&mut messages).is_err());
-        let mut response = AssistantMessage::failure("p", "m", StopReason::ToolUse, "unused");
-        response.content = vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
-            id: "c".into(),
-            name: "echo".into(),
-            arguments: json!({}),
-            arguments_error: None,
-        })];
+        let response = AssistantMessage::new(
+            "p",
+            "m",
+            StopReason::ToolUse,
+            vec![ContentBlock::ToolCall(ToolCall {
+                id: "c".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+                arguments_error: None,
+            })],
+        );
         messages.push(Message::Assistant(response));
         assert!(
             ContextEdit::ReplaceText {
@@ -568,7 +415,7 @@ mod tests {
         let summary = Message::User {
             content: "<context_summary></context_summary>".into(),
             timestamp: 0,
-            kind: crate::ai::UserMessageKind::Summary,
+            kind: UserMessageKind::Summary,
         };
         let mut messages = vec![summary.clone(), Message::user("kept")];
         for edit in [

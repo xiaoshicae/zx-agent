@@ -13,10 +13,12 @@
 //! - [`env`](mod@env): [`env::env_value`], an environment variable that counts only when it
 //!   is set and not empty
 //! - [`registry`]: implementations registered under names, for a configuration to choose one
+//! - [`stdio`]: lines on stdout and stderr that do not panic when the stream is closed
 
 pub mod default;
 pub mod env;
 pub mod random;
 pub mod registry;
+pub mod stdio;
 pub mod sync;
 pub mod text;

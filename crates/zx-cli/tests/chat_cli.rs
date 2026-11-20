@@ -1,5 +1,9 @@
 //! Interactive frontend contracts against the local fake HTTP service; no paid APIs.
+
 mod common;
+#[cfg(unix)]
+#[path = "common/pty.rs"]
+mod pty;
 
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -8,25 +12,25 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
-
-use common::zx_agent_in;
 use zx_agent::ai::Message;
-use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, write_agent, write_config};
-use zx_testing::{json_lines, signal, stderr, stdout, tool_call_answer};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
+use zx_testing::program::{Home, ended, ended_output, retrying_fake_model_config, write_agent, write_config};
+use zx_testing::{json_lines, signal, stderr, stdout, summary_json, tool_call_answer};
+
+use self::common::zx_agent_in;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
 
 fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
-    chat_retrying(server, cwd, args, "0")
+    chat_retrying(server, cwd, args, 0)
 }
 
 /// Like `chat`, with the given number of retries for transient errors, unless the test wrote
 /// a config.toml of its own with [`configure`].
-fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
+fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], retries: u32) -> Command {
     if !agent_home(cwd).join("config.toml").exists() {
-        write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
+        write_config(&agent_home(cwd), &base_config(retries, "", ""));
     }
     // chat keeps sessions under the home directory by default; never the real one.
     let mut command = zx_agent_in(cwd, Home::User(&cwd.join(".home")));
@@ -48,10 +52,7 @@ async fn run(server: &MockServer, cwd: &Path, args: &[&str], input: &str) -> Out
     stdin.write_all(input.as_bytes()).await.unwrap();
     stdin.shutdown().await.unwrap();
     drop(stdin);
-    tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap()
+    ended_output(child).await
 }
 
 fn users(server: &MockServer, index: usize) -> Vec<String> {
@@ -60,16 +61,49 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
-    let mut store = zx_testing::create_session_file(&path, zx_testing::header())
+    let mut seed = zx_testing::create_session_file(&path, zx_testing::header())
         .await
         .unwrap();
-    let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
-    store.append_message(Message::user("recent input")).await.unwrap();
+    let id = seed.append_message(Message::user("x".repeat(bytes))).await.unwrap();
+    seed.append_message(Message::user("recent input")).await.unwrap();
     id
 }
 
-fn summary_json(id: &str) -> String {
-    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":["Continue"]}).to_string()
+/// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
+/// context window of `mock-model`.
+fn window_agent(dir: &Path, window: u64, extra: &str) {
+    config(
+        dir,
+        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
+    );
+    agent(dir, extra);
+}
+
+/// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
+fn agent(dir: &Path, front: &str) {
+    write_agent(&agent_home(dir), "assistant", front);
+}
+
+/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
+fn agent_home(dir: &Path) -> std::path::PathBuf {
+    dir.join(".home/.zx-agent")
+}
+
+/// The config.toml of these tests: the key in [`KEY_VAR`], `retries` retries, a 10-second
+/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
+fn base_config(retries: u32, top: &str, rest: &str) -> String {
+    retrying_fake_model_config(KEY_VAR, retries, top, &format!("idleTimeoutSecs = 10\n{rest}"))
+}
+
+/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
+/// [`base_config`] places them.
+fn configure(dir: &Path, top: &str, rest: &str) {
+    write_config(&agent_home(dir), &base_config(0, top, rest));
+}
+
+/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
+fn config(dir: &Path, tables: &str) {
+    configure(dir, "", tables);
 }
 
 #[tokio::test]
@@ -80,7 +114,7 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "first answer\nsecond answer\n");
     assert_eq!(
-        stderr(&output).matches("[turn] 1 request · ").count(),
+        stderr(&output).matches("[turn] 1 request(s) · ").count(),
         2,
         "{}",
         stderr(&output)
@@ -159,11 +193,11 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     );
     assert_eq!(server.requests()[0].body["max_tokens"], 2048);
     assert!(server.requests()[0].body.get("tools").is_none());
-    let store = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
+    let seed = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
         .await
         .unwrap();
-    assert!(store.latest_compaction().is_some());
-    assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
+    assert!(seed.latest_compaction().is_some());
+    assert!(seed.raw_projection().iter().any(|item| item.entry_id == id));
 }
 
 #[tokio::test]
@@ -261,9 +295,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     let mut stdin = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     stdin.write_all(b"/compact\n").await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), server.wait_for_requests(1))
-        .await
-        .unwrap();
+    server.wait_for_requests(1).await;
     signal(&child, "-INT").await;
     let compact = read_event_until(&mut events, |event| event["type"] == "compaction_report").await;
     assert_eq!(compact["report"]["outcome"], "cancelled");
@@ -271,14 +303,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     drop(stdin);
     let task = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(task["report"]["finalText"], "reused");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(
         zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
             .await
@@ -295,7 +320,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
     let id = seed_context(dir.path(), 10_000).await;
     agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":summary_json(&id)},"finish_reason":null}]})];
+    let chunks = vec![text_chunk(&summary_json(&id))];
     let server = MockServer::start(vec![
         Reply::Gate {
             chunks,
@@ -304,7 +329,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
         Reply::text("queued answer"),
     ])
     .await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(
         &server,
         dir.path(),
@@ -335,14 +360,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
     assert_eq!(users(&server, 1).last().unwrap(), "queued task");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -562,7 +580,7 @@ async fn a_file_write_approval_shows_the_content_as_lines() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(
-        log.contains("[approval 1] write_file: notes.txt\n  content (2 lines):\n      one\n      two\n"),
+        log.contains("[approval 1] write_file: notes.txt\n  content (2 line(s)):\n      one\n      two\n"),
         "{log}"
     );
     assert!(log.contains("[tool] write_file: notes.txt -> ok"), "{log}");
@@ -661,23 +679,18 @@ async fn a_retried_error_is_named_once() {
         Reply::text("recovered"),
     ])
     .await;
-    let mut child = chat_retrying(&server, dir.path(), &["--tools", ""], "1")
-        .spawn()
-        .unwrap();
+    let mut child = chat_retrying(&server, dir.path(), &["--tools", ""], 1).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"go\n/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "recovered\n");
     let log = stderr(&output);
     assert_eq!(log.matches("upstream exploded").count(), 1, "{log}");
     assert!(log.contains("[retry] 1/1 in "), "{log}");
     assert!(log.contains("ms (same error)\n"), "{log}");
-    assert!(log.contains("[turn] 2 requests · 1 retry · "), "{log}");
+    assert!(log.contains("[turn] 2 request(s) · 1 retry · "), "{log}");
 }
 
 #[tokio::test]
@@ -688,7 +701,7 @@ async fn a_turn_without_reported_usage_omits_the_token_counts() {
     let output = run(&server, dir.path(), &["--tools", ""], "go\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
-    assert!(log.contains("[turn] 1 request · "), "{log}");
+    assert!(log.contains("[turn] 1 request(s) · "), "{log}");
     assert!(!log.contains(" in · "), "{log}");
 }
 
@@ -705,14 +718,7 @@ async fn ctrl_c_twice_while_idle_exits() {
     signal(&child, "-INT").await;
     read_error_until(&mut errors, "press Ctrl+C again").await;
     signal(&child, "-INT").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -723,14 +729,11 @@ async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
     let mut stdin = child.stdin.take().unwrap();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"go\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     assert!(!dir.path().join("marker").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let result = ended_output(child).await;
     assert_eq!(result.status.code(), Some(0));
     assert!(dir.path().join("marker").exists());
 }
@@ -748,14 +751,11 @@ async fn a_file_write_waits_for_an_approval_by_default() {
     let mut stdin = child.stdin.take().unwrap();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"go\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     assert!(!dir.path().join("notes.txt").exists());
     stdin.write_all(b"1\n/quit\n").await.unwrap();
     drop(stdin);
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let result = ended_output(child).await;
     assert_eq!(result.status.code(), Some(0));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
@@ -777,7 +777,7 @@ async fn discussing_an_approval_sends_user_input_without_executing_the_call() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!dir.path().join("marker").exists());
     assert!(stderr(&output).contains("4 discuss"));
-    assert!(stderr(&output).contains("What would you like to discuss?"));
+    assert!(stderr(&output).contains("what would you like to discuss?"));
     assert!(
         server.requests()[1].body["messages"]
             .to_string()
@@ -850,7 +850,7 @@ async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     assert!(
         server.requests()[1].body["messages"]
             .to_string()
-            .contains("Blocked by policy")
+            .contains("Not executed: a policy denied it")
     );
 }
 
@@ -1013,10 +1013,8 @@ async fn an_approved_command_is_shown_with_the_request_and_again_with_its_result
 async fn chat_filters_the_known_api_key_before_tool_results_reach_audit_and_model() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("credentials.txt"), KEY).unwrap();
-    let tool = json!({"choices":[{"index":0,"delta":{"tool_calls":[{
-        "index":0,"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"credentials.txt\"}"}
-    }]},"finish_reason":"tool_calls"}]});
-    let server = MockServer::start(vec![Reply::Sse(vec![tool]), Reply::text("done")]).await;
+    let read = Reply::tool_call("read", "read_file", &json!({"path": "credentials.txt"}));
+    let server = MockServer::start(vec![read, Reply::text("done")]).await;
     let output = run(
         &server,
         dir.path(),
@@ -1080,7 +1078,7 @@ async fn read_terminal_until(terminal: &mut tokio::fs::File, seen: &mut Vec<u8>,
 #[tokio::test]
 async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_continue() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let partial = text_chunk("partial");
     let server = MockServer::start(vec![Reply::Stall(vec![partial]), Reply::text("after cancellation")]).await;
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .spawn()
@@ -1098,14 +1096,7 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
     let next = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(next["report"]["outcome"], "completed");
     assert_eq!(next["report"]["finalText"], "after cancellation");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
 
@@ -1113,7 +1104,7 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
 #[tokio::test]
 async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let partial = text_chunk("partial");
     let server = MockServer::start(vec![Reply::Stall(vec![partial])]).await;
     let mut child = chat(&server, dir.path(), &["--tools", ""]).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -1133,15 +1124,12 @@ async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
     signal(&child, "-INT").await;
     stdin.write_all(b"/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0));
     let log = stderr(&output);
     assert!(log.contains("[chat] run was cancelled"), "{log}");
-    assert!(!log.contains("[model] Aborted"), "{log}");
-    assert!(log.contains("[turn] 1 request · "), "{log}");
+    assert!(!log.contains("[model] aborted"), "{log}");
+    assert!(log.contains("[turn] 1 request(s) · "), "{log}");
 }
 
 #[cfg(unix)]
@@ -1149,7 +1137,7 @@ async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
 async fn lines_pasted_together_into_a_terminal_are_one_message() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("got it")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1165,14 +1153,7 @@ async fn lines_pasted_together_into_a_terminal_are_one_message() {
     assert_eq!(users(&server, 0), ["第一行：日志\n第二行：ERROR\n请分析"]);
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
@@ -1180,7 +1161,7 @@ async fn lines_pasted_together_into_a_terminal_are_one_message() {
 async fn a_terminal_separates_answers_with_blank_lines() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("answer")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut command = chat(&server, dir.path(), &["--tools", ""]);
     command
         .stdin(Stdio::from(slave.try_clone().unwrap()))
@@ -1201,14 +1182,7 @@ async fn a_terminal_separates_answers_with_blank_lines() {
     assert!(!output.contains("\x1b["), "{output:?}");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
@@ -1223,7 +1197,7 @@ async fn cancelling_an_approval_drops_its_reply_and_allows_a_new_prompt() {
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     signal(&child, "-INT").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["outcome"], "cancelled");
@@ -1231,14 +1205,7 @@ async fn cancelling_an_approval_drops_its_reply_and_allows_a_new_prompt() {
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["finalText"], "safe");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
@@ -1253,14 +1220,7 @@ async fn sigterm_exits_even_when_the_input_reader_is_waiting_for_a_line() {
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     read_error_until(&mut errors, "[chat] model=").await;
     signal(&child, "-TERM").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(5)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(5));
 }
 
 #[cfg(unix)]
@@ -1276,10 +1236,7 @@ async fn ctrl_c_while_idle_keeps_chat_open() {
     read_error_until(&mut errors, "no active task").await;
     stdin.write_all(b"hello\n/quit\n").await.unwrap();
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output = ended_output(child).await;
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), "done\n");
 }
@@ -1289,7 +1246,7 @@ async fn ctrl_c_while_idle_keeps_chat_open() {
 async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
     let dir = tempfile::tempdir().unwrap();
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"original"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("original")];
     let server = MockServer::start(vec![
         Reply::Gate {
             chunks,
@@ -1298,7 +1255,7 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
         Reply::text("steered"),
     ])
     .await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1320,23 +1277,16 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
     assert_eq!(server.requests()[1].body["model"], "mock-model");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     let dir = tempfile::tempdir().unwrap();
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("partial")];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1360,14 +1310,7 @@ async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     read_error_until(&mut errors, "discarded").await;
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -1387,7 +1330,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     let resolved = read_event_until(&mut events, |event| event["type"] == "approval_resolved").await;
     assert_eq!(resolved["approval"], "timed_out");
     // The task goes on without the call, so a line written now is the next question.
@@ -1398,14 +1341,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
     assert_eq!(report["report"]["finalText"], "second answer");
     assert_eq!(users(&server, 2), ["first", "second"]);
     read_error_until(&mut errors, "expired").await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
 }
 
@@ -1413,9 +1349,9 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
 #[tokio::test]
 async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     let dir = tempfile::tempdir().unwrap();
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("partial")];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1437,14 +1373,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     assert_eq!(users(&server, 1), ["second"]);
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
 }
 
 #[tokio::test]
@@ -1462,21 +1391,14 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     stdin.write_all(b"first\n").await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["outcome"], "timed_out");
     stdin.write_all(b"/approve 1 once\nsecond\n/quit\n").await.unwrap();
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["finalText"], "safe");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
     assert_eq!(users(&server, 1), ["first", "second"]);
 }
@@ -1486,7 +1408,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
 async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1494,31 +1416,24 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     terminal.write_all(b"first\n").await.unwrap();
     terminal.flush().await.unwrap();
-    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    read_error_until(&mut errors, "[approval] choose 1, 2, 3 or 4:").await;
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
+    assert_eq!(ended(&mut child).await.code(), Some(0));
     assert!(!dir.path().join("marker").exists());
 }
 
 #[tokio::test]
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = zx_testing::create_session_file(&dir.path().join("chat.jsonl"), zx_testing::header())
+    let mut seed = zx_testing::create_session_file(&dir.path().join("chat.jsonl"), zx_testing::header())
         .await
         .unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
+    seed.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
-    store.append_message(call).await.unwrap();
-    store.record_tool_call_started("c1", "bash").await.unwrap();
-    drop(store);
+    seed.append_message(call).await.unwrap();
+    seed.record_tool_call_started("c1", "bash").await.unwrap();
+    drop(seed);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
     let output = run(
@@ -1705,41 +1620,4 @@ async fn after_a_model_switch_the_token_trigger_follows_the_window_of_the_new_mo
     let requests = server.requests();
     assert_eq!(requests.len(), 2, "the summary request, then the task request");
     assert_eq!(requests[0].body["model"], "small-model");
-}
-
-/// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
-/// context window of `mock-model`.
-fn window_agent(dir: &Path, window: u64, extra: &str) {
-    config(
-        dir,
-        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
-    );
-    agent(dir, extra);
-}
-
-/// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
-fn agent(dir: &Path, front: &str) {
-    write_agent(&dir.join(".home/.zx-agent"), "assistant", front);
-}
-
-/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
-fn agent_home(dir: &Path) -> std::path::PathBuf {
-    dir.join(".home/.zx-agent")
-}
-
-/// The config.toml of these tests: the key in [`KEY_VAR`], `max_retries` retries, a 10-second
-/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
-fn base_config(max_retries: &str, top: &str, rest: &str) -> String {
-    format!("{top}\n[provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = {max_retries}\nidleTimeoutSecs = 10\n{rest}\n")
-}
-
-/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
-/// [`base_config`] places them.
-fn configure(dir: &Path, top: &str, rest: &str) {
-    write_config(&agent_home(dir), &base_config("0", top, rest));
-}
-
-/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
-fn config(dir: &Path, tables: &str) {
-    configure(dir, "", tables);
 }

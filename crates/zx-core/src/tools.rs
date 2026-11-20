@@ -24,11 +24,11 @@ pub(crate) struct Toolbox {
 }
 
 /// A tool, and what it declared when the toolbox was made.
-struct Declared {
-    tool: Arc<dyn Tool>,
+pub(crate) struct Declared {
+    pub(crate) tool: Arc<dyn Tool>,
     definition: ToolDef,
-    execution_mode: ExecutionMode,
-    effects: Effects,
+    pub(crate) execution_mode: ExecutionMode,
+    pub(crate) effects: Effects,
     /// The declared parameter schema, compiled.
     #[cfg(feature = "json-schema")]
     schema: jsonschema::Validator,
@@ -83,18 +83,10 @@ impl Toolbox {
         self.tools.iter().map(|declared| declared.definition.name.as_str())
     }
 
-    fn declared(&self, name: &str) -> Option<&Declared> {
+    /// The tool the model calls `name`, with how it runs beside other calls and what it
+    /// changes, as it declared.
+    pub(crate) fn declared(&self, name: &str) -> Option<&Declared> {
         self.tools.iter().find(|declared| declared.definition.name == name)
-    }
-
-    /// The tool the model calls `name`.
-    pub(crate) fn find(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.declared(name).map(|declared| &declared.tool)
-    }
-
-    /// How the tool the model calls `name` runs beside other calls, as it declared.
-    pub(crate) fn execution_mode(&self, name: &str) -> Option<ExecutionMode> {
-        self.declared(name).map(|declared| declared.execution_mode)
     }
 
     /// What the tool the model calls `name` changes, as it declared.
@@ -243,7 +235,7 @@ pub const MAX_QUEUED_PROGRESS: usize = 32;
 
 /// The most bytes of [`ToolOutput::details`], as compact JSON. Details are recorded with
 /// every result, so they get the same bound as a progress update.
-pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
+pub const MAX_DETAILS_BYTES: usize = MAX_PROGRESS_BYTES;
 
 /// What a tool returns. In JSON `content` is required and the flags default to `false`, so
 /// output that a hook process forgot cannot silently replace the result with nothing.
@@ -319,20 +311,24 @@ impl ToolOutput {
 pub trait Tool: Send + Sync {
     /// Name the model calls the tool by. Must match `definition().name`.
     fn name(&self) -> &str;
+
     /// Declaration sent to the model with every request, and whose parameter schema the
     /// arguments of a call are checked against. A session asks for it when it is made and
     /// keeps the answer.
     fn definition(&self) -> ToolDef;
+
     /// Defaults to `Parallel`.
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }
+
     /// Defaults to `SideEffects`. The session records that a call with side effects
     /// started before it runs, so recovery never assumes that an interrupted call did
     /// nothing. Return `ReadOnly` only when the tool cannot change any state.
     fn effects(&self) -> Effects {
         Effects::SideEffects
     }
+
     /// Rewrite the model's arguments before they are checked, to tolerate a mistake models
     /// commonly make, such as a JSON string where an array belongs or a field at the wrong
     /// level (pi: `prepareEditArguments`). Return `None` to keep them as they are, which the
@@ -346,12 +342,14 @@ pub trait Tool: Send + Sync {
     fn prepare_arguments(&self, _args: &Value) -> Option<Value> {
         None
     }
+
     /// Validate before policy and approval, after the declared JSON Schema has been checked.
     /// Override for semantic checks; `execute` must still validate direct SDK calls. The
     /// default adds no checks.
     fn validate_arguments(&self, _args: &Value) -> Result<(), String> {
         Ok(())
     }
+
     /// Run the tool. Must honor `ctx.cancel` if it can take long, and bound its output.
     ///
     /// When the run is cancelled, the loop stops waiting at once and drops this future, so
@@ -429,10 +427,10 @@ mod tests {
 
         assert!(toolbox.definitions(&active).is_empty());
         assert!(
-            toolbox.find("shift").is_some(),
+            toolbox.declared("shift").is_some(),
             "an inactive tool is still the session's"
         );
-        assert!(toolbox.find("another").is_none());
+        assert!(toolbox.declared("another").is_none());
     }
 
     fn observed(capacity: usize) -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {

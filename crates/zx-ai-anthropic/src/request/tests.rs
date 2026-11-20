@@ -18,10 +18,7 @@ fn system(changes: &[(&str, Option<&str>)]) -> Message {
 
 /// An answer of the provider `p` with `content`.
 fn answer(content: Vec<ContentBlock>) -> Message {
-    Message::Assistant(AssistantMessage {
-        content,
-        ..AssistantMessage::failure("p", "m", StopReason::Stop, "")
-    })
+    Message::Assistant(AssistantMessage::new("p", "m", StopReason::Stop, content))
 }
 
 fn call(id: &str) -> ContentBlock {
@@ -109,8 +106,9 @@ fn a_conversation_becomes_alternating_turns_with_its_end_cached() {
     );
 }
 
-#[test]
-fn a_call_without_a_result_gets_one_and_a_result_without_its_call_is_left_out() {
+/// The tool results of a body whose answer called `a` and `b`, with a result for `a` and
+/// one for a call `z` that the answer did not make.
+fn results_of_unpaired_calls() -> Vec<Value> {
     let body = body_of(
         &request(vec![
             Message::user("go"),
@@ -121,20 +119,35 @@ fn a_call_without_a_result_gets_one_and_a_result_without_its_call_is_left_out() 
         ]),
         SystemUpdates::Collapse,
     );
-    let results: Vec<(&str, &str)> = body["messages"][2]["content"]
+    body["messages"][2]["content"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|block| block["type"] == "tool_result")
-        .map(|block| {
-            (
-                block["tool_use_id"].as_str().unwrap(),
-                block["content"].as_str().unwrap(),
-            )
-        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_call_without_a_result_gets_an_error_result() {
+    let results = results_of_unpaired_calls();
+    assert_eq!(
+        (
+            &results[1]["tool_use_id"],
+            &results[1]["content"],
+            &results[1]["is_error"]
+        ),
+        (&json!("b"), &json!(MISSING_TOOL_RESULT), &json!(true))
+    );
+}
+
+#[test]
+fn a_result_without_its_call_is_left_out() {
+    let ids: Vec<Value> = results_of_unpaired_calls()
+        .iter()
+        .map(|result| result["tool_use_id"].clone())
         .collect();
-    assert_eq!(results, [("a", "ok"), ("b", NO_RESULT)]);
-    assert_eq!(body["messages"][2]["content"][1]["is_error"], json!(true));
+    assert_eq!(ids, [json!("a"), json!("b")]);
 }
 
 #[test]
@@ -151,13 +164,15 @@ fn thinking_goes_back_with_its_signature_only_to_its_provider_and_model() {
         ContentBlock::Text { text: "done".into() },
     ]);
     let other_source = |provider: &str, model: &str| {
-        Message::Assistant(AssistantMessage {
-            content: vec![
+        Message::Assistant(AssistantMessage::new(
+            provider,
+            model,
+            StopReason::Stop,
+            vec![
                 thinking("other", Some("sig-2")),
                 ContentBlock::Text { text: "theirs".into() },
             ],
-            ..AssistantMessage::failure(provider, model, StopReason::Stop, "")
-        })
+        ))
     };
     let body = body_of(
         &request(vec![
@@ -220,7 +235,7 @@ fn inline_changes_of_the_system_prompt_wait_for_the_next_answer() {
             .contains("cwd /b")
     );
     // The last turn is the end of the conversation, cached.
-    assert_eq!(inline["messages"][6]["content"][0]["cache_control"], cache());
+    assert_eq!(inline["messages"][6]["content"][0]["cache_control"], cache_breakpoint());
 
     let collapsed = body_of(&request(messages), SystemUpdates::Collapse);
     let system = collapsed["system"][0]["text"].as_str().unwrap();
@@ -271,14 +286,15 @@ fn a_reasoning_level_sets_adaptive_thinking_at_an_effort_or_turns_thinking_off()
     assert!(unset.get("thinking").is_none() && unset.get("output_config").is_none());
 }
 
-#[test]
-fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
+/// The body of a request with two tools, an output limit, and a call whose id the API
+/// does not take as it is.
+fn body_with_tools() -> Value {
     let tool = |name: &str| ToolDef {
         name: name.into(),
         description: format!("{name} things"),
         parameters: json!({"type": "object", "properties": {}}),
     };
-    let body = build_body(
+    build_body(
         &Request {
             tools: vec![tool("read"), tool("write")],
             max_tokens: Some(500),
@@ -290,8 +306,17 @@ fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
         },
         &BodyOptions::default(),
         "p",
-    );
-    assert_eq!(body["max_tokens"], json!(500));
+    )
+}
+
+#[test]
+fn a_requests_output_limit_is_sent() {
+    assert_eq!(body_with_tools()["max_tokens"], json!(500));
+}
+
+#[test]
+fn tools_are_declared_with_the_last_one_a_cache_breakpoint() {
+    let body = body_with_tools();
     assert_eq!(
         body["tools"],
         json!([
@@ -300,31 +325,100 @@ fn tools_are_declared_with_the_last_one_cached_and_ids_take_the_apis_form() {
              "cache_control": {"type": "ephemeral"}},
         ])
     );
+}
+
+#[test]
+fn call_ids_take_the_form_the_api_takes() {
+    let body = body_with_tools();
     assert_eq!(body["messages"][1]["content"][0]["id"], json!("call_1_x"));
     assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], json!("call_1_x"));
 }
 
 #[test]
-fn thinking_left_out_after_a_refusal_goes_from_the_named_message_on() {
-    let mut body = json!({"messages": [
-        {"role": "user", "content": [{"type": "text", "text": "a"}]},
-        {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "early", "signature": "s1"},
-            {"type": "text", "text": "kept"},
-        ]},
-        {"role": "user", "content": [{"type": "text", "text": "b"}]},
-        {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "late", "signature": "s2"},
-            {"type": "redacted_thinking", "data": "d"},
-            {"type": "text", "text": "answer"},
-        ]},
-        {"role": "assistant", "content": [{"type": "thinking", "thinking": "alone", "signature": "s3"}]},
-    ]});
-    drop_thinking_from(&mut body, 3);
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 4);
-    assert_eq!(messages[1]["content"][0]["type"], "thinking");
-    assert_eq!(messages[3]["content"], json!([{"type": "text", "text": "answer"}]));
+fn a_reasoning_level_keeps_the_other_thinking_settings_of_the_extra_fields() {
+    let binding = json!({"prefix_mismatch_behavior": "drop_block"});
+    let mut extra_fields = Map::new();
+    extra_fields.insert(
+        "thinking".into(),
+        json!({"block_binding": binding, "display": "omitted"}),
+    );
+    let options = BodyOptions {
+        extra_fields,
+        ..BodyOptions::default()
+    };
+    let with = |reasoning| {
+        build_body(
+            &Request {
+                reasoning: Some(reasoning),
+                ..request(vec![Message::user("hi")])
+            },
+            &options,
+            "p",
+        )
+    };
+    assert_eq!(
+        with(Reasoning::Medium)["thinking"],
+        json!({"block_binding": binding, "type": "adaptive", "display": "summarized"})
+    );
+    // The level says how thinking is shown too, and thinking that is off shows nothing.
+    assert_eq!(
+        with(Reasoning::Off)["thinking"],
+        json!({"block_binding": binding, "type": "disabled"})
+    );
+}
+
+#[test]
+fn the_fields_a_reasoning_level_sets_are_those_extra_fields_must_not_set() {
+    for reasoning in Reasoning::ALL {
+        let mut body = json!({});
+        apply_reasoning(&mut body, reasoning);
+        for (object, fields) in body.as_object().unwrap() {
+            for key in fields.as_object().unwrap().keys() {
+                assert!(
+                    crate::config::REASONING_FIELDS
+                        .iter()
+                        .any(|&(reserved, field)| reserved == object && field == key),
+                    "{reasoning}: {object}.{key}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn replayed_bodies_match_the_live_body_in_both_system_update_modes() {
+    let request = request(vec![
+        system(&[("preamble", Some("Be brief."))]),
+        Message::user("first"),
+        system(&[("environment", Some("changed"))]),
+        Message::user("second"),
+    ]);
+    let mut extra_fields = Map::new();
+    extra_fields.insert("metadata".into(), json!({"user_id": "u"}));
+    for system_updates in [SystemUpdates::Collapse, SystemUpdates::Inline] {
+        let options = BodyOptions {
+            system_updates,
+            extra_fields: extra_fields.clone(),
+        };
+        let replayed = replay_body(&request, "p", &request_options(&options)).unwrap();
+        assert_eq!(replayed, build_body(&request, &options, "p"), "{system_updates:?}");
+    }
+}
+
+#[test]
+fn replay_refuses_another_conversion_and_options_it_does_not_know() {
+    let request = request(vec![Message::user("hi")]);
+    for options in [
+        Value::Null,
+        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "collapse"}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "sideways"}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extra": 1}),
+        json!({"format": "anthropic-messages", "version": 1}),
+        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extraFields": {"model": "x"}}),
+    ] {
+        assert!(replay_body(&request, "p", &options).is_err(), "{options}");
+    }
 }
 
 #[test]

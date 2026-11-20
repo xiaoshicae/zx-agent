@@ -146,7 +146,7 @@ impl Endpoint {
 fn print_usage(test: &str, report: &RunReport) {
     let usage = &report.usage;
     eprintln!(
-        "[real_api] {test}: {} tokens (in {} / out {}), {} steps, outcome {:?}",
+        "[real_api] {test}: {} tokens (in {} / out {}), {} model requests, outcome {:?}",
         usage.total_tokens, usage.input, usage.output, report.model_requests, report.outcome
     );
 }
@@ -183,7 +183,7 @@ async fn runs_a_tool_and_answers_from_its_output() {
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     assert!(report.final_text.contains('7'), "{}", report.final_text);
-    let ran = runner.session().messages().into_iter().any(
+    let ran = runner.transcript().messages().into_iter().any(
         |message| matches!(message, Message::ToolResult(result) if !result.is_error && result.content.contains('7')),
     );
     assert!(ran, "the bash tool ran successfully");
@@ -201,8 +201,8 @@ async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
     print_usage("policy denial", &report);
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
-    let denied = runner.session().messages().into_iter().any(|message| {
-        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Approval denied"))
+    let denied = runner.transcript().messages().into_iter().any(|message| {
+        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Not executed: approval denied"))
     });
     assert!(denied, "the model saw a policy denial");
 }
@@ -282,11 +282,11 @@ async fn an_invalid_key_fails_without_retrying() {
 }
 
 /// The scripted session of `zx_testing::summary_eval` summarized after each of its rounds.
-/// Prints each round's score and the final facts. Fails when a summary is not made, since the scores then
-/// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
-/// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`
-/// sets the output budget. The session file stays in a temporary directory, whose path is
-/// printed first.
+/// Prints each round's score and the final facts. Fails when a summary is not made, since the
+/// scores then mean nothing; otherwise asserts only what holds whatever the model answers.
+/// Each summary has the default budgets, 2048 output tokens and 2 minutes, unless
+/// `ZX_E2E_SUMMARY_TOKENS` sets the output budget. The session file stays in a temporary
+/// directory, whose path is printed first.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
 async fn summaries_over_eight_rounds_of_a_scripted_session() {

@@ -3,22 +3,26 @@
 
 use std::path::Path;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 use zx_core::transcript::{SessionHeader, Transcript};
+
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
 pub(super) fn header() -> SessionHeader {
     SessionHeader::new(Path::new("/tmp"), "m")
 }
 
 pub(super) fn assistant(text: &str) -> Message {
-    let mut message = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-    message.error_message = None;
-    message.content = vec![ContentBlock::Text { text: text.into() }];
+    let message = AssistantMessage::new(
+        "p",
+        "m",
+        StopReason::Stop,
+        vec![ContentBlock::Text { text: text.into() }],
+    );
     Message::Assistant(message)
 }
 
-pub(super) fn texts(store: &Transcript) -> Vec<String> {
-    store
+pub(super) fn texts(transcript: &Transcript) -> Vec<String> {
+    transcript
         .messages()
         .iter()
         .map(|message| match message {

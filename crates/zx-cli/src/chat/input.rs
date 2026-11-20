@@ -10,7 +10,7 @@ use super::InputMode;
 
 /// Bound both read-ahead and the size of one input line (including its line ending). Lines
 /// pasted together are joined up to the same size; what is left starts the next message.
-pub(super) const MAX_LINE_BYTES: usize = 1024 * 1024;
+const MAX_LINE_BYTES: usize = 1024 * 1024;
 const INPUT_QUEUE: usize = 8;
 
 /// One message from the input owner.
@@ -21,9 +21,9 @@ pub(super) enum Line {
     Rejected(String),
 }
 
-pub(super) type Input = mpsc::Receiver<io::Result<Line>>;
+pub(super) type Lines = mpsc::Receiver<io::Result<Line>>;
 
-pub(super) fn spawn(mode: InputMode) -> Result<Input> {
+pub(super) fn spawn(mode: InputMode) -> Result<Lines> {
     // A handle of its own: only this thread reads stdin, so the global lock's buffer would hide
     // whether more input is waiting.
     let stdin = stdin_handle().context("cannot open terminal input")?;

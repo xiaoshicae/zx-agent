@@ -5,19 +5,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ProviderErrorKind, StopReason, ToolCall};
-use zx_agent::events::{EventKind, RunOutcome};
+use zx_agent::ai::{AssistantMessage, Message, ProviderErrorKind, StopReason};
+use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{CustomMessage, Entry};
-
 use zx_testing::{
-    Collect, Driven, EchoTool, RunnerSetup, Seed, Start, config, header, summarize, take_queued_inputs,
-    tool_call_answer,
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, replayed_requests,
+    summarize, take_queued_inputs, tool_call_answer, tool_call_block,
 };
 
 async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
@@ -37,10 +35,10 @@ fn call_answer() -> Message {
 
 #[tokio::test]
 async fn continuing_answers_the_input_the_conversation_ends_with() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("question")).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -48,21 +46,21 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
     assert_eq!(report.final_text, "answer");
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:question"]);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:question", "assistant:answer"]
     );
 }
 
 #[tokio::test]
 async fn after_a_crash_the_recovered_results_are_answered_without_running_the_call_again() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
-    store.append_message(call_answer()).await.unwrap();
-    store.record_tool_call_started("c1", "echo").await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
+    seed.append_message(call_answer()).await.unwrap();
+    seed.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let tool = Arc::new(EchoTool::new("echo"));
     let (runner, events) = RunnerSetup {
-        session: store.into(),
+        session: seed.into(),
         ..RunnerSetup::new(config(provider.clone(), vec![tool.clone()]))
     }
     .build()
@@ -80,12 +78,12 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
 
 #[tokio::test]
 async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_results() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
-    store.append_message(call_answer()).await.unwrap();
-    store.record_tool_call_started("c1", "echo").await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
+    seed.append_message(call_answer()).await.unwrap();
+    seed.record_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
     let heard = CustomMessage {
         custom_type: "heard".into(),
         content: "someone spoke".into(),
@@ -103,18 +101,13 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
 
 #[tokio::test]
 async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
-    let mut store = Seed::in_memory(header()).await;
-    store.append_message(Message::user("echo hi")).await.unwrap();
+    let mut seed = Seed::in_memory(header()).await;
+    seed.append_message(Message::user("echo hi")).await.unwrap();
     let mut failed = AssistantMessage::failure("faux", "test-model", StopReason::Error, "the stream broke");
-    failed.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "echo".into(),
-        arguments: json!({"text": "h"}),
-        arguments_error: None,
-    })];
-    store.append_message(Message::Assistant(failed)).await.unwrap();
+    failed.content = vec![tool_call_block("c1", "echo", json!({"text": "h"}))];
+    seed.append_message(Message::Assistant(failed)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("second try")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -139,12 +132,12 @@ async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
     // The prompt is sent once, and the failed answer not at all.
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:question"]);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:question", "assistant:second try"]
     );
     // The failed answer stays in the session for the audit.
     let failed_answers = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(m) if matches!(&m.message, Message::Assistant(a) if a.stop_reason == StopReason::Error)))
@@ -253,41 +246,23 @@ async fn an_empty_conversation_has_nothing_to_continue() {
 async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("question")).await.unwrap();
+    let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
+    seed.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store.into()).await;
+    let (runner, _) = runner(&provider, seed.into()).await;
 
     runner.continue_run().await.unwrap();
 
-    let store = zx_testing::read_session_file(&path).unwrap();
-    let id = store
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(started.id.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(store.replay_request(&id).unwrap().1, provider.requests()[0]);
+    let transcript = zx_testing::read_session_file(&path).unwrap();
+    assert_eq!(replayed_requests(&transcript), provider.requests());
 }
 
 #[tokio::test]
 async fn a_running_session_refuses_to_continue() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
-    let (session, events) = runner(&provider, Start::default()).await;
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build().await;
     let mut running = Box::pin(session.prompt("first"));
-    // Wait until the request is in flight.
-    while !events
-        .events()
-        .iter()
-        .any(|event| matches!(event, EventKind::RequestStart { .. }))
-    {
-        tokio::select! {
-            () = tokio::task::yield_now() => {}
-            _ = &mut running => panic!("must still be running"),
-        }
-    }
+    provider.wait_for_start(&mut running).await;
 
     assert_eq!(session.continue_run().await.err(), Some(SessionError::Busy));
     session.cancel();

@@ -7,8 +7,8 @@ paths:
 
 格式由 rustfmt 决定，能用 lint 查的条款在 `Cargo.toml` 的 `[workspace.lints]`，阈值在 `clippy.toml`。这里只列工具查不出的约定。
 
-- **`#[allow]` 的唯一例外**（红线 3）：`crates/zx-cli/tests/common/mod.rs` 的 `#![allow(dead_code, reason = "...")]`，原因写在它的 `reason` 里。`#[expect]` 的理由写成能核对的一句话（`one arm per event variant`）。
-- **导入分三组**，组之间空一行：标准库、外部 crate、本 crate（`crate::`、`super::`）。
+- **`#[expect]` 的理由**写成能核对的一句话（`one arm per event variant`）；不用 `#[allow]`（红线 3）。几个测试二进制共用的辅助，只有其中一部分用到的，单放一个文件，由用到的二进制经 `#[path]` 引入（`crates/zx-cli/tests/common/pty.rs`）。
+- **导入分三组**，组之间空一行：标准库、外部 crate（工作区的其他 crate 也是）、本 crate（`crate::`、`self::`、`super::`；子模块写成 `self::` 开头）。分组由 `cargo fmt -- --config group_imports=StdExternalCrate` 完成：这个选项还不稳定，写进 `rustfmt.toml` 会被忽略，只能在命令行给出。
 - **可见性最小化**：默认私有，crate 内共享用 `pub(crate)`，只有库的使用者需要的才 `pub`。
 - **函数**：参数超过 5 个就打包成结构体；不用 bool 参数切换行为，改用枚举或拆成两个函数。
 - **命名**：函数名说它返回什么（`executor()`、`hidden_env()`）或做什么（`open_session()`）；谓词用 `is_`、`has_` 或一个陈述（`waiting()`）。一个概念一个词，全仓库一致，例如截短字符串只有 `clip`、`prefix_within` 与 `prefix_noted`。同名不同义是错误，改名到各自的含义。不缩写，通用的除外：`cwd`、`id`、`ms`、`secs`、`env`、`args`、`ctx`（工具与钩子的上下文）、`cx`（ACP 连接）、`tx`/`rx`、`acc`。

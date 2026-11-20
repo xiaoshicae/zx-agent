@@ -1,6 +1,7 @@
 //! The container executor. Tests with a fake `docker` program always run and need no Docker.
 //! Tests against real Docker run only when `ZX_DOCKER_TEST_IMAGE` names a local image that
-//! has bash; CI pulls one on Linux. Without it they print a note and return.
+//! has bash; CI pulls one on Linux. Without it they print a note and return. The last part of
+//! the file runs the program in container mode.
 
 #![cfg(unix)]
 
@@ -12,10 +13,9 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{
@@ -25,16 +25,12 @@ use zx_agent::builtin::executor::{
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::{ExecutionMode, Tool};
-
-use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, tool};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{AgentHome, Home};
-use zx_testing::{RunnerSetup, config, stderr};
+use zx_testing::program::{AgentHome, Home, ended, ended_output};
+use zx_testing::{RunnerSetup, config, read_session_file, stderr};
 
-// ---------------------------------------------------------------------------
-// Fake docker
-// ---------------------------------------------------------------------------
+use self::common::zx_agent_in;
 
 /// Logs every invocation's arguments to `calls/` and answers from files next to it:
 /// `run.fail` (docker run fails with this message), `probe.code` and `probe.err` (the start-up
@@ -510,7 +506,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
     runner.run("again").await;
 
     let results: Vec<(String, String)> = runner
-        .session()
+        .transcript()
         .messages()
         .into_iter()
         .filter_map(|message| match message {
@@ -597,7 +593,11 @@ async fn file_writes_map_each_refusal_to_an_actionable_error() {
     let executor = fake.start(fake.config()).await.unwrap();
     let path = Path::new("/srv/app.conf");
     for (code, error, message) in [
-        ("94", "", "/srv/app.conf is a directory"),
+        (
+            "94",
+            "",
+            "/srv/app.conf is a directory; write to the path of a file instead",
+        ),
         (
             "96",
             "",
@@ -666,10 +666,6 @@ async fn dropping_the_executor_ends_the_docker_run_client() {
         "the docker run client outlived the executor"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Real Docker (ZX_DOCKER_TEST_IMAGE)
-// ---------------------------------------------------------------------------
 
 /// The image for real Docker tests, or None to skip them.
 fn docker_image() -> Option<String> {
@@ -964,27 +960,31 @@ async fn real_dropping_the_executor_removes_the_container() {
     let (_dir, workspace) = real_workspace();
     let executor = start_real(&image, &workspace).await;
     let name = executor.name().to_string();
-    let exists = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &format!("name=^{name}$")])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    assert!(exists());
+    let filter = format!("name=^{name}$");
+    assert!(docker_lists(&filter));
 
     drop(executor);
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while exists() {
-        assert!(Instant::now() < deadline, "container {name} outlived its executor");
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        eventually(Duration::from_secs(15), || !docker_lists(&filter)).await,
+        "container {name} outlived its executor"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// The CLI in container mode
-// ---------------------------------------------------------------------------
+/// Whether `docker ps` lists a container, running or not, that `filter` selects.
+fn docker_lists(filter: &str) -> bool {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "--all", "--quiet", "--filter", filter])
+        .output()
+        .unwrap();
+    !output.stdout.is_empty()
+}
+
+/// The `docker ps` filter of the containers that the session of the file `session` started.
+fn session_containers(session: &Path) -> String {
+    let id = read_session_file(session).unwrap().header().id.clone();
+    format!("label=zx-agent.session={id}")
+}
 
 /// `zx-agent run` in `dir` against the mock server. `docker_dir` goes first on PATH, so that
 /// its `docker` replaces the real one.
@@ -994,7 +994,7 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home
         .args(["run", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(args)
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .stdin(Stdio::null());
     if let Some(docker_dir) = docker_dir {
         let path = std::env::var("PATH").unwrap_or_default();
@@ -1006,17 +1006,9 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home
         .unwrap()
 }
 
-/// The leading system message of the first model request.
-fn system_prompt(server: &MockServer) -> String {
-    server.requests()[0].system_text()
-}
-
 /// The first tool result in model request `index`.
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].tool_results()[0]["content"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    server.requests()[index].tool_result_texts().remove(0)
 }
 
 #[tokio::test]
@@ -1039,7 +1031,7 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
     .await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let prompt = system_prompt(&server);
+    let prompt = server.requests()[0].system_text();
     assert!(
         prompt.contains("OS: Fake Linux 1, Linux kernel 6.0.0-fake (x86_64), in a container from image fake:1"),
         "{prompt}"
@@ -1074,7 +1066,7 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &st
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap()])
-        .env("OPENAI_API_KEY", "sk-p10-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .env("PATH", format!("{}:{path}", fake.dir.path().display()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1084,10 +1076,7 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &st
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(input.as_bytes()).await.unwrap();
     drop(stdin);
-    tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap()
+    ended_output(child).await
 }
 
 /// A config.toml that runs commands in a container of `image`, with `extra` after it.
@@ -1262,7 +1251,7 @@ async fn a_workspace_the_container_user_cannot_use_is_explained_with_the_keys_of
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
         let stderr = stderr(&output);
         let explained = format!(
-            "cannot start the container for container execution: user {} {problem} {}; {advice}",
+            "cannot start the container: user {} {problem} {}; {advice}",
             fake.config().user,
             fake.workspace().display()
         );
@@ -1298,37 +1287,23 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
         "{}",
         tool_result(&server, 1)
     );
-    let header: Value =
-        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
-    let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
-    let left = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &label])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while left() {
-        assert!(Instant::now() < deadline, "the container outlived zx-agent");
-        tokio::task::yield_now().await;
-    }
+    let label = session_containers(&session);
+    assert!(
+        eventually(Duration::from_secs(15), || !docker_lists(&label)).await,
+        "the container outlived zx-agent"
+    );
 }
 
 /// Guards the behavior, not one mechanism: the Docker clients run in their own process group,
-/// and on 2026-11-01 an attached `docker run --sig-proxy=false` client also kept running after
-/// SIGINT on its own, so this test passes even without the separate group.
+/// and an attached `docker run --sig-proxy=false` client has also been seen to keep running
+/// after SIGINT on its own, so this test passes even without the separate group.
 #[tokio::test]
 async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let Some(image) = docker_image() else { return };
     let home = container_home(&image);
     let (_dir, workspace) = real_workspace();
-    let call = json!({"index": 0, "id": "r1", "type": "function",
-        "function": {"name": "read_file", "arguments": "{\"path\":\"/etc/os-release\"}"}});
     let server = MockServer::start(vec![
-        Reply::Sse(vec![
-            json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}]}),
-        ]),
+        Reply::tool_call("r1", "read_file", &json!({"path": "/etc/os-release"})),
         Reply::text("done"),
     ])
     .await;
@@ -1339,7 +1314,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
         .args(["--tools", "read_file"])
         // The session file would have to be outside the workspace; this test needs none.
         .arg("--no-session")
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1373,10 +1348,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let mut stdin = chat.stdin.take().unwrap();
     stdin.write_all(b"which system is this?\n/quit\n").await.unwrap();
     drop(stdin);
-    let status = tokio::time::timeout(Duration::from_secs(60), chat.wait())
-        .await
-        .unwrap()
-        .unwrap();
+    let status = ended(&mut chat).await;
 
     assert_eq!(status.code(), Some(0));
     let result = tool_result(&server, 1);
@@ -1396,7 +1368,7 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap(), "go"])
-        .env("OPENAI_API_KEY", "sk-p6-container-test")
+        .env("OPENAI_API_KEY", "sk-container-test")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1404,24 +1376,14 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
         .unwrap();
     // The model's request comes after start-up, so the container is running.
     server.wait_for_requests(1).await;
-    let header: Value =
-        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
-    let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
-    let exists = || {
-        let output = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--filter", &label])
-            .output()
-            .unwrap();
-        !output.stdout.is_empty()
-    };
-    assert!(exists());
+    let label = session_containers(&session);
+    assert!(docker_lists(&label));
 
     // SIGKILL: zx-agent runs no cleanup; only the closed stdin of its docker client remains.
     agent.kill().await.unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while exists() {
-        assert!(Instant::now() < deadline, "the container outlived a killed zx-agent");
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        eventually(Duration::from_secs(20), || !docker_lists(&label)).await,
+        "the container outlived a killed zx-agent"
+    );
 }

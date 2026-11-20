@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
-
 use zx_agent::ai::{Message, StopReason, Usage};
 use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -92,8 +91,8 @@ pub(super) enum What {
     },
     Decision {
         call: String,
-        /// The policies' verdict, without its reason, which may quote the call.
-        verdict: &'static str,
+        /// The policies' decision, without its reason, which may quote the call.
+        decision: &'static str,
     },
     ApprovalRequested {
         call: String,
@@ -182,7 +181,7 @@ impl Signal {
                 tool_call_id, decision, ..
             } => What::Decision {
                 call: tool_call_id.clone(),
-                verdict: decision.name(),
+                decision: decision.name(),
             },
             EventKind::ApprovalRequested { tool_call_id, .. } => What::ApprovalRequested {
                 call: tool_call_id.clone(),
@@ -227,7 +226,7 @@ impl Signal {
             EventKind::ContextOverflow { .. } => What::Overflow,
             EventKind::HookFailed { hook, phase, .. } => What::HookFailed {
                 hook: hook.clone(),
-                phase: phase.as_str(),
+                phase: phase.name(),
             },
             EventKind::ToolCallRecovered {
                 tool_call_id,
@@ -256,22 +255,12 @@ impl Signal {
     }
 }
 
-/// An event of the run the tests use, at `at_ms`, in session `s1`.
-#[cfg(test)]
-pub(super) fn event(at_ms: u64, event: EventKind) -> Event {
-    Event {
-        schema_version: zx_agent::events::EVENT_SCHEMA_VERSION,
-        seq: at_ms,
-        at_ms,
-        session_id: "s1".into(),
-        run_id: "6f1c2c4e-0000-4000-8000-000000000001".into(),
-        event,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::Role;
+
     use super::*;
+    use crate::otel::test_support::event;
 
     #[test]
     fn the_hook_drops_events_beyond_its_queue_and_counts_them() {
@@ -284,7 +273,7 @@ mod tests {
         hook.observe(&event(1, EventKind::StepStart { step: 1 }));
         hook.observe(&event(2, EventKind::StepStart { step: 2 }));
         // Not for spans: neither queued nor counted.
-        hook.observe(&event(3, EventKind::MessageStart { role: "assistant" }));
+        hook.observe(&event(3, EventKind::MessageStart { role: Role::Assistant }));
         assert_eq!(hook.dropped.load(Ordering::Relaxed), 1);
     }
 }

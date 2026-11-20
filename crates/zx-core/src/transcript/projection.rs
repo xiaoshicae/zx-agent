@@ -7,9 +7,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
-
 use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
+use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
 
 /// A model-visible message and the entry it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -183,17 +182,12 @@ impl Transcript {
         projected
     }
 
-    /// Latest successful, still-valid summary on the active branch.
+    /// The latest compaction on the current branch that succeeded and still holds.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        Self::latest_compaction_on(&self.branch_path())
+        Self::compaction_in_effect_on(&self.branch_path()).map(|(compaction, _)| compaction)
     }
 
-    /// The latest successful summary on `path` that still holds.
-    fn latest_compaction_on<'s>(path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
-        Self::compaction_in_effect_on(path).map(|(compaction, _)| compaction)
-    }
-
-    /// The latest successful summary on `path` that still holds, with the record of its
+    /// The latest compaction on `path` that succeeded and still holds, with the record of its
     /// start. Invalid or incomplete control records never hide original evidence, and a
     /// correction of a summary's evidence invalidates it as a whole: the projection falls
     /// back to the originals.
@@ -302,9 +296,12 @@ mod tests {
 
     /// An answer that reported `input` prompt tokens and 10 output tokens.
     fn answer_reporting(input: u64) -> Message {
-        let mut answer = AssistantMessage::failure("p", "m", StopReason::Stop, "");
-        answer.error_message = None;
-        answer.content = vec![ContentBlock::Text { text: "noted".into() }];
+        let mut answer = AssistantMessage::new(
+            "p",
+            "m",
+            StopReason::Stop,
+            vec![ContentBlock::Text { text: "noted".into() }],
+        );
         answer.usage = Usage {
             input,
             output: 10,
@@ -326,41 +323,47 @@ mod tests {
 
     #[tokio::test]
     async fn a_compaction_ends_the_measurement_by_the_answers_before_it() {
-        let mut store = Transcript::in_memory(header());
-        let old = store.append_message(Message::user("old evidence")).await.unwrap();
-        let kept = store.append_message(answer_reporting(900)).await.unwrap();
+        let mut transcript = Transcript::in_memory(header());
+        let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
+        let kept = transcript.append_message(answer_reporting(900)).await.unwrap();
         let latest = Message::user("latest input");
-        store.append_message(latest.clone()).await.unwrap();
-        let (usage, rest) = store.measured_context();
+        transcript.append_message(latest.clone()).await.unwrap();
+        let (usage, rest) = transcript.measured_context();
         assert_eq!(usage.map(|usage| usage.input), Some(900));
         assert_eq!(rest, [latest]);
 
-        let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-        store
+        let started = transcript
+            .append_compaction_started(plan(&transcript, &kept))
+            .await
+            .unwrap();
+        transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await
             .unwrap();
 
         // The kept answer was sent the context from before the compaction.
-        let (usage, rest) = store.measured_context();
+        let (usage, rest) = transcript.measured_context();
         assert_eq!(usage, None);
-        assert_eq!(rest, store.messages());
+        assert_eq!(rest, transcript.messages());
     }
 
     #[tokio::test]
     async fn an_answer_recorded_after_a_compaction_measures_the_compacted_context() {
-        let mut store = Transcript::in_memory(header());
-        let (old, kept) = seeded(&mut store).await;
-        let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-        store
+        let mut transcript = Transcript::in_memory(header());
+        let (old, kept) = seeded(&mut transcript).await;
+        let started = transcript
+            .append_compaction_started(plan(&transcript, &kept))
+            .await
+            .unwrap();
+        transcript
             .append_compaction(&started, summary(&old), Usage::default())
             .await
             .unwrap();
-        store.append_message(answer_reporting(300)).await.unwrap();
+        transcript.append_message(answer_reporting(300)).await.unwrap();
         let later = Message::user("next input");
-        store.append_message(later.clone()).await.unwrap();
+        transcript.append_message(later.clone()).await.unwrap();
 
-        let (usage, rest) = store.measured_context();
+        let (usage, rest) = transcript.measured_context();
 
         assert_eq!(usage.map(|usage| usage.input), Some(300));
         assert_eq!(rest, [later]);
@@ -368,39 +371,39 @@ mod tests {
 
     /// An old message, an answer that reported 900 prompt tokens, and a later input; returns
     /// the three entry IDs.
-    async fn measured(store: &mut Transcript) -> [String; 3] {
-        let earlier = store.append_message(Message::user("old evidence")).await.unwrap();
-        let answer = store.append_message(answer_reporting(900)).await.unwrap();
-        let later = store.append_message(Message::user("latest input")).await.unwrap();
+    async fn measured(transcript: &mut Transcript) -> [String; 3] {
+        let earlier = transcript.append_message(Message::user("old evidence")).await.unwrap();
+        let answer = transcript.append_message(answer_reporting(900)).await.unwrap();
+        let later = transcript.append_message(Message::user("latest input")).await.unwrap();
         [earlier, answer, later]
     }
 
     #[tokio::test]
     async fn an_edit_of_a_later_message_keeps_the_measurement_by_an_answer() {
-        let mut store = Transcript::in_memory(header());
-        let [_, _, later] = measured(&mut store).await;
+        let mut transcript = Transcript::in_memory(header());
+        let [_, _, later] = measured(&mut transcript).await;
 
         // What the answer was sent is as it was.
-        store
+        transcript
             .append_context_edit(&later, Some("rewritten".into()))
             .await
             .unwrap();
 
-        assert_eq!(store.measured_context().0.map(|usage| usage.input), Some(900));
+        assert_eq!(transcript.measured_context().0.map(|usage| usage.input), Some(900));
     }
 
     #[tokio::test]
     async fn an_edit_at_or_before_an_answer_ends_its_measurement() {
         for edited in [0, 1] {
-            let mut store = Transcript::in_memory(header());
-            let ids = measured(&mut store).await;
+            let mut transcript = Transcript::in_memory(header());
+            let ids = measured(&mut transcript).await;
 
-            store
+            transcript
                 .append_context_edit(&ids[edited], Some("shorter".into()))
                 .await
                 .unwrap();
 
-            assert_eq!(store.measured_context().0, None, "edited entry {edited}");
+            assert_eq!(transcript.measured_context().0, None, "edited entry {edited}");
         }
     }
 

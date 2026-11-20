@@ -3,8 +3,9 @@
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
 //! each envelope once its message is kept, before handling it.
 //!
-//! The Web API calls are in `api.rs`; the Socket Mode connection in `connection.rs`; what
-//! arrives over it, and the cards, in `events.rs`.
+//! - `api`: the Web API calls
+//! - `connection`: the Socket Mode connection
+//! - `events`: what arrives over it, and the text and blocks the channel posts
 
 mod api;
 mod connection;
@@ -18,32 +19,27 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    ApprovalCard, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said,
-    ThreadId, UserId,
-};
-
+use self::api::CallError;
+use self::events::{Me, button, card_request, escape, history, resolution, section, split};
 use super::{
-    Backoff, BuiltChannel, DEFAULT_REQUEST_TIMEOUT, MAX_TEXT_CHARS, Pacer, PlatformFactory, PlatformInput,
-    RATE_LIMIT_RETRIES, http_client, report, secret,
+    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
+    PlatformInput, RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
 };
-use api::CallError;
-use connection::{Ended, connection_url};
-use events::{Me, button, card_request, escape, history, resolution, section, split};
+use crate::{
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said, ThreadId,
+    UserId,
+};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
-pub(super) const PLATFORM: &str = "slack";
 /// The variables that hold the tokens, unless the `[slack]` section of im.toml names others.
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 /// Keepalive pings over the Socket Mode connection, by default: often enough to notice a
 /// connection that died within half a minute, rare enough to cost nothing.
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(10);
-/// Longest wait a `Retry-After` is given: Slack's rate limits are per minute (Rate limits,
-/// "Tiers"), so a longer value is more likely a bad header than a real wait; a send that
-/// waits is dropped by the server's outbound timeout, a connection attempt by the stop.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+/// Least time between two posts to one chat, by default: see [`SlackConfig::post_interval`].
+const DEFAULT_POST_INTERVAL: Duration = Duration::from_secs(1);
 /// `action_id`s of the two card buttons; their `value` is the approval ID.
 const ALLOW_ACTION: &str = "zx_allow_once";
 const DENY_ACTION: &str = "zx_deny";
@@ -103,7 +99,7 @@ impl SlackConfig {
             bot_token,
             api_base: DEFAULT_API_BASE.into(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            post_interval: Duration::from_secs(1),
+            post_interval: DEFAULT_POST_INTERVAL,
             ping_interval: DEFAULT_PING_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
@@ -139,7 +135,7 @@ pub(super) struct Slack;
 impl PlatformFactory for Slack {
     /// The variables holding the tokens are the ones commands must not see. Fails when a
     /// variable does not hold its token, and when the channel cannot be built.
-    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+    fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         let section: SlackSection = toml::Value::Table(input.section.clone()).try_into()?;
         let mut config = SlackConfig::new(
             secret(&section.app_token_env, "the Slack app-level token")?,
@@ -150,7 +146,7 @@ impl PlatformFactory for Slack {
         }
         config.labels.clone_from(input.labels);
         config.on_error = Some(input.on_error);
-        let channel = SlackChannel::new(config).map_err(anyhow::Error::msg)?;
+        let channel = SlackChannel::new(config)?;
         Ok(BuiltChannel {
             channel: Arc::new(channel),
             hidden_env: vec![section.app_token_env, section.bot_token_env],
@@ -177,11 +173,6 @@ pub struct SlackChannel {
     me: OnceLock<Me>,
 }
 
-/// What a card shows of the request `card`, open and once closed.
-fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
-    card_request(labels, &card.tool, &card.summary, &card.reason)
-}
-
 impl SlackChannel {
     /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
@@ -197,7 +188,7 @@ impl SlackChannel {
 #[async_trait]
 impl ImChannel for SlackChannel {
     fn platform(&self) -> &str {
-        PLATFORM
+        SLACK
     }
 
     async fn run(&self, inlet: Inlet, cancel: &CancellationToken) -> Result<(), ImError> {
@@ -227,42 +218,33 @@ impl ImChannel for SlackChannel {
         };
         let me = self.me.get_or_init(|| me);
         loop {
-            let opened = self
-                .call_unless_cancelled("apps.connections.open", &self.config.app_token, cancel)
-                .await;
-            let url = match opened.map(|answer| answer.and_then(|answer| connection_url(&answer))) {
-                None => return Ok(()),
-                Some(Ok(url)) => Some(url),
-                Some(Err(error @ ImError::Config(_))) => return Err(error),
-                Some(Err(error @ ImError::Transport(_))) => {
-                    report(self.config.on_error.as_ref(), &error);
-                    None
-                }
+            let connected = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(()),
+                connected = self.connect() => connected?,
             };
-            let ended = match url {
-                Some(url) => self.receive(&url, &inlet, me, cancel).await,
-                None => Ended::Failed,
-            };
-            match ended {
-                Ended::Cancelled => return Ok(()),
-                // Slack refreshes connections every few hours; reconnect at once.
-                Ended::Lost => backoff.reset(),
-                Ended::Silent(silence) => {
-                    report(
-                        self.config.on_error.as_ref(),
-                        &ImError::Transport(format!(
-                            "slack: the Socket Mode connection was silent for {} s; opening it again",
-                            silence.as_secs()
-                        )),
-                    );
-                    backoff.reset();
-                }
-                Ended::Failed => {
+            let socket = match connected {
+                Connection::Open(socket) => socket,
+                Connection::Later(reason) => {
+                    report(self.config.on_error.as_ref(), &ImError::Transport(reason));
                     if !backoff.wait(cancel).await {
                         return Ok(());
                     }
+                    continue;
                 }
+            };
+            let why = match self.receive(*socket, &inlet, me, cancel).await {
+                Ended::Cancelled => return Ok(()),
+                // Slack refreshes connections every few hours; reconnect at once.
+                Ended::Closed => None,
+                Ended::Lost(why) => Some(format!("was lost ({why})")),
+                Ended::Silent(silence) => Some(format!("was silent for {silence:?}")),
+            };
+            if let Some(why) = why {
+                let reconnecting = format!("slack: the Socket Mode connection {why}; opening it again");
+                report(self.config.on_error.as_ref(), &ImError::Transport(reconnecting));
             }
+            backoff.reset();
         }
     }
 
@@ -280,7 +262,7 @@ impl ImChannel for SlackChannel {
             }
             Post::ApprovalRequest { id, card } => {
                 let labels = &self.config.labels;
-                let request = shown(labels, card);
+                let request = card_request(labels, card);
                 // The thread travels in the button value: the documented block_actions
                 // fields do not include the message's thread.
                 let value = match &to.thread {
@@ -325,7 +307,7 @@ impl ImChannel for SlackChannel {
             Replacement::ApprovalResolved { card, user, result, .. } => {
                 let labels = &self.config.labels;
                 let result = resolution(labels, user.as_ref(), *result);
-                let blocks = json!([section(&shown(labels, card)), section(&result)]);
+                let blocks = json!([section(&card_request(labels, card)), section(&result)]);
                 self.edit(posted, &result, Some(blocks)).await.map_err(ImError::from)
             }
         }
@@ -382,7 +364,7 @@ impl ImChannel for SlackChannel {
     async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
         let token = &self.config.bot_token;
         let answer = match self.call("users.info", token, &[("user", user.0.as_str())], None).await {
-            Err(ImError::Transport(error)) if error.ends_with("user_not_found") => {
+            Err(CallError::Refused { code, .. }) if code == "user_not_found" => {
                 let answer = self.call("bots.info", token, &[("bot", user.0.as_str())], None).await?;
                 return Ok(answer["bot"]["name"].as_str().map(String::from));
             }
@@ -408,8 +390,8 @@ impl ImChannel for SlackChannel {
             .await
         {
             // Acknowledged before, as by a redelivery.
-            Err(ImError::Transport(error)) if error.ends_with("already_reacted") => Ok(()),
-            other => other.map(|_| ()),
+            Err(CallError::Refused { code, .. }) if code == "already_reacted" => Ok(()),
+            other => other.map(drop).map_err(ImError::from),
         }
     }
 }

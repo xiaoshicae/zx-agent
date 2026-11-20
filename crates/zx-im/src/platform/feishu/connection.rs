@@ -14,11 +14,10 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_util::random::random_u64;
 
-use crate::platform::{Halted, Keepalive, Next, Socket, keep, next_message, report};
-use crate::{ImError, Inlet};
-
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
+use crate::{ImError, Inlet};
 
 /// The prefix of every error of the long connection.
 pub(super) const PREFIX: &str = "feishu long connection";
@@ -85,25 +84,8 @@ impl ClientConfig {
     }
 }
 
-pub(super) enum Ended {
-    Cancelled,
-    /// The connection dropped.
-    Lost,
-    /// Nothing came over the connection for this long, not even answers to the pings.
-    Silent(Duration),
-}
-
-/// How an attempt to open the long connection went.
-pub(super) enum Connection {
-    /// The link is boxed: the other variant is a short reason.
-    Open(Box<Link>),
-    /// A failure worth retrying, with the reason; the address, which carries a ticket, is
-    /// never in it.
-    Later(String),
-}
-
 /// A failure worth retrying: `reason` after [`PREFIX`].
-fn later(reason: impl Display) -> Connection {
+fn later(reason: impl Display) -> Connection<Link> {
     Connection::Later(format!("{PREFIX}: {reason}"))
 }
 
@@ -143,7 +125,7 @@ enum Received {
 impl FeishuChannel {
     /// Ask for the long connection's address and open it. An error is a failure that
     /// retrying cannot fix.
-    pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection, ImError> {
+    pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection<Link>, ImError> {
         let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
         let body = json!({
             "AppID": self.config.app_id,
@@ -166,7 +148,8 @@ impl FeishuChannel {
             Some(code) if RETRY_CODES.contains(&code) => return Ok(later(format!("code {code}, retrying"))),
             code => {
                 let detail = answer["msg"].as_str().unwrap_or("no message");
-                return Err(ImError::Config(format!("{PREFIX}: code {code:?}: {detail}")));
+                let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
+                return Err(ImError::Config(format!("{PREFIX}: code {code}: {detail}")));
             }
         }
         // The address carries a ticket: it is used, never shown.
@@ -180,7 +163,7 @@ impl FeishuChannel {
     /// Open the WebSocket at `address`, to be pinged every `ping`. A refused handshake is a
     /// configuration error when the platform says the app may not connect, or has too many
     /// connections.
-    async fn open_socket(&self, address: &str, ping: Duration) -> Result<Connection, ImError> {
+    async fn open_socket(&self, address: &str, ping: Duration) -> Result<Connection<Link>, ImError> {
         let service = service_id(address);
         match tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(address)).await {
             Ok(Ok((socket, _))) => Ok(Connection::Open(Box::new(Link::new(socket, service, ping)))),
@@ -202,8 +185,8 @@ impl FeishuChannel {
             }
             Ok(Err(error)) => Ok(later(format!("cannot connect: {error}"))),
             Err(_) => Ok(later(format!(
-                "connecting took longer than {} s",
-                self.config.request_timeout.as_secs()
+                "connecting took longer than {:?}",
+                self.config.request_timeout
             ))),
         }
     }
@@ -222,7 +205,8 @@ impl FeishuChannel {
                 Next::Message(Message::Binary(bytes)) => bytes,
                 // The Go SDK reads only binary messages; anything else still shows life.
                 Next::Message(Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
-                Next::Message(Message::Close(_)) | Next::Lost => return Ended::Lost,
+                Next::Message(Message::Close(_)) => return Ended::Closed,
+                Next::Lost(why) => return Ended::Lost(why),
                 Next::Silent(silence) => return Ended::Silent(silence),
                 Next::Cancelled => return Ended::Cancelled,
             };
@@ -263,14 +247,8 @@ impl FeishuChannel {
         let delivery = keep(inlet, self.events(&payload), self.config.on_error.as_ref()).await;
         // Acknowledged before anything is handled: Feishu redelivers what is not acknowledged
         // in time.
-        let acknowledgement = link.socket.send(Message::binary(acknowledge(&frame).encode()));
-        delivery
-            .finish(inlet, acknowledgement)
-            .await
-            .map_err(|halted| match halted {
-                Halted::ServerStopped => Ended::Cancelled,
-                Halted::Unacknowledged => Ended::Lost,
-            })
+        let acknowledgement = link.socket.send(Message::binary(acknowledge(frame).encode()));
+        delivery.finish(inlet, acknowledgement).await
     }
 }
 
@@ -299,21 +277,11 @@ fn ping(service: i32) -> Frame {
 
 /// The acknowledgement of a data frame: the frame itself, with the time spent appended as
 /// `biz_rt` and a success code as payload (`ws/client_message.go`).
-fn acknowledge(frame: &Frame) -> Frame {
-    let mut headers = frame.headers.clone();
+fn acknowledge(mut frame: Frame) -> Frame {
     // Acknowledged on arrival, before any handling.
-    headers.push(("biz_rt".into(), "0".into()));
-    Frame {
-        seq_id: frame.seq_id,
-        log_id: frame.log_id,
-        service: frame.service,
-        method: frame.method,
-        headers,
-        payload_encoding: frame.payload_encoding.clone(),
-        payload_type: frame.payload_type.clone(),
-        payload: ACK_PAYLOAD.to_vec(),
-        log_id_new: frame.log_id_new.clone(),
-    }
+    frame.headers.push(("biz_rt".into(), "0".into()));
+    frame.payload = ACK_PAYLOAD.to_vec();
+    frame
 }
 
 /// The `service_id` query parameter of the connection address, which pings carry; 0 when
@@ -438,14 +406,16 @@ mod tests {
     }
 
     #[test]
-    fn bad_fragment_headers_and_stale_parts_are_dropped() {
+    fn a_fragment_beyond_its_sum_is_dropped() {
+        let mut fragments = Fragments::default();
+        assert_eq!(add(&mut fragments, fragment("m", 2, 2, "x"), Instant::now()), None);
+        assert!(fragments.partial.is_empty());
+    }
+
+    #[test]
+    fn a_part_older_than_the_fragments_wait_is_dropped() {
         let mut fragments = Fragments::default();
         let now = Instant::now();
-        assert_eq!(
-            add(&mut fragments, fragment("m", 2, 2, "x"), now),
-            None,
-            "seq beyond sum"
-        );
         assert_eq!(add(&mut fragments, fragment("m", 2, 0, "a"), now), None);
         let later = now + FRAGMENT_TTL + Duration::from_millis(1);
         assert_eq!(
@@ -472,7 +442,7 @@ mod tests {
     #[test]
     fn an_acknowledgement_echoes_the_frame_with_biz_rt_and_a_success_code() {
         let frame = fragment("m", 1, 0, "{}");
-        let ack = acknowledge(&frame);
+        let ack = acknowledge(frame.clone());
         assert_eq!(ack.headers[..frame.headers.len()], frame.headers[..]);
         assert_eq!(ack.header("biz_rt"), Some("0"));
         assert_eq!(ack.payload, ACK_PAYLOAD);

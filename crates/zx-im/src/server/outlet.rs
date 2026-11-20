@@ -1,24 +1,20 @@
-//! Where a conversation posts and reports, the session it holds while it serves, how the
-//! model reads what people said there, and the text that replaces the status message when a
-//! run ends.
+//! Where a conversation posts and reports, the session it holds while it serves, and how the
+//! model reads what people said there.
 
-use std::fmt::Display;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
-use zx_agent::events::{Budget, RunOutcome, RunReport};
+use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
 use zx_agent::session::SessionError;
 use zx_agent::transcript::{CustomMessage, SessionQuery};
 use zx_agent::{Agent, Session, SessionOptions, compaction};
 use zx_app::shutdown::next_event;
 
-use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
-
 use super::approval::{ApprovalEvents, ApprovalUpdate};
 use super::{Replies, SessionKey, Shared, timed};
+use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.
@@ -167,7 +163,7 @@ impl Outlet {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
             match shared.agent.open_session(&id).await {
-                Ok(session) => return self.held(Ok::<_, String>(session)),
+                Ok(session) => return Ok(self.hold(session)),
                 Err(error) if !self.still_kept(&id).await => {
                     self.failed(format!("session {id} is gone ({error:#}); a new one is made"));
                 }
@@ -208,20 +204,44 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
         };
-        let opened = self.held(self.shared.agent.create_session(options).await)?;
-        self.shared.go_on_in(&self.key, opened.session.id());
-        Ok(opened)
+        let created = self.shared.agent.create_session(options).await;
+        // The whole chain of causes.
+        let session = created.map_err(|error| format!("{error:#}"))?;
+        self.shared.go_on_in(&self.key, session.id());
+        Ok(self.hold(session))
     }
 
-    /// `session`, as the conversation holds it, or why the agent could not give one: the
-    /// whole chain of causes.
-    fn held<E: Display>(&self, session: Result<Session, E>) -> Result<Opened, String> {
-        match session {
-            Ok(session) => Ok(Opened {
-                session,
-                agent: self.shared.agent.clone(),
-            }),
-            Err(error) => Err(format!("{error:#}")),
+    /// `session`, as the conversation holds it.
+    fn hold(&self, session: Session) -> Opened {
+        Opened {
+            session,
+            agent: self.shared.agent.clone(),
+        }
+    }
+
+    /// A new session in place of `open`, the one held so far, said in the conversation: the
+    /// session the conversation holds from now on. Created at once, it is the conversation's
+    /// latest session whatever happens before the next message: a conversation that is
+    /// released, or a process that restarts, goes on in it. A session that cannot be created
+    /// is reported in the conversation, which then stays in `open`, as it does when `stop`,
+    /// the server stopping, ends the wait.
+    pub(super) async fn start_over(&self, open: Option<Opened>, stop: &CancellationToken) -> Option<Opened> {
+        let created = tokio::select! {
+            // The command stays in the backlog, for the next start.
+            () = stop.cancelled() => return open,
+            created = self.create() => created,
+        };
+        match created {
+            Ok(opened) => {
+                // The session held so far is closed here; it stays in the storage.
+                drop(open);
+                self.post(self.replies().new_session.clone()).await;
+                Some(opened)
+            }
+            Err(error) => {
+                self.cannot_open(&error).await;
+                open
+            }
         }
     }
 
@@ -232,7 +252,7 @@ impl Outlet {
     }
 
     /// Post the card of an approval request. An error says why nobody can decide.
-    pub(super) async fn ask(&self, card: &Post) -> Result<MessageRef, String> {
+    pub(super) async fn post_card(&self, card: &Post) -> Result<MessageRef, String> {
         let post = self.channel.send(&self.to, card);
         timed(self.shared.outbound_timeout, "post the approval request", post).await
     }
@@ -255,18 +275,8 @@ impl Outlet {
         };
         async move {
             let mut run = session.send(prompt)?;
-            let mut stopped = false;
-            loop {
-                tokio::select! {
-                    () = stop.cancelled(), if !stopped => {
-                        session.cancel();
-                        stopped = true;
-                    }
-                    event = run.next() => match event {
-                        Some(event) => approvals.forward(&event),
-                        None => break,
-                    },
-                }
+            while let Some(event) = next_event(&mut run, &session, &stop).await {
+                approvals.forward(&event);
             }
             Ok(Finished::Run(run.wait().await))
         }
@@ -287,25 +297,9 @@ impl Outlet {
         }
     }
 
-    /// Replace the status with how the work ended, or post that when no status was posted or
-    /// the status could not be replaced.
-    pub(super) async fn answer(
-        &self,
-        ended: Result<Result<Finished, SessionError>, JoinError>,
-        status: Option<MessageRef>,
-        closing: bool,
-    ) {
-        let replies = self.replies();
-        let answer = match ended {
-            // The stop cancels runs through their token. A `/cancel` just before the stop ends
-            // the same way and is told the same.
-            Ok(Ok(finished)) if closing && finished.cancelled() => replies.stopped.clone(),
-            Ok(Ok(Finished::Run(report))) => render(&report, replies),
-            Ok(Ok(Finished::Compaction(report))) => render_compaction(&report, replies),
-            // Only this worker prompts the session, one run at a time, so Busy cannot occur.
-            Ok(Err(error)) => format!("{}{error}", replies.failed),
-            Err(error) => format!("{}{error}", replies.failed),
-        };
+    /// Replace the status with `answer`, how the work ended, or post it when no status was
+    /// posted or the status could not be replaced.
+    pub(super) async fn answer(&self, answer: String, status: Option<MessageRef>) {
         match status {
             Some(posted) => {
                 // Forgotten first: should the process end between the two, the status still
@@ -400,165 +394,5 @@ pub(super) fn said(content: String) -> CustomMessage {
         content,
         display: true,
         details: None,
-    }
-}
-
-/// The text that replaces the status message at the end of a run.
-fn render(report: &RunReport, replies: &Replies) -> String {
-    let answer = report.final_text.trim();
-    let noted = |note: &str| {
-        if answer.is_empty() {
-            note.to_string()
-        } else {
-            format!("{answer}\n\n{note}")
-        }
-    };
-    match report.outcome {
-        RunOutcome::Completed if answer.is_empty() => replies.no_answer.clone(),
-        RunOutcome::Completed => answer.to_string(),
-        RunOutcome::Truncated => noted(&replies.truncated),
-        RunOutcome::BudgetExhausted { budget, truncated } => {
-            let reached = match budget {
-                Budget::ModelRequests => &replies.model_request_limit,
-                Budget::Tokens => &replies.token_budget,
-                Budget::Cost => &replies.cost_budget,
-            };
-            if truncated {
-                noted(&format!("{}\n{reached}", replies.truncated))
-            } else {
-                noted(reached)
-            }
-        }
-        // The last answer in the session may be an earlier run's, so it is not repeated.
-        RunOutcome::TimedOut => replies.timed_out.clone(),
-        RunOutcome::Cancelled => replies.cancelled.clone(),
-        RunOutcome::Failed => failure(report.error.as_deref(), replies),
-    }
-}
-
-/// The text that replaces the status message at the end of `/compact`.
-fn render_compaction(report: &compaction::Report, replies: &Replies) -> String {
-    match report.outcome {
-        compaction::Outcome::Completed => replies.compacted.clone(),
-        compaction::Outcome::Noop => replies.nothing_to_compact.clone(),
-        compaction::Outcome::Cancelled => replies.cancelled.clone(),
-        compaction::Outcome::Failed => failure(report.error.as_deref(), replies),
-    }
-}
-
-/// That the work failed, with `error` when there is one.
-fn failure(error: Option<&str>, replies: &Replies) -> String {
-    match error {
-        Some(error) => format!("{}{error}", replies.failed),
-        // The reply leads into the error; without one, drop the separator it ends with,
-        // whatever the reply's language.
-        None => replies
-            .failed
-            .trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '\u{ff1a}')
-            .to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use zx_agent::ai::Usage;
-
-    use super::*;
-
-    fn report(outcome: RunOutcome, final_text: &str, error: Option<&str>) -> RunReport {
-        RunReport {
-            outcome,
-            final_text: final_text.into(),
-            model_requests: 1,
-            retries: 0,
-            usage: Usage::default(),
-            tool_usage: std::collections::BTreeMap::new(),
-            denied_calls: 0,
-            error: error.map(String::from),
-            session_id: "session".into(),
-        }
-    }
-
-    #[test]
-    fn a_completed_run_posts_its_answer() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::Completed, " done \n", None), &replies),
-            "done"
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Completed, "", None), &replies),
-            replies.no_answer
-        );
-    }
-
-    #[test]
-    fn an_unfinished_answer_says_why_it_stopped() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::Truncated, "part", None), &replies),
-            format!("part\n\n{}", replies.truncated)
-        );
-        let exhausted = |budget, truncated| RunOutcome::BudgetExhausted { budget, truncated };
-        assert_eq!(
-            render(&report(exhausted(Budget::ModelRequests, false), "", None), &replies),
-            replies.model_request_limit
-        );
-        assert_eq!(
-            render(&report(exhausted(Budget::Tokens, false), "part", None), &replies),
-            format!("part\n\n{}", replies.token_budget)
-        );
-        // Cut off as well: both are said.
-        assert_eq!(
-            render(&report(exhausted(Budget::Cost, true), "part", None), &replies),
-            format!("part\n\n{}\n{}", replies.truncated, replies.cost_budget)
-        );
-    }
-
-    #[test]
-    fn a_run_that_did_not_finish_does_not_repeat_an_earlier_answer() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::TimedOut, "earlier", None), &replies),
-            replies.timed_out
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Cancelled, "earlier", None), &replies),
-            replies.cancelled
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Failed, "earlier", Some("HTTP 500")), &replies),
-            format!("{}HTTP 500", replies.failed)
-        );
-    }
-
-    #[test]
-    fn a_compaction_says_how_it_ended() {
-        use compaction::Outcome;
-
-        let replies = Replies::default();
-        let ended = |outcome, error: Option<&str>| compaction::Report {
-            outcome,
-            requests: 1,
-            usage: Usage::default(),
-            input_bytes: 10,
-            output_bytes: 5,
-            entry_id: None,
-            error: error.map(String::from),
-        };
-        let shown = |outcome, error| render_compaction(&ended(outcome, error), &replies);
-        assert_eq!(shown(Outcome::Completed, None), replies.compacted);
-        assert_eq!(shown(Outcome::Noop, None), replies.nothing_to_compact);
-        assert_eq!(shown(Outcome::Cancelled, None), replies.cancelled);
-        assert_eq!(
-            shown(Outcome::Failed, Some("no summary")),
-            format!("{}no summary", replies.failed)
-        );
-        // Without an error the reply does not end with the separator that leads into one.
-        assert_eq!(shown(Outcome::Failed, None), "The run failed");
-        // A cancelled one is told as a cancelled run is: by the stop when the server stops.
-        assert!(Finished::Compaction(ended(Outcome::Cancelled, None)).cancelled());
-        assert!(!Finished::Compaction(ended(Outcome::Completed, None)).cancelled());
-        assert!(Finished::Run(report(RunOutcome::Cancelled, "", None)).cancelled());
     }
 }

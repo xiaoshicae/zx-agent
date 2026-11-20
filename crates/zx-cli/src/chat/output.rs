@@ -5,18 +5,16 @@ use std::io::IsTerminal;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::Value;
-use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
 use zx_util::text::clip;
 
-use crate::cli::{ColorArg, OutputMode};
-use crate::process::{JsonlEvents, write_line};
-use crate::render::{Severity, answer_end_line, call_label, progress_line, visible};
-
 use super::term::{Style, Terminal, Tone, elapsed_text};
+use crate::cli::{ColorArg, OutputMode};
+use crate::process::{JsonlEvents, print_json_line};
+use crate::render::{Severity, answer_end_line, call_label, patch_of, progress_line, visible};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;
@@ -132,9 +130,9 @@ impl Output {
         }
     }
 
-    pub(super) fn compact_report(&self, report: &compaction::Report) {
+    pub(super) fn compaction_report(&self, report: &compaction::Report) {
         match self.mode {
-            OutputMode::Jsonl => write_line(&serde_json::json!({"type":"compaction_report","report":report})),
+            OutputMode::Jsonl => print_json_line(&serde_json::json!({"type":"compaction_report","report":report})),
             OutputMode::Text => match report.outcome {
                 Outcome::Noop => self.line(Tone::Dim, "[compact] no eligible old messages to summarize"),
                 Outcome::Completed => self.line(
@@ -204,17 +202,6 @@ fn tool_result(state: &mut TextState, result: &ToolResultMessage) {
     }
 }
 
-/// Retry `retry` of `max_retries` is scheduled: say so, unless the failed response just
-/// said it.
-fn retry_scheduled(state: &mut TextState, retry: u32, max_retries: u32, delay_ms: u64, error: &str) {
-    let line = if state.last_error.as_deref() == Some(error) {
-        format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)")
-    } else {
-        format!("[retry] {retry}/{max_retries} in {delay_ms}ms: {}", visible(error))
-    };
-    state.terminal.line(Tone::Warn, &line);
-}
-
 /// An event with no line of chat's own: print it as `run` does.
 fn progress(state: &mut TextState, event: &EventKind) {
     if let Some((severity, line)) = progress_line(event) {
@@ -241,7 +228,7 @@ impl Output {
         let mut state = lock(&self.text);
         match &event.event {
             EventKind::RunStart { .. } => state.last_error = None,
-            EventKind::MessageStart { role: "assistant" } => state.wrote_text = false,
+            EventKind::MessageStart { role: Role::Assistant } => state.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => {
@@ -264,12 +251,16 @@ impl Output {
             } if info.display => custom_message(&mut state, &info.custom_type, content),
             // The result line that follows says how the call ended.
             EventKind::ToolExecutionStart { .. } | EventKind::ToolExecutionEnd { .. } => {}
+            // The failed response said the error just now: the retry need not repeat it.
             EventKind::RetryScheduled {
                 retry,
                 max_retries,
                 delay_ms,
                 error,
-            } => retry_scheduled(&mut state, *retry, *max_retries, *delay_ms, error),
+            } if state.last_error.as_ref() == Some(error) => {
+                let line = format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)");
+                state.terminal.line(Tone::Warn, &line);
+            }
             // Everything else is printed as `run` prints it; `progress_line` covers every event.
             other => progress(&mut state, other),
         }
@@ -279,10 +270,8 @@ impl Output {
 /// The line that ends a turn: requests, retries, tokens when the provider reported any, and
 /// the time it took.
 fn turn_line(report: &RunReport, elapsed: Duration) -> String {
-    let requests = match report.model_requests {
-        1 => "1 request".to_string(),
-        n => format!("{n} requests"),
-    };
+    let requests = format!("{} request(s)", report.model_requests);
+    // `retry(s)` is not a word: the one count written by its number.
     let retries = match report.retries {
         0 => String::new(),
         1 => " · 1 retry".to_string(),
@@ -311,12 +300,7 @@ pub(super) fn cost_text(total_cost: f64) -> String {
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its
 /// details (what `edit_file` changed), otherwise the first lines of its text.
 fn preview(result: &ToolResultMessage, style: Style) -> Vec<String> {
-    let patch = result
-        .details
-        .as_ref()
-        .and_then(|details| details.get("patch"))
-        .and_then(Value::as_str);
-    match patch {
+    match patch_of(&result.tool_name, result.details.as_ref()) {
         Some(patch) => limited(patch, PATCH_PREVIEW_LINES, style, |line| {
             // Unified diff: added and removed lines stand out, headers and context do not.
             if line.starts_with('+') && !line.starts_with("+++") {
@@ -356,28 +340,23 @@ fn tone(severity: Severity) -> Tone {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use zx_agent::builtin::tools::{EDIT_FILE, PATCH_DETAIL};
+    use zx_agent::events::RunOutcome;
 
     use super::*;
+    use crate::test_support;
 
     #[test]
     fn the_turn_line_omits_tokens_the_provider_did_not_report() {
-        use zx_agent::ai::Usage;
-        use zx_agent::events::RunOutcome;
         let mut report = RunReport {
-            outcome: RunOutcome::Completed,
-            final_text: String::new(),
             model_requests: 2,
             retries: 1,
-            usage: Usage::default(),
-            tool_usage: std::collections::BTreeMap::new(),
-            denied_calls: 0,
-            error: None,
-            session_id: "session".into(),
+            ..test_support::report(RunOutcome::Completed)
         };
         assert_eq!(
             turn_line(&report, Duration::from_millis(600)),
-            "[turn] 2 requests · 1 retry · 0.6s"
+            "[turn] 2 request(s) · 1 retry · 0.6s"
         );
         report.usage.input = 30;
         report.usage.output = 15;
@@ -386,7 +365,7 @@ mod tests {
         report.model_requests = 1;
         assert_eq!(
             turn_line(&report, Duration::from_secs(12)),
-            "[turn] 1 request · 30 in · 15 out · 10 cached · 12s"
+            "[turn] 1 request(s) · 30 in · 15 out · 10 cached · 12s"
         );
     }
 
@@ -419,7 +398,13 @@ mod tests {
     #[test]
     fn a_patch_in_the_details_is_previewed_instead_of_the_text_with_changes_colored() {
         let patch = "--- f\n+++ f\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n";
-        let message = result("Replaced 1 block in f.", Some(json!({"patch": patch, "path": "f"})));
+        let message = ToolResultMessage {
+            tool_name: EDIT_FILE.into(),
+            ..result(
+                "Replaced 1 block in f.",
+                Some(json!({PATCH_DETAIL: patch, "path": "f"})),
+            )
+        };
         assert_eq!(
             preview(&message, Style::new(false)),
             ["--- f", "+++ f", "@@ -1,2 +1,2 @@", "-old", "+new", " same"]

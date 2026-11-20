@@ -203,7 +203,9 @@ impl Drop for ForgetUnopened<'_> {
     fn drop(&mut self) {
         let mut sessions = lock(self.sessions);
         // The table's share and this call's: a call gets a place only under the table's lock,
-        // so nobody else has this one, and nobody can fill it now.
+        // so nobody else has this one, and nobody can fill it now. Calls that fail at the same
+        // time may each find the other's share still there and both leave the empty place,
+        // which the next call for the session then takes.
         let unused = !self.opening.initialized() && Arc::strong_count(self.opening) == 2;
         if unused
             && sessions

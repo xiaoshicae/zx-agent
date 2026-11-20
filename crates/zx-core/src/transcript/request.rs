@@ -1,12 +1,11 @@
-//! Request configuration changes and per-dispatch projection checkpoints.
+//! Request configuration changes and per-request checkpoints.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
-
 use super::{CompactionStartedEntry, Entry, SummarizedBy, Transcript, summary_input, summary_messages};
+use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -69,8 +68,8 @@ pub struct RequestStartedEntry {
 }
 
 impl Transcript {
-    /// Persist configuration changes and a dispatch checkpoint before a model call; any
-    /// failure prevents dispatch. The checkpoint records how to rebuild the messages, not the
+    /// Persist configuration changes and a request checkpoint before a model call; any
+    /// failure prevents the request. The checkpoint records how to rebuild the messages, not the
     /// messages: the caller sends the ones `source` names, as of the current leaf.
     pub(crate) async fn record_request(
         &mut self,
@@ -153,7 +152,8 @@ impl Transcript {
     pub(super) fn validate_request_config(entry: &RequestConfigEntry) -> Result<()> {
         ensure!(
             !entry.config.model.trim().is_empty() && !entry.config.provider.trim().is_empty(),
-            "empty request model or provider"
+            "request configuration {}: the model or the provider is empty",
+            entry.id
         );
         Ok(())
     }
@@ -172,21 +172,21 @@ impl Transcript {
         // Check only what can fail: a projection can always be built, and building one for
         // every request record would clone the branch's messages once per record.
         if let RequestSource::Summary { compaction_id, .. } = &started.source {
-            let (_, compaction) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
-            Self::summary_instructions(compaction)?;
+            let (_, start) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+            Self::summary_instructions(start)?;
         }
         Ok(())
     }
 
-    /// The instructions of the request that makes the summary of `compaction`. An error when
-    /// a summarizer of the host makes it: the session then holds no request for it.
-    fn summary_instructions(compaction: &CompactionStartedEntry) -> Result<&str> {
-        match &compaction.by {
+    /// The instructions of the request that makes the summary of the compaction `start`
+    /// began. An error when a summarizer of the host makes it: the session then holds no
+    /// request for it.
+    fn summary_instructions(start: &CompactionStartedEntry) -> Result<&str> {
+        match &start.by {
             SummarizedBy::Request(request) => Ok(&request.instructions),
-            SummarizedBy::Summarizer(name) => bail!(
-                "compaction {} is summarized by {name:?}, not by a request",
-                compaction.id
-            ),
+            SummarizedBy::Summarizer(name) => {
+                bail!("compaction {} is summarized by {name:?}, not by a request", start.id)
+            }
         }
     }
 
@@ -202,10 +202,12 @@ impl Transcript {
                 system_timestamp,
                 user_timestamp,
             } => {
-                let (_, started) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
-                let source = self.compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)?;
+                let (_, start) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+                let source = self
+                    .compaction_source(start.parent_id.as_deref(), &start.first_kept_entry_id)
+                    .with_context(|| format!("compaction {compaction_id}"))?;
                 Ok(summary_messages(
-                    Self::summary_instructions(started)?,
+                    Self::summary_instructions(start)?,
                     summary_input(&source)?,
                     *system_timestamp,
                     *user_timestamp,
@@ -234,9 +236,9 @@ mod tests {
         }
     }
 
-    /// The IDs of the request configurations `store` recorded, oldest first.
-    fn config_ids(store: &Transcript) -> Vec<String> {
-        store
+    /// The IDs of the request configurations `transcript` recorded, oldest first.
+    fn config_ids(transcript: &Transcript) -> Vec<String> {
+        transcript
             .entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -246,16 +248,16 @@ mod tests {
             .collect()
     }
 
-    /// Why the records of `store` do not load once a request checkpoint after `parent` names
+    /// Why the records of `transcript` do not load once a request checkpoint after `parent` names
     /// the configuration `config`.
-    fn refusal_of_a_request(store: &Transcript, parent: &str, config: &str) -> String {
-        let mut records = records_of(store);
+    fn refusal_of_a_request(transcript: &Transcript, parent: &str, config: &str) -> String {
+        let mut records = records_of(transcript);
         records.push(
             json!({"type":"request_started", "id":"invalid", "parentId":parent,
             "timestamp":0, "configId":config, "source":{"kind":"task"}})
             .to_string(),
         );
-        let error = Transcript::snapshot(loaded(store.header().clone(), records))
+        let error = Transcript::snapshot(loaded(transcript.header().clone(), records))
             .err()
             .expect("the request must be refused");
         format!("{error:#}")
@@ -263,56 +265,56 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_request_is_recorded_as_its_kind() {
-        let mut store = Transcript::in_memory(header());
+        let mut transcript = Transcript::in_memory(header());
 
-        let id = store
+        let id = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
 
-        let line = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        let line = serde_json::to_value(transcript.get(&id).unwrap()).unwrap();
         assert_eq!(line["source"], json!({"kind": "task"}));
     }
 
     #[tokio::test]
     async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
-        let mut store = Transcript::in_memory(header());
-        let first = store
+        let mut transcript = Transcript::in_memory(header());
+        let first = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        store
+        transcript
             .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let foreign = config_ids(&store).pop().unwrap();
-        store.branch(&first).unwrap();
-        let last = store
+        let foreign = config_ids(&transcript).pop().unwrap();
+        transcript.branch(&first).unwrap();
+        let last = transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        assert_eq!(config_ids(&store).len(), 2, "the branch reuses its configuration");
+        assert_eq!(config_ids(&transcript).len(), 2, "the branch reuses its configuration");
 
-        let error = refusal_of_a_request(&store, &last, &foreign);
+        let error = refusal_of_a_request(&transcript, &last, &foreign);
 
         assert!(error.contains("is not the one in force on this branch"), "{error}");
     }
 
     #[tokio::test]
     async fn a_request_names_the_configuration_in_force_not_an_earlier_one_of_its_branch() {
-        let mut store = Transcript::in_memory(header());
-        store
+        let mut transcript = Transcript::in_memory(header());
+        transcript
             .record_request(&request_for("first"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let last = store
+        let last = transcript
             .record_request(&request_for("other"), "p", json!({}), RequestSource::Task)
             .await
             .unwrap();
-        let configs = config_ids(&store);
+        let configs = config_ids(&transcript);
         assert_eq!(configs.len(), 2);
 
-        let error = refusal_of_a_request(&store, &last, &configs[0]);
+        let error = refusal_of_a_request(&transcript, &last, &configs[0]);
 
         assert!(error.contains("is not the one in force on this branch"), "{error}");
     }

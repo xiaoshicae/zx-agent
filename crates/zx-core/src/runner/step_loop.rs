@@ -21,6 +21,8 @@ mod tools;
 
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use self::config::LoopConfig;
+use self::step::{AfterTools, NextInput, StepResponse};
 use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
 use crate::events::EventKind;
 use crate::hooks::HookError;
@@ -29,10 +31,6 @@ use crate::policy::ApprovalGate;
 use crate::runner::final_answer::cut_off;
 use crate::runner::run_scope::RunScope;
 use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
-
-pub(crate) use config::LoopConfig;
-pub(crate) use context::{PERSIST_FAILED, record_pending_entries};
-use step::{AfterTools, NextInput, StepResponse};
 
 /// Why the loop stops. Every part of a step returns it as its error, so `?` ends the attempt
 /// wherever a step stops it, and [`StepLoop::run`] returns the one that did. What the
@@ -87,7 +85,7 @@ pub(crate) struct StepLoop<'a> {
     /// The scope of the run, for this attempt: the session that records each step before the
     /// loop acts on it and holds the context, the configuration, where the run's events go
     /// and the run's trace, which carries the cancellation.
-    run: RunScope<'a>,
+    scope: RunScope<'a>,
     /// Where a call waits for the host's approval, and what the session was granted.
     approvals: &'a ApprovalGate,
     /// What the run has spent and may spend: the loop counts into it as it goes and checks
@@ -99,8 +97,9 @@ pub(crate) struct StepLoop<'a> {
 
 /// What an attempt starts with.
 pub(crate) enum FirstInput {
-    /// The prompt of a run, recorded before the first request; its hold ends once it is.
-    Prompt(PendingInput),
+    /// The message the run starts with, recorded before the first request; its hold ends
+    /// once it is.
+    Message(PendingInput),
     /// Nothing new: the attempt answers the conversation as it is, as a retry does.
     Conversation,
     /// The follow-ups that wait in the queue, taken as they are between steps: as many at
@@ -112,9 +111,9 @@ impl<'a> StepLoop<'a> {
     /// The loop for the attempt in progress of the run whose scope is `run`, spending against
     /// `accounting`; the run's cancellation is its trace's. Calls wait for approval at
     /// `approvals`, which keeps the session's grants.
-    pub(super) fn new(run: RunScope<'a>, approvals: &'a ApprovalGate, accounting: &'a mut RunAccounting) -> Self {
+    pub(super) fn new(scope: RunScope<'a>, approvals: &'a ApprovalGate, accounting: &'a mut RunAccounting) -> Self {
         Self {
-            run,
+            scope,
             approvals,
             accounting,
             step: None,
@@ -128,14 +127,11 @@ impl<'a> StepLoop<'a> {
         let attempt = self.accounting.attempts;
         self.emit(EventKind::AttemptStart { attempt }).await;
 
-        let halt = self
-            .run_steps(first)
-            .await
-            .aborted_if_cancelled(self.run.target.trace.cancel());
+        let halt = self.run_steps(first).await.aborted_if_cancelled(self.scope.cancel());
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
-        let cut_off = cut_off(&self.run.transcript.messages_since(self.run.run_start));
+        let cut_off = cut_off(&self.scope.transcript.messages_since(self.scope.run_start));
         self.emit(EventKind::AttemptEnd {
             outcome: halt.outcome(cut_off),
         })
@@ -146,26 +142,26 @@ impl<'a> StepLoop<'a> {
     /// Record what the attempt starts with, then run steps until a step stops the loop.
     /// Returns why it did.
     async fn run_steps(&mut self, first: FirstInput) -> Halt {
-        let (prompt, mut pending) = match first {
-            FirstInput::Prompt(prompt) => (Some(prompt), NextInput::None),
+        let (message, mut next) = match first {
+            FirstInput::Message(message) => (Some(message), NextInput::None),
             FirstInput::Conversation => (None, NextInput::None),
             FirstInput::QueuedFollowUps => (None, NextInput::FollowUps),
         };
-        if let Err(halt) = self.initialize(prompt).await {
+        if let Err(halt) = self.initialize(message).await {
             return halt;
         }
         loop {
-            match self.run_step(pending).await {
-                Ok(next) => pending = next,
+            match self.run_step(next).await {
+                Ok(following) => next = following,
                 Err(halt) => return halt,
             }
         }
     }
 
-    /// One step: prepare it with `pending`, request the model, handle the response, and
-    /// decide what the next step starts with.
-    async fn run_step(&mut self, pending: NextInput) -> Result<NextInput, Halt> {
-        let step = self.prepare_step(pending).await?;
+    /// One step: prepare it with `next`, request the model, handle the response, and decide
+    /// what the next step starts with.
+    async fn run_step(&mut self, next: NextInput) -> Result<NextInput, Halt> {
+        let step = self.prepare_step(next).await?;
         let message = self.request_model(step).await?;
         let response = self.handle_response(step, message).await?;
         self.decide_next_step(response).await
@@ -174,7 +170,7 @@ impl<'a> StepLoop<'a> {
     /// Where this attempt's events go. The target borrows the run, not the loop, so that the
     /// loop can record in its run's session while it holds one.
     fn target(&self) -> EventTarget<'a> {
-        self.run.target
+        self.scope.target
     }
 
     async fn emit(&self, event: EventKind) {
@@ -211,12 +207,12 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Record the system prompt's changes and the prompt, if there is one. The prompt's hold
-    /// ends once it is recorded, or failed to be.
-    async fn initialize(&mut self, prompt: Option<PendingInput>) -> Result<(), Halt> {
-        let config = self.run.config;
+    /// Record the system prompt's changes and the message the run starts with, if there is
+    /// one. The message's hold ends once it is recorded, or failed to be.
+    async fn initialize(&mut self, first: Option<PendingInput>) -> Result<(), Halt> {
+        let config = self.scope.config;
         self.start_step().await;
-        let changes = SystemPrompt::from_transcript(&self.run.transcript.messages()).diff(&config.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.scope.transcript.messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,
@@ -226,17 +222,17 @@ impl<'a> StepLoop<'a> {
         }
         // State an extension recorded before the run, such as from a command, precedes the
         // input it may refer to.
-        self.record_pending_entries().await?;
-        if let Some(prompt) = prompt {
-            let (message, _hold) = prompt.into_parts();
-            self.queued_input(message, None).await?;
+        self.scope.record_pending_entries().await.map_err(Halt::Unrecorded)?;
+        if let Some(first) = first {
+            let (message, _hold) = first.into_parts();
+            self.record_input(message, None).await?;
         }
         Ok(())
     }
 
-    /// Gather input, starting with `pending`, and prepare the context before a task request.
+    /// Gather input, starting with `next`, and prepare the context before a task request.
     /// Returns the step that is ready for its request.
-    async fn prepare_step(&mut self, mut pending: NextInput) -> Result<u32, Halt> {
+    async fn prepare_step(&mut self, mut next: NextInput) -> Result<u32, Halt> {
         loop {
             // A step exists to make a request: without budget, or once cancelled, none is
             // made, and queued input stays queued for the next run. Checked before taking
@@ -244,29 +240,29 @@ impl<'a> StepLoop<'a> {
             self.ensure_can_request()?;
             let step = self.start_step().await;
             // State an extension asked to record is written before the input it may refer to.
-            self.record_pending_entries().await?;
+            self.scope.record_pending_entries().await.map_err(Halt::Unrecorded)?;
             // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
             self.drain_queue(Queue::Steering).await?;
-            match std::mem::take(&mut pending) {
+            match std::mem::take(&mut next) {
                 NextInput::None => {}
                 NextInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
                 // A hook asked for it: nobody sent it.
-                NextInput::Requested(message) => self.input(*message, None, None).await?,
+                NextInput::Requested(message) => self.record_user_input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
             let (targets, messages): (Vec<String>, Vec<Message>) = self
-                .run
+                .scope
                 .transcript
                 .projection()
                 .into_iter()
                 .map(|projected| (projected.entry_id, projected.message))
                 .unzip();
             let planned = self
-                .run
+                .scope
                 .config
                 .hooks
-                .transform_context(&messages, &self.run.target.trace.context())
+                .transform_context(&messages, &self.scope.target.trace.hook_context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,
@@ -276,7 +272,7 @@ impl<'a> StepLoop<'a> {
             self.ensure_can_request()?;
             // Summary requests count against the budget but are reported as a compaction,
             // not as steps of their own.
-            let requests = self.run.prepare_context(self.accounting).await?;
+            let requests = self.scope.prepare_context(self.accounting).await?;
             self.ensure_can_request()?;
             if requests == 0 {
                 return Ok(step);
@@ -291,9 +287,9 @@ impl<'a> StepLoop<'a> {
     async fn handle_response(&mut self, step: u32, message: AssistantMessage) -> Result<StepResponse, Halt> {
         let stop = message.stop_reason;
         let calls = message.tool_calls();
-        // The response is kept twice: in the session, and for the decision or the failure.
+        // The event takes a copy of the response; this one stays for the decision or the failure.
         let entry_id = self
-            .record_finished_message(&Message::Assistant(message.clone()))
+            .record_finished_message(Message::Assistant(message.clone()))
             .await?;
         if matches!(stop, StopReason::Error | StopReason::Aborted) {
             self.end_step().await;
@@ -334,14 +330,14 @@ impl<'a> StepLoop<'a> {
     fn ensure_can_request(&self) -> Result<(), Halt> {
         self.ensure_not_cancelled()?;
         match self.accounting.exhausted() {
-            Some(budget) => Err(Halt::Ended(Ending::BudgetExhausted(budget))),
+            Some(exhausted) => Err(Halt::Ended(Ending::BudgetExhausted(exhausted))),
             None => Ok(()),
         }
     }
 
     /// End the attempt if the run was cancelled.
     fn ensure_not_cancelled(&self) -> Result<(), Halt> {
-        if self.run.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Err(Halt::Ended(Ending::Cancelled));
         }
         Ok(())

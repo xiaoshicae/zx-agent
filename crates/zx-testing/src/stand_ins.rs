@@ -1,8 +1,8 @@
 //! What a test gives the code under test in place of the real thing: a provider that says
-//! when a request starts, a tool that echoes and counts its calls, and the context a hook gets
-//! when a test calls it directly.
+//! when a request starts, a tool that echoes and counts its calls, and the context a hook or
+//! a tool gets when a test calls it directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -29,6 +29,15 @@ pub struct NotifyingProvider {
 }
 
 impl NotifyingProvider {
+    /// Wait until a request starts; panic if `running`, which makes the request, ends first.
+    /// A test that needs a run under way waits for this rather than a fixed time.
+    pub async fn wait_for_start(&self, running: impl Future) {
+        tokio::select! {
+            () = self.started.notified() => {}
+            _ = running => panic!("the run ended before its request started"),
+        }
+    }
+
     /// `provider`, saying when each of its requests starts.
     pub fn new(provider: impl Provider + 'static) -> Arc<Self> {
         Arc::new(Self {
@@ -61,7 +70,8 @@ impl Provider for NotifyingProvider {
 
 /// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs (`steer`,
 /// `follow_up`) or withdraw a queued user message (`withdraw`), report each string in
-/// `progress` as a progress update, and return `details` and `usage` as given.
+/// `progress` as a progress update, and return `details` and `usage` as given. `panic`
+/// makes it panic, `fail` fail with that text, and `terminate` ask the run to end after it.
 pub struct EchoTool {
     /// The name the model calls it by.
     pub name: &'static str,
@@ -151,4 +161,9 @@ impl Tool for EchoTool {
 /// the current directory.
 pub fn hook_context() -> HookContext {
     HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
+}
+
+/// A tool context for calling a tool directly in `cwd`, which nothing cancels.
+pub fn tool_context(cwd: &Path) -> ToolContext {
+    ToolContext::new(cwd.to_path_buf(), CancellationToken::new())
 }

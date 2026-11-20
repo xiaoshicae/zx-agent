@@ -15,14 +15,14 @@ use serde_json::Value;
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
 use crate::events::{ApprovalResult, EventKind};
-use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision};
+use crate::policy::{ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision, RequestEnd, request_id};
 use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
     /// The tool the model calls `name`, and what it declared it changes.
     fn find_tool(&self, name: &str) -> Option<(Arc<dyn Tool>, Effects)> {
-        let tools = &self.run.config.tools;
-        Some((tools.find(name)?.clone(), tools.effects(name)?))
+        let declared = self.scope.config.tools.declared(name)?;
+        Some((Arc::clone(&declared.tool), declared.effects))
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
@@ -30,29 +30,40 @@ impl StepLoop<'_> {
     async fn check<'c>(&mut self, call: &'c ToolCall) -> Checked<'c> {
         // Resolve and validate before running policy or asking the host.
         let Some((tool, effects)) = self.find_tool(&call.name) else {
-            return Checked::blocked(format!("Tool {} not found", call.name));
+            return Checked::blocked(not_executed(format_args!(
+                "there is no tool {:?}. Call one of the tools offered.",
+                call.name
+            )));
         };
-        if !self.run.config.active_tools.is_active(&call.name) {
-            return Checked::blocked(format!("Tool {} is not active", call.name));
+        if !self.scope.config.active_tools.is_active(&call.name) {
+            return Checked::blocked(not_executed(format_args!(
+                "the tool {:?} is not active now. Call one of the tools offered.",
+                call.name
+            )));
         }
         if let Some(error) = &call.arguments_error {
             return Checked::blocked(invalid_arguments(call, error));
         }
-        let ran = match std::panic::catch_unwind(AssertUnwindSafe(|| tool.prepare_arguments(&call.arguments))) {
+        let prepared = match std::panic::catch_unwind(AssertUnwindSafe(|| tool.prepare_arguments(&call.arguments))) {
             Ok(None) => Cow::Borrowed(call),
             Ok(Some(arguments)) => Cow::Owned(ToolCall {
                 arguments,
                 ..call.clone()
             }),
-            Err(_) => return Checked::blocked(format!("Tool {} argument preparation panicked", call.name)),
+            Err(_) => {
+                return Checked::blocked(not_executed(format_args!(
+                    "preparing the arguments of {:?} panicked.",
+                    call.name
+                )));
+            }
         };
-        if let Err(text) = self.validate_arguments(tool.as_ref(), &ran) {
+        if let Err(text) = self.validate_arguments(tool.as_ref(), &prepared) {
             return Checked::blocked(text);
         }
-        let authorized = self.authorize(&ran).await;
+        let authorized = self.authorize(&prepared).await;
         // Cancelled while the policies ran or the call waited for approval: the call does not
         // start, whatever their answer came to, and nobody denied it.
-        if self.run.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Checked::NotStarted;
         }
         if let Err(text) = authorized {
@@ -62,7 +73,7 @@ impl StepLoop<'_> {
         Checked::Ready(Runnable {
             tool,
             effects,
-            call: ran,
+            call: prepared,
         })
     }
 
@@ -71,16 +82,16 @@ impl StepLoop<'_> {
     /// result could not be told from the first call's. A cancelled run starts no call, and
     /// asks no tool, no policy and no person about one.
     async fn check_next<'c>(&mut self, call: &'c ToolCall, seen: &mut HashSet<&'c str>) -> Checked<'c> {
-        if self.run.target.trace.cancel().is_cancelled() {
+        if self.scope.is_cancelled() {
             return Checked::NotStarted;
         }
         if seen.insert(&call.id) {
             return self.check(call).await;
         }
-        Checked::blocked(format!(
-            "Tool call {:?} was not executed: an earlier call of this answer has the same ID {:?}. Give every call an ID of its own.",
-            call.name, call.id
-        ))
+        Checked::blocked(not_executed(format_args!(
+            "an earlier call of this answer has the ID {:?} too. Give every call an ID of its own.",
+            call.id
+        )))
     }
 
     /// Check the arguments `call` runs with: a JSON object that fits the tool's declared
@@ -89,40 +100,46 @@ impl StepLoop<'_> {
         if !call.arguments.is_object() {
             return Err(invalid_arguments(call, "expected a JSON object"));
         }
-        if let Some(mismatch) = self.run.config.tools.schema_mismatch(&call.name, &call.arguments) {
+        if let Some(mismatch) = self.scope.config.tools.schema_mismatch(&call.name, &call.arguments) {
             return Err(invalid_arguments(call, mismatch));
         }
         match std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments))) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(invalid_arguments(call, error)),
-            Err(_) => Err(format!("Tool {} argument validation panicked", call.name)),
+            Err(_) => Err(not_executed(format_args!(
+                "checking the arguments of {:?} panicked.",
+                call.name
+            ))),
         }
     }
 
     /// Run the policy on `call`, then ask for the host's approval when it says so. An error
     /// is the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
-        let verdict = self
-            .run
+        let decision = self
+            .scope
             .config
             .policies
-            .check(call, &self.run.target.trace.policy_context())
+            .check(call, &self.scope.target.trace.policy_context())
             .await;
-        self.decision(call, verdict.clone()).await;
-        match verdict {
+        self.report_decision(call, decision.clone()).await;
+        match decision {
             PolicyDecision::Allow => {}
             PolicyDecision::Deny(reason) => return Err(blocked_by_policy(&reason)),
             PolicyDecision::Ask(reason) => {
                 if self.approvals.allows(call) {
-                    let remembered = Resolved {
+                    // A session grant covered the call: nobody was asked.
+                    self.emit(EventKind::ApprovalResolved {
                         approval_id: None,
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
                         approval: ApprovalResult::Remembered,
                         reason: None,
                         wait_ms: 0,
-                    };
-                    self.approval_resolved(call, remembered).await;
+                    })
+                    .await;
                 } else if let Err(denied) = self.ask(call, reason).await {
-                    return Err(format!("Approval denied: {denied}"));
+                    return Err(not_executed(format_args!("approval denied: {denied}")));
                 }
             }
         }
@@ -130,10 +147,16 @@ impl StepLoop<'_> {
     }
 
     /// Ask for the host's approval of `call`: announce the request, then wait at the gate
-    /// for its answer. Returns why the call may not run.
+    /// for its answer. Without a person to ask, the request is denied at once and never
+    /// waits at the gate, so no answer reaches it. Returns why the call may not run.
     async fn ask(&mut self, call: &ToolCall, reason: String) -> Result<(), String> {
-        let mut request = self.approvals.open();
-        let approval_id = request.id().to_string();
+        let waiting = match self.scope.config.approvals {
+            ApprovalMode::Deny => None,
+            ApprovalMode::Wait(timeout) => Some((self.approvals.open(), timeout)),
+        };
+        let approval_id = waiting
+            .as_ref()
+            .map_or_else(request_id, |(request, _)| request.id().to_string());
         self.emit(EventKind::ApprovalRequested {
             approval_id: approval_id.clone(),
             tool_call_id: call.id.clone(),
@@ -143,43 +166,42 @@ impl StepLoop<'_> {
         })
         .await;
         let asked = Instant::now();
-        let answer = match self.run.config.approvals {
-            ApprovalMode::Deny => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
-            ApprovalMode::Wait(timeout) => request.answer(timeout, self.run.target.trace.cancel()).await,
+        let answer = match waiting {
+            None => RequestEnd::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
+            // Withdrawn as this arm ends, before it is reported: an answer that comes later
+            // finds no request.
+            Some((mut request, timeout)) => request.wait(timeout, self.scope.cancel()).await,
         };
-        // Withdrawn before it is reported: an answer that comes now finds no request.
-        drop(request);
         let (approval, denial) = match answer {
-            Answer::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
-            Answer::Decided(ApprovalDecision::AllowSession) => {
+            RequestEnd::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
+            RequestEnd::Decided(ApprovalDecision::AllowSession) => {
                 self.approvals.remember(call);
                 (ApprovalResult::AllowSession, None)
             }
-            Answer::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
-            Answer::TimedOut(timeout) => (
+            RequestEnd::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
+            RequestEnd::TimedOut(timeout) => (
                 ApprovalResult::TimedOut,
-                Some(format!(
-                    "nobody answered the approval request within {}s",
-                    timeout.as_secs()
-                )),
+                Some(format!("nobody answered the approval request within {timeout:?}")),
             ),
-            Answer::Cancelled => (
+            RequestEnd::Cancelled => (
                 ApprovalResult::Cancelled,
                 Some("the run was cancelled while the call waited for approval".to_string()),
             ),
         };
-        let resolved = Resolved {
+        self.emit(EventKind::ApprovalResolved {
             approval_id: Some(approval_id),
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
             approval,
             reason: denial.clone(),
             wait_ms: duration_ms(asked.elapsed()),
-        };
-        self.approval_resolved(call, resolved).await;
+        })
+        .await;
         denial.map_or(Ok(()), Err)
     }
 
-    /// Report the policies' verdict on `call`.
-    async fn decision(&self, call: &ToolCall, decision: PolicyDecision) {
+    /// Report the policies' decision on `call`.
+    async fn report_decision(&self, call: &ToolCall, decision: PolicyDecision) {
         self.emit(EventKind::ToolDecision {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
@@ -188,29 +210,21 @@ impl StepLoop<'_> {
         .await;
     }
 
-    async fn approval_resolved(&self, call: &ToolCall, resolved: Resolved) {
-        self.emit(EventKind::ApprovalResolved {
-            approval_id: resolved.approval_id,
-            tool_call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            approval: resolved.approval,
-            reason: resolved.reason,
-            wait_ms: resolved.wait_ms,
-        })
-        .await;
-    }
-
     /// Check, run and record the calls of one response. Each call's start is recorded before
-    /// it runs (invariant 10), and the two orders keep that true differently: in sequence,
+    /// it runs, and the two orders keep that true differently: in sequence,
     /// each call is checked, started and run before the next is checked; in parallel, every
     /// call is checked, approvals included, before any start is recorded, so that a crash
     /// while one call waits for approval leaves no start for calls that never ran. Every call
     /// gets its result here, in a cancelled run too: the calls it did not reach are recorded
     /// as not started, so that only a run that died leaves calls for the next one to answer.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let sequential = calls
-            .iter()
-            .any(|call| self.run.config.tools.execution_mode(&call.name) == Some(ExecutionMode::Sequential));
+        let sequential = calls.iter().any(|call| {
+            self.scope
+                .config
+                .tools
+                .declared(&call.name)
+                .is_some_and(|declared| declared.execution_mode == ExecutionMode::Sequential)
+        });
         if sequential {
             self.sequential(calls).await
         } else {
@@ -246,7 +260,7 @@ impl StepLoop<'_> {
         // Record starts in call order before any call runs, so that recovery after a crash
         // can tell the calls that began from those that never did. A run cancelled during
         // the checks starts none of them.
-        if !self.run.target.trace.cancel().is_cancelled() {
+        if !self.scope.is_cancelled() {
             for (_, checked) in &slots {
                 if let Checked::Ready(runnable) = checked {
                     self.record_start(runnable).await?;
@@ -276,7 +290,7 @@ impl StepLoop<'_> {
         let call = &runnable.call;
         match runnable.effects {
             Effects::SideEffects => self
-                .run
+                .scope
                 .transcript
                 .append_tool_call_started(&call.id, &call.name)
                 .await
@@ -292,20 +306,20 @@ impl StepLoop<'_> {
     /// with the arguments `Tool::prepare_arguments` rewrote; what the kernel says of a call
     /// that the run's cancellation kept from starting or interrupted goes past them.
     async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'c>) -> CallOutput {
-        let (ran, ended) = match checked {
+        let (prepared, ended) = match checked {
             Checked::Blocked(outcome) => (Cow::Borrowed(call), Ended::Output(outcome)),
             Checked::NotStarted => (Cow::Borrowed(call), Ended::not_started()),
             Checked::Ready(Runnable {
                 tool,
                 effects,
-                call: ran,
+                call: prepared,
             }) => {
-                let ended = self.execute(tool.as_ref(), effects, &ran).await;
-                (ran, ended)
+                let ended = self.execute(tool.as_ref(), effects, &prepared).await;
+                (prepared, ended)
             }
         };
         let outcome = match ended {
-            Ended::Output(outcome) => self.apply_output_hooks(&ran, outcome).await,
+            Ended::Output(outcome) => self.apply_output_hooks(&prepared, outcome).await,
             Ended::Cancelled(outcome) => outcome,
         };
         self.tool_end(call, &outcome).await;
@@ -316,13 +330,13 @@ impl StepLoop<'_> {
     /// cancelled, reporting its progress on the way. A failure or a panic of the tool becomes
     /// an error result.
     async fn execute(&self, tool: &dyn Tool, effects: Effects, call: &ToolCall) -> Ended {
-        let cancel = self.run.target.trace.cancel();
+        let cancel = self.scope.cancel();
         if cancel.is_cancelled() {
             return Ended::not_started();
         }
         let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
         let ctx = ToolContext {
-            cwd: self.run.config.cwd.clone(),
+            cwd: self.scope.config.cwd.clone(),
             // A token of the call's own: cancelled with the run, while a tool that cancels it
             // to stop work of its own does not stop the run.
             cancel: cancel.child_token(),
@@ -356,7 +370,7 @@ impl StepLoop<'_> {
         let output = match result {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => ToolOutput::error(error),
-            Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
+            Err(_) => ToolOutput::error(format!("Failed: the tool {:?} panicked.", tool.name())),
         };
         Ended::Output(CallOutput {
             output,
@@ -367,10 +381,10 @@ impl StepLoop<'_> {
     /// Pass one progress update of `call` through the redaction hooks, then report it.
     async fn emit_progress(&self, call: &ToolCall, text: String) {
         match self
-            .run
+            .scope
             .config
             .hooks
-            .filter_tool_progress(call, ToolOutput::ok(text), &self.run.target.trace.context())
+            .filter_tool_progress(call, ToolOutput::ok(text), &self.scope.target.trace.hook_context())
             .await
         {
             Ok(output) => {
@@ -402,17 +416,19 @@ impl StepLoop<'_> {
 
     async fn apply_output_hooks(&self, call: &ToolCall, outcome: CallOutput) -> CallOutput {
         let mut output = match self
-            .run
+            .scope
             .config
             .hooks
-            .after_tool(call, outcome.output, &self.run.target.trace.context())
+            .after_tool(call, outcome.output, &self.scope.target.trace.hook_context())
             .await
         {
             Ok(output) => output,
             // Discard the raw output on every failure, including cancellation.
             Err(error) => {
                 let failure = self.report_hook_failure(error).await;
-                ToolOutput::error(format!("Tool output withheld: {failure}"))
+                ToolOutput::error(format!(
+                    "Withheld: the call ran, but its output did not pass the hooks: {failure}"
+                ))
             }
         };
         // Bounded here, after every hook, so that the event and the record carry the same.
@@ -423,15 +439,14 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Answer every call of a response cut off at the output token limit without running it
-    /// (invariant 4). Calls that never ran cannot end the attempt, whatever an output hook
-    /// sets on their results.
+    /// Answer every call of a response cut off at the output token limit without running it:
+    /// its arguments may be cut off too. These calls never ran, so they cannot end the
+    /// attempt, whatever an output hook sets on their results.
     pub(super) async fn reject_truncated_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         for call in calls {
             self.tool_start(call).await;
-            let blocked = CallOutput::blocked(format!(
-                "Tool call {:?} was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
-                call.name
+            let blocked = CallOutput::blocked(not_executed(
+                "the answer reached the output token limit, so its arguments may be cut short. Call the tool again with complete arguments.",
             ));
             let outcome = self.execute_checked(call, Checked::Blocked(blocked)).await;
             self.record_result(call, outcome).await?;
@@ -465,22 +480,19 @@ impl StepLoop<'_> {
 /// call asked to.
 #[derive(Default)]
 pub(super) struct Batch {
-    /// Whether a result was recorded.
-    recorded: bool,
-    /// Whether a recorded call did not ask to end the attempt.
-    declined: bool,
+    /// Whether every recorded call asked to end the attempt; `None` until one is recorded.
+    all_terminate: Option<bool>,
 }
 
 impl Batch {
     /// Count a recorded result, and whether its tool asked to end the attempt.
     fn add(&mut self, terminate: bool) {
-        self.recorded = true;
-        self.declined |= !terminate;
+        self.all_terminate = Some(self.all_terminate.unwrap_or(true) && terminate);
     }
 
     /// Whether the results end the attempt: there was one, and every call asked to.
     pub(super) fn terminates(&self) -> bool {
-        self.recorded && !self.declined
+        self.all_terminate == Some(true)
     }
 }
 
@@ -499,25 +511,21 @@ impl CallOutput {
     }
 }
 
+/// The result text of a call that did not run, and why. A result the kernel writes opens with
+/// what became of the call: it was not executed, it was interrupted, it failed, or its output
+/// was withheld.
+fn not_executed(why: impl Display) -> String {
+    format!("Not executed: {why}")
+}
+
 /// The result text of a call whose arguments are not valid for its tool.
 fn invalid_arguments(call: &ToolCall, reason: impl Display) -> String {
-    format!("Invalid arguments for tool {:?}: {reason}", call.name)
+    not_executed(format_args!("the arguments of {:?} are invalid: {reason}", call.name))
 }
 
 /// The result text of a call the policy denied.
 fn blocked_by_policy(reason: &str) -> String {
-    format!("Blocked by policy: {reason}")
-}
-
-/// How an approval ended, as its `approval_resolved` event reports it.
-struct Resolved {
-    /// The request that was answered; `None` when a session grant covered the call and
-    /// nobody was asked.
-    approval_id: Option<String>,
-    approval: ApprovalResult,
-    /// Why the call may not run, when it may not.
-    reason: Option<String>,
-    wait_ms: u64,
+    not_executed(format_args!("a policy denied it: {reason}"))
 }
 
 /// What a call came to, before the output hooks.
@@ -534,7 +542,7 @@ enum Ended {
 impl Ended {
     /// The end of a call that never started because the run was cancelled first.
     fn not_started() -> Self {
-        Self::Cancelled(CallOutput::blocked(NOT_STARTED))
+        Self::Cancelled(CallOutput::blocked(not_executed(CANCELLED_FIRST)))
     }
 }
 
@@ -566,8 +574,8 @@ fn details_fit(details: &Value) -> bool {
     serde_json::to_string(details).is_ok_and(|json| json.len() <= MAX_DETAILS_BYTES)
 }
 
-/// The result of a call that never started because the run was cancelled first.
-const NOT_STARTED: &str = "Not executed: the run was cancelled before this call started, so it had no effect.";
+/// Why a call never started when the run was cancelled first.
+const CANCELLED_FIRST: &str = "the run was cancelled before this call started, so it had no effect.";
 
 /// The result of a call that the cancellation interrupted. Like a call that a crash
 /// interrupted, one with side effects may have changed state before it stopped.

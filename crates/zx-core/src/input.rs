@@ -1,4 +1,5 @@
-//! Messages injected into a running loop, and records an extension asks the loop to keep.
+//! The messages given to a run, the one that starts it and those injected while it runs, the
+//! queues that hold them, and the records an extension asks the loop to keep.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -7,7 +8,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use crate::sync::lock;
-use crate::transcript::CustomMessage;
+use crate::transcript::{BlankCustomType, CustomMessage, check_custom_type};
 
 /// A message a frontend or an extension queues for a run (pi: `AgentMessage`).
 #[derive(Clone, Debug, PartialEq)]
@@ -136,23 +137,27 @@ impl InputQueues {
     /// Queue a message for the next step of the current task: the person's text, any
     /// [`Input`], or input with a hold of the host's ([`PendingInput::held`]).
     pub fn steer(&self, message: impl Into<PendingInput>) {
-        lock(&self.steering).push_back(message.into());
+        // The conversion is host code: it runs before the queue is locked.
+        let message = message.into();
+        lock(&self.steering).push_back(message);
     }
 
     /// Queue a message for after the current task finishes, as [`steer`](Self::steer) takes
     /// it.
     pub fn follow_up(&self, message: impl Into<PendingInput>) {
-        lock(&self.follow_up).push_back(message.into());
+        let message = message.into();
+        lock(&self.follow_up).push_back(message);
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
     /// next step, or when the run ends. Without a run the entry waits for the next one; a
-    /// host that is idle records directly through its session instead.
-    pub fn append_custom_entry(&self, custom_type: impl Into<String>, data: Value) {
-        lock(&self.entries).push(PendingEntry {
-            custom_type: custom_type.into(),
-            data,
-        });
+    /// host that is idle records directly through its session instead. A blank
+    /// `custom_type` is refused here, and nothing is queued: recorded, it would fail the run.
+    pub fn append_custom_entry(&self, custom_type: impl Into<String>, data: Value) -> Result<(), BlankCustomType> {
+        let custom_type = custom_type.into();
+        check_custom_type(&custom_type)?;
+        lock(&self.entries).push(PendingEntry { custom_type, data });
+        Ok(())
     }
 
     /// How queued messages are taken.
@@ -345,7 +350,13 @@ mod tests {
         };
         queues.steer("a");
         queues.steer(Input::Custom(custom.clone()));
-        queues.append_custom_entry("state", serde_json::json!({"n": 1}));
+        queues
+            .append_custom_entry("state", serde_json::json!({"n": 1}))
+            .unwrap();
+        assert_eq!(
+            queues.append_custom_entry(" ", serde_json::json!(null)),
+            Err(BlankCustomType)
+        );
 
         assert_eq!(inputs(queues.take_all()), [Input::from("a"), Input::Custom(custom)]);
         assert_eq!(

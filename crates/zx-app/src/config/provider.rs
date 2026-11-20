@@ -1,7 +1,8 @@
 //! The `[provider]` table: which provider reaches the model, `api`, and its settings. zx-app
 //! reads `api`, `apiKeyEnv` and `maxRetries` itself; every other key is the provider's. The
-//! keys of the built-in providers are checked when the file is read, those of a provider a
-//! host registers when its agent is built.
+//! keys of the built-in providers are checked when the file is read, with the request fields
+//! that the reasoning level would conflict with; those of a provider a host registers are
+//! checked when its agent is built.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -9,7 +10,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use zx_agent::ai::anthropic::{self, AnthropicConfig};
+use zx_agent::ai::Reasoning;
+use zx_agent::ai::anthropic::AnthropicConfig;
 use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
 
@@ -65,16 +67,17 @@ impl ProviderSettings {
         Ok(settings)
     }
 
-    /// Check the values zx-app reads, and the keys of a built-in provider.
-    pub(super) fn validate(&self) -> Result<()> {
+    /// Check the values zx-app reads, and the keys of a built-in provider, also against the
+    /// `reasoning` level of config.toml.
+    pub(super) fn validate(&self, reasoning: Option<Reasoning>) -> Result<()> {
         ensure!(!self.api.trim().is_empty(), "provider.api must not be empty");
         ensure!(
             self.api_key_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
             "provider.apiKeyEnv must not be empty"
         );
         match self.api.as_str() {
-            OPENAI => openai_config(&self.options).map(drop),
-            ANTHROPIC => anthropic_config(&self.options).map(drop),
+            OPENAI => openai_config(&self.options, reasoning).map(drop),
+            ANTHROPIC => anthropic_config(&self.options, reasoning).map(drop),
             // A provider a host registers checks its own keys.
             _ => Ok(()),
         }
@@ -121,7 +124,7 @@ impl BuiltInKeys {
         );
         ensure!(
             keys.idle_timeout_secs != Some(0),
-            "provider.idleTimeoutSecs must be at least 1"
+            "provider.idleTimeoutSecs must be greater than zero"
         );
         ensure!(
             keys.request_fields.keys().all(|field| !field.trim().is_empty()),
@@ -155,8 +158,8 @@ impl BuiltInKeys {
 }
 
 /// The settings of the OpenAI-compatible provider that `options` give, over its defaults,
-/// checked; without the API key, which the assembly reads.
-pub(crate) fn openai_config(options: &toml::Table) -> Result<OpenAiConfig> {
+/// checked, also against the `reasoning` level; without the API key, which the assembly reads.
+pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<OpenAiConfig> {
     let keys = BuiltInKeys::read(options, "Authorization")?;
     let mut config = OpenAiConfig::default();
     if let Some(url) = keys.base_url {
@@ -178,35 +181,48 @@ pub(crate) fn openai_config(options: &toml::Table) -> Result<OpenAiConfig> {
     if let Some(secs) = keys.idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
+    if reasoning.is_some()
+        && let Some(field) = config.body.reasoning_overlap()
+    {
+        anyhow::bail!(
+            "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
+            config.body.reasoning_format
+        );
+    }
     Ok(config)
 }
 
 /// The settings of the Anthropic Messages API provider that `options` give, over its
-/// defaults, checked; without the API key, which the assembly reads.
-pub(crate) fn anthropic_config(options: &toml::Table) -> Result<AnthropicConfig> {
+/// defaults, checked, also against the `reasoning` level; without the API key, which the
+/// assembly reads.
+pub(crate) fn anthropic_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<AnthropicConfig> {
     let keys = BuiltInKeys::read(options, "x-api-key")?;
     keys.refuse_openai_keys(ANTHROPIC)?;
     let mut config = AnthropicConfig::default();
+    // The address, the request fields, the headers and the idle timeout are set as for the
+    // OpenAI-compatible provider: the two configurations share no type to set them through.
     if let Some(url) = keys.base_url {
         config.base_url = url;
     }
-    if let Some(updates) = keys.system_updates {
-        config.body.system_updates = match updates.trim().to_ascii_lowercase().as_str() {
-            "collapse" => anthropic::SystemUpdates::Collapse,
-            "inline" => anthropic::SystemUpdates::Inline,
-            _ => anyhow::bail!("provider.systemUpdates: unknown value {updates:?}; use collapse or inline"),
-        };
+    if let Some(updates) = parsed("provider.systemUpdates", keys.system_updates)? {
+        config.body.system_updates = updates;
     }
     config.body.extra_fields = keys.request_fields;
     config.headers = keys.headers.into_iter().collect();
     if let Some(secs) = keys.idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
+    if reasoning.is_some()
+        && let Some(field) = config.body.reasoning_overlap()
+    {
+        anyhow::bail!("provider.requestFields.{field} conflicts with reasoning, which sets it; use one of them");
+    }
     Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::anthropic;
     use zx_agent::ai::openai::{MaxTokensField, ReasoningFormat, SystemUpdates};
 
     use super::*;
@@ -231,11 +247,14 @@ mod tests {
 
     #[test]
     fn the_openai_keys_set_the_settings_of_its_provider() {
-        let config = openai_config(&table(
-            "baseUrl = 'http://localhost:8000/v1'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
+        let config = openai_config(
+            &table(
+                "baseUrl = 'http://localhost:8000/v1'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
              maxTokensField = 'max_completion_tokens'\nfillMissingReasoning = true\npromptCacheKey = true\n\
              idleTimeoutSecs = 15\nrequestFields = { top_k = 5 }\nheaders = { X-Route = 'eu' }",
-        ))
+            ),
+            None,
+        )
         .unwrap();
         assert_eq!(config.base_url, "http://localhost:8000/v1");
         assert_eq!(config.body.system_updates, SystemUpdates::Inline);
@@ -249,10 +268,13 @@ mod tests {
 
     #[test]
     fn the_anthropic_keys_set_the_settings_of_its_provider() {
-        let config = anthropic_config(&table(
-            "baseUrl = 'https://gateway.example/anthropic'\nsystemUpdates = 'inline'\nidleTimeoutSecs = 30\n\
+        let config = anthropic_config(
+            &table(
+                "baseUrl = 'https://gateway.example/anthropic'\nsystemUpdates = 'inline'\nidleTimeoutSecs = 30\n\
              requestFields = { metadata = { user_id = 'u' } }\nheaders = { anthropic-beta = 'x' }",
-        ))
+            ),
+            None,
+        )
         .unwrap();
         assert_eq!(config.base_url, "https://gateway.example/anthropic");
         assert_eq!(config.body.system_updates, anthropic::SystemUpdates::Inline);
@@ -265,27 +287,89 @@ mod tests {
     fn a_key_the_provider_does_not_read_is_refused() {
         let error = format!(
             "{:#}",
-            anthropic_config(&table("reasoningFormat = 'thinking'")).unwrap_err()
+            anthropic_config(&table("reasoningFormat = 'thinking'"), None).unwrap_err()
         );
         assert!(
             error.contains("provider.reasoningFormat is a setting of the openai provider"),
             "{error}"
         );
-        let error = format!("{:#}", anthropic_config(&table("typo = 1")).unwrap_err());
+        let error = format!("{:#}", anthropic_config(&table("typo = 1"), None).unwrap_err());
         assert!(error.contains("unknown field `typo`"), "{error}");
         let error = format!(
             "{:#}",
-            anthropic_config(&table("headers = { X-Api-Key = 'k' }")).unwrap_err()
+            anthropic_config(&table("headers = { X-Api-Key = 'k' }"), None).unwrap_err()
         );
         assert!(error.contains("x-api-key comes from the API key"), "{error}");
-        let error = format!("{:#}", anthropic_config(&table("systemUpdates = 'merge'")).unwrap_err());
-        assert!(error.contains("provider.systemUpdates"), "{error}");
+        let error = format!(
+            "{:#}",
+            anthropic_config(&table("systemUpdates = 'merge'"), None).unwrap_err()
+        );
+        assert!(error.contains("provider.systemUpdates: unknown variant"), "{error}");
         // A provider a host registers checks its own keys.
         let custom = ProviderSettings {
             api: "mine".into(),
             options: table("anything = 1"),
             ..ProviderSettings::default()
         };
-        custom.validate().unwrap();
+        custom.validate(Some(Reasoning::Low)).unwrap();
+    }
+
+    /// The settings of `api` that `text` gives, checked against the reasoning level `Low`.
+    fn with_reasoning(api: &str, text: &str) -> Result<()> {
+        let options = table(text);
+        match api {
+            OPENAI => openai_config(&options, Some(Reasoning::Low)).map(drop),
+            _ => anthropic_config(&options, Some(Reasoning::Low)).map(drop),
+        }
+    }
+
+    #[test]
+    fn request_fields_that_the_reasoning_level_sets_are_refused() {
+        for (api, text, expected) in [
+            (
+                OPENAI,
+                "requestFields = { reasoning_effort = 'high' }",
+                "provider.requestFields.reasoning_effort conflicts with reasoning",
+            ),
+            (
+                OPENAI,
+                "reasoningFormat = 'thinking'\nrequestFields = { thinking = { type = 'enabled' } }",
+                "provider.requestFields.thinking conflicts with reasoning",
+            ),
+            (
+                ANTHROPIC,
+                "requestFields = { thinking = { type = 'disabled' } }",
+                "provider.requestFields.thinking.type conflicts with reasoning",
+            ),
+            (
+                ANTHROPIC,
+                "requestFields = { thinking = { display = 'omitted' } }",
+                "provider.requestFields.thinking.display conflicts with reasoning",
+            ),
+            (
+                ANTHROPIC,
+                "requestFields = { output_config = { effort = 'max' } }",
+                "provider.requestFields.output_config.effort conflicts with reasoning",
+            ),
+        ] {
+            let error = format!("{:#}", with_reasoning(api, text).unwrap_err());
+            assert!(error.contains(expected), "{api}, {text}: {error}");
+        }
+        // Without a reasoning level, the field is the only one that sets it; the other
+        // settings of `output_config` are not the level's.
+        openai_config(&table("requestFields = { reasoning_effort = 'high' }"), None).unwrap();
+        anthropic_config(&table("requestFields = { thinking = { type = 'disabled' } }"), None).unwrap();
+        with_reasoning(
+            ANTHROPIC,
+            "requestFields = { output_config = { format = { type = 'json_schema', schema = {} } } }",
+        )
+        .unwrap();
+        // Nor are the other settings of `thinking`, such as what the API does with thinking
+        // bound to another conversation.
+        with_reasoning(
+            ANTHROPIC,
+            "requestFields = { thinking = { block_binding = { prefix_mismatch_behavior = 'drop_block' } } }",
+        )
+        .unwrap();
     }
 }

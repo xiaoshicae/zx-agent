@@ -119,7 +119,9 @@ impl SystemPrompt {
 
 /// A change to one section (pi: one entry of `SystemMessage.sections`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SectionChange {
+    /// The section's name, such as [`PREAMBLE`].
     pub name: String,
     /// The new content; `None` removes the section.
     pub content: Option<String>,
@@ -127,6 +129,7 @@ pub struct SectionChange {
 
 /// A system prompt change recorded in the conversation (pi: `SystemMessage`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemMessage {
     /// The sections this message sets or removes; the first system message sets them all.
     pub sections: Vec<SectionChange>,

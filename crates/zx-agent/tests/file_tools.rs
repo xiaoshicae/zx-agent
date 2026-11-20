@@ -11,26 +11,44 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-
 use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, executor_tools};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-
-use zx_testing::{RunnerSetup, Start, config};
-
-fn ctx(dir: &Path) -> ToolContext {
-    ToolContext::new(dir.to_path_buf(), CancellationToken::new())
-}
+use zx_testing::{RunnerSetup, Start, config, tool_context};
 
 async fn write(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    WriteFileTool::default().execute(args, &ctx(dir)).await
+    WriteFileTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn edit(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    EditFileTool::default().execute(args, &ctx(dir)).await
+    EditFileTool::default().execute(args, &tool_context(dir)).await
+}
+
+#[tokio::test]
+async fn results_name_the_path_as_the_tools_read_it() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let written = write(dir.path(), json!({"path": " @notes.txt ", "content": "one"}))
+        .await
+        .unwrap();
+    let edited = edit(
+        dir.path(),
+        json!({"path": "@notes.txt", "edits": [{"oldText": "one", "newText": "two"}]}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(written.content, "Wrote 3 bytes to notes.txt.");
+    assert_eq!(edited.content, "Replaced 1 block in notes.txt.");
+    assert!(
+        edited.details.unwrap()["patch"]
+            .as_str()
+            .unwrap()
+            .starts_with("--- notes.txt\n")
+    );
 }
 
 #[tokio::test]
@@ -256,7 +274,7 @@ async fn a_write_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
     std::fs::write(&file, "old\n").unwrap();
     let content = "a line of the new content\n".repeat(LARGE_BYTES / 26);
     let tool = WriteFileTool::default();
-    let ctx = ctx(dir.path());
+    let ctx = tool_context(dir.path());
 
     let call = tool.execute(json!({"path": "f.txt", "content": content}), &ctx);
     drop_once_the_write_has_begun(call, &file, "old\n".len()).await;
@@ -277,7 +295,7 @@ async fn an_edit_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
     std::fs::write(&file, &original).unwrap();
     let changed = original.replace("MARK", "CHANGED");
     let tool = EditFileTool::default();
-    let ctx = ctx(dir.path());
+    let ctx = tool_context(dir.path());
 
     let call = tool.execute(
         json!({"path": "f.txt", "edits": [{"oldText": "MARK", "newText": "CHANGED"}]}),
@@ -372,7 +390,7 @@ async fn edits_of_different_files_in_one_batch_do_not_wait_for_each_other() {
         Duration::from_secs(5),
         tool.execute(
             json!({"path": "b.txt", "edits": [{"oldText": "x", "newText": "y"}]}),
-            &ctx(dir.path()),
+            &tool_context(dir.path()),
         ),
     )
     .await;

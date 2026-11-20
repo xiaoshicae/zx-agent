@@ -1,5 +1,7 @@
 //! Bash commands that run without asking where a rule would otherwise ask.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use super::{BashCall, bash_call, begins_with, collapse_whitespace, non_empty, normalize};
@@ -36,7 +38,7 @@ impl ProgramOptions {
         for name in &self.long {
             if name.is_empty() || name.starts_with('-') || name.contains(|c: char| c.is_whitespace() || c == '=') {
                 return Err(format!(
-                    "long option {name:?} must be a name without dashes, such as \"namespace\""
+                    "long option {name:?} must be a name without leading dashes, `=` or whitespace, such as \"namespace\""
                 ));
             }
         }
@@ -92,7 +94,7 @@ pub struct AutoApprove {
     /// Normalized texts that keep a command asking.
     except: Vec<String>,
     /// Lowercased program names and the options their segments may pass.
-    options: Vec<(String, ProgramOptions)>,
+    options: BTreeMap<String, ProgramOptions>,
 }
 
 impl AutoApprove {
@@ -102,7 +104,7 @@ impl AutoApprove {
         Self {
             prefixes: non_empty(prefixes, collapse_whitespace),
             except: Vec::new(),
-            options: Vec::new(),
+            options: BTreeMap::new(),
         }
     }
 
@@ -119,9 +121,7 @@ impl AutoApprove {
     /// A second call for the same program replaces the first. Check `options` with
     /// [`ProgramOptions::validate`] first: an option it refuses never matches.
     pub fn options(mut self, program: &str, options: ProgramOptions) -> Self {
-        let program = normalize(program);
-        self.options.retain(|(name, _)| *name != program);
-        self.options.push((program, options));
+        self.options.insert(normalize(program), options);
         self
     }
 
@@ -161,7 +161,7 @@ impl AutoApprove {
         let Some(program) = words.next().map(str::to_lowercase) else {
             return true;
         };
-        let Some((_, options)) = self.options.iter().find(|(name, _)| *name == program) else {
+        let Some(options) = self.options.get(&program) else {
             return true;
         };
         words
@@ -194,14 +194,14 @@ mod tests {
                     long: vec!["--namespace".into()],
                     ..ProgramOptions::default()
                 },
-                "without dashes",
+                "without leading dashes",
             ),
             (
                 ProgramOptions {
                     long: vec!["output=json".into()],
                     ..ProgramOptions::default()
                 },
-                "without dashes",
+                "`=` or whitespace",
             ),
             (
                 ProgramOptions {

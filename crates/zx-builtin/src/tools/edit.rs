@@ -5,20 +5,23 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
-use super::edit_text::{Edit, apply_edits, lf_endings, split_bom, unified_patch};
-use super::mutation::{FileMutationQueue, write_locked};
-use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
+use super::edit_text::{Edit, NO_EDITS, apply_edits, lf_endings, split_bom, unified_patch};
+use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
+use super::{
+    DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, path_text, resolve, unless_cancelled,
+};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
-use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 /// The most bytes of the patch in a result's details: details over the loop's limit are
 /// dropped whole, so a long patch is cut to leave room for the other fields.
 const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
-/// Replaces exact, unique, non-overlapping pieces of text in one file of at most 10 MiB.
+/// Replaces exact, unique, non-overlapping pieces of text in one file of at most
+/// [`DEFAULT_MAX_FILE_BYTES`](super::DEFAULT_MAX_FILE_BYTES) bytes.
 pub struct EditFileTool {
     /// Where files are read and written. Defaults to this machine.
     pub executor: Arc<dyn Executor>,
@@ -40,6 +43,18 @@ impl Default for EditFileTool {
 struct Args {
     path: String,
     edits: Vec<Edit>,
+}
+
+impl Args {
+    /// The arguments of a call, checked.
+    fn parse(args: &Value) -> Result<Self, String> {
+        let args: Self = parse_args(args)?;
+        if args.edits.is_empty() {
+            return Err(NO_EDITS.into());
+        }
+        check_path(&args.path)?;
+        Ok(args)
+    }
 }
 
 #[async_trait]
@@ -111,16 +126,16 @@ impl Tool for EditFileTool {
             changed = true;
         }
         if let (Some(Value::String(_)), Some(Value::String(_))) = (object.get("oldText"), object.get("newText")) {
-            let mut legacy = Map::new();
+            let mut top_level = Map::new();
             for key in ["oldText", "newText"] {
                 if let Some(value) = object.remove(key) {
-                    legacy.insert(key.into(), value);
+                    top_level.insert(key.into(), value);
                 }
             }
             match object.get_mut("edits") {
-                Some(Value::Array(edits)) => edits.push(Value::Object(legacy)),
+                Some(Value::Array(edits)) => edits.push(Value::Object(top_level)),
                 _ => {
-                    object.insert("edits".into(), Value::Array(vec![Value::Object(legacy)]));
+                    object.insert("edits".into(), Value::Array(vec![Value::Object(top_level)]));
                 }
             }
             changed = true;
@@ -129,23 +144,18 @@ impl Tool for EditFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args: Args = parse_args(args)?;
-        if args.edits.is_empty() {
-            return Err("edits must contain at least one replacement".into());
-        }
-        check_path(&args.path)
+        Args::parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = parse_args(&args)?;
-        let shown = args.path.trim();
+        let args = Args::parse(&args)?;
+        let shown = path_text(&args.path)?;
         let path = resolve(&ctx.cwd, &args.path)?;
-        let cancelled = || "edit cancelled before the file was changed".to_string();
         let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
-            .ok_or_else(cancelled)?;
+            .ok_or(CHANGE_CANCELLED)?;
         let read = unless_cancelled(ctx, self.executor.read_file(&path, DEFAULT_MAX_FILE_BYTES)).await;
-        let bytes = read.ok_or_else(cancelled)??;
+        let bytes = read.ok_or(CHANGE_CANCELLED)??;
         if looks_binary(&bytes) {
             return Err(format!(
                 "{} looks like a binary file; edit_file edits text only",
@@ -161,18 +171,13 @@ impl Tool for EditFileTool {
         let (bom, text) = split_bom(&raw);
         let changed = apply_edits(text, &args.edits, shown)?;
         let contents = format!("{bom}{changed}");
-        // Checked last before writing: the executor finishes a write it has begun, also when
-        // this call is dropped meanwhile, so that no file is left empty or cut short.
-        if ctx.cancel.is_cancelled() {
-            return Err(cancelled());
-        }
-        write_locked(self.executor.clone(), path.clone(), contents.into_bytes(), turn).await?;
+        write_locked(ctx, self.executor.clone(), path.clone(), contents.into_bytes(), turn).await?;
 
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));
         // The patch shows the lines as the model reads them, with `\n` endings.
         if let Some((patch, first_changed_line)) = unified_patch(shown, &lf_endings(text), &lf_endings(&changed)) {
-            details.insert("patch".into(), json!(bounded_patch(&patch)));
+            details.insert(PATCH_DETAIL.into(), json!(bounded_patch(&patch)));
             details.insert("firstChangedLine".into(), json!(first_changed_line));
         }
         let count = args.edits.len();
@@ -189,7 +194,7 @@ fn is_single_edit(value: &Value) -> bool {
 /// `patch` within [`MAX_PATCH_BYTES`], with a note when it was cut.
 fn bounded_patch(patch: &str) -> String {
     prefix_noted(patch, MAX_PATCH_BYTES, |kept, total| {
-        format!("\n[patch cut at {kept} of {total} bytes]\n")
+        format!("\n[patch truncated at {kept} of {total} bytes]\n")
     })
 }
 
@@ -248,7 +253,9 @@ mod tests {
         // The limit falls inside a character; what is kept is a String, so it ends before it.
         let text = format!("x{}", "界".repeat(MAX_PATCH_BYTES / 3 + 10));
         let cut = bounded_patch(&text);
-        let (kept, note) = cut.split_once("\n[patch cut at ").expect("the patch is cut");
+        let (kept, note) = cut
+            .split_once("\n[patch truncated at ")
+            .expect("the patch is truncated");
         assert!(
             text.starts_with(kept) && kept.len() <= MAX_PATCH_BYTES,
             "{} bytes kept",

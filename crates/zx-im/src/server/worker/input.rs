@@ -1,12 +1,12 @@
 //! Input admission, and context recorded without starting a run.
 
 use zx_agent::Session;
-use zx_agent::input::Input;
+use zx_agent::input::{Input, PendingInput};
 
+use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
 use crate::Addressee;
+use crate::server::admission::Limit;
 use crate::server::outlet::{Asked, said};
-
-use super::{AfterRun, CANCEL_COMMAND, COMPACT_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -28,61 +28,59 @@ impl Worker {
 
     async fn message(&mut self, incoming: Incoming) {
         let answer = self.answers(&incoming);
-        if answer {
-            match incoming.text.trim() {
-                CANCEL_COMMAND => return self.cancel().await,
-                NEW_COMMAND => return self.renew().await,
-                COMPACT_COMMAND => return self.compact().await,
-                _ => {}
-            }
+        if answer && let Some(command) = Command::parse(&incoming.text) {
+            return match command {
+                Command::Cancel => self.cancel().await,
+                Command::New => self.renew().await,
+                Command::Compact => self.compact().await,
+            };
         }
         let content = self.out.attributed(&incoming.sender, &incoming.text).await;
-        let input = if answer {
-            Input::User {
-                text: content,
-                actor: Some(incoming.sender.0.clone()),
-            }
-        } else {
-            Input::Custom(said(content))
+        let permit = match incoming.permit {
+            Some(permit) => permit.resize(content.len()),
+            None => self.budget.try_reserve(content.len()),
         };
-        let admitted = match incoming.permit {
-            Some(permit) => permit.attach(input, incoming.receipt),
-            None => self.budget.try_admit(input, incoming.receipt),
-        };
-        let Some(pending) = admitted else {
-            self.out
-                .failed("pending input capacity exceeded; message was not accepted".into());
+        let Some(permit) = permit else {
+            self.out.failed(Limit::Pending.refusal().into());
             // Talk the bot only records is refused without a word in the conversation.
             if answer {
                 self.out.post(self.out.replies().overloaded.clone()).await;
             }
             return;
         };
+        let hold = (permit, incoming.receipt);
         if !answer {
             self.answering = None;
-            self.heard.push(pending);
+            self.heard.push(Heard {
+                message: said(content),
+                hold,
+            });
             self.record_heard().await;
             return;
         }
-        self.answering = Some(incoming.sender.clone());
-        let asked = Asked(pending);
+        let input = Input::User {
+            text: content,
+            actor: Some(incoming.sender.0.clone()),
+        };
+        self.answering = Some(incoming.sender);
+        let asked = Asked(PendingInput::held(input, hold));
         let taken = match &mut self.phase {
             // A run that `/cancel` or `/new` stopped takes no more input: what is asked now
             // runs next.
-            Phase::Running {
+            Phase::Running(Running {
                 after: AfterRun::Cancel | AfterRun::Renew,
                 asked: later,
                 ..
-            } => {
+            }) => {
                 later.push(asked);
                 true
             }
-            Phase::Running { open, .. } => {
-                open.session.queues().steer(asked.0);
+            Phase::Running(running) => {
+                running.open.session.queues().steer(asked.0);
                 true
             }
-            Phase::Waiting { asked: waiting, .. } => {
-                waiting.push(asked);
+            Phase::Waiting(waiting) => {
+                waiting.asked.push(asked);
                 false
             }
             Phase::Idle { open, .. } => {
@@ -99,35 +97,36 @@ impl Worker {
 
     /// Write the messages heard but not answered into the session when the conversation holds
     /// it. A run that holds it, or waits for a slot, writes them when it next opens or ends; a
-    /// released session is opened again for them once a run slot is free, as for a run. A
-    /// conversation without a session yet, such as after a mention that was only `/cancel`,
-    /// drops them: its first session, made for the next mention, starts with what the thread
-    /// holds then, them included, on a platform that reads threads.
+    /// released session, or one that closed while the conversation held it, is opened again
+    /// for them once a run slot is free, as for a run. A conversation without a session yet,
+    /// such as after a mention that was only `/cancel`, drops them: its first session, made
+    /// for the next mention, starts with what the thread holds then, them included, on a
+    /// platform that reads threads.
     pub(super) async fn record_heard(&mut self) {
         if self.heard.is_empty() {
             return;
         }
         match &self.phase {
-            Phase::Idle { open: Some(open), .. } => {
+            Phase::Idle { open: Some(open), .. } if open.still_open() => {
                 let session = open.session.clone();
                 self.record_in(&session).await;
             }
-            Phase::Idle { open: None, .. } if self.out.shared.session_of(&self.out.key).is_some() => {
+            Phase::Idle { .. } if self.out.shared.session_of(&self.out.key).is_some() => {
                 self.begin(None, Vec::new(), None).await;
             }
             // Dropping them returns their share of the budget and takes them out of the backlog.
-            Phase::Idle { open: None, .. } => self.heard.clear(),
-            Phase::Waiting { .. } | Phase::Running { .. } => {}
+            Phase::Idle { .. } => self.heard.clear(),
+            Phase::Waiting(_) | Phase::Running(_) => {}
         }
     }
 
     pub(super) async fn record_in(&mut self, session: &Session) {
-        for pending in std::mem::take(&mut self.heard) {
-            if let Input::Custom(message) = pending.input()
-                && let Err(error) = session.append_custom_message(message.clone()).await
-            {
+        for Heard { message, hold } in std::mem::take(&mut self.heard) {
+            if let Err(error) = session.append_custom_message(message).await {
                 self.out.failed(format!("cannot record a message: {error}"));
             }
+            // Recorded, or reported as not: the message is handled.
+            drop(hold);
         }
     }
 }

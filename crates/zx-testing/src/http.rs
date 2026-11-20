@@ -1,9 +1,26 @@
-//! One HTTP/1.1 request per connection, read and answered, for the fake platform servers;
-//! and a listener that never answers.
+//! What the fake servers share: one HTTP/1.1 request per connection, read and answered; a
+//! listener that never answers; and whether a client closed its WebSocket, waited for as
+//! long as [`WAIT`].
 
+use futures::StreamExt;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::WAIT;
+
+/// Whether the client closed the WebSocket `stream`, waiting up to [`WAIT`] for it.
+pub(crate) async fn closed_by_client(stream: &mut WebSocketStream<TcpStream>) -> bool {
+    loop {
+        match tokio::time::timeout(WAIT, stream.next()).await {
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
+            Ok(Some(Ok(_))) => {}
+            Err(_) => return false,
+        }
+    }
+}
 
 /// One request as a fake server read it.
 pub struct Request {

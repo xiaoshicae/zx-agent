@@ -5,17 +5,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-
 use zx_agent::Session;
 use zx_agent::ai::openai::{BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{ApiKey, Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt};
+use zx_agent::ai::{
+    ApiKey, ApiKeySource, Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt,
+};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind, RunOutcome};
 use zx_agent::transcript::SessionHeader;
-use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::{RunnerSetup, Seed, Start, config, fast_retry};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
+use zx_testing::{RunnerSetup, Seed, Start, config, fast_retry, request_ids};
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
@@ -42,20 +43,6 @@ fn setup_with_provider(server: &MockServer, mut settings: OpenAiConfig) -> Runne
     RunnerSetup::new(config)
 }
 
-fn raw_error(status: u16, headers: &str, body: &str) -> Reply {
-    Reply::Raw(format!(
-        "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
-        body.len()
-    ))
-}
-
-fn provider_error(runner: &zx_testing::Driven) -> ProviderError {
-    match runner.session().messages().last() {
-        Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
-        other => panic!("expected a failed assistant message: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn response_budget_failure_is_not_retried() {
     let server = MockServer::start(vec![Reply::text(&"x".repeat(256))]).await;
@@ -76,7 +63,7 @@ async fn response_budget_failure_is_not_retried() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::ResourceLimit)
     );
     assert!(report.error.unwrap().contains("response exceeds the 64 byte limit"));
@@ -100,7 +87,7 @@ async fn sse_event_budget_is_enforced() {
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::ResourceLimit)
     );
     assert!(report.error.unwrap().contains("SSE event exceeds the 32 byte limit"));
@@ -120,7 +107,7 @@ async fn http_status_prevents_retries_from_diagnostic_words() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::Other,
             status: Some(400),
@@ -148,7 +135,7 @@ async fn quota_errors_are_not_retried() {
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             kind: ProviderErrorKind::AccessDenied,
             status: Some(429),
@@ -160,7 +147,7 @@ async fn quota_errors_are_not_retried() {
 
 #[tokio::test]
 async fn numeric_retry_after_is_used_by_the_runner() {
-    let server = MockServer::start(vec![raw_error(
+    let server = MockServer::start(vec![Reply::error(
         429,
         "retry-after: 7\r\n",
         r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
@@ -197,8 +184,26 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 }
 
 #[tokio::test]
+async fn an_http_error_shows_the_servers_message() {
+    let body = json!({"error": {"message": "Rate limit reached, slow down", "type": "requests"}});
+    let server = MockServer::start(vec![Reply::error(429, "", &body.to_string())]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(0),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    let error = report.error.unwrap();
+    assert!(error.contains("HTTP 429: Rate limit reached, slow down"), "{error}");
+    assert!(!error.contains('{'), "{error}");
+}
+
+#[tokio::test]
 async fn large_http_errors_keep_bounded_diagnostics() {
-    let server = MockServer::start(vec![raw_error(400, "", &"x".repeat(128 * 1024))]).await;
+    let server = MockServer::start(vec![Reply::error(400, "", &"x".repeat(128 * 1024))]).await;
     let (runner, _) = setup(&server, Duration::from_secs(10)).build().await;
 
     let report = runner.run("check").await;
@@ -225,7 +230,7 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(report.final_text, "partial");
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError::from(ProviderErrorKind::Protocol)
     );
 }
@@ -249,7 +254,7 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
     let error = report.error.unwrap_or_default();
     assert!(error.contains("server_interrupted"), "{error}");
     assert_eq!(
-        provider_error(&runner),
+        runner.provider_error(),
         ProviderError {
             code: Some("server_interrupted".into()),
             ..ProviderError::from(ProviderErrorKind::Refused)
@@ -398,8 +403,7 @@ async fn a_stalled_stream_fails_after_the_idle_timeout() {
 
 #[tokio::test]
 async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
-    let first_chunk = json!({"choices":[{"index":0,"delta":{"content":"partial"}}]});
-    let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
+    let server = MockServer::start(vec![Reply::Stall(vec![text_chunk("partial")])]).await;
     // Cancelled at the first streamed delta, to cancel a response mid-stream without
     // depending on timing.
     let (runner, _) = setup(&server, Duration::from_secs(10))
@@ -413,7 +417,7 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
     let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
-    let messages = runner.session().messages();
+    let messages = runner.transcript().messages();
     let Some(Message::Assistant(answer)) = messages.last() else {
         panic!("the aborted answer is kept: {messages:?}");
     };
@@ -424,7 +428,7 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
 }
 
 /// A summary that cites the first record the summary request reads.
-fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Value> {
+fn summary_of_the_first_record(body: &serde_json::Value) -> Reply {
     let source = body["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
@@ -434,7 +438,7 @@ fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Valu
         "inferences": [],
         "plans": ["Continue"]
     });
-    vec![json!({"choices": [{"index": 0, "delta": {"content": summary.to_string()}, "finish_reason": "stop"}]})]
+    Reply::text(&summary.to_string())
 }
 
 #[tokio::test]
@@ -450,15 +454,7 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         Reply::text("answer"),
     ])
     .await;
-    let mut session = Seed::in_memory(zx_testing::header()).await;
-    session
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    session
-        .append_message(Message::user("most recent input"))
-        .await
-        .unwrap();
+    let (session, _) = zx_testing::seeded_session().await;
     let compaction = Config {
         trigger_bytes: Some(100_000),
         keep_recent_bytes: 1,
@@ -486,7 +482,7 @@ struct RotatingKeys {
 }
 
 #[async_trait::async_trait]
-impl zx_agent::ai::ApiKeySource for RotatingKeys {
+impl ApiKeySource for RotatingKeys {
     async fn api_key(&self) -> Result<String, String> {
         let n = self.issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if n > self.until {
@@ -503,7 +499,7 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
         &server,
         OpenAiConfig {
             headers: vec![("X-Route".into(), "blue".into())],
-            api_key: zx_agent::ai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+            api_key: ApiKey::Dynamic(Arc::new(RotatingKeys {
                 issued: Default::default(),
                 until: 9,
             })),
@@ -532,7 +528,7 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
 struct SilentKeys;
 
 #[async_trait::async_trait]
-impl zx_agent::ai::ApiKeySource for SilentKeys {
+impl ApiKeySource for SilentKeys {
     async fn api_key(&self) -> Result<String, String> {
         std::future::pending().await
     }
@@ -558,7 +554,7 @@ async fn a_key_source_that_does_not_answer_fails_the_request_within_the_idle_tim
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
+    assert_eq!(runner.provider_error(), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error
@@ -577,7 +573,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
         ..setup_with_provider(
             &server,
             OpenAiConfig {
-                api_key: zx_agent::ai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+                api_key: ApiKey::Dynamic(Arc::new(RotatingKeys {
                     issued: Default::default(),
                     until: 0,
                 })),
@@ -591,7 +587,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
     let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
-    assert_eq!(provider_error(&runner), ProviderError::from(ProviderErrorKind::ApiKey));
+    assert_eq!(runner.provider_error(), ProviderError::from(ProviderErrorKind::ApiKey));
     assert!(
         report
             .error
@@ -623,17 +619,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     runner.run("go").await;
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
     // The audit replays the request with its key.
-    let replayed = runner
-        .session()
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            zx_agent::transcript::Entry::RequestStarted(started) => {
-                Some(runner.session().replay_request(&started.id).unwrap())
-            }
-            _ => None,
-        })
-        .unwrap();
+    let transcript = runner.transcript();
+    let replayed = transcript.replay_request(&request_ids(&transcript)[0]).unwrap();
     assert_eq!(replayed.0.cache_key.as_deref(), Some("session-42"));
     assert_eq!(replayed.1.cache_key.as_deref(), Some("session-42"));
 

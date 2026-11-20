@@ -4,7 +4,6 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-
 use zx_agent::transcript::{SessionInfo, SessionList};
 use zx_app::{SessionPlace, resolve_cwd};
 
@@ -59,31 +58,52 @@ impl First {
     }
 }
 
-/// Where the conversations are kept, and the session to open first: `--no-session`,
-/// `--session`, `--resume` with its ID if it has one, and `cwd`, the command line's working
-/// directory.
-pub(super) async fn opening(
-    no_session: bool,
-    session: Option<PathBuf>,
-    resume: Option<Option<&str>>,
-    cwd: Option<&Path>,
-) -> Result<(Storage, First)> {
-    // The parser refuses `--no-session` with `--session` or `--resume`, and `--resume` with
-    // `--session`.
-    let (place, original, first) = match (no_session, session) {
-        (true, _) => (SessionPlace::memory(), None, First::Fresh),
-        // `--session` continues the session its file holds, or starts the file.
-        (false, Some(path)) => {
-            let first = match session_file::held(&path, cwd).await? {
-                Some(id) => First::Resume(id),
-                None => First::Fresh,
-            };
-            (SessionPlace::file(&path), Some(path), first)
+/// Where the command line keeps a chat's conversations: `--no-session`, `--session` and
+/// `--resume` exclude each other.
+pub(super) enum Keeping<'a> {
+    /// `--no-session`: in memory.
+    Memory,
+    /// `--session`: in this file, continuing the session it holds.
+    File(PathBuf),
+    /// In the session files of the home directory, continuing the session `--resume` names,
+    /// when it is given.
+    Home(Option<Resume<'a>>),
+}
+
+impl<'a> Keeping<'a> {
+    /// Where `--no-session`, `--session` and `--resume` keep the conversations. The parser
+    /// refuses `--no-session` with either of the others, and `--resume` with `--session`.
+    pub(super) fn of(no_session: bool, session: Option<PathBuf>, resume: Option<&'a Option<String>>) -> Self {
+        match (no_session, session) {
+            (true, _) => Self::Memory,
+            (false, Some(path)) => Self::File(path),
+            (false, None) => Self::Home(resume.map(|id| id.as_deref().map_or(Resume::Latest, Resume::Prefix))),
         }
-        (false, None) => {
+    }
+}
+
+/// The session `--resume` continues, of those started in the working directory.
+pub(super) enum Resume<'a> {
+    /// The most recent one.
+    Latest,
+    /// The one whose ID starts with this.
+    Prefix(&'a str),
+}
+
+/// Where the conversations are kept, and the session to open first: as `keeping` says, in
+/// `cwd`, the command line's working directory.
+pub(super) async fn opening(keeping: Keeping<'_>, cwd: Option<&Path>) -> Result<(Storage, First)> {
+    let (place, original, first) = match keeping {
+        Keeping::Memory => (SessionPlace::memory(), None, First::Fresh),
+        // `--session` continues the session its file holds, or starts the file.
+        Keeping::File(path) => {
+            let (place, held) = session_file::open(&path, cwd).await?;
+            (place, Some(path), held.map_or(First::Fresh, First::Resume))
+        }
+        Keeping::Home(resume) => {
             let place = SessionPlace::home()?;
             let first = match resume {
-                Some(id) => resume_target(&place, cwd, id).await?,
+                Some(resume) => resume_target(&place, cwd, resume).await?,
                 None => First::Fresh,
             };
             (place, None, first)
@@ -94,17 +114,17 @@ pub(super) async fn opening(
 
 /// The session `--resume` opens among those started in this working directory, or why there
 /// is none to resume.
-async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
+async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, resume: Resume<'_>) -> Result<First> {
     let cwd = resolve_cwd(cwd)?;
     let list = place.started_in(&cwd).await?;
     let directory = place.location(&cwd).unwrap_or_default();
-    match id {
-        Some(id) => {
+    match resume {
+        Resume::Prefix(id) => {
             let session = session_with_id_prefix(&list, id)
                 .with_context(|| format!("--resume: no single session to resume in {}", directory.display()))?;
             Ok(First::Resume(session.id.clone()))
         }
-        None => Ok(match list.sessions.first() {
+        Resume::Latest => Ok(match list.sessions.first() {
             Some(session) => First::Resume(session.id.clone()),
             None => First::NothingToResume(format!(
                 "[chat] no earlier session of this directory in {}; starting a new one",
@@ -140,26 +160,20 @@ fn new_file(original: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
+    use crate::test_support;
 
     fn session(id: &str, last_activity_ms: u64) -> SessionInfo {
         SessionInfo {
-            id: id.into(),
             cwd: "/w".into(),
-            started_ms: 0,
             last_activity_ms,
-            messages: 0,
-            first_prompt: None,
-            name: None,
-            labels: BTreeMap::new(),
+            ..test_support::session(id)
         }
     }
 
     #[tokio::test]
     async fn a_conversation_kept_in_memory_continues_nothing() {
-        let (storage, first) = opening(true, None, None, None).await.unwrap();
+        let (storage, first) = opening(Keeping::Memory, None).await.unwrap();
         assert!(!storage.place.is_persistent());
         assert_eq!(first.id(), None);
         assert!(storage.beside().is_none());

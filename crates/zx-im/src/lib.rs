@@ -20,6 +20,7 @@
 //! - `files`: one record per file, as the program's stores on disk write them
 //! - `program`: the program ([`Program`]): im.toml, its command line, the platforms it
 //!   configures, the operator log and the exit codes
+//! - `test_support`, compiled for tests only: what the unit tests of several modules share
 
 mod backlog;
 mod channel;
@@ -27,19 +28,23 @@ mod files;
 mod platform;
 mod program;
 mod server;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 
-pub use backlog::{Backlog, Kept, MemoryBacklog, MessageKey};
-pub use channel::{
+pub use self::backlog::{Backlog, Kept, MemoryBacklog, MessageKey};
+pub use self::channel::{
     Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ErrorReport,
     ImChannel, ImError, Inbound, Inlet, MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
-pub use platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChannel, SlackConfig};
+pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChannel, SlackConfig};
 #[cfg(feature = "feishu")]
-pub use platform::{FeishuChannel, FeishuConfig};
-pub use program::Program;
-pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
+pub use self::platform::{FeishuChannel, FeishuConfig};
+pub use self::program::Program;
+pub use self::server::{
+    ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
+};
 
 /// Run the program with its built-in platforms ([`Program::run`]).
 pub async fn main() -> ExitCode {

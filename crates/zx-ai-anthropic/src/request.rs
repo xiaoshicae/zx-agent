@@ -1,15 +1,18 @@
 //! The JSON body of a Messages request, and the conversion options recorded with each request
 //! (pi: anthropic-messages.ts).
 
-use serde::Serialize;
-use serde_json::{Value, json};
-use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt, ToolDef};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use zx_ai::{
+    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, MISSING_TOOL_RESULT, Message, Reasoning, Request, SystemPrompt,
+    ToolDef, api_identifier,
+};
 
 use crate::config::{BodyOptions, SystemUpdates};
 
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "anthropic-messages";
-/// The version of this conversion in the recorded options.
+/// The version of this conversion in the recorded options, the only one replayed.
 const VERSION: u32 = 1;
 
 /// The output limit of a request that sets none, which the API requires: room for long
@@ -19,10 +22,6 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 64_000;
 /// What a thinking block the API redacted is recorded with in place of its signature: this
 /// marker, then the block's encrypted data. No signature starts with it.
 pub(crate) const REDACTED: &str = "redacted:";
-
-/// The result sent for a tool call that has none, such as one a cancelled run left behind:
-/// the API refuses a call without a result.
-const NO_RESULT: &str = "No result provided";
 
 /// What is recorded with each request: which conversion turned the transcript into a body,
 /// then its options, side by side in one object.
@@ -44,6 +43,39 @@ pub(crate) fn request_options(options: &BodyOptions) -> Value {
     serde_json::to_value(record).expect("strings and a JSON map serialize")
 }
 
+/// The conversion a record names. Read apart from the options, which refuse a field they do
+/// not know: serde cannot do that for a flattened value.
+#[derive(Deserialize)]
+struct Conversion {
+    format: String,
+    version: u32,
+}
+
+/// Rebuild the JSON body of a Messages request from a recorded request and the options
+/// recorded with it, for the request audit; as zx-ai-openai's `replay_body` does for its
+/// conversion. Credentials, URLs and HTTP headers are not in it. Rejects another conversion,
+/// any version but this one and an option it does not know, rather than apply a different
+/// conversion.
+pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
+    let Conversion { format, version } = Conversion::deserialize(options)?;
+    anyhow::ensure!(
+        format == FORMAT,
+        "request conversion format {format:?} is not supported; only {FORMAT:?} can be replayed"
+    );
+    anyhow::ensure!(
+        version == VERSION,
+        "request conversion version {version} is not supported; only version {VERSION} can be replayed"
+    );
+    let mut options = options.clone();
+    if let Some(recorded) = options.as_object_mut() {
+        recorded.remove("format");
+        recorded.remove("version");
+    }
+    let options: BodyOptions = serde_json::from_value(options)?;
+    options.check()?;
+    Ok(build_body(request, &options, provider))
+}
+
 /// The JSON body of a streaming Messages request to `provider`, the name its answers are
 /// recorded under. The system prompt, the tools and the end of the conversation are cache
 /// breakpoints, so that a conversation's next request reads what this one wrote.
@@ -56,7 +88,7 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
         "stream": true,
     });
     if let Some(system) = system {
-        body["system"] = json!([{ "type": "text", "text": system, "cache_control": cache() }]);
+        body["system"] = json!([{ "type": "text", "text": system, "cache_control": cache_breakpoint() }]);
     }
     if !request.tools.is_empty() {
         body["tools"] = tools(&request.tools);
@@ -73,7 +105,7 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
 }
 
 /// The cache breakpoint of this provider: the API's default lifetime.
-fn cache() -> Value {
+fn cache_breakpoint() -> Value {
     json!({ "type": "ephemeral" })
 }
 
@@ -90,7 +122,7 @@ fn tools(tools: &[ToolDef]) -> Value {
                 "input_schema": tool.parameters,
             });
             if index == last {
-                definition["cache_control"] = cache();
+                definition["cache_control"] = cache_breakpoint();
             }
             definition
         })
@@ -98,12 +130,16 @@ fn tools(tools: &[ToolDef]) -> Value {
 }
 
 /// Write `reasoning` into `body`: adaptive thinking at an effort, with the thinking shown as a
-/// summary, or thinking turned off. Minimal is the API's lowest effort, `low`. An
-/// `output_config` among the extra fields keeps its other settings.
+/// summary, or thinking turned off. Minimal is the API's lowest effort, `low`. The level sets
+/// `thinking.type`, `thinking.display` and `output_config.effort`; the other settings of a
+/// `thinking` or an `output_config` among the extra fields stay, such as
+/// `thinking.block_binding`.
 fn apply_reasoning(body: &mut Value, reasoning: Reasoning) {
     let effort = match reasoning {
         Reasoning::Off => {
-            body["thinking"] = json!({ "type": "disabled" });
+            let thinking = object(body, "thinking");
+            thinking.insert("type".into(), json!("disabled"));
+            thinking.remove("display");
             return;
         }
         Reasoning::Minimal | Reasoning::Low => "low",
@@ -111,11 +147,18 @@ fn apply_reasoning(body: &mut Value, reasoning: Reasoning) {
         Reasoning::High => "high",
         Reasoning::Xhigh => "xhigh",
     };
-    body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
-    if !body["output_config"].is_object() {
-        body["output_config"] = json!({});
+    let thinking = object(body, "thinking");
+    thinking.insert("type".into(), json!("adaptive"));
+    thinking.insert("display".into(), json!("summarized"));
+    object(body, "output_config").insert("effort".into(), json!(effort));
+}
+
+/// The object `body[field]`, an empty one in place of anything else there.
+fn object<'a>(body: &'a mut Value, field: &str) -> &'a mut Map<String, Value> {
+    if !body[field].is_object() {
+        body[field] = json!({});
     }
-    body["output_config"]["effort"] = json!(effort);
+    body[field].as_object_mut().expect("the field holds an object now")
 }
 
 /// The conversation's turns as the body's `messages` are built: a block joins the turn before
@@ -139,7 +182,7 @@ impl Turns {
     /// A result for each call of `pending` that has none.
     fn close_calls(&mut self, pending: &mut Vec<String>) {
         for id in pending.drain(..) {
-            self.push("user", tool_result(&id, NO_RESULT, true));
+            self.push("user", tool_result(&id, MISSING_TOOL_RESULT, true));
         }
     }
 
@@ -159,7 +202,7 @@ impl Turns {
             && last["role"] != "assistant"
             && let Some(block) = last["content"].as_array_mut().and_then(|content| content.last_mut())
         {
-            block["cache_control"] = cache();
+            block["cache_control"] = cache_breakpoint();
         }
     }
 }
@@ -219,7 +262,7 @@ fn convert_messages(
                 };
                 pending.remove(position);
                 let content = if result.content.is_empty() {
-                    "(no output)"
+                    EMPTY_TOOL_RESULT
                 } else {
                     result.content.as_str()
                 };
@@ -297,31 +340,10 @@ fn tool_result(id: &str, content: &str, is_error: bool) -> Value {
 /// characters: the ids of another provider's answers may hold other characters (pi:
 /// `normalizeToolCallId`).
 fn tool_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect()
-}
-
-/// Leave out the thinking blocks of the body's messages from the one at `from` on, for a
-/// request the API refused because one of them is bound to a different conversation.
-pub(crate) fn drop_thinking_from(body: &mut Value, from: usize) {
-    let Some(messages) = body["messages"].as_array_mut() else {
-        return;
-    };
-    for message in messages.iter_mut().skip(from) {
-        if let Some(content) = message["content"].as_array_mut() {
-            content.retain(|block| !matches!(block["type"].as_str(), Some("thinking" | "redacted_thinking")));
-        }
-    }
-    // A turn that held thinking alone is left without content, which the API refuses.
-    messages.retain(|message| message["content"].as_array().is_none_or(|content| !content.is_empty()));
+    let mut id = api_identifier(id);
+    // ASCII only now, so a byte is a character.
+    id.truncate(64);
+    id
 }
 
 #[cfg(test)]

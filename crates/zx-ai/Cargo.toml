@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # The scripted provider `faux::FauxProvider`, for the tests of the crates built on this one;
 # off in every other build. It streams its answers from Tokio tasks.
@@ -25,6 +28,3 @@ tokio-util.workspace = true
 [dev-dependencies]
 # The scripted provider's own tests run on Tokio's test runtime.
 tokio = { workspace = true, features = ["macros", "rt"] }
-
-[lints]
-workspace = true

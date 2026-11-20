@@ -9,19 +9,17 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::{ServerEvent, ServerSink, Shared, timed};
 use crate::backlog;
 use crate::{Backlog, Inbound, MessageKey};
-
-use super::{ServerEvent, ServerSink, Shared, timed};
 
 /// A message's place in the backlog, which the message carries until it is handled: written
 /// into its session, answered without a run, or dropped on purpose. Dropping the receipt
 /// completes the message ([`Backlog::complete`]), unless the server is stopping: what it has
 /// not handled by then stays pending, for the next start.
 pub(super) struct Receipt {
-    /// Taken as the receipt is dropped. Boxed, as every message carries a receipt through
-    /// the queues.
-    key: Option<Box<MessageKey>>,
+    /// Taken as the receipt is dropped.
+    key: Option<MessageKey>,
     handled: mpsc::UnboundedSender<MessageKey>,
     stop: CancellationToken,
 }
@@ -34,7 +32,7 @@ impl Drop for Receipt {
         if let Some(key) = self.key.take() {
             // Fails only once the completing task has failed, which is reported; the message
             // is then handled again at the next start.
-            self.handled.send(*key).ok();
+            self.handled.send(key).ok();
         }
     }
 }
@@ -48,7 +46,7 @@ pub(super) struct Receipts {
 impl Receipts {
     pub(super) fn receipt(&self, key: MessageKey) -> Receipt {
         Receipt {
-            key: Some(Box::new(key)),
+            key: Some(key),
             handled: self.handled.clone(),
             stop: self.stop.clone(),
         }
@@ -98,20 +96,4 @@ pub(super) async fn left_pending(shared: &Shared, backlog: &dyn Backlog) -> Vec<
         }
     }
     left
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    impl Receipt {
-        /// A receipt that completes nothing, for the tests of what carries one.
-        pub(in crate::server) fn unconnected() -> Self {
-            Self {
-                key: None,
-                handled: mpsc::unbounded_channel().0,
-                stop: CancellationToken::new(),
-            }
-        }
-    }
 }

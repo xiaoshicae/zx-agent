@@ -14,6 +14,7 @@ mod feishu;
 mod slack;
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,14 +30,14 @@ use zx_util::env::env_value;
 use zx_util::registry::Registry;
 use zx_util::sync::lock;
 
+#[cfg(feature = "feishu")]
+pub use self::feishu::{FeishuChannel, FeishuConfig};
+pub use self::slack::{SlackChannel, SlackConfig};
 use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
 
-#[cfg(feature = "feishu")]
-pub use feishu::{FeishuChannel, FeishuConfig};
-pub use slack::{SlackChannel, SlackConfig};
-
-/// The name of Feishu's section, which a build without the platform refuses by name.
-#[cfg(not(feature = "feishu"))]
+/// The names the built-in platforms are registered under, which their channels go by.
+/// Feishu's is known also to a build without it, which refuses its section by name.
+const SLACK: &str = "slack";
 const FEISHU: &str = "feishu";
 
 /// Builds a platform's channel from the section of im.toml named as the platform is
@@ -44,7 +45,7 @@ const FEISHU: &str = "feishu";
 pub trait PlatformFactory: Send + Sync {
     /// The channel `input` describes. Fails on a section it cannot use, the error naming its
     /// keys as im.toml writes them, and on a credential it cannot read.
-    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel>;
+    fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel>;
 }
 
 /// What a platform's channel is built from.
@@ -71,12 +72,12 @@ pub struct BuiltChannel {
 pub(crate) fn built_in() -> Registry<dyn PlatformFactory> {
     let slack: Arc<dyn PlatformFactory> = Arc::new(slack::Slack);
     #[cfg(feature = "feishu")]
-    let feishu = (feishu::PLATFORM, Arc::new(feishu::Feishu) as Arc<dyn PlatformFactory>);
+    let feishu: Arc<dyn PlatformFactory> = Arc::new(feishu::Feishu);
     #[cfg(not(feature = "feishu"))]
-    let feishu = (FEISHU, Arc::new(NotBuilt) as Arc<dyn PlatformFactory>);
+    let feishu: Arc<dyn PlatformFactory> = Arc::new(NotBuilt);
     Registry::new(
         "IM platform",
-        vec![(slack::PLATFORM.to_string(), slack), (feishu.0.to_string(), feishu.1)],
+        vec![(SLACK.to_string(), slack), (FEISHU.to_string(), feishu)],
     )
 }
 
@@ -86,7 +87,7 @@ struct NotBuilt;
 
 #[cfg(not(feature = "feishu"))]
 impl PlatformFactory for NotBuilt {
-    fn channel(&self, _input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+    fn build(&self, _input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         anyhow::bail!("this build of zx-im has no such platform: it was built without the cargo feature `feishu`")
     }
 }
@@ -144,8 +145,10 @@ fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, V
     let mut rest = Vec::new();
     let mut current = String::new();
     let mut count = 0;
+    // What `push` writes of one character.
+    let mut piece = String::new();
     for c in text.chars() {
-        let mut piece = String::new();
+        piece.clear();
         push(&mut piece, c);
         let size = piece.chars().count();
         if count + size > max && count > 0 {
@@ -180,16 +183,23 @@ fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, V
     }
 }
 
+/// Longest wait a rate limit is given: a longer one is more likely a bad header than a real
+/// wait (Slack's limits, for one, are per minute: Rate limits, "Tiers"), and a send that
+/// waits that long is dropped by the server's outbound timeout anyway, a connection attempt
+/// by the stop.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
+
 /// How long a rate-limited call waits before it is tried again: the seconds in the header
-/// `name` of `headers`, the answer's, in which the platform says so, but at most `longest`;
-/// one second when that header is missing, not text, or not a number of seconds.
-fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName, longest: Duration) -> Duration {
+/// `name` of `headers`, the answer's, in which the platform says so, but at most
+/// [`MAX_RATE_LIMIT_WAIT`]; one second when that header is missing, not text, or not a
+/// number of seconds.
+fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName) -> Duration {
     let secs = headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(1);
-    Duration::from_secs(secs).min(longest)
+    Duration::from_secs(secs).min(MAX_RATE_LIMIT_WAIT)
 }
 
 /// One delivery's events once its messages are kept in the backlog ([`keep`]).
@@ -202,34 +212,30 @@ struct Delivery {
     acknowledge: bool,
 }
 
-/// Why a connection stops after a delivery.
-#[derive(Debug, PartialEq, Eq)]
-enum Halted {
-    /// The server no longer reads: it is stopping.
-    ServerStopped,
-    /// The acknowledgement could not be sent: the connection is lost.
-    Unacknowledged,
-}
-
 impl Delivery {
     /// Finish the delivery: send its acknowledgement with `acknowledge`, unless it may not be
     /// acknowledged, then pass its events on to the server. They are passed on also when the
     /// acknowledgement cannot be sent: the platform then delivers the messages again, but
-    /// the backlog knows them by then, and nobody would pass them on.
-    async fn finish<E>(self, inlet: &Inlet, acknowledge: impl Future<Output = Result<(), E>>) -> Result<(), Halted> {
-        // Why it could not be sent does not matter here: the connection is lost either way,
-        // and its owner reconnects.
-        let acknowledged = !self.acknowledge || acknowledge.await.is_ok();
+    /// the backlog knows them by then, and nobody would pass them on. `Err` says how the
+    /// connection ended: lost when the acknowledgement could not be sent, cancelled when the
+    /// server no longer reads.
+    async fn finish<E: Display>(
+        self,
+        inlet: &Inlet,
+        acknowledge: impl Future<Output = Result<(), E>>,
+    ) -> Result<(), Ended> {
+        let acknowledged = if self.acknowledge {
+            let sent = acknowledge.await;
+            sent.map_err(|error| format!("cannot acknowledge a delivery: {error}"))
+        } else {
+            Ok(())
+        };
         for event in self.events {
             if !inlet.pass(event).await {
-                return Err(Halted::ServerStopped);
+                return Err(Ended::Cancelled);
             }
         }
-        if acknowledged {
-            Ok(())
-        } else {
-            Err(Halted::Unacknowledged)
-        }
+        acknowledged.map_err(Ended::Lost)
     }
 }
 
@@ -405,12 +411,35 @@ impl Keepalive {
     }
 }
 
+/// How an attempt to open a platform's connection went.
+enum Connection<L> {
+    /// The connection, boxed: the other variant is a short reason.
+    Open(Box<L>),
+    /// A failure worth retrying, with the reason, which never shows a secret, such as an
+    /// address that carries a ticket.
+    Later(String),
+}
+
+/// How a platform's connection ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// The server is stopping: `cancel` was triggered, or the server no longer reads.
+    Cancelled,
+    /// The platform closed it, or asked for another: a new one is opened.
+    Closed,
+    /// It failed, for this reason: a new one is opened, and the operator hears why.
+    Lost(String),
+    /// Nothing came over it for this long, not even answers to the pings.
+    Silent(Duration),
+}
+
 /// What came next over a connection ([`next_message`]).
 enum Next {
     /// `cancel` was triggered; the connection was closed.
     Cancelled,
-    /// The connection failed or ended without a close frame, or a ping could not be sent.
-    Lost,
+    /// The connection failed or ended without a close frame, or a ping could not be sent:
+    /// why.
+    Lost(String),
     /// Nothing came for this long, not even answers to the pings: the connection counts as
     /// dead.
     Silent(Duration),
@@ -437,8 +466,8 @@ async fn next_message(
                 return Next::Cancelled;
             }
             () = tokio::time::sleep_until(keepalive.next_ping()) => {
-                if socket.send(ping.clone()).await.is_err() {
-                    return Next::Lost;
+                if let Err(error) = socket.send(ping.clone()).await {
+                    return Next::Lost(format!("cannot send a ping: {error}"));
                 }
                 keepalive.pinged();
             }
@@ -447,7 +476,8 @@ async fn next_message(
                 keepalive.alive();
                 return match message {
                     Some(Ok(message)) => Next::Message(message),
-                    Some(Err(_)) | None => Next::Lost,
+                    Some(Err(error)) => Next::Lost(format!("cannot read: {error}")),
+                    None => Next::Lost("it ended without a close frame".into()),
                 };
             }
         }
@@ -470,55 +500,91 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_rate_limit_wait_is_capped_and_defaults_to_one_second() {
-        let longest = Duration::from_secs(60);
-        let wait = |value: Option<HeaderValue>| {
-            let mut headers = HeaderMap::new();
-            if let Some(value) = value {
-                headers.insert(RETRY_AFTER, value);
-            }
-            rate_limit_wait(&headers, RETRY_AFTER, longest)
-        };
-        assert_eq!(wait(None), Duration::from_secs(1));
-        assert_eq!(wait(Some(HeaderValue::from_static("soon"))), Duration::from_secs(1));
-        // Not text: as good as missing.
-        assert_eq!(
-            wait(Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
-            Duration::from_secs(1)
-        );
-        assert_eq!(wait(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
-        assert_eq!(wait(Some(HeaderValue::from_static(" 5 "))), Duration::from_secs(5));
-        assert_eq!(wait(Some(HeaderValue::from_static("100000"))), longest);
-        // Only the named header counts.
+    /// The wait after an answer whose `Retry-After` is `value`, or that has none.
+    fn retry_after(value: Option<HeaderValue>) -> Duration {
         let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
-        assert_eq!(rate_limit_wait(&headers, "x-reset", longest), Duration::from_secs(1));
+        if let Some(value) = value {
+            headers.insert(RETRY_AFTER, value);
+        }
+        rate_limit_wait(&headers, RETRY_AFTER)
     }
 
     #[test]
-    fn a_backoff_doubles_up_to_the_longest_wait_and_starts_over_when_reset() {
+    fn a_rate_limit_wait_is_the_seconds_the_platform_names() {
+        assert_eq!(retry_after(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
+        assert_eq!(
+            retry_after(Some(HeaderValue::from_static(" 5 "))),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_wait_is_capped() {
+        assert_eq!(
+            retry_after(Some(HeaderValue::from_static("100000"))),
+            MAX_RATE_LIMIT_WAIT
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_wait_without_a_number_of_seconds_is_one_second() {
+        assert_eq!(retry_after(None), Duration::from_secs(1));
+        assert_eq!(
+            retry_after(Some(HeaderValue::from_static("soon"))),
+            Duration::from_secs(1)
+        );
+        // Not text: as good as missing.
+        let not_text = HeaderValue::from_bytes(&[0xff]).unwrap();
+        assert_eq!(retry_after(Some(not_text)), Duration::from_secs(1));
+        // Only the named header counts.
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
+        assert_eq!(rate_limit_wait(&headers, "x-reset"), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_backoff_doubles_up_to_the_longest_wait() {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(5));
         let waits: Vec<u64> = (0..5).map(|_| backoff.advance().as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 5, 5]);
+    }
+
+    #[test]
+    fn a_reset_backoff_starts_over() {
+        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(5));
+        backoff.advance();
+        backoff.advance();
         backoff.reset();
         assert_eq!(backoff.advance(), Duration::from_secs(1));
     }
 
     #[test]
-    fn a_keepalive_pings_at_once_and_counts_a_new_interval_from_the_last_ping() {
+    fn a_keepalive_pings_at_once() {
         let before = Instant::now();
-        let mut keepalive = Keepalive::new(Duration::from_secs(10));
+        let keepalive = Keepalive::new(Duration::from_secs(10));
         assert!(keepalive.next_ping() <= Instant::now());
         assert!(keepalive.deadline() >= before + Duration::from_secs(25));
+    }
+
+    #[test]
+    fn a_new_ping_interval_counts_from_the_last_ping() {
+        let before = Instant::now();
+        let mut keepalive = Keepalive::new(Duration::from_secs(10));
         keepalive.pinged();
         let pinged = Instant::now();
         assert!(keepalive.next_ping() >= before + Duration::from_secs(10));
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(10));
         keepalive.set_interval(Duration::from_secs(3));
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(3));
-        // The margin shrinks to a short interval.
-        assert_eq!(keepalive.silence(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn the_silence_margin_shrinks_to_a_short_interval() {
+        assert_eq!(Keepalive::new(Duration::from_secs(3)).silence(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn a_ping_interval_is_capped() {
         assert_eq!(
             Keepalive::new(Duration::MAX).silence(),
             Keepalive::MAX_INTERVAL * 2 + Keepalive::MARGIN
@@ -546,14 +612,17 @@ mod tests {
         let inlet = Inlet::new("slack", events, Arc::new(MemoryBacklog::default()));
 
         let delivery = keep(&inlet, vec![message("m1")], None).await;
-        let finished = delivery.finish(&inlet, async { Err::<(), ()>(()) }).await;
+        let finished = delivery.finish(&inlet, async { Err::<(), _>("closed") }).await;
 
-        assert_eq!(finished, Err(Halted::Unacknowledged));
+        assert_eq!(
+            finished,
+            Err(Ended::Lost("cannot acknowledge a delivery: closed".into()))
+        );
         assert_eq!(passed.try_recv().ok(), Some(message("m1")));
         // The platform delivers what was not acknowledged again: known by then, it is not
         // passed on a second time, so the first delivery was its only way to the server.
         let again = keep(&inlet, vec![message("m1")], None).await;
-        assert_eq!(again.finish(&inlet, async { Ok::<(), ()>(()) }).await, Ok(()));
+        assert_eq!(again.finish(&inlet, async { Ok::<(), &str>(()) }).await, Ok(()));
         assert!(passed.try_recv().is_err());
     }
 
@@ -570,7 +639,7 @@ mod tests {
         let finished = delivery
             .finish(&inlet, async {
                 acknowledged.set(true);
-                Ok::<(), ()>(())
+                Ok::<(), &str>(())
             })
             .await;
 

@@ -1,55 +1,5 @@
-//! Run-level behavior: retries, limits, continuation of cut-off answers, persistence, and
-//! resumed sessions.
-
-struct CancellationProbe {
-    token: std::sync::Mutex<Option<CancellationToken>>,
-    started: tokio::sync::Notify,
-}
-
-impl zx_agent::ai::Provider for CancellationProbe {
-    fn name(&self) -> &str {
-        "cancellation-probe"
-    }
-
-    fn stream(&self, _request: zx_agent::ai::Request, cancel: CancellationToken) -> zx_agent::ai::EventReceiver {
-        *self.token.lock().unwrap() = Some(cancel.clone());
-        self.started.notify_one();
-        let (mut tx, rx) = zx_agent::ai::provider::event_channel();
-        tokio::spawn(async move {
-            cancel.cancelled().await;
-            let _ = futures::SinkExt::send(
-                &mut tx,
-                zx_agent::ai::StreamEvent::Error(zx_agent::ai::AssistantMessage::failure(
-                    "cancellation-probe",
-                    "test-model",
-                    StopReason::Aborted,
-                    "cancelled",
-                )),
-            )
-            .await;
-        });
-        rx
-    }
-}
-
-#[tokio::test]
-async fn dropping_a_run_cancels_its_provider() {
-    let probe = Arc::new(CancellationProbe {
-        token: std::sync::Mutex::new(None),
-        started: tokio::sync::Notify::new(),
-    });
-    let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build().await;
-    let mut running = Box::pin(runner.run("go"));
-    tokio::select! {
-        () = probe.started.notified() => {}
-        _ = &mut running => panic!("the provider must still be running"),
-    }
-
-    drop(running);
-
-    let cancelled = probe.token.lock().unwrap().as_ref().unwrap().is_cancelled();
-    assert!(cancelled, "dropping the run left its provider active");
-}
+//! Run-level behavior: the kernel's neutral defaults, retries, limits and cancellation,
+//! continuation of cut-off answers, persistence, and resumed sessions.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -58,13 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
-
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{
-    Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, StopReason, SystemPrompt, ToolCall, Usage,
-};
+use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, ProviderErrorKind, SystemPrompt, ToolCall, Usage};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -73,7 +19,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
 use zx_testing::{
     EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
-    summarize, take_queued_inputs,
+    request_ids, summarize, take_queued_inputs,
 };
 
 /// A stored record, as a database row would hold it.
@@ -121,7 +67,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.session_id, runner.session().header().id);
+    assert_eq!(report.session_id, runner.transcript().header().id);
     let rows: Vec<Row> = table.try_iter().collect();
     let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(rows.len()).unwrap()).collect::<Vec<_>>());
@@ -134,7 +80,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     assert!(kinds.contains(&"tool_call_started"), "{kinds:?}");
 
     let loaded = LoadedSession {
-        header: runner.session().header().clone(),
+        header: runner.transcript().header().clone(),
         records: rows.iter().map(|row| row.json.clone()).collect(),
         incomplete_tail_bytes: 0,
     };
@@ -143,8 +89,8 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
         id: loaded.header.id.clone(),
         storage: Arc::new(LogStorage::holding(loaded, TableLog(sender))),
     };
-    let entries = runner.session().entries().to_vec();
-    let history = runner.session().messages();
+    let entries = runner.transcript().entries().to_vec();
+    let history = runner.transcript().messages();
     let next = Arc::new(FauxProvider::new([FauxStep::text("again")]));
     let (runner, _) = RunnerSetup {
         session: reloaded,
@@ -152,7 +98,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     }
     .build()
     .await;
-    assert_eq!(runner.session().entries(), entries);
+    assert_eq!(runner.transcript().entries(), entries);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let mut expected = history;
@@ -183,10 +129,6 @@ fn limits(max_model_requests: u32, timeout: Option<Duration>) -> RunLimits {
         ..RunLimits::default()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Neutral kernel defaults
-// ---------------------------------------------------------------------------
 
 #[test]
 fn default_limits_have_no_deadline() {
@@ -445,10 +387,6 @@ async fn an_unlimited_budget_can_explicitly_enable_continuation() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Retries
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn retries_transient_errors_without_repeating_the_prompt() {
     let provider = provider([
@@ -624,7 +562,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
     assert_eq!(lines[5]["targetId"], lines[4]["id"]);
     assert_eq!(lines[5]["replacement"], Value::Null);
     assert_eq!(
-        summarize(&runner.session().messages()),
+        summarize(&runner.transcript().messages()),
         ["user:diagnose", "assistant:ok"]
     );
 }
@@ -742,7 +680,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
             truncated: false
         }
     );
-    assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
+    assert_eq!(summarize(&runner.transcript().messages()), ["user:go"]);
     assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("later")]);
 }
 
@@ -762,7 +700,7 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
     runner.run("diagnose").await;
 
     let edit = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .find_map(|entry| match entry {
@@ -789,14 +727,14 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
 }
 
 /// Holds the first `message_end` of the user input `text` until the run is dropped.
-struct HoldInput {
+struct HoldMessageEnd {
     text: &'static str,
     held: std::sync::atomic::AtomicBool,
     reached: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
-impl Hook for HoldInput {
+impl Hook for HoldMessageEnd {
     fn observes(&self, event: &EventKind) -> bool {
         matches!(event, EventKind::MessageEnd { .. })
     }
@@ -822,8 +760,8 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     let mut setup = setup(&provider);
     let reached = Arc::new(tokio::sync::Notify::new());
     setup.config.hooks.push_with_timeout(
-        "hold_input",
-        Arc::new(HoldInput {
+        "hold_message_end",
+        Arc::new(HoldMessageEnd {
             text: "queued",
             held: std::sync::atomic::AtomicBool::new(false),
             reached: reached.clone(),
@@ -841,16 +779,12 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     let report = runner.run("second").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    let inputs: Vec<String> = summarize(&runner.session().messages())
+    let inputs: Vec<String> = summarize(&runner.transcript().messages())
         .into_iter()
         .filter(|message| message.starts_with("user:"))
         .collect();
     assert_eq!(inputs, ["user:first", "user:queued", "user:second"]);
 }
-
-// ---------------------------------------------------------------------------
-// RunLimits and cancellation
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_run_stops_at_the_step_limit() {
@@ -889,6 +823,7 @@ async fn a_run_stops_at_the_time_limit() {
     let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::TimedOut);
+    assert_eq!(report.error.as_deref(), Some("run exceeded the 150ms time limit"));
 }
 
 #[tokio::test]
@@ -908,10 +843,6 @@ async fn the_caller_can_cancel_a_waiting_run() {
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
 }
-
-// ---------------------------------------------------------------------------
-// Answers cut off at the output token limit
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn continues_a_truncated_answer_and_joins_the_parts() {
@@ -1035,10 +966,6 @@ async fn a_cut_off_answer_that_the_token_budget_leaves_no_continuation_for_says_
         "{error}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Persistence and resumed sessions
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn events_are_forwarded_after_persistence() {
@@ -1175,7 +1102,7 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
     let envelopes = events.envelopes();
     let seqs: Vec<u64> = envelopes.iter().map(|event| event.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(envelopes.len()).unwrap()).collect::<Vec<_>>());
-    let session_id = runner.session().header().id.clone();
+    let session_id = runner.transcript().header().id.clone();
     for event in &envelopes {
         assert_eq!(event.schema_version, EVENT_SCHEMA_VERSION);
         assert_eq!(event.run_id, envelopes[0].run_id);
@@ -1235,15 +1162,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
             _ => None,
         })
         .collect();
-    let recorded: Vec<String> = runner
-        .session()
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(started.id.clone()),
-            _ => None,
-        })
-        .collect();
+    let recorded = request_ids(&runner.transcript());
     assert_eq!(
         requests,
         [
@@ -1284,6 +1203,7 @@ async fn each_attempt_reports_how_it_ended() {
 }
 
 struct Uppercase;
+
 #[async_trait]
 impl Hook for Uppercase {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
@@ -1310,7 +1230,7 @@ async fn messages_and_context_edits_name_their_session_entries() {
         })
         .collect();
     let recorded: Vec<(&'static str, String)> = runner
-        .session()
+        .transcript()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(_) | Entry::ContextEdit(_)))
