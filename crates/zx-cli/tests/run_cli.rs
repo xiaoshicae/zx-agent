@@ -32,6 +32,12 @@ const KEY: &str = "sk-run-cli-test-key";
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
 
+/// The model every run asks for; the fake service answers any.
+const MODEL: &str = "mock-model";
+
+/// The arguments of a run without tools that asks `go`.
+const GO: [&str; 3] = ["--tools", "", "go"];
+
 /// A zx-agent home in `dir`: a config.toml for the fake model, with `top` before its
 /// `[provider]` table and `rest` after the test's provider keys.
 fn home(dir: &Path, top: &str, rest: &str) -> PathBuf {
@@ -40,49 +46,28 @@ fn home(dir: &Path, top: &str, rest: &str) -> PathBuf {
     home
 }
 
-/// `zx-agent run` in `dir` against `server`, with the zx-agent home `home`, the API key set
-/// and stdin closed; the caller adds the options and the prompt.
-fn program(server: &MockServer, dir: &Path, home: &Path) -> Command {
+/// `zx-agent run` with [`MODEL`] and `args`, in `dir` against `server`, with the zx-agent home
+/// `home`, the API key set and stdin closed.
+fn run_with_home(server: &MockServer, dir: &Path, home: &Path, args: &[&str]) -> Command {
     let mut command = zx_agent_in(dir, Home::Agent(home));
     command
-        .arg("run")
+        .args(["run", "--model", MODEL])
+        .args(args)
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
         .stdin(Stdio::null());
     command
 }
 
-/// `zx-agent run` without tools against `server`.
-fn run(server: &MockServer, dir: &Path) -> Command {
-    run_with(server, dir, "", "")
+/// [`run_with_home`] with a zx-agent home in `dir` whose config.toml has only the fake model.
+fn run(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
+    run_with_home(server, dir, &home(dir, "", ""), args)
 }
 
-/// `zx-agent run` without tools against `server`, with a config.toml in a zx-agent home of
-/// `dir` that has `top` before its `[provider]` table and `rest` after the test's provider
-/// keys.
-fn run_with(server: &MockServer, dir: &Path, top: &str, rest: &str) -> Command {
-    let mut command = program(server, dir, &home(dir, top, rest));
-    command.args(["--model", "mock", "--tools", "", "go"]);
-    command
-}
-
-/// `zx-agent run` against `server`, started in `dir`, with `args` after the model.
-fn run_against(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
-    run_configured(server, dir, "", args)
-}
-
-/// Like [`run_against`], with `provider` added to the `[provider]` table of the config.toml in
-/// a zx-agent home of `dir`.
-fn run_configured(server: &MockServer, dir: &Path, provider: &str, args: &[&str]) -> Command {
-    let mut command = program(server, dir, &home(dir, "", provider));
-    command.args(["--model", "mock-model"]).args(args);
-    command
-}
-
-/// Run to completion from an empty temporary directory.
+/// [`run`] to completion in an empty temporary directory.
 async fn run_once(server: &MockServer, args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
-    run_against(server, dir.path(), args).output().await.unwrap()
+    run(server, dir.path(), args).output().await.unwrap()
 }
 
 /// The `messages` array of request `index`.
@@ -113,7 +98,7 @@ async fn repaired_session_tails_are_reported_on_stderr() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path(), "mock-model"))
+    let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path(), MODEL))
         .await
         .unwrap();
     session.append_message(Message::user("earlier")).await.unwrap();
@@ -126,7 +111,7 @@ async fn repaired_session_tails_are_reported_on_stderr() {
         .unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    let output = run_against(
+    let output = run(
         &server,
         dir.path(),
         &[
@@ -196,7 +181,7 @@ async fn the_time_limit_exits_4() {
 async fn sigterm_exits_5() {
     let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
     let dir = tempfile::tempdir().unwrap();
-    let child = run_against(&server, dir.path(), &["--tools", "", "check"])
+    let child = run(&server, dir.path(), &["--tools", "", "check"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -220,7 +205,7 @@ async fn a_second_signal_ends_the_process_without_waiting_for_its_shutdown() {
     // the whole export timeout.
     let (collector, mut exports) = silent_listener().await;
     let dir = tempfile::tempdir().unwrap();
-    let mut child = run_against(&server, dir.path(), &["--tools", "", "check"])
+    let mut child = run(&server, dir.path(), &["--tools", "", "check"])
         .env(
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
             format!("http://{collector}/v1/traces"),
@@ -246,8 +231,7 @@ async fn a_truncated_answer_is_printed_and_exits_6() {
 
     let home = AgentHome::agent("unattended", "continueOnLength = 0");
     let dir = tempfile::tempdir().unwrap();
-    let output = run_against(&server, dir.path(), &["--tools", "", "check"])
-        .env("ZX_AGENT_HOME", home.path())
+    let output = run_with_home(&server, dir.path(), home.path(), &["--tools", "", "check"])
         .output()
         .await
         .unwrap();
@@ -278,7 +262,7 @@ async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
 async fn a_dash_reads_the_prompt_from_stdin() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut child = run_against(&server, dir.path(), &["--tools", "", "-"])
+    let mut child = run(&server, dir.path(), &["--tools", "", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -324,8 +308,7 @@ async fn the_system_prompt_states_the_environment() {
 
     let home = AgentHome::agent("unattended", "[permissions]\nallow = [\"bash(grep)\"]");
     let dir = tempfile::tempdir().unwrap();
-    run_against(&server, dir.path(), &["--tools", "bash", "check"])
-        .env("ZX_AGENT_HOME", home.path())
+    run_with_home(&server, dir.path(), home.path(), &["--tools", "bash", "check"])
         .output()
         .await
         .unwrap();
@@ -346,10 +329,15 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
     for instructions in ["Answer briefly.", "Answer at length."] {
         let agent = agent_text("extends = \"unattended\"", instructions);
         write_agent_file(&dir.path().join(".home"), "unattended", &agent);
-        let output = run_configured(&server, dir.path(), "systemUpdates = 'inline'", &args)
-            .output()
-            .await
-            .unwrap();
+        let output = run_with_home(
+            &server,
+            dir.path(),
+            &home(dir.path(), "", "systemUpdates = 'inline'"),
+            &args,
+        )
+        .output()
+        .await
+        .unwrap();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
 
@@ -385,7 +373,7 @@ async fn a_continued_session_works_in_the_directory_it_started_in() {
     let args = ["--tools", "", "--session", session.to_str().unwrap(), "check"];
     // Started by a process in `first`, continued by one in `second`.
     for cwd in [&first, &second] {
-        let output = run_against(&server, cwd, &args).output().await.unwrap();
+        let output = run(&server, cwd, &args).output().await.unwrap();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
 
@@ -415,7 +403,7 @@ async fn continuing_a_session_with_another_cwd_is_refused_before_any_request() {
             cwd.to_str().unwrap(),
             "check",
         ];
-        run_against(&server, dir.path(), &args)
+        run(&server, dir.path(), &args)
     };
     let started = run_in(&first).output().await.unwrap();
     assert_eq!(started.status.code(), Some(0), "{}", stderr(&started));
@@ -439,11 +427,11 @@ async fn a_session_whose_directory_is_gone_is_not_continued() {
     let (first, _) = two_directories(dir.path());
     let session = dir.path().join("s.jsonl");
     let args = ["--tools", "", "--session", session.to_str().unwrap(), "check"];
-    let started = run_against(&server, &first, &args).output().await.unwrap();
+    let started = run(&server, &first, &args).output().await.unwrap();
     assert_eq!(started.status.code(), Some(0), "{}", stderr(&started));
     std::fs::remove_dir_all(&first).unwrap();
 
-    let continued = run_against(&server, dir.path(), &args).output().await.unwrap();
+    let continued = run(&server, dir.path(), &args).output().await.unwrap();
 
     assert_eq!(continued.status.code(), Some(2), "{}", stderr(&continued));
     let error = stderr(&continued);
@@ -463,7 +451,7 @@ async fn a_session_whose_directory_is_gone_is_not_continued() {
 async fn an_answer_written_to_a_pipe_keeps_its_exact_text() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text(TITLE_ANSWER)]).await;
-    let output = run(&server, dir.path()).output().await.unwrap();
+    let output = run(&server, dir.path(), &GO).output().await.unwrap();
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), format!("{TITLE_ANSWER}\n"));
 }
@@ -476,7 +464,7 @@ async fn an_answer_written_to_a_terminal_cannot_drive_it() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text(TITLE_ANSWER)]).await;
     let (mut terminal, slave) = pty::open();
-    let mut command = run(&server, dir.path());
+    let mut command = run(&server, dir.path(), &GO);
     command.stdout(Stdio::from(slave)).stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     // The child holds the only other copy of the terminal, so reading ends when it exits.
@@ -513,11 +501,7 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
         Reply::Status(400, "bad\u{1b}[2J"),
     ])
     .await;
-    let output = program(&server, dir.path(), &home(dir.path(), "", ""))
-        .args(["--model", "mock", "go"])
-        .output()
-        .await
-        .unwrap();
+    let output = run(&server, dir.path(), &["go"]).output().await.unwrap();
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert_eq!(server.requests().len(), 2, "{stderr}");
@@ -540,7 +524,7 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
         Reply::text("second"),
     ])
     .await;
-    let mut first = run(&server, dir.path());
+    let mut first = run(&server, dir.path(), &GO);
     first
         .args(["--session", session.to_str().unwrap()])
         .stdout(Stdio::piped());
@@ -549,7 +533,7 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
     server.wait_for_requests(1).await;
     let before = std::fs::read(&session).unwrap();
 
-    let second = run(&server, dir.path())
+    let second = run(&server, dir.path(), &GO)
         .args(["--session", session.to_str().unwrap()])
         .output()
         .await
@@ -577,8 +561,7 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
     let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS] \
                    metrics=[$OTEL_EXPORTER_OTLP_METRICS_HEADERS]\"";
     let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
-    let output = program(&server, dir.path(), &home(dir.path(), "", ""))
-        .args(["--model", "mock", "--tools", "bash", "go"])
+    let output = run(&server, dir.path(), &["--tools", "bash", "go"])
         .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", TOKEN)
@@ -596,7 +579,7 @@ async fn request_fields_reach_the_model_and_the_audit() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let fields = r#"requestFields = { thinking = { type = "disabled" }, reasoning_effort = "low" }"#;
-    let output = run_with(&server, dir.path(), "", fields)
+    let output = run_with_home(&server, dir.path(), &home(dir.path(), "", fields), &GO)
         .args(["--session", "audit.jsonl"])
         .output()
         .await
@@ -638,7 +621,7 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
         ("", "", "unset.jsonl", json!({})),
     ];
     for (index, (top, provider, session, expected)) in cases.into_iter().enumerate() {
-        let output = run_with(&server, dir.path(), top, provider)
+        let output = run_with_home(&server, dir.path(), &home(dir.path(), top, provider), &GO)
             .args(["--session", session])
             .output()
             .await
@@ -676,7 +659,7 @@ async fn the_output_limit_reaches_the_model_in_the_chosen_field_and_the_audit() 
         ),
     ];
     for (index, (provider, session, sent, unsent)) in cases.into_iter().enumerate() {
-        let output = run_with(&server, dir.path(), "maxTokens = 77", provider)
+        let output = run_with_home(&server, dir.path(), &home(dir.path(), "maxTokens = 77", provider), &GO)
             .args(["--session", session])
             .output()
             .await
@@ -694,9 +677,7 @@ async fn the_output_limit_reaches_the_model_in_the_chosen_field_and_the_audit() 
 
 /// `zx-agent run --continue` against `server`, without a prompt.
 fn run_continue(server: &MockServer, dir: &Path) -> Command {
-    let mut command = program(server, dir, &home(dir, "", ""));
-    command.args(["--continue", "--model", "mock", "--tools", ""]);
-    command
+    run(server, dir, &["--continue", "--tools", ""])
 }
 
 #[tokio::test]
@@ -708,7 +689,7 @@ async fn continue_answers_again_after_a_failed_run_without_repeating_the_prompt(
         Reply::text("must not be requested"),
     ])
     .await;
-    let failed = run(&server, dir.path())
+    let failed = run(&server, dir.path(), &GO)
         .args(["--session", "s.jsonl"])
         .output()
         .await
@@ -770,7 +751,7 @@ async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the
         ("", "off.jsonl", false),
         ("fillMissingReasoning = true", "on.jsonl", true),
     ] {
-        let output = run_with(&server, dir.path(), "", provider)
+        let output = run_with_home(&server, dir.path(), &home(dir.path(), "", provider), &GO)
             .args(["--session", session])
             .output()
             .await
@@ -789,7 +770,7 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
     // With the streaming deltas, so that every event of the run is written.
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--output", "jsonl", "--deltas"])
         .output()
         .await
@@ -830,7 +811,7 @@ async fn the_token_budget_ends_a_run_with_exit_code_7_before_the_next_request() 
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
 
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--token-budget", "12"])
         .output()
         .await
@@ -855,7 +836,7 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
 
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--token-budget", "13"])
         .output()
         .await
@@ -873,8 +854,7 @@ async fn the_agent_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     let home = AgentHome::agent("unattended", "[limits]\ntokenBudget = 12\n");
 
     let limited = two_answers().await;
-    let output = run(&limited, dir.path())
-        .env("ZX_AGENT_HOME", home.path())
+    let output = run_with_home(&limited, dir.path(), home.path(), &GO)
         .output()
         .await
         .unwrap();
@@ -882,9 +862,8 @@ async fn the_agent_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     assert_eq!(limited.requests().len(), 1);
 
     let unlimited = two_answers().await;
-    let output = run(&unlimited, dir.path())
+    let output = run_with_home(&unlimited, dir.path(), home.path(), &GO)
         .args(["--token-budget", "0"])
-        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -892,10 +871,12 @@ async fn the_agent_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     assert_eq!(unlimited.requests().len(), 2);
 }
 
-/// A config.toml whose model `mock` costs 0.01 per answer of the fake service (10 input
+/// A config.toml whose model [`MODEL`] costs 0.01 per answer of the fake service (10 input
 /// tokens at 1000 per million; output free). The unit is whatever the prices use, such as CNY.
 fn priced_config() -> AgentHome {
-    AgentHome::new("[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n")
+    AgentHome::new(&format!(
+        "[[models]]\nid = \"{MODEL}\"\ncost = {{ input = 1000.0, output = 0.0 }}\n"
+    ))
 }
 
 #[tokio::test]
@@ -904,9 +885,8 @@ async fn the_cost_budget_ends_a_run_with_exit_code_8_before_the_next_request() {
     let server = two_answers().await;
     let home = priced_config();
 
-    let output = run(&server, dir.path())
+    let output = run_with_home(&server, dir.path(), home.path(), &GO)
         .args(["--cost-budget", "0.01"])
-        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -926,7 +906,7 @@ async fn a_cost_budget_without_prices_for_the_model_is_a_configuration_error() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
 
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--cost-budget", "0.01"])
         .output()
         .await
@@ -943,7 +923,7 @@ async fn an_error_shows_what_its_causes_quote_with_control_characters_escaped() 
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
 
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--cwd", "missing-\u{1b}[31m-dir"])
         .output()
         .await
@@ -960,7 +940,7 @@ async fn a_negative_cost_budget_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
 
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .args(["--cost-budget=-1"])
         .output()
         .await
@@ -976,8 +956,7 @@ async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
     let home = AgentHome::agent("unattended", "[permissions]\nask = [\"bash\"]\nallow = [\"bash(ls)\"]");
-    program(&server, dir.path(), home.path())
-        .args(["--model", "mock", "--tools", "bash"])
+    run_with_home(&server, dir.path(), home.path(), &["--tools", "bash"])
         .args(extra)
         .arg("go")
         .output()
@@ -1008,7 +987,11 @@ async fn fail_on_denied_keeps_exit_code_0_when_nothing_was_denied() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("done")]).await;
 
-    let output = run(&server, dir.path()).arg("--fail-on-denied").output().await.unwrap();
+    let output = run(&server, dir.path(), &GO)
+        .arg("--fail-on-denied")
+        .output()
+        .await
+        .unwrap();
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
@@ -1056,7 +1039,7 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let (endpoint, received) = collector().await;
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
         .output()
         .await
@@ -1080,7 +1063,7 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     }
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .env("OTEL_SERVICE_NAME", "not-a-reason-to-export")
         .output()
         .await
@@ -1096,7 +1079,7 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
 async fn exported_trace(dir: &Path, resource: &[(&str, &str)]) -> Vec<u8> {
     let (endpoint, received) = collector().await;
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let mut command = run(&server, dir);
+    let mut command = run(&server, dir, &GO);
     command.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", format!("{endpoint}/v1/traces"));
     for (name, value) in resource {
         command.env(name, value);
@@ -1178,7 +1161,7 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
     let traces = format!("{endpoint}/v1/traces");
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
         .env("TRACEPARENT", format!("00-{TRACE_ID}-{PARENT_SPAN_ID}-01"))
         .output()
@@ -1202,7 +1185,7 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
 
     // A value that is not a traceparent is reported; the run goes on in a trace of its own.
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let output = run(&server, dir.path())
+    let output = run(&server, dir.path(), &GO)
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
         .env("TRACEPARENT", "not-a-traceparent")
         .output()
@@ -1226,7 +1209,7 @@ async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
     let dir = tempfile::tempdir().unwrap();
     for mode in ["text", "jsonl"] {
         let server = MockServer::start(vec![Reply::text("the answer")]).await;
-        let mut child = run(&server, dir.path())
+        let mut child = run(&server, dir.path(), &GO)
             .args(["--output", mode])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1247,7 +1230,7 @@ async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
 async fn a_closed_stderr_leaves_the_exit_code_to_the_outcome() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
-    let mut child = run(&server, dir.path())
+    let mut child = run(&server, dir.path(), &GO)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
