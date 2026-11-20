@@ -155,10 +155,10 @@ provider 判断每次失败的种类，记在失败回答的 `providerError` 里
 | `rate_limited` | 限频：HTTP 429 或限频的错误码、措辞 | 重试 |
 | `unavailable` | 服务过载、出错或暂时不可用：HTTP 5xx 或相应的错误码、措辞 | 重试 |
 | `transport` | 连接失败或中途断开 | 重试 |
-| `timeout` | 连接、等待响应头或流中下一段数据超时（后两者的时限为 `provider.idleTimeoutSecs`），或 HTTP 408 与相应的错误码 | 重试 |
+| `timeout` | 连接、等待响应头或流中下一段数据超时（后两者的时限为 `provider.idleTimeoutSecs`），或 HTTP 408 与相应的错误码、措辞 | 重试 |
 | `context_overflow` | 上下文过长：HTTP 413、相应的错误码、通用措辞，或指明上下文过长的结束原因（如 `model_context_window_exceeded`） | 开启自动摘要时摘要一次再试，否则失败 |
-| `access_denied` | 凭据、权限或配额被拒：HTTP 401、403 或相应的错误码、措辞 | 失败 |
-| `api_key` | 取不到 API key，请求没有发出 | 失败 |
+| `access_denied` | 凭据、权限或配额被拒：HTTP 401、403 或相应的错误码、措辞；Anthropic 的月度花费上限也是 429，`error.details.error_code` 为 `enforced_spend_limit_reached`，算作此类 | 失败 |
+| `api_key` | 取不到 API key，或 key 不能作为请求头的值（如含换行），请求没有发出 | 失败 |
 | `refused` | 服务端以正常结束、截断与调用工具以外的原因结束回答（OpenAI 兼容服务的 `finish_reason` 如 `content_filter`，Anthropic 的 `stop_reason` 如 `refusal`），`code` 为该取值 | 失败 |
 | `protocol` | 响应不合协议，如无法解析的数据、流结束时没有结束原因 | 失败 |
 | `resource_limit` | 超出流式响应的上限：每次请求 16 MiB、每个 SSE 事件 1 MiB | 失败 |
@@ -224,4 +224,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.19 · 2026年11月
+REFERENCE.md · v0.20 · 2026年11月
