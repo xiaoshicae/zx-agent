@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow, ensure};
 
 use crate::ai::{Message, SystemMessage, SystemPrompt, UserMessageKind};
-use crate::transcript::{ProjectedMessage, Transcript, without_details};
+use crate::transcript::{ProjectedMessage, Transcript, without_details, without_image_data};
 
 /// The two messages of a summary request: `instructions` as the system prompt, `input` as
 /// the user message.
@@ -21,15 +21,17 @@ pub(crate) fn summary_messages(
         }),
         Message::User {
             content: input,
+            images: Vec::new(),
             timestamp: user_timestamp,
             kind: UserMessageKind::Prompt,
         },
     ]
 }
 
-/// The content of a summary request: the records it reads, without tool result details.
+/// The content of a summary request: the records it reads, without tool result details and
+/// without the data of their images, which a text cannot show.
 pub(crate) fn summary_input(records: &[ProjectedMessage]) -> Result<String> {
-    Ok(serde_json::to_string(&without_details(records))?)
+    Ok(serde_json::to_string(&without_image_data(&without_details(records)))?)
 }
 
 impl Transcript {
@@ -53,5 +55,31 @@ impl Transcript {
         );
         raw.truncate(cut);
         Ok(raw)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::Image;
+
+    #[test]
+    fn a_summary_reads_the_media_type_of_an_image_not_its_data() {
+        let image = Image {
+            mime_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        };
+        let records = [ProjectedMessage {
+            entry_id: "a".into(),
+            message: Message::user_with_images("look", vec![image]),
+        }];
+
+        let input = summary_input(&records).unwrap();
+
+        assert!(
+            input.contains(r#""images":[{"mimeType":"image/png","data":""}]"#),
+            "{input}"
+        );
+        assert!(!input.contains("iVBORw0KGgo"), "{input}");
     }
 }

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
-use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason, Usage};
+use crate::ai::{AssistantMessage, ContentBlock, Image, Message, StopReason, Usage};
 
 /// A model-visible message and the entry it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -68,10 +68,44 @@ pub(crate) fn without_details<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]
     Cow::Owned(copy)
 }
 
+/// The images of `message`: those of a user message or a tool result.
+fn images_of(message: &Message) -> &[Image] {
+    match message {
+        Message::User { images, .. } => images,
+        Message::ToolResult(result) => &result.images,
+        Message::System(_) | Message::Assistant(_) => &[],
+    }
+}
+
+/// How many images `items` hold.
+pub(crate) fn image_count<T: HasMessage>(items: &[T]) -> usize {
+    items.iter().map(|item| images_of(item.message()).len()).sum()
+}
+
+/// `items` with the data of their images left out, their media types kept: what a text of
+/// the conversation, such as a summary request, can carry of them. Copies only when an item
+/// has images.
+pub(crate) fn without_image_data<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]> {
+    if image_count(items) == 0 {
+        return Cow::Borrowed(items);
+    }
+    let mut copy = items.to_vec();
+    for item in &mut copy {
+        let images = match item.message_mut() {
+            Message::User { images, .. } => images,
+            Message::ToolResult(result) => &mut result.images,
+            Message::System(_) | Message::Assistant(_) => continue,
+        };
+        images.iter_mut().for_each(|image| image.data.clear());
+    }
+    Cow::Owned(copy)
+}
+
 /// Replace the text of `message` with `text`, as a context edit's replacement does: the
-/// content of a user message or a tool result, or the blocks of an assistant message, which
-/// become one text block. A system message keeps its sections: prompt changes are appended,
-/// never edited. Callers change a copy for the model, never the record.
+/// content of a user message or a tool result, whose images stay, or the blocks of an
+/// assistant message, which become one text block. A system message keeps its sections:
+/// prompt changes are appended, never edited. Callers change a copy for the model, never the
+/// record.
 pub(crate) fn replace_text(message: &mut Message, text: &str) {
     match message {
         Message::System(_) => {}

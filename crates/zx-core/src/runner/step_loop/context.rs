@@ -134,6 +134,7 @@ impl StepLoop<'_> {
     ) -> Result<(), Halt> {
         let Message::User {
             content,
+            images,
             kind: UserMessageKind::Prompt,
             ..
         } = &message
@@ -157,6 +158,7 @@ impl StepLoop<'_> {
         let queued = queue.map(|queue| {
             let original = Input::User {
                 text: text.clone(),
+                images: images.clone(),
                 actor: actor.clone(),
             };
             (queue, original)
@@ -183,7 +185,10 @@ impl StepLoop<'_> {
     /// [`StepLoop::record_custom_message`].
     pub(super) async fn record_input(&mut self, message: Input, queue: Option<Queue>) -> Result<(), Halt> {
         match message {
-            Input::User { text, actor } => self.record_user_input(Message::user(text), actor, queue).await,
+            Input::User { text, images, actor } => {
+                self.record_user_input(Message::user_with_images(text, images), actor, queue)
+                    .await
+            }
             Input::Custom(message) => self.record_custom_message(message, queue).await,
         }
     }

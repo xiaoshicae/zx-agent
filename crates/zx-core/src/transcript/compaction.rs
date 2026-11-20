@@ -122,6 +122,7 @@ impl CompactionSummary {
         text.push_str("</context_summary>");
         Message::User {
             content: text,
+            images: Vec::new(),
             timestamp,
             kind: UserMessageKind::Summary,
         }

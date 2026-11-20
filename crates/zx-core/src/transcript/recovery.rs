@@ -227,6 +227,7 @@ mod tests {
             tool_call_id: id.into(),
             tool_name: name.into(),
             content: "done".into(),
+            images: Vec::new(),
             is_error: false,
             timestamp: 0,
             duration_ms: None,

@@ -18,7 +18,7 @@
 | `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |
 | `zx-ai-http` | 两个 provider 共用的 HTTP 部分：设置检查、取 key 与发请求、按限额读事件流、请求失败（`Failure`、Retry-After）；不属于 API。协议的写法与失败的归类留在各 provider |
 | `zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
-| `zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
+| `zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP、图片进入会话前的适配 |
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |
 | `zx-app` | 应用层，命令行、IM 服务与其他宿主（如 Web 服务）共用：`config.toml` 与 agent 文件（`config`）、由它们装配 agent 的 `Application`、追踪导出（`otel`）、进程收尾（`shutdown`）。不知道命令行、终端与协议（ACP、IM 平台），不打印，要说的返回给宿主 |
 | `zx-cli` | 程序 `zx-agent`（代码都在库里，`main.rs` 只调用它）：参数、输出与退出码；agent 都经 `zx_app::Application` 得到 |

@@ -56,7 +56,7 @@ pub use self::log::{LoadedSession, LogRecord, SessionLog};
 pub use self::memory::MemoryStorage;
 pub use self::name::{SessionInfoEntry, SessionName};
 pub use self::projection::ProjectedMessage;
-pub(crate) use self::projection::{replace_text, without_details};
+pub(crate) use self::projection::{image_count, replace_text, without_details, without_image_data};
 pub use self::recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use self::request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 pub use self::storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
@@ -67,7 +67,7 @@ use crate::ai::{Message, UserMessageKind, now_ms};
 /// The session format: written to every new header, and the only version a session may have
 /// to be created, loaded or read. A change to the format raises it, and sessions of any
 /// other version are refused.
-pub const SESSION_VERSION: u32 = 14;
+pub const SESSION_VERSION: u32 = 15;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.

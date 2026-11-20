@@ -15,6 +15,7 @@
 | `crates/zx-agent/tests/step_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、取消、队列；系统提示词的记录、参数预处理，工具的进度、详情与用量 |
 | `crates/zx-agent/tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话；事件的编号与信封 |
 | `crates/zx-agent/tests/session.rs` | 共享会话：Busy、取消、`Run`（事件顺序、读才推进、丢弃即取消、多个句柄）、提问的 hold 在写入会话后才释放、插话与后续消息、`take_queued`、经会话回答审批（按事件给出的审批编号；超时后迟到的回答落空）、模型与推理强度切换、起名、记录写不进去时自行关闭 |
+| `crates/zx-agent/tests/images.rs` | 图片：人发的与工具返回的图片随消息到达模型并记入会话，请求标明模型能否看图 |
 | `crates/zx-agent/tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、失败的归类与重试、超时、取消、错误正文；请求头与 API key 的来源、缓存键与输出上限的字段 |
 | `crates/zx-agent/tests/anthropic_mock.rs` | 真实 HTTP 下的 Anthropic provider：带思考与签名的工具往返、请求头与请求体、含缓存的用量；思考块属于另一段对话时按服务的回答失败、不重发；过载与拒绝的归类 |
 | `crates/zx-agent/tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
@@ -57,10 +58,10 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、续接的会话在原目录工作 |
+| `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、续接的会话在原目录工作、`@文件` 附图 |
 | `crates/zx-cli/tests/chat_cli.rs` | chat：审批、斜杠命令、摘要、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
-| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号 |
+| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
@@ -74,11 +75,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-im/tests/im_server/` | IM 服务（线束在 `main.rs`，测试按主题分在同目录的 `conversations`、`commands`、`approvals`、`runs`、`lifecycle`、`statuses` 里）：会话划分与接话、`/new`、`/cancel` 与 `/compact`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答 |
-| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递；其他机器人的消息只听不答，自己的不听 |
-| ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台；存不进 backlog 的消息不确认投递 |
+| `crates/zx-im/tests/im_server/` | IM 服务（线束在 `main.rs`，测试按主题分在同目录的 `conversations`、`commands`、`approvals`、`runs`、`lifecycle`、`statuses`、`images` 里）：会话划分与接话、`/new`、`/cancel` 与 `/compact`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答、要回答的消息的图片下载后交给模型（用不了的在正文里写明原因，至多 4 张，不回答的只写名字） |
+| `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递；其他机器人的消息只听不答，自己的不听；消息里的图片只传引用、其他文件略去，用 bot token 下载，超限与别处的 URL 被拒 |
+| ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台；存不进 backlog 的消息不确认投递；图片与富文本消息带图片引用，经消息资源接口下载，被拒与超限报错 |
 | `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程、提示词中说明对话怎样送达的一段、被 SIGKILL 结束后再启动时回答它没处理完的消息（仅 Unix） |
 
 ---
 
-TESTS.md · v0.23 · 2026年11月
+TESTS.md · v0.24 · 2026年11月

@@ -36,7 +36,7 @@ use super::{
     PlatformInput, http_client, pause, report, secret, split_text,
 };
 use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageId, MessageRef, Post, Replacement,
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post, Replacement,
 };
 
 /// Where the open API lives.
@@ -319,6 +319,16 @@ impl ImChannel for FeishuChannel {
                     .map_err(ImError::from)
             }
         }
+    }
+
+    /// The image `image` of `message`, by the message resource API, which needs one of the
+    /// permissions `im:message`, `im:message:readonly` and `im:message.history:readonly`.
+    async fn image(&self, message: &MessageRef, image: &ImageRef, max_bytes: usize) -> Result<Vec<u8>, ImError> {
+        let path = format!(
+            "/open-apis/im/v1/messages/{}/resources/{}?type=image",
+            message.id.0, image.key
+        );
+        self.resource(&path, max_bytes).await
     }
 }
 

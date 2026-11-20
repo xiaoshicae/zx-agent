@@ -8,10 +8,12 @@
 //! - `lifecycle`: idle release, the stop, the backlog a restart answers, and sessions that
 //!   close or cannot be opened
 //! - `statuses`: the statuses of running work kept for a restart
+//! - `images`: the images of messages, fetched for the messages the bot answers
 
 mod approvals;
 mod commands;
 mod conversations;
+mod images;
 mod lifecycle;
 mod runs;
 mod statuses;
@@ -42,8 +44,8 @@ use zx_agent::transcript::{
 };
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, Backlog, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError,
-    Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig,
-    ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
+    ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server,
+    ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 
@@ -113,10 +115,23 @@ struct FakeChannel {
     history_gate: Option<Arc<Gate>>,
     /// Users' names; the others have none.
     names: HashMap<String, String>,
+    /// The images the platform keeps, by key, or why it cannot give one.
+    images: HashMap<String, Result<Vec<u8>, String>>,
 }
 
 #[async_trait]
 impl ImChannel for FakeChannel {
+    async fn image(&self, _message: &MessageRef, image: &ImageRef, max_bytes: usize) -> Result<Vec<u8>, ImError> {
+        match self.images.get(&image.key) {
+            Some(Ok(bytes)) if bytes.len() > max_bytes => {
+                Err(ImError::Transport(format!("the file is larger than {max_bytes} bytes")))
+            }
+            Some(Ok(bytes)) => Ok(bytes.clone()),
+            Some(Err(why)) => Err(ImError::Transport(why.clone())),
+            None => Err(ImError::Transport(format!("no image {}", image.key))),
+        }
+    }
+
     async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
         if let Some(gate) = &self.history_gate {
             gate.pass().await;
@@ -474,6 +489,8 @@ struct Setup {
     updates: Updates,
     history: Vec<Said>,
     names: HashMap<String, String>,
+    /// The images the channel gives, by key.
+    images: HashMap<String, Result<Vec<u8>, String>>,
     /// How much of the latest talk `/compact` leaves as it is; the agent's default without.
     keep_recent_bytes: Option<usize>,
     /// Where a summarizer of the host waits before it summarizes; the model summarizes
@@ -506,6 +523,7 @@ impl Default for Setup {
             updates: Updates::default(),
             history: Vec::new(),
             names: HashMap::new(),
+            images: HashMap::new(),
             keep_recent_bytes: None,
             summary_gate: None,
         }
@@ -558,6 +576,7 @@ fn start(setup: Setup) -> Harness {
         history: setup.history,
         history_gate: setup.history_gate,
         names: setup.names,
+        images: setup.images,
     });
     let (events_to, events) = mpsc::unbounded_channel();
     let mut config = setup.config;
@@ -647,6 +666,7 @@ fn group_message(
         addressee,
         sender: UserId(sender.into()),
         text: text.into(),
+        images: Vec::new(),
     }
 }
 
@@ -675,6 +695,7 @@ impl Harness {
             addressee: Addressee::Bot,
             sender: UserId(ASKER.into()),
             text: text.into(),
+            images: Vec::new(),
         };
         self.inject.send(message).await.unwrap();
     }

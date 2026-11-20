@@ -259,6 +259,7 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
         tool_call_id: "c1".into(),
         tool_name: "echo".into(),
         content: "the tool said hi".into(),
+        images: Vec::new(),
         is_error: false,
         timestamp: 1,
         duration_ms: None,

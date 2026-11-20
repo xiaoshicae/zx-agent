@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -23,15 +24,17 @@ use self::api::CallError;
 use self::events::{Me, button, card_request, escape, history, resolution, section, split};
 use super::{
     Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
-    PlatformInput, RATE_LIMIT_RETRIES, SLACK, http_client, report, secret,
+    PlatformInput, RATE_LIMIT_RETRIES, SLACK, body_within, content_type_is, http_client, report, secret,
 };
 use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, Inlet, MessageRef, Post, Replacement, Said, ThreadId,
-    UserId,
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageRef, Post, Replacement, Said,
+    ThreadId, UserId,
 };
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
+/// Where Slack keeps the files of messages, which its private URLs name.
+const FILE_HOST: &str = "files.slack.com";
 /// The variables that hold the tokens, unless the `[slack]` section of im.toml names others.
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -67,7 +70,8 @@ const SETUP_ERRORS: [&str; 9] = [
     "no_permission",
 ];
 
-/// Settings of a [`SlackChannel`]. The tokens are sent only to `api_base` and never shown.
+/// Settings of a [`SlackChannel`]. The tokens are sent only to `api_base`, the bot token
+/// also to Slack's file host for the images of messages, and never shown.
 pub struct SlackConfig {
     /// App-level token (`xapp-`) for Socket Mode.
     pub app_token: String,
@@ -392,6 +396,51 @@ impl ImChannel for SlackChannel {
             // Acknowledged before, as by a redelivery.
             Err(CallError::Refused { code, .. }) if code == "already_reacted" => Ok(()),
             other => other.map(drop).map_err(ImError::from),
+        }
+    }
+
+    /// The file behind `image`'s private URL, fetched with the bot token (needs `files:read`).
+    async fn image(&self, _message: &MessageRef, image: &ImageRef, max_bytes: usize) -> Result<Vec<u8>, ImError> {
+        let failed = |why: String| ImError::Transport(format!("slack file {}: {why}", image.name));
+        let url = self.file_url(&image.key)?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.config.bot_token)
+            .send()
+            .await
+            .map_err(|error| failed(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(failed(format!("HTTP {status}")));
+        }
+        // Slack answers a token it does not take with its sign-in page, under status 200.
+        if content_type_is(&response, "text/html") {
+            return Err(failed(
+                "Slack sent a page instead of the file; the bot token may lack files:read".into(),
+            ));
+        }
+        body_within(response, max_bytes).await.map_err(failed)
+    }
+}
+
+impl SlackChannel {
+    /// `key`, a file's private URL, as a URL the bot token may go to: on Slack's file host, or
+    /// on the host of `api_base`, such as a test server. A file elsewhere, such as a remote
+    /// file another app shared, is refused unfetched: its URL is not Slack's.
+    fn file_url(&self, key: &str) -> Result<Url, ImError> {
+        let refused = || ImError::Transport(format!("slack: {key} is not a URL of a file Slack keeps"));
+        let url = Url::parse(key).map_err(|_| refused())?;
+        let api = Url::parse(&self.config.api_base)
+            .map_err(|error| ImError::Config(format!("slack: invalid API base {}: {error}", self.config.api_base)))?;
+        let on_api_host = url.scheme() == api.scheme()
+            && url.host_str() == api.host_str()
+            && url.port_or_known_default() == api.port_or_known_default();
+        let on_file_host = url.scheme() == "https" && url.host_str() == Some(FILE_HOST);
+        if on_api_host || on_file_host {
+            Ok(url)
+        } else {
+            Err(refused())
         }
     }
 }

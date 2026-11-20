@@ -3,10 +3,13 @@
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tokio_util::sync::CancellationToken;
-use zx_agent::ai::Message;
+use zx_agent::ai::{Image, Message};
+use zx_agent::builtin::images;
+use zx_agent::builtin::tools::DEFAULT_MAX_FILE_BYTES;
 use zx_agent::events::{Event, EventKind, RunOutcome, RunReport};
+use zx_agent::input::Input;
 use zx_agent::{Run, Session};
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook, TraceParent};
@@ -33,7 +36,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         output,
         deltas,
     } = args;
-    let task = Task::of(prompt, continue_session, session)?;
+    let task = Task::of(prompt, continue_session, session).await?;
     with_telemetry(async move |telemetry| {
         let app = connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
@@ -58,23 +61,36 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
 
 /// What a run answers, and the session file it keeps the conversation in.
 enum Task {
-    /// A prompt, in `--session`'s file when one is given, else in memory.
-    Prompt { prompt: String, file: Option<PathBuf> },
+    /// A prompt and its images, in `--session`'s file when one is given, else in memory.
+    Prompt { prompt: Input, file: Option<PathBuf> },
     /// `--continue`: what the conversation in `--session`'s file ends with.
     Continue { file: PathBuf },
 }
 
 impl Task {
-    /// The task that `prompt`, `--continue` and `--session`'s `file` describe, its prompt read.
-    /// The parser takes a prompt or `--continue`, not both, and `--continue` only with
-    /// `--session`; the last error is for what it refuses.
-    fn of(prompt: Option<String>, continue_session: bool, file: Option<PathBuf>) -> Result<Self> {
-        match (prompt, continue_session, file) {
-            (Some(prompt), false, file) => Ok(Self::Prompt {
-                prompt: read_prompt(&prompt)?,
-                file,
-            }),
-            (None, true, Some(file)) => {
+    /// The task that the prompt's `arguments`, `--continue` and `--session`'s `file`
+    /// describe: the prompt read, and the images its `@` arguments name, fitted to the model
+    /// APIs' limits. The parser takes a prompt or `--continue`, not both, and `--continue`
+    /// only with `--session`; the last error is for what it refuses.
+    async fn of(arguments: Vec<String>, continue_session: bool, file: Option<PathBuf>) -> Result<Self> {
+        match (arguments.is_empty(), continue_session, file) {
+            (false, false, file) => {
+                let (paths, text) = prompt_arguments(arguments)?;
+                let text = match text {
+                    Some(text) => read_prompt(&text)?,
+                    None => String::new(),
+                };
+                let images = attached_images(&paths).await?;
+                // The kernel takes any input; an empty one would reach the model as a message.
+                anyhow::ensure!(!text.trim().is_empty() || !images.is_empty(), "the prompt is empty");
+                let prompt = Input::User {
+                    text,
+                    images,
+                    actor: None,
+                };
+                Ok(Self::Prompt { prompt, file })
+            }
+            (true, true, Some(file)) => {
                 // Checked before anything starts, a synchronous look at one path: continuing a new
                 // session has nothing to answer.
                 anyhow::ensure!(
@@ -97,20 +113,65 @@ impl Task {
     }
 }
 
+/// The prompt's arguments apart: the paths of those that start with `@`, the images to
+/// attach (pi: `@files`), and the one argument left, the description, if any.
+fn prompt_arguments(arguments: Vec<String>) -> Result<(Vec<PathBuf>, Option<String>)> {
+    let (attached, mut descriptions): (Vec<String>, Vec<String>) =
+        arguments.into_iter().partition(|argument| argument.starts_with('@'));
+    let paths = attached
+        .iter()
+        .map(|argument| match &argument[1..] {
+            "" => Err(anyhow!("an @ argument names no file: write @<path>")),
+            path => Ok(PathBuf::from(path)),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        descriptions.len() <= 1,
+        "give one task description, not {}: quote a description that has spaces",
+        descriptions.len()
+    );
+    Ok((paths, descriptions.pop()))
+}
+
+/// The description an argument gives: itself, or with "-" what stdin holds.
 fn read_prompt(arg: &str) -> Result<String> {
-    let prompt = if arg == "-" {
-        // A startup read: the session and the runtime's other tasks do not exist yet, so
-        // nothing waits while stdin is read to its end.
-        let mut text = String::new();
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .context("cannot read the prompt from stdin")?;
-        text
-    } else {
-        arg.to_string()
-    };
-    anyhow::ensure!(!prompt.trim().is_empty(), "the prompt is empty");
-    Ok(prompt)
+    if arg != "-" {
+        return Ok(arg.to_string());
+    }
+    // A startup read: the session and the runtime's other tasks do not exist yet, so nothing
+    // waits while stdin is read to its end.
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("cannot read the prompt from stdin")?;
+    Ok(text)
+}
+
+/// The images that `paths` name, each fitted to the model APIs' limits; an error names the
+/// path it could not attach and says why.
+async fn attached_images(paths: &[PathBuf]) -> Result<Vec<Image>> {
+    let mut attached = Vec::with_capacity(paths.len());
+    for path in paths {
+        let cannot_attach = || format!("cannot attach @{}", path.display());
+        let bytes = read_image_file(path).with_context(cannot_attach)?;
+        let fitted = images::fit(bytes)
+            .await
+            .map_err(|reason| anyhow!("{}: {reason}", cannot_attach()))?;
+        attached.push(fitted.image);
+    }
+    Ok(attached)
+}
+
+/// The bytes of the regular file at `path`, at most as many as read_file reads: a startup read,
+/// like the prompt's from stdin. A relative path is the launch directory's, as a shell has it.
+fn read_image_file(path: &Path) -> Result<Vec<u8>> {
+    let found = std::fs::metadata(path)?;
+    anyhow::ensure!(found.is_file(), "it is not a regular file");
+    anyhow::ensure!(
+        found.len() <= DEFAULT_MAX_FILE_BYTES,
+        "it is larger than {DEFAULT_MAX_FILE_BYTES} bytes"
+    );
+    Ok(std::fs::read(path)?)
 }
 
 /// The trace hook of an unattended run: the run continues the caller's trace when

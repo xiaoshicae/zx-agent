@@ -32,6 +32,7 @@ fn priced() -> ModelMeta {
             cache_read: 0.0,
             cache_write: 0.0,
         }),
+        takes_images: false,
     }
 }
 
@@ -388,6 +389,7 @@ fn window(tokens: u64) -> ModelMeta {
     ModelMeta {
         context_window: Some(tokens),
         cost: None,
+        takes_images: false,
     }
 }
 

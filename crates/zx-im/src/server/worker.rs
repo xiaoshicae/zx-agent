@@ -35,7 +35,7 @@ use super::outlet::{Asked, Finished, Opened, Outlet};
 use super::received::Receipt;
 use super::render::answer_of;
 use super::{ServerEvent, SessionKey, Shared};
-use crate::{Addressee, ApprovalId, Choice, ImChannel, MessageRef, UserId};
+use crate::{Addressee, ApprovalId, Choice, ImChannel, ImageRef, MessageRef, UserId};
 
 /// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
 const UPDATE_CAPACITY: usize = 16;
@@ -47,13 +47,16 @@ pub(super) struct Incoming {
     pub(super) sender: UserId,
     pub(super) addressee: Addressee,
     pub(super) text: String,
+    /// The images attached, fetched only when the bot answers.
+    pub(super) images: Vec<ImageRef>,
     pub(super) permit: Option<InputPermit>,
     /// Its place in the backlog, kept with it until it is handled.
     pub(super) receipt: Receipt,
 }
 
 pub(super) enum WorkerInput {
-    Message(Incoming),
+    /// Boxed: a message carries far more than a click.
+    Message(Box<Incoming>),
     Decision {
         user: UserId,
         approval: ApprovalId,

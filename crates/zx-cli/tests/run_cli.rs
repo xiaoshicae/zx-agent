@@ -1227,3 +1227,96 @@ async fn a_closed_stderr_leaves_the_exit_code_to_the_outcome() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), "the answer\n");
 }
+
+/// A PNG of one transparent pixel, in base64.
+const ONE_PIXEL_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/// `dir/dot.png`, a PNG of one pixel.
+fn write_dot(dir: &Path) {
+    use base64::Engine;
+
+    let png = base64::engine::general_purpose::STANDARD.decode(ONE_PIXEL_PNG).unwrap();
+    std::fs::write(dir.join("dot.png"), png).unwrap();
+}
+
+#[tokio::test]
+async fn an_at_argument_attaches_an_image_to_the_prompt_read_from_stdin() {
+    let server = MockServer::start(vec![Reply::text("a dot")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    write_dot(dir.path());
+    let home = home(
+        dir.path(),
+        "",
+        "[[models]]\nid = \"mock-model\"\ninput = [\"text\", \"image\"]",
+    );
+    let mut child = run_with_home(&server, dir.path(), &home, &["--tools", "", "@dot.png", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"what is this?").await.unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let url = format!("data:image/png;base64,{ONE_PIXEL_PNG}");
+    assert_eq!(
+        sent_messages(&server, 0).last().unwrap()["content"],
+        json!([{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": "what is this?"}])
+    );
+}
+
+#[tokio::test]
+async fn an_image_alone_is_a_prompt_and_a_model_not_said_to_take_images_gets_a_note() {
+    let server = MockServer::start(vec![Reply::text("cannot see it")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    write_dot(dir.path());
+
+    let output = run(&server, dir.path(), &["--tools", "", "@dot.png"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        sent_messages(&server, 0).last().unwrap()["content"],
+        "(image omitted: model does not support images)"
+    );
+}
+
+#[tokio::test]
+async fn what_cannot_be_attached_exits_2_before_any_request() {
+    let server = MockServer::start(vec![Reply::text("unused")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    write_dot(dir.path());
+    std::fs::write(dir.path().join("notes.txt"), "not a picture").unwrap();
+    std::fs::create_dir(dir.path().join("pictures")).unwrap();
+    let session = dir.path().join("s.jsonl").display().to_string();
+
+    for (args, expected) in [
+        (
+            vec!["@notes.txt", "go"],
+            "cannot attach @notes.txt: not a PNG, JPEG, GIF or WebP image",
+        ),
+        (vec!["@missing.png", "go"], "cannot attach @missing.png: "),
+        (
+            vec!["@pictures", "go"],
+            "cannot attach @pictures: it is not a regular file",
+        ),
+        (vec!["@", "go"], "an @ argument names no file"),
+        (vec!["@dot.png", "go", "on"], "give one task description, not 2"),
+        (
+            vec!["--session", &session, "--continue", "@dot.png"],
+            "cannot be used with",
+        ),
+    ] {
+        let output = run(&server, dir.path(), &args).output().await.unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", stderr(&output));
+        assert!(stderr(&output).contains(expected), "{args:?}: {}", stderr(&output));
+    }
+    assert!(server.requests().is_empty());
+}

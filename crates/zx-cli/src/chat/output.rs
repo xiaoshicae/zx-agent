@@ -374,6 +374,7 @@ mod tests {
             tool_call_id: "c".into(),
             tool_name: "t".into(),
             content: content.into(),
+            images: Vec::new(),
             is_error: false,
             timestamp: 0,
             duration_ms: None,

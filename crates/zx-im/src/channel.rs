@@ -28,11 +28,14 @@ use crate::backlog::{self, Backlog, Kept};
 ///   a group's threads, each with its [`ChatKind`] and [`Addressee`]; never the bot's own,
 ///   nor a message posted in a group itself that does not mention the bot. The server
 ///   decides which to answer;
+/// - it passes on the images attached to a message as [`ImageRef`]s, PNG, JPEG, GIF and
+///   WebP only, and fetches one when the server asks ([`image`](Self::image)): only then,
+///   so that the backlog keeps small records;
 /// - it queues its sends to stay within the platform's rate limits.
 ///
-/// [`thread_history`](Self::thread_history), [`display_name`](Self::display_name) and
-/// [`acknowledge`](Self::acknowledge) have defaults that do nothing, for a platform, or an
-/// app without the permissions, that cannot.
+/// [`thread_history`](Self::thread_history), [`display_name`](Self::display_name),
+/// [`acknowledge`](Self::acknowledge) and [`image`](Self::image) have defaults that do
+/// nothing, for a platform, or an app without the permissions, that cannot.
 #[async_trait]
 pub trait ImChannel: Send + Sync {
     /// Name used in configuration and logs, in the labels of the sessions of its
@@ -74,6 +77,17 @@ pub trait ImChannel: Send + Sync {
     /// run that is already answering. The default shows nothing.
     async fn acknowledge(&self, _message: &MessageRef) -> Result<(), ImError> {
         Ok(())
+    }
+
+    /// The bytes of `image`, attached to `message`, as the platform keeps them: asked for when
+    /// the server answers the message. Fails on a file larger than `max_bytes`, read no
+    /// further. The default fetches nothing: a platform that passes on no images.
+    async fn image(&self, _message: &MessageRef, image: &ImageRef, _max_bytes: usize) -> Result<Vec<u8>, ImError> {
+        Err(ImError::Transport(format!(
+            "{} cannot fetch the image {}",
+            self.platform(),
+            image.name
+        )))
     }
 }
 
@@ -212,6 +226,18 @@ pub struct Said {
     pub text: String,
 }
 
+/// An image attached to a message, by what the platform calls it: the server asks the
+/// channel for its bytes only when it answers the message ([`ImChannel::image`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ImageRef {
+    /// What the channel fetches it by, such as Slack's private URL of the file.
+    pub key: String,
+    /// What people call it, such as its file name: the model reads it when it cannot see the
+    /// image.
+    pub name: String,
+}
+
 /// An event from the platform.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inbound {
@@ -224,6 +250,8 @@ pub enum Inbound {
         addressee: Addressee,
         sender: UserId,
         text: String,
+        /// The images attached, in the order they were posted.
+        images: Vec<ImageRef>,
     },
     /// A click on a button of an approval card. `at` is where the card was posted.
     Decision {

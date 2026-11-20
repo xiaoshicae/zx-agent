@@ -58,15 +58,17 @@ impl Acp {
 
     /// Start the agent with `home` as its home directory, or one of its own.
     async fn start_in(server: &MockServer, cwd: &Path, args: &[&str], home: Option<&Path>) -> Self {
+        Self::start_configured(server, cwd, args, home, "idleTimeoutSecs = 10").await
+    }
+
+    /// [`Acp::start_in`], with `rest` after the provider keys of its config.toml.
+    async fn start_configured(server: &MockServer, cwd: &Path, args: &[&str], home: Option<&Path>, rest: &str) -> Self {
         let own = match home {
             Some(_) => None,
             None => Some(tempfile::tempdir().unwrap()),
         };
         let home = home.map_or_else(|| own.as_ref().unwrap().path().to_path_buf(), Path::to_path_buf);
-        write_config(
-            &home.join(".zx-agent"),
-            &fake_model_config(KEY_VAR, "", "idleTimeoutSecs = 10"),
-        );
+        write_config(&home.join(".zx-agent"), &fake_model_config(KEY_VAR, "", rest));
         let mut child = zx_agent_in(cwd, Home::User(&home))
             .arg("acp")
             .args(["--model", "mock-model"])
@@ -1208,5 +1210,171 @@ async fn closing_a_session_the_agent_does_not_hold_succeeds() {
         assert_eq!(closed["result"], json!({}), "{closed}");
     }
     assert!(acp.inbox.is_empty(), "{:?}", acp.inbox);
+    assert!(acp.finish().await.success());
+}
+
+/// A PNG of one transparent pixel, in base64.
+const ONE_PIXEL_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/// The provider keys of the harness and a model that takes images.
+const SEEING: &str = "idleTimeoutSecs = 10\n[[models]]\nid = \"mock-model\"\ninput = [\"text\", \"image\"]";
+
+/// A prompt block of an image whose base64 is `data`.
+fn image_block(data: &str) -> Value {
+    json!({"type": "image", "data": data, "mimeType": "image/png"})
+}
+
+/// The content part an OpenAI-compatible request carries for [`ONE_PIXEL_PNG`].
+fn image_part() -> Value {
+    json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{ONE_PIXEL_PNG}")}})
+}
+
+#[tokio::test]
+async fn images_in_a_prompt_reach_a_model_that_takes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("a dot"), Reply::text("the same dot")]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, SEEING).await;
+    let initialized = acp.initialize().await;
+    let prompts = &initialized["result"]["agentCapabilities"]["promptCapabilities"];
+    assert_eq!(prompts["image"], true, "{initialized}");
+    assert_ne!(prompts["audio"], true, "{initialized}");
+    let session = acp.create(dir.path()).await;
+
+    let with_text = acp
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "what is this?"}, image_block(ONE_PIXEL_PNG)]}),
+        )
+        .await;
+    assert_eq!(with_text["result"]["stopReason"], "end_turn", "{with_text}");
+    // An image alone is a prompt too.
+    let alone = acp
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [image_block(ONE_PIXEL_PNG)]}),
+        )
+        .await;
+    assert_eq!(alone["result"]["stopReason"], "end_turn", "{alone}");
+
+    let requests = server.requests();
+    let first = requests[0].body["messages"].as_array().unwrap();
+    assert_eq!(
+        first.last().unwrap()["content"],
+        json!([image_part(), {"type": "text", "text": "what is this?"}])
+    );
+    let second = requests[1].body["messages"].as_array().unwrap();
+    assert_eq!(second.last().unwrap()["content"], json!([image_part()]));
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn an_image_that_cannot_be_used_is_refused_before_any_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("unused")]).await;
+    let mut acp = Acp::start(&server, dir.path(), &[]).await;
+    let session = acp.session(dir.path()).await;
+
+    // Only the PNG's signature: there is no picture to decode.
+    let broken = acp
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "look"}, image_block("iVBORw0KGgo=")]}),
+        )
+        .await;
+    assert_eq!(broken["error"]["code"], -32602, "{broken}");
+    let message = broken["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("image 1 of the prompt cannot be used: cannot decode the image"),
+        "{message}"
+    );
+    let command = acp
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "/compact"}, image_block(ONE_PIXEL_PNG)]}),
+        )
+        .await;
+    assert_eq!(command["error"]["code"], -32602, "{command}");
+    assert_eq!(command["error"]["message"], "a command takes no images", "{command}");
+
+    assert!(server.requests().is_empty());
+    assert!(acp.inbox.is_empty(), "{:?}", acp.inbox);
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn loading_replays_the_images_of_a_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("a dot")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first
+        .request(
+            "session/prompt",
+            json!({"sessionId": id, "prompt": [{"type": "text", "text": "what is this?"}, image_block(ONE_PIXEL_PNG)]}),
+        )
+        .await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.finish().await;
+
+    let server = MockServer::start(Vec::new()).await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay = second.replayed();
+
+    assert_eq!(replay.len(), 3, "{replay:?}");
+    assert_eq!(replay[0]["sessionUpdate"], "user_message_chunk");
+    assert_eq!(text_of(&replay[0]), "what is this?");
+    assert_eq!(replay[1]["sessionUpdate"], "user_message_chunk");
+    assert_eq!(
+        replay[1]["content"],
+        json!({"type": "image", "data": ONE_PIXEL_PNG, "mimeType": "image/png"})
+    );
+    assert_eq!(text_of(&replay[2]), "a dot");
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn an_image_a_tool_reads_shows_in_its_call() {
+    use base64::Engine;
+
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let png = base64::engine::general_purpose::STANDARD.decode(ONE_PIXEL_PNG).unwrap();
+    std::fs::write(cwd.join("dot.png"), png).unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("c1", "read_file", &json!({"path": "dot.png"})),
+        Reply::text("a dot"),
+    ])
+    .await;
+    let mut acp = Acp::start_configured(&server, &cwd, &[], None, SEEING).await;
+    let session = acp.session(&cwd).await;
+
+    let response = acp.prompt(&session, "look at dot.png").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates = acp.replayed();
+    let ended = updates
+        .iter()
+        .find(|update| update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed")
+        .unwrap_or_else(|| panic!("{updates:?}"));
+    let content = ended["content"].as_array().unwrap();
+    assert_eq!(content[0]["content"]["text"], "Read image file [image/png]", "{ended}");
+    assert_eq!(
+        content[1]["content"],
+        json!({"type": "image", "data": ONE_PIXEL_PNG, "mimeType": "image/png"}),
+        "{ended}"
+    );
+    // The model saw the image, after the result's text, in a message of its own.
+    let requests = server.requests();
+    let sent = requests[1].body["messages"].as_array().unwrap();
+    assert_eq!(
+        sent.last().unwrap()["content"],
+        json!([{"type": "text", "text": "Attached image(s) from tool result:"}, image_part()])
+    );
     assert!(acp.finish().await.success());
 }

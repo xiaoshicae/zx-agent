@@ -7,9 +7,12 @@ use zx_agent::events::ApprovalResult;
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 use crate::platform::split_text;
 use crate::{
-    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId,
-    Said, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImageRef, Inbound,
+    MessageId, Said, ThreadId, UserId,
 };
+
+/// The types of the files passed on as images: those the model APIs take.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// The bot as `auth.test` names it, which tells its own posts from everyone else's.
 #[derive(Default)]
@@ -82,7 +85,34 @@ pub(super) fn message(payload: &Value, me: &Me) -> Option<Inbound> {
         addressee,
         sender: UserId(sender.into()),
         text: unescape(&without_mention(&raw, bot)),
+        images: images(event),
     })
+}
+
+/// The images attached to `message`: its files of the types the model APIs take, by their
+/// private URLs, which need the bot token. A file whose URL Slack has not given, as for one
+/// just shared into a Slack Connect channel, is left out.
+fn images(message: &Value) -> Vec<ImageRef> {
+    let Some(files) = message["files"].as_array() else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter(|file| IMAGE_TYPES.contains(&file["mimetype"].as_str().unwrap_or_default()))
+        .filter_map(|file| {
+            let url = file["url_private_download"]
+                .as_str()
+                .or_else(|| file["url_private"].as_str())?;
+            let name = file["name"]
+                .as_str()
+                .or_else(|| file["title"].as_str())
+                .unwrap_or("image");
+            Some(ImageRef {
+                key: url.into(),
+                name: name.into(),
+            })
+        })
+        .collect()
 }
 
 /// Who posted `message`: its user, or for an integration, which has none, its bot ID.
@@ -278,12 +308,14 @@ pub(super) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: App
 }
 
 /// Whether `message` is what someone said: edits, deletions and joins carry a subtype, but a
-/// thread reply also sent to the channel carries `thread_broadcast` and an integration's post
-/// `bot_message`, and both are said like any other.
+/// thread reply also sent to the channel carries `thread_broadcast`, an integration's post
+/// `bot_message` and a message with files `file_share`, and these are said like any other.
 fn is_talk(message: &Value) -> bool {
     match message.get("subtype") {
         None => true,
-        Some(subtype) => subtype == "thread_broadcast" || subtype == "bot_message",
+        Some(subtype) => ["thread_broadcast", "bot_message", "file_share"]
+            .iter()
+            .any(|said| subtype == said),
     }
 }
 

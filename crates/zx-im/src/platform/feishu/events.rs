@@ -9,8 +9,8 @@ use super::FeishuChannel;
 use super::connection::PREFIX;
 use crate::platform::report;
 use crate::{
-    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
-    MessageId, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, ImageRef,
+    Inbound, MessageId, ThreadId, UserId,
 };
 
 impl FeishuChannel {
@@ -50,15 +50,17 @@ impl FeishuChannel {
     }
 }
 
-/// A text message from a person: in a direct chat, in a group with a bot mentioned, or a
-/// reply in a group's thread. Replies that do not mention the bot arrive only with the
-/// permission to read every group message (`im:message.group_msg`).
+/// A message from a person, of text, an image, or rich text (`post`) with text and images:
+/// in a direct chat, in a group with a bot mentioned, or a reply in a group's thread. Replies
+/// that do not mention the bot arrive only with the permission to read every group message
+/// (`im:message.group_msg`).
 fn message(event: &Value) -> Option<Inbound> {
     if event["sender"]["sender_type"] != "user" {
         return None;
     }
     let message = &event["message"];
-    if message["message_type"] != "text" {
+    let kind = message["message_type"].as_str()?;
+    if !["text", "image", "post"].contains(&kind) {
         return None;
     }
     let chat = match message["chat_type"].as_str()? {
@@ -85,9 +87,14 @@ fn message(event: &Value) -> Option<Inbound> {
     if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
         return None;
     }
-    // The content of a text message is a JSON object with `text`; anything else is not text
-    // this channel reads.
+    // The content of a message is a JSON object as a string: `text` of a text message,
+    // `image_key` of an image, `title` and `content` of rich text.
     let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
+    let (text, images) = match kind {
+        "image" => (String::new(), vec![image(content["image_key"].as_str()?)]),
+        "post" => rich_text(&content, mentions)?,
+        _ => (readable(content["text"].as_str()?, mentions), Vec::new()),
+    };
     Some(Inbound::Message {
         id: MessageId(message["message_id"].as_str()?.into()),
         at: Destination {
@@ -97,8 +104,44 @@ fn message(event: &Value) -> Option<Inbound> {
         chat,
         addressee,
         sender: UserId(event["sender"]["sender_id"]["open_id"].as_str()?.into()),
-        text: readable(content["text"].as_str()?, mentions),
+        text,
+        images,
     })
+}
+
+/// An image of a message, by its key; Feishu gives it no other name.
+fn image(key: &str) -> ImageRef {
+    ImageRef {
+        key: key.into(),
+        name: key.into(),
+    }
+}
+
+/// The text and images of rich text: its title and paragraphs, a line each, with text,
+/// links, code and mentions as a text message has them, and its images by their keys.
+fn rich_text(content: &Value, mentions: &[Value]) -> Option<(String, Vec<ImageRef>)> {
+    let mut lines = Vec::new();
+    let title = content["title"].as_str().unwrap_or_default().trim();
+    if !title.is_empty() {
+        lines.push(title.to_string());
+    }
+    let mut images = Vec::new();
+    for paragraph in content["content"].as_array()? {
+        let mut line = String::new();
+        for element in paragraph.as_array().map(Vec::as_slice).unwrap_or_default() {
+            match element["tag"].as_str() {
+                Some("text" | "a" | "code_block") => line.push_str(element["text"].as_str().unwrap_or_default()),
+                // A mention names its key, as in the text of a text message.
+                Some("at") => line.push_str(element["user_id"].as_str().unwrap_or_default()),
+                Some("img") => images.extend(element["image_key"].as_str().map(image)),
+                _ => {}
+            }
+        }
+        if !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    Some((readable(&lines.join("\n"), mentions), images))
 }
 
 /// The text with mentions of bots removed and mentions of people written as `@name`. A
@@ -227,6 +270,22 @@ pub(super) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: App
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rich_text_reads_as_lines_with_its_images_apart() {
+        let mentions = serde_json::from_value::<Vec<Value>>(json!([
+            {"key": "@_user_1", "mentioned_type": "bot", "name": "zx"},
+        ]))
+        .unwrap();
+        let content = json!({"title": "Crash", "content": [
+            [{"tag": "at", "user_id": "@_user_1"}, {"tag": "text", "text": " what is this?"}],
+            [{"tag": "img", "image_key": "img_1"}],
+            [{"tag": "a", "text": "logs", "href": "https://example.com"}, {"tag": "emotion", "emoji_type": "SMILE"}],
+        ]});
+        let (text, images) = rich_text(&content, &mentions).unwrap();
+        assert_eq!(text, "Crash\n what is this?\nlogs");
+        assert_eq!(images, [image("img_1")]);
+    }
 
     #[test]
     fn mentions_of_bots_go_and_people_are_named() {

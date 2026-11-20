@@ -28,9 +28,15 @@ pub(crate) enum Command {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    /// Task description. Use "-" to read it from stdin. Omitted with --continue.
-    #[arg(required_unless_present = "continue_session", conflicts_with = "continue_session")]
-    pub(crate) prompt: Option<String>,
+    /// Task description. Use "-" to read it from stdin. Arguments that start with "@" attach
+    /// the image files they name to it (PNG, JPEG, GIF or WebP), as `@screenshot.png`; with
+    /// one, the description may be left out. Omitted with --continue.
+    #[arg(
+        value_name = "PROMPT",
+        required_unless_present = "continue_session",
+        conflicts_with = "continue_session"
+    )]
+    pub(crate) prompt: Vec<String>,
 
     /// Continue the conversation in --session without new input: answer the input or tool
     /// results it ends with, for example after a crash, or answer again after a failed or

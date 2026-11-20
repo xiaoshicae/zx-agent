@@ -133,6 +133,7 @@ impl CustomMessageEntry {
     pub(crate) fn projected(&self) -> Message {
         Message::User {
             content: self.message.content.clone(),
+            images: Vec::new(),
             timestamp: self.timestamp,
             kind: UserMessageKind::Custom,
         }

@@ -423,6 +423,8 @@ impl<'a> Compactor<'a> {
             max_tokens: Some(self.compaction.max_summary_tokens),
             reasoning: None,
             cache_key: None,
+            // The records reach the summary as text, their images as their media types.
+            takes_images: false,
         };
         let source = RequestSource::Summary {
             compaction_id: compaction_id.into(),

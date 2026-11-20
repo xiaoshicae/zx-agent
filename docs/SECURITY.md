@@ -37,7 +37,7 @@
 
 - 以下凭据只从环境变量读取：API key（`provider.apiKeyEnv`）、MCP 的 `tokenEnv`、zx-im 的平台凭据（Slack 的两个 token，⚑ D:5/CHINA FLAG: 飞书的 App Secret）与 OpenTelemetry 的请求头变量（`OTEL_EXPORTER_OTLP_HEADERS` 等）。在本机执行的命令看不到这些变量；工具输出在写入会话、事件和回传模型之前，把它们的完整字面值替换为 `[REDACTED]`。这两项由 `zx-app` 的装配设置；作为库使用时要宿主自己设置（`LocalExecutor::hidden_env` 与 `RedactSecrets`，见 [LIBRARY.md](LIBRARY.md)）。宿主注册的执行环境经 `ExecutorSession::hidden_env` 得到这些变量名，命令看不到它们由该执行环境负责；宿主自己的 zx-im 程序加的平台，其凭据变量经 `BuiltChannel::hidden_env` 交给装配，与内置平台的同样处理。
 - 其他凭据文件用 `config.toml` 的 `secretFiles` 或 `ZX_SECRET_FILES` 登记（如 Kubernetes ServiceAccount 的 token），程序本身不预设路径。文件每次过滤前重新读取，轮换下来的旧值保留最近 32 个继续过滤。短于 8 个字符的值照常过滤，但所有相同的文本都会被替换，启动时在 stderr 以 `[secret] <文件>: …` 提示。过滤器出错时丢弃原始输出，返回错误结果。
-- 过滤不识别未知、编码或拆分后的密钥，也不处理用户输入、模型输出、工具参数、项目上下文与说明。这些内容仍可能进入模型请求、会话和事件，需要控制会话文件的访问权限；chat 默认把会话写到主目录下，不想留下记录时用 `--no-session`。
+- 过滤不识别未知、编码或拆分后的密钥，也不处理用户输入、模型输出、工具参数、项目上下文与说明，也不处理图片：截图里的密钥会原样进入模型请求与会话文件。这些内容仍可能进入模型请求、会话和事件，需要控制会话文件的访问权限；chat 默认把会话写到主目录下，不想留下记录时用 `--no-session`。
 - 本机执行时，工具与 agent 是同一系统用户，仍可经其他途径读到凭据（如 Linux 的 `/proc/<pid>/environ`）；其他环境变量（如云厂商凭证）bash 仍能读到，需要时在启动前清理。隔离要靠容器执行或不同账号。
 - 项目上下文会发给模型服务方；在不可信仓库中用 `discover = false` 的 agent（发现规则见[项目上下文](CONFIGURATION.md#项目上下文)）。
 
@@ -55,4 +55,4 @@
 
 ---
 
-SECURITY.md · v0.10 · 2026年11月
+SECURITY.md · v0.11 · 2026年11月

@@ -593,6 +593,8 @@ fn interrupted(effects: Effects) -> &'static str {
 fn to_result(call: &ToolCall, outcome: CallOutput) -> ToolResultMessage {
     let CallOutput { output, duration_ms } = outcome;
     let content = match (output.content.is_empty(), output.is_error) {
+        // The images are the output: providers say so where a text is required.
+        (true, _) if !output.images.is_empty() => output.content,
         (false, _) => output.content,
         (true, true) => "(tool failed without output)".to_string(),
         (true, false) => "(no output)".to_string(),
@@ -601,6 +603,7 @@ fn to_result(call: &ToolCall, outcome: CallOutput) -> ToolResultMessage {
         tool_call_id: call.id.clone(),
         tool_name: call.name.clone(),
         content,
+        images: output.images,
         is_error: output.is_error,
         timestamp: now_ms(),
         duration_ms,

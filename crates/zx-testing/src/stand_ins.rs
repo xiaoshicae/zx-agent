@@ -149,6 +149,7 @@ impl Tool for EchoTool {
         };
         Ok(ToolOutput {
             content: args.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
+            images: Vec::new(),
             is_error: false,
             terminate: args.get("terminate").and_then(Value::as_bool).unwrap_or(false),
             details: args.get("details").cloned(),

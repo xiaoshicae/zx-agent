@@ -9,6 +9,8 @@
 //! - [`policy`]: the built-in command and rule policies
 //! - [`continuation`]: the hook that continues an answer cut off at the output token limit
 //! - [`redact`]: the hook that redacts known secrets from tool output
+//! - [`images`]: images fitted to the limits of the model APIs before they enter a
+//!   conversation
 //! - `files`: bounded reads of regular files that never wait on a FIFO, for the local
 //!   executor, the files that tools page, the redaction and zx-app's configuration files;
 //!   hidden, not part of the API, though `tools::paging` re-exports its `Links`
@@ -28,6 +30,7 @@ pub mod continuation;
 pub mod executor;
 #[doc(hidden)]
 pub mod files;
+pub mod images;
 pub mod jsonl;
 #[cfg(feature = "mcp")]
 pub mod mcp;

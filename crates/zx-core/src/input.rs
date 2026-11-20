@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
+use crate::ai::Image;
 use crate::sync::lock;
 use crate::transcript::{BlankCustomType, CustomMessage, check_custom_type};
 
@@ -14,9 +15,13 @@ use crate::transcript::{BlankCustomType, CustomMessage, check_custom_type};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
     /// Text a person sent. It passes through the `on_input` hooks and is recorded as a user
-    /// message. A string converts into one without an actor.
+    /// message. A string converts into one without images or an actor.
     User {
         text: String,
+        /// Images sent with the text, fitted to the model APIs' limits by the host
+        /// (`zx_agent::builtin::images`). They are recorded with the message as they are:
+        /// the input hooks see the text only.
+        images: Vec<Image>,
         /// Who sent it, as the host names the people it serves, such as a user ID of a chat
         /// where several people talk to one session; `None` when the host does not say. The
         /// kernel records it with the message and tells the hooks and the policies
@@ -32,7 +37,11 @@ pub enum Input {
 
 impl From<String> for Input {
     fn from(text: String) -> Self {
-        Self::User { text, actor: None }
+        Self::User {
+            text,
+            images: Vec::new(),
+            actor: None,
+        }
     }
 }
 

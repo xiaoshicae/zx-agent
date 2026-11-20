@@ -283,6 +283,31 @@ fn models_are_known_by_id_and_their_prices_checked() {
     }
 }
 
+#[test]
+fn a_model_takes_images_only_when_its_input_says_so() {
+    let config = load_text(
+        "[[models]]\nid = 'plain'\n[[models]]\nid = 'text'\ninput = ['text']\n\
+         [[models]]\nid = 'seeing'\ninput = ['text', 'image']",
+    )
+    .unwrap();
+    assert!(!config.models["plain"].takes_images, "text alone by default, as in pi");
+    assert!(!config.models["text"].takes_images);
+    assert!(config.models["seeing"].takes_images);
+    for (text, expected) in [
+        (
+            "[[models]]\nid = 'm'\ninput = ['image']",
+            "models.m: input must include \"text\"",
+        ),
+        (
+            "[[models]]\nid = 'm'\ninput = ['text', 'video']",
+            "unknown variant `video`",
+        ),
+    ] {
+        let error = error(text);
+        assert!(error.contains(expected), "{text}: {error}");
+    }
+}
+
 const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
                     tools = ['query', 'range']\ntimeoutSecs = 30\n";
 

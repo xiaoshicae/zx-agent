@@ -18,7 +18,9 @@ use serde::Serialize;
 pub(crate) use self::compactor::Compactor;
 use crate::ai::{Message, ModelMeta, Usage};
 use crate::guard::CancelSignal;
-use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without_details};
+use crate::transcript::{
+    CompactionSummary, ProjectedMessage, Transcript, image_count, without_details, without_image_data,
+};
 
 /// The most bytes of original records one compaction reads.
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -364,11 +366,18 @@ pub(crate) enum Initiative {
     Automatic,
 }
 
-/// Bytes of `messages` serialized as a model may see them (without tool result details), not
-/// a tokenizer or a model context-window guarantee.
+/// Bytes of `messages` serialized as a model may see them (without tool result details), each
+/// image counted as [`IMAGE_BYTES`] instead of its data; not a tokenizer or a model
+/// context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
-    serialized_bytes(&without_details(messages))
+    let text = serialized_bytes(&without_image_data(&without_details(messages)))?;
+    Ok(text.saturating_add(image_count(messages).saturating_mul(IMAGE_BYTES)))
 }
+
+/// Bytes of serialized context that an image counts as in an estimate (pi:
+/// `ESTIMATED_IMAGE_CHARS`): its data says little of the tokens it takes, which the APIs
+/// count by its size in pixels.
+pub const IMAGE_BYTES: usize = 4800;
 
 /// How many bytes `value` serializes to, counted without keeping them.
 fn serialized_bytes(value: &impl serde::Serialize) -> Result<usize> {
@@ -413,9 +422,12 @@ fn estimated_tokens(bytes: usize) -> u64 {
     u64::try_from(bytes.div_ceil(BYTES_PER_TOKEN)).unwrap_or(u64::MAX)
 }
 
-/// Bytes of one message as a model may see it.
+/// Bytes of one message as a model may see it, its images counted as [`context_bytes`]
+/// counts them.
 fn message_bytes(message: &Message) -> Result<usize> {
-    serialized_bytes(&without_details(std::slice::from_ref(message))[0])
+    let alone = std::slice::from_ref(message);
+    let text = serialized_bytes(&without_image_data(&without_details(alone))[0])?;
+    Ok(text.saturating_add(image_count(alone).saturating_mul(IMAGE_BYTES)))
 }
 
 #[cfg(test)]
@@ -427,6 +439,7 @@ mod tests {
         let meta = ModelMeta {
             context_window: Some(tokens),
             cost: None,
+            takes_images: false,
         };
         HashMap::from([(id.to_string(), meta)])
     }
@@ -437,6 +450,32 @@ mod tests {
             trigger_tokens: Some(TokenTrigger::BelowWindow { reserve_tokens }),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn an_image_counts_as_an_estimate_not_by_its_data() {
+        use crate::ai::Image;
+
+        let image = |bytes: usize| Image {
+            mime_type: "image/png".into(),
+            data: "A".repeat(bytes),
+        };
+        let small = Message::user_with_images("look", vec![image(8)]);
+        let large = Message::user_with_images("look", vec![image(1_000_000)]);
+        let small = std::slice::from_ref(&small);
+
+        assert_eq!(context_bytes(small).unwrap(), context_bytes(&[large]).unwrap());
+        let without = context_bytes(&[Message::user("look")]).unwrap();
+        let with = context_bytes(small).unwrap();
+        assert!(
+            with > without + IMAGE_BYTES - 64 && with <= without + IMAGE_BYTES + 64,
+            "{without} {with}"
+        );
+        assert_eq!(
+            message_bytes(&small[0]).unwrap(),
+            with - 2,
+            "the same count, without the array's brackets"
+        );
     }
 
     #[test]

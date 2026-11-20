@@ -414,6 +414,7 @@ mod tests {
     fn context_summaries_cannot_be_edited_omitted_or_appended() {
         let summary = Message::User {
             content: "<context_summary></context_summary>".into(),
+            images: Vec::new(),
             timestamp: 0,
             kind: UserMessageKind::Summary,
         };

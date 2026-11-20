@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::{ToolDef, Usage};
+use crate::ai::{Image, ToolDef, Usage};
 use crate::sync::lock;
 use crate::text::prefix_within;
 
@@ -244,6 +244,10 @@ pub const MAX_DETAILS_BYTES: usize = MAX_PROGRESS_BYTES;
 pub struct ToolOutput {
     /// Text returned to the model.
     pub content: String,
+    /// Images returned to the model after the text (pi: the image blocks of a result's
+    /// `content`), fitted to the model APIs' limits (`zx_agent::builtin::images`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     #[serde(default)]
     pub is_error: bool,
     /// Ask to stop after this batch. Takes effect only when every result in the batch sets it.
@@ -279,6 +283,11 @@ impl ToolOutput {
             is_error: true,
             ..Default::default()
         }
+    }
+
+    /// The same result with `images` for the model.
+    pub fn with_images(self, images: Vec<Image>) -> Self {
+        Self { images, ..self }
     }
 
     /// The same result with structured `details` for observers.

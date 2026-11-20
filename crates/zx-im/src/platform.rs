@@ -2,7 +2,8 @@
 //! shares: an HTTP client, its connection and the loop that reads it (pings, the silence
 //! that means it died, the stop), keeping a delivery's messages before it is acknowledged,
 //! reports to the operator, splitting long text, pacing posts to a chat, waiting out a rate
-//! limit, and waiting between attempts to reach the platform. A platform uses these and
+//! limit, reading a fetched file within a size, and waiting between attempts to reach the
+//! platform. A platform uses these and
 //! nothing of another platform. Each builds its channel from its im.toml section through a
 //! [`PlatformFactory`], registered under the section's name.
 //!
@@ -113,6 +114,40 @@ fn http_client(timeout: Duration) -> Result<reqwest::Client, ImError> {
         .timeout(timeout)
         .build()
         .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))
+}
+
+/// Whether `response` says its body is of a type that starts with `prefix`, such as
+/// `text/html`. A type that is not text says nothing.
+fn content_type_is(response: &reqwest::Response, prefix: &str) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with(prefix))
+}
+
+/// The body of `response`, a fetched file, at most `max_bytes`: an error, read no further,
+/// for a longer one.
+async fn body_within(mut response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let too_large = || format!("the file is larger than {max_bytes} bytes");
+    // A `usize` fits in a `u64` on every target Rust supports; were it not, the reading below
+    // would still stop at `max_bytes`.
+    let limit = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if response.content_length().is_some_and(|length| length > limit) {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("cannot read the file: {error}"))?
+    {
+        if chunk.len() > max_bytes - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Tell the operator about `error`, which a channel goes on after: through `on_error`, the
@@ -603,6 +638,7 @@ mod tests {
             addressee: Addressee::Bot,
             sender: UserId("U1".into()),
             text: "hello".into(),
+            images: Vec::new(),
         }
     }
 

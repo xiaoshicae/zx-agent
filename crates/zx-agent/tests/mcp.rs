@@ -141,6 +141,10 @@ async fn a_call_sends_the_arguments_to_the_tool_and_returns_its_text() {
     assert_eq!(sent[0].protocol_version.as_deref(), Some("2026-07-28"));
 }
 
+/// A PNG of one transparent pixel, in base64.
+const ONE_PIXEL_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
 #[tokio::test]
 async fn results_are_rendered_as_text_for_the_model() {
     let fake = FakeMcp::start(Era::Modern, three_tools()).await;
@@ -159,16 +163,51 @@ async fn results_are_rendered_as_text_for_the_model() {
         ],
     );
     let server = connect(&fake, &["query"]).await;
-    let mixed = call(&server, "prom__query", json!({})).await.unwrap().content;
-    assert_eq!(
-        mixed,
-        "two series\n[image image/png omitted]\n[resource file:///tmp/report.csv (report)]\n\
-         [resource file:///tmp/a.txt]\nline one\n[resource file:///tmp/a.bin: binary application/zip omitted]"
+    let mixed = call(&server, "prom__query", json!({})).await.unwrap();
+    let lines: Vec<&str> = mixed.content.lines().collect();
+    assert_eq!(lines[0], "two series");
+    // Only the PNG's signature: an image that cannot be decoded is a line that says why.
+    assert!(
+        lines[1].starts_with("[image image/png omitted: cannot decode the image: "),
+        "{}",
+        lines[1]
     );
+    assert_eq!(
+        lines[2..].join("\n"),
+        "[resource file:///tmp/report.csv (report)]\n[resource file:///tmp/a.txt]\nline one\n\
+         [resource file:///tmp/a.bin: binary application/zip omitted]"
+    );
+    assert!(mixed.images.is_empty());
     let structured = call(&server, "prom__query", json!({})).await.unwrap().content;
     assert_eq!(structured, r#"{"series":2}"#);
     let empty = call(&server, "prom__query", json!({})).await.unwrap().content;
     assert_eq!(empty, "(no content)");
+}
+
+#[tokio::test]
+async fn images_in_a_result_reach_the_model_as_images() {
+    let fake = FakeMcp::start(Era::Modern, three_tools()).await;
+    fake.reply(
+        "query",
+        vec![
+            Reply::Result(json!({"content": [
+                {"type": "text", "text": "the chart"},
+                {"type": "image", "data": ONE_PIXEL_PNG, "mimeType": "image/png"},
+            ]})),
+            Reply::Result(json!({"content": [{"type": "image", "data": ONE_PIXEL_PNG, "mimeType": "image/png"}]})),
+        ],
+    );
+    let server = connect(&fake, &["query"]).await;
+
+    let with_text = call(&server, "prom__query", json!({})).await.unwrap();
+    assert_eq!(with_text.content, "the chart");
+    assert_eq!(with_text.images.len(), 1);
+    assert_eq!(with_text.images[0].mime_type, "image/png");
+    assert_eq!(with_text.images[0].data, ONE_PIXEL_PNG);
+
+    let alone = call(&server, "prom__query", json!({})).await.unwrap();
+    assert_eq!(alone.content, "", "a result of images alone has no text");
+    assert_eq!(alone.images.len(), 1);
 }
 
 #[tokio::test]

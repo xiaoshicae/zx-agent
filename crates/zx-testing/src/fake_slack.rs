@@ -1,5 +1,5 @@
-//! A fake Slack: the Web API methods the Slack channel calls, and Socket Mode connections the
-//! test drives frame by frame.
+//! A fake Slack: the Web API methods the Slack channel calls, the private URLs of the files
+//! it keeps, and Socket Mode connections the test drives frame by frame.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -13,12 +13,19 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::WAIT;
-use crate::http::{read_request, response};
+use crate::http::{read_request, response, response_bytes};
 
-/// One Web API call.
+/// Where the fake keeps files, as Slack's private URLs name them.
+const FILES: &str = "/files-pri/T1-F1/";
+
+/// The bot token the fake gives files to, the one the Slack tests use.
+pub const BOT_TOKEN: &str = "xoxb-test";
+
+/// One Web API call, or one fetch of a kept file.
 #[derive(Clone, Debug)]
 pub struct ApiCall {
-    /// The Web API method, such as `chat.postMessage`.
+    /// The Web API method, such as `chat.postMessage`, or the path of a file fetched, such as
+    /// `/files-pri/T1-F1/shot.png`.
     pub method: String,
     /// The `Authorization` header; empty without one.
     pub authorization: String,
@@ -59,8 +66,13 @@ pub struct FakeSlack {
     calls: Arc<Mutex<Vec<ApiCall>>>,
     called: Arc<Notify>,
     scripted: Arc<Mutex<HashMap<String, VecDeque<Answer>>>>,
+    /// The files kept, by path: their type and bytes.
+    files: Files,
     sockets: mpsc::UnboundedReceiver<Socket>,
 }
+
+/// Files by path, with their type and bytes.
+type Files = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
 
 impl FakeSlack {
     /// Start the Web API and the Socket Mode endpoint that `apps.connections.open` names.
@@ -71,20 +83,22 @@ impl FakeSlack {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let called = Arc::new(Notify::new());
         let scripted: Arc<Mutex<HashMap<String, VecDeque<Answer>>>> = Arc::default();
-        let (log, notify, script) = (calls.clone(), called.clone(), scripted.clone());
+        let files = Files::default();
+        let (log, notify, script, kept) = (calls.clone(), called.clone(), scripted.clone(), files.clone());
         let api_base = format!("http://{}/api", api.local_addr().unwrap());
         tokio::spawn(async move {
             let posted = Arc::new(Mutex::new(0u64));
             loop {
                 let (stream, _) = api.accept().await.unwrap();
-                tokio::spawn(answer(
-                    stream,
-                    socket_url.clone(),
-                    log.clone(),
-                    notify.clone(),
-                    script.clone(),
-                    posted.clone(),
-                ));
+                let fake = Answering {
+                    socket_url: socket_url.clone(),
+                    log: log.clone(),
+                    called: notify.clone(),
+                    scripted: script.clone(),
+                    posted: posted.clone(),
+                    files: kept.clone(),
+                };
+                tokio::spawn(fake.answer(stream));
             }
         });
         let (sockets_to, sockets) = mpsc::unbounded_channel();
@@ -102,8 +116,20 @@ impl FakeSlack {
             calls,
             called,
             scripted,
+            files,
             sockets,
         }
+    }
+
+    /// Keep a file named `name` of `content_type` with `bytes`, and return its private URL,
+    /// which answers only with the bot token.
+    pub fn file(&self, name: &str, content_type: &str, bytes: Vec<u8>) -> String {
+        let path = format!("{FILES}{name}");
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (content_type.to_string(), bytes));
+        format!("{}{path}", self.api_base.trim_end_matches("/api"))
     }
 
     /// Answer the next calls of `method` this way, in order, before answering normally.
@@ -185,43 +211,73 @@ impl Socket {
     }
 }
 
-async fn answer(
-    mut stream: TcpStream,
+/// What answers one connection to the Web API.
+struct Answering {
     socket_url: String,
     log: Arc<Mutex<Vec<ApiCall>>>,
     called: Arc<Notify>,
     scripted: Arc<Mutex<HashMap<String, VecDeque<Answer>>>>,
     posted: Arc<Mutex<u64>>,
-) {
-    let Some(request) = read_request(&mut stream).await else {
-        return;
-    };
-    let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
-    let call = ApiCall {
-        method: path.trim_start_matches("/api/").to_string(),
-        authorization: request.header("authorization").unwrap_or_default().to_string(),
-        args: query_args(query),
-        body: request.json(),
-    };
-    let scripted = scripted
-        .lock()
-        .unwrap()
-        .get_mut(&call.method)
-        .and_then(VecDeque::pop_front);
-    let response = match scripted {
-        Some(Answer::RateLimited { retry_after_secs }) => response(
-            "429 Too Many Requests",
-            &[("retry-after", retry_after_secs.to_string())],
-            "",
-        ),
-        Some(Answer::Error(error)) => response("200 OK", &[], &json!({"ok": false, "error": error}).to_string()),
-        Some(Answer::Json(body)) => response("200 OK", &[], &body.to_string()),
-        None => response("200 OK", &[], &normal(&call, &socket_url, &posted).to_string()),
-    };
-    log.lock().unwrap().push(call);
-    called.notify_waiters();
-    stream.write_all(response.as_bytes()).await.unwrap();
-    stream.shutdown().await.ok();
+    files: Files,
+}
+
+impl Answering {
+    async fn answer(self, mut stream: TcpStream) {
+        let Some(request) = read_request(&mut stream).await else {
+            return;
+        };
+        let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
+        let call = ApiCall {
+            method: path.trim_start_matches("/api/").to_string(),
+            authorization: request.header("authorization").unwrap_or_default().to_string(),
+            args: query_args(query),
+            body: if path.starts_with(FILES) {
+                Value::Null
+            } else {
+                request.json()
+            },
+        };
+        let scripted = self
+            .scripted
+            .lock()
+            .unwrap()
+            .get_mut(&call.method)
+            .and_then(VecDeque::pop_front);
+        let response = match scripted {
+            Some(Answer::RateLimited { retry_after_secs }) => response(
+                "429 Too Many Requests",
+                &[("retry-after", retry_after_secs.to_string())],
+                "",
+            )
+            .into_bytes(),
+            Some(Answer::Error(error)) => {
+                response("200 OK", &[], &json!({"ok": false, "error": error}).to_string()).into_bytes()
+            }
+            Some(Answer::Json(body)) => response("200 OK", &[], &body.to_string()).into_bytes(),
+            None if path.starts_with(FILES) => self.file(path, &call.authorization),
+            None => response(
+                "200 OK",
+                &[],
+                &normal(&call, &self.socket_url, &self.posted).to_string(),
+            )
+            .into_bytes(),
+        };
+        self.log.lock().unwrap().push(call);
+        self.called.notify_waiters();
+        stream.write_all(&response).await.unwrap();
+        stream.shutdown().await.ok();
+    }
+
+    /// The file kept at `path`, for [`BOT_TOKEN`]; as Slack does, a sign-in page for another.
+    fn file(&self, path: &str, authorization: &str) -> Vec<u8> {
+        if authorization != format!("Bearer {BOT_TOKEN}") {
+            return response_bytes("200 OK", "text/html; charset=utf-8", b"<html>sign in</html>");
+        }
+        match self.files.lock().unwrap().get(path) {
+            Some((content_type, bytes)) => response_bytes("200 OK", content_type, bytes),
+            None => response_bytes("404 Not Found", "text/plain", b"not found"),
+        }
+    }
 }
 
 /// What Slack answers when the call succeeds.

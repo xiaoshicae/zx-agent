@@ -450,6 +450,7 @@ fn messages(round: usize, index: usize, step: Step) -> Vec<Message> {
                     tool_call_id: id,
                     tool_name: "bash".into(),
                     content: output,
+                    images: Vec::new(),
                     is_error: false,
                     timestamp: now_ms(),
                     duration_ms: Some(350),

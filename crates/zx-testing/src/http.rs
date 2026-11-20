@@ -118,6 +118,17 @@ pub fn response(status: &str, headers: &[(&str, String)], body: &str) -> String 
     )
 }
 
+/// A complete response of `body`, bytes of `content_type`, that closes the connection.
+pub fn response_bytes(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let head = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut bytes = head.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
 /// A listener that accepts connections and never answers them, for a request or a handshake
 /// that does not end: its address, and a receiver told of each connection it accepts.
 pub async fn silent_listener() -> (String, mpsc::UnboundedReceiver<()>) {

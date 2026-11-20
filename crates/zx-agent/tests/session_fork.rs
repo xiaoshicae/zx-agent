@@ -136,6 +136,7 @@ async fn a_fork_that_ends_at_an_answer_knows_which_of_its_calls_started() {
             tool_call_id: "c1".into(),
             tool_name: "bash".into(),
             content: "done".into(),
+            images: Vec::new(),
             is_error: false,
             timestamp: 0,
             duration_ms: None,

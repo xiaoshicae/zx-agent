@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Image;
+use zx_agent::builtin::images::fit;
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
 use zx_agent::session::SessionError;
@@ -14,13 +16,19 @@ use zx_app::shutdown::next_event;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate};
 use super::{Replies, SessionKey, Shared, timed};
-use crate::{Destination, ImChannel, MessageRef, Post, Replacement, UserId};
+use crate::{Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.
 const HISTORY_MESSAGES: usize = 50;
 /// The kind of the custom messages that record what people said without the bot answering.
 const SAID_TYPE: &str = "im_message";
+/// The most images of one message the model sees: a few screenshots, while the requests
+/// that carry them, each image up to 4.5 MiB, stay well within what the model APIs take.
+const MAX_IMAGES: usize = 4;
+/// The largest image file fetched from a platform, before it is fitted to the model APIs'
+/// limits: more than a phone's photograph takes.
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 /// The session while the conversation holds it. Dropping it closes the session, which frees
 /// its place in the storage and everything set up for it.
@@ -84,22 +92,31 @@ impl Opened {
 pub(super) struct Asked(pub(super) PendingInput);
 
 impl Asked {
-    /// Several messages as one prompt, which holds what each held until the session records
-    /// it; the sender of the last message is whom the answer is for.
+    /// Several messages as one prompt, with the images of all, which holds what each held
+    /// until the session records it; the sender of the last message is whom the answer is
+    /// for.
     pub(super) fn joined(asked: Vec<Self>) -> PendingInput {
         let mut texts = Vec::with_capacity(asked.len());
+        let mut images = Vec::new();
         let mut actor = None;
         let mut holds = Vec::with_capacity(asked.len());
         for Asked(pending) in asked {
             let (input, hold) = pending.into_parts();
-            if let Input::User { text, actor: sender } = input {
+            if let Input::User {
+                text,
+                images: sent,
+                actor: sender,
+            } = input
+            {
                 texts.push(text);
+                images.extend(sent);
                 actor = sender;
             }
             holds.extend(hold);
         }
         let prompt = Input::User {
             text: texts.join("\n\n"),
+            images,
             actor,
         };
         PendingInput::held(prompt, holds)
@@ -336,6 +353,36 @@ impl Outlet {
         format!("{name}: {text}")
     }
 
+    /// The images of `message` the model can see, fetched from the platform and fitted to the
+    /// model APIs' limits, and a line for each one it cannot, which says why: one beyond
+    /// [`MAX_IMAGES`], one that is not an image the APIs take, and one that could not be
+    /// fetched within the outbound timeout, which is also reported to the operator.
+    pub(super) async fn images(&self, message: &MessageRef, attached: &[ImageRef]) -> (Vec<Image>, Vec<String>) {
+        let mut images = Vec::new();
+        let mut notes = Vec::new();
+        for (index, image) in attached.iter().enumerate() {
+            if index >= MAX_IMAGES {
+                let reason = format!("the bot takes at most {MAX_IMAGES} images of a message");
+                notes.push(unusable(image, &reason));
+                continue;
+            }
+            let fetch = self.channel.image(message, image, MAX_IMAGE_BYTES);
+            let bytes = match timed(self.shared.outbound_timeout, "fetch it", fetch).await {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    self.failed(format!("image {} of message {}: {reason}", image.name, message.id));
+                    notes.push(unusable(image, &reason));
+                    continue;
+                }
+            };
+            match fit(bytes).await {
+                Ok(fitted) => images.push(fitted.image),
+                Err(reason) => notes.push(unusable(image, &reason)),
+            }
+        }
+        (images, notes)
+    }
+
     /// Show the sender that a message reached the run that is answering. A failure is
     /// reported to the operator.
     pub(super) async fn acknowledge(&self, message: &MessageRef) {
@@ -388,6 +435,30 @@ impl Outlet {
 
 /// What someone said without the bot answering, as the session records it: the model reads
 /// it with the next prompt.
+/// What the model reads of `image` when it cannot see it, and why.
+fn unusable(image: &ImageRef, reason: &str) -> String {
+    format!("[image {} could not be used: {reason}]", image.name)
+}
+
+/// What the model reads of `image`, attached to a message the bot does not answer, whose
+/// images it does not fetch.
+pub(super) fn unshown(image: &ImageRef) -> String {
+    format!("[image {} not shown]", image.name)
+}
+
+/// `text` with `notes` after it, a line each.
+pub(super) fn with_notes(text: &str, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return text.to_string();
+    }
+    let notes = notes.join("\n");
+    if text.is_empty() {
+        notes
+    } else {
+        format!("{text}\n{notes}")
+    }
+}
+
 pub(super) fn said(content: String) -> CustomMessage {
     CustomMessage {
         custom_type: SAID_TYPE.into(),

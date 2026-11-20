@@ -1,6 +1,6 @@
 //! The Feishu channel against a fake open platform: the long connection (pings, pongs,
 //! acknowledgements, fragments, redeliveries, reconnection), messages and card clicks,
-//! tokens, replies in topics, edits, cards, rate limits and the stop.
+//! tokens, replies in topics, edits, cards, rate limits, the images of messages and the stop.
 
 mod common;
 
@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,
-    ImError, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
+    ImError, ImageRef, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
 };
 use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
@@ -85,6 +85,7 @@ fn said(id: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &
         addressee,
         sender: UserId("ou_u1".into()),
         text: text.into(),
+        images: Vec::new(),
     }
 }
 
@@ -164,17 +165,17 @@ async fn a_reply_names_the_root_of_its_thread() {
 }
 
 #[tokio::test]
-async fn only_text_from_people_addressed_to_the_bot_is_passed_on() {
+async fn only_what_people_address_to_the_bot_is_passed_on() {
     let mut fake = FakeFeishu::start(120).await;
     let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     let unmentioned = text_message("om_1", "oc_1", "group", None, "chatter", &json!([]));
     let mut from_bot = text_message("om_2", "oc_d", "p2p", None, "echo", &json!([]));
     from_bot["sender"]["sender_type"] = json!("bot");
-    let mut image = text_message("om_3", "oc_d", "p2p", None, "", &json!([]));
-    image["message"]["message_type"] = json!("image");
+    let mut file = text_message("om_3", "oc_d", "p2p", None, "", &json!([]));
+    file["message"]["message_type"] = json!("file");
     let wanted = text_message("om_4", "oc_d", "p2p", None, "hi", &json!([]));
-    for (n, event) in [unmentioned, from_bot, image, wanted].into_iter().enumerate() {
+    for (n, event) in [unmentioned, from_bot, file, wanted].into_iter().enumerate() {
         socket
             .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(&event)))
             .await;
@@ -624,4 +625,107 @@ async fn stopping_closes_the_connection() {
     let mut socket = fake.socket().await;
     running.stop().await.unwrap();
     assert!(socket.closed_by_client().await);
+}
+
+/// The direct message `id` of ou_u1 of the kind `kind` with `content`.
+fn direct_of_kind(id: &str, kind: &str, content: &Value) -> Value {
+    let mut event = text_message(id, "oc_d", "p2p", None, "", &json!([]));
+    event["message"]["message_type"] = json!(kind);
+    event["message"]["content"] = json!(content.to_string());
+    event
+}
+
+/// The image `key`, as the channel passes it on.
+fn image(key: &str) -> ImageRef {
+    ImageRef {
+        key: key.into(),
+        name: key.into(),
+    }
+}
+
+#[tokio::test]
+async fn an_image_and_rich_text_are_passed_on_with_their_images() {
+    let mut fake = FakeFeishu::start(120).await;
+    let mut running = run_channel(channel(&fake), WAIT);
+    let mut socket = fake.socket().await;
+    let picture = direct_of_kind("om_1", "image", &json!({"image_key": "img_1"}));
+    let rich = direct_of_kind(
+        "om_2",
+        "post",
+        &json!({"title": "Crash", "content": [
+            [{"tag": "text", "text": "what is this?"}],
+            [{"tag": "img", "image_key": "img_2"}],
+        ]}),
+    );
+    for (n, event) in [picture, rich].into_iter().enumerate() {
+        socket
+            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(&event)))
+            .await;
+        socket.receive_data().await;
+    }
+    let with_images = |id: &str, text: &str, images: Vec<ImageRef>| {
+        let Inbound::Message {
+            id,
+            at,
+            chat,
+            addressee,
+            sender,
+            text,
+            ..
+        } = direct(id, text)
+        else {
+            unreachable!("a message")
+        };
+        Inbound::Message {
+            id,
+            at,
+            chat,
+            addressee,
+            sender,
+            text,
+            images,
+        }
+    };
+    assert_eq!(running.next().await, with_images("om_1", "", vec![image("img_1")]));
+    assert_eq!(
+        running.next().await,
+        with_images("om_2", "Crash\nwhat is this?", vec![image("img_2")])
+    );
+    running.stop().await.unwrap();
+}
+
+/// The message `om_1` of the direct chat, whose images are fetched.
+fn posted() -> MessageRef {
+    MessageRef {
+        at: at("oc_d", None),
+        id: MessageId("om_1".into()),
+    }
+}
+
+#[tokio::test]
+async fn an_image_is_fetched_by_the_message_resource_api() {
+    let fake = FakeFeishu::start(120).await;
+    fake.image("img_1", b"png bytes".to_vec());
+    let bytes = channel(&fake).image(&posted(), &image("img_1"), 1024).await.unwrap();
+    assert_eq!(bytes, b"png bytes");
+    let call = &fake.calls("resource")[0];
+    assert_eq!(call.path, "/open-apis/im/v1/messages/om_1/resources/img_1?type=image");
+    assert_eq!(call.authorization, "Bearer t-1");
+}
+
+#[tokio::test]
+async fn an_image_feishu_refuses_or_one_too_large_is_an_error() {
+    let fake = FakeFeishu::start(120).await;
+    fake.image("img_1", vec![0; 100]);
+    let channel = channel(&fake);
+    let refused = channel.image(&posted(), &image("img_2"), 1024).await.unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "feishu /open-apis/im/v1/messages/om_1/resources/img_2?type=image: HTTP 400 Bad Request, code 234003: File not in msg."
+    );
+    let large = channel.image(&posted(), &image("img_1"), 99).await.unwrap_err();
+    assert_eq!(
+        large.to_string(),
+        "feishu /open-apis/im/v1/messages/om_1/resources/img_1?type=image: the file is larger than 99 bytes"
+    );
 }

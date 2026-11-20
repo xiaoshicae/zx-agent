@@ -1,10 +1,13 @@
 //! The JSON body of a Chat Completions request, the conversion options recorded with each
 //! request, and the body rebuilt from them for the request audit (pi: transform-messages.ts).
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zx_ai::{
-    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, MISSING_TOOL_RESULT, Message, Reasoning, Request, SystemPrompt,
+    AssistantMessage, ContentBlock, EMPTY_TOOL_RESULT, Image, MISSING_TOOL_RESULT, Message, Reasoning, Request,
+    SystemPrompt, TOOL_IMAGES_OMITTED, ToolResultMessage, USER_IMAGES_OMITTED, with_note,
 };
 
 use crate::accumulate::REASONING_FIELDS;
@@ -14,6 +17,14 @@ use crate::config::{BodyOptions, ReasoningFormat, SystemUpdates};
 const FORMAT: &str = "openai-chat-completions";
 /// The version of this conversion in the recorded options, the only one replayed.
 const VERSION: u32 = 2;
+
+/// The result of a tool call that returned images and no text, whose images follow the
+/// results (pi: openai-completions).
+const SEE_ATTACHED: &str = "(see attached image)";
+
+/// The text that opens the user message carrying the images of tool results, which a tool
+/// message cannot (pi: openai-completions).
+const ATTACHED_IMAGES: &str = "Attached image(s) from tool result:";
 
 /// What is recorded with each request: which conversion turned the transcript into a body,
 /// then its options, side by side in one object.
@@ -70,7 +81,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
 /// The JSON body of a streaming Chat Completions request to `provider`, the name its
 /// answers are recorded under.
 pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &str) -> Value {
-    let messages = convert_messages(&request.messages, options, provider, &request.model);
+    let messages = convert_messages(request, options, provider);
 
     let mut body = json!({
         "model": request.model,
@@ -137,11 +148,15 @@ fn apply_reasoning(body: &mut Value, reasoning: Reasoning, format: ReasoningForm
 /// cancelled between them leaves such gaps, so missing results get a placeholder and
 /// unmatched results are dropped.
 ///
-/// Reasoning is sent back only to the `provider` and `model` that produced it. System
-/// messages follow `options.system_updates`.
-fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str, model: &str) -> Vec<Value> {
+/// Reasoning is sent back only to the provider and model that produced it. System messages
+/// follow `options.system_updates`. A tool message takes text only, so the images of tool
+/// results follow the results in a user message of their own; to a model that takes no
+/// images, a note goes in their place.
+fn convert_messages(request: &Request, options: &BodyOptions, provider: &str) -> Vec<Value> {
+    let (messages, model) = (&request.messages, request.model.as_str());
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
+    let mut attached: Vec<Value> = Vec::new();
     let inline = options.system_updates == SystemUpdates::Inline;
     if !inline {
         let prompt = SystemPrompt::from_transcript(messages);
@@ -155,7 +170,7 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
         match message {
             Message::System(_) if !inline => {}
             Message::System(system) => {
-                flush_missing_results(&mut out, &mut pending);
+                close_tool_results(&mut out, &mut pending, &mut attached);
                 let first = prompt.is_empty();
                 prompt.apply(&system.sections);
                 let text = if first { prompt.render() } else { system.render_update() };
@@ -168,19 +183,19 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
                     continue;
                 };
                 pending.remove(position);
-                let content = if result.content.is_empty() {
-                    EMPTY_TOOL_RESULT
-                } else {
-                    result.content.as_str()
-                };
+                let content = tool_result_text(result, request.takes_images);
                 out.push(json!({ "role": "tool", "tool_call_id": result.tool_call_id, "content": content }));
+                if request.takes_images {
+                    attached.extend(result.images.iter().map(image_part));
+                }
             }
-            Message::User { content, .. } => {
-                flush_missing_results(&mut out, &mut pending);
+            Message::User { content, images, .. } => {
+                close_tool_results(&mut out, &mut pending, &mut attached);
+                let content = user_content(content, images, request.takes_images);
                 out.push(json!({ "role": "user", "content": content }));
             }
             Message::Assistant(assistant) => {
-                flush_missing_results(&mut out, &mut pending);
+                close_tool_results(&mut out, &mut pending, &mut attached);
                 if let Some((entry, calls)) = assistant_entry(assistant, provider, model) {
                     pending = calls;
                     out.push(entry);
@@ -188,7 +203,7 @@ fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str,
             }
         }
     }
-    flush_missing_results(&mut out, &mut pending);
+    close_tool_results(&mut out, &mut pending, &mut attached);
     if options.fill_missing_reasoning {
         fill_missing_reasoning(&mut out);
     }
@@ -263,10 +278,50 @@ fn fill_missing_reasoning(messages: &mut [Value]) {
     }
 }
 
-fn flush_missing_results(out: &mut Vec<Value>, pending: &mut Vec<String>) {
+/// End a run of tool results: a placeholder for each call of `pending` without one, then the
+/// images of the results, `attached`, in a user message.
+fn close_tool_results(out: &mut Vec<Value>, pending: &mut Vec<String>, attached: &mut Vec<Value>) {
     for id in pending.drain(..) {
         out.push(json!({ "role": "tool", "tool_call_id": id, "content": MISSING_TOOL_RESULT }));
     }
+    if !attached.is_empty() {
+        let mut parts = vec![json!({ "type": "text", "text": ATTACHED_IMAGES })];
+        parts.append(attached);
+        out.push(json!({ "role": "user", "content": parts }));
+    }
+}
+
+/// The content of a user message: its text, or its images and then its text; to a model
+/// that takes no images, the text with a note in their place.
+fn user_content(text: &str, images: &[Image], takes_images: bool) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    if !takes_images {
+        return json!(with_note(text, USER_IMAGES_OMITTED));
+    }
+    let mut parts: Vec<Value> = images.iter().map(image_part).collect();
+    if !text.trim().is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+    Value::Array(parts)
+}
+
+/// The text a tool message carries for `result`: to a model that takes no images, a note in
+/// place of its images.
+fn tool_result_text(result: &ToolResultMessage, takes_images: bool) -> Cow<'_, str> {
+    match (result.content.is_empty(), result.images.is_empty()) {
+        (_, false) if !takes_images => Cow::Owned(with_note(&result.content, TOOL_IMAGES_OMITTED)),
+        (true, false) => Cow::Borrowed(SEE_ATTACHED),
+        (true, true) => Cow::Borrowed(EMPTY_TOOL_RESULT),
+        (false, _) => Cow::Borrowed(&result.content),
+    }
+}
+
+/// An image as a content part, in a data URL.
+fn image_part(image: &Image) -> Value {
+    let url = format!("data:{};base64,{}", image.mime_type, image.data);
+    json!({ "type": "image_url", "image_url": { "url": url } })
 }
 
 #[cfg(test)]

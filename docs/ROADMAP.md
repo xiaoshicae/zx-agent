@@ -20,7 +20,7 @@
 
 | 编号 | 现行规则 |
 |---|---|
-| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端（规则 07）；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。serde_json 开启 `preserve_order`（规则 01）。其他新依赖与升级先征得同意 |
+| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`、`base64`（图片的编码；0.22 已经经 `jsonschema` 编进 `zx-core`）、`image`（只开 `gif`、`jpeg`、`png`、`webp`：图片进入会话前的缩放与重新编码，D36）。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端（规则 07）；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。serde_json 开启 `preserve_order`（规则 01）。其他新依赖与升级先征得同意 |
 | D4 | 会话 API 是进程内方法调用，不做提交队列 / 事件队列（SQ/EQ） |
 | D5 | 命令默认在本机执行；容器执行在 `config.toml` 中显式开启。理由：Kubernetes Job 的 Pod 内通常没有 Docker |
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |
@@ -50,6 +50,7 @@
 | D33 | IM 服务收到的每条消息先写入 backlog（`zx-im` 的 trait `Backlog`；程序用会话目录下的文件实现，不新增依赖），再确认投递，写入会话、已回复或有意丢弃之后才删除；去重也只由它做，处理完的消息仍被认出一段时间（文件实现为 24 小时）。消息的凭证与配额一起作为输入的 hold 交给内核（D28）：`Session::send` 也接收带 hold 的输入，写入会话后才释放。停止时还没写入会话的消息留到下次启动，不再回复；启动时先按到达顺序处理它们。崩溃或停止恰好落在写入会话与删除记录之间时重复处理一次，先接受，不为此改会话格式。多副本时 backlog 与会话存储、对话归属、状态记录一起换成数据库实现。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用三个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落、对命令隐藏的变量），`set_*` 换掉唯一的那个（摘要器、追踪导出），`register_*` 登记由配置按名字选用的实现；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。内置的实现也经 `register_*` 登记：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字；执行环境经 `register_executor`，`execution` 写它的名字，它声明是否隔离命令，`permissions.approveAll` 只能用于隔离的执行环境；IM 平台经程序 `zx-im` 的库中 `Program::register_platform`，`im.toml` 中服务自己的段以外，每个段配置以段名注册的平台。自建的 zx-im 程序经 `Program::customize` 用同样的动词给 `Application` 加部件，程序自己的部件在其后：平台的凭据与宿主隐藏的变量合并，不替换；追踪导出归程序。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
 | D35 | 被取消的运行为整批工具调用都写下结果：还没开始的记为未执行，执行中被打断的按工具有无副作用说明；只有运行没能写下结果时（崩溃、宿主丢弃 `Run`、会话写入失败）与失败或被取消的回答里的调用，才由下一次运行补写（不变量 10）。被取消打断的钩子回调不算钩子失败，不发 `hook_failed`。行为见 [REFERENCE.md](REFERENCE.md) 的“会话文件” |
+| D36 | 支持图片输入（2026-11-20 用户决定，原先第 7 节的“工具结果中的图片”不做取消）：用户消息与工具结果在文本旁带 `images`（base64 与媒体类型），不像 pi 那样与文本穿插；`[[models]]` 的 `input` 默认只有文本（沿用 pi），没声明 `"image"` 的模型由 provider 按请求把图片换成一句说明，会话里存原图；图片进入会话前由 `zx_agent::builtin::images` 按 pi 的上限适配。入口：`read_file` 与 MCP 的结果、ACP 提问、`run` 的 `@文件`、IM 附件（Slack 与 ⚑ D:5/CHINA FLAG: 飞书。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval）。音频与视频不收（第 5 节）。行为见 [REFERENCE.md](REFERENCE.md#图片) |
 
 ## 4. 当前阶段
 
@@ -87,6 +88,9 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（IM 服务丢消息已由 D33 的 backlog 解决）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
+- 图片（D36）：只对模拟服务测试过，没有在真实的 OpenAI 兼容服务与 Anthropic API 上验收；尺寸与大小都在上限内的 GIF 原样发送，动图是否被各服务接受没有验证；每张图片按约 1200 token 估算上下文，不按尺寸。会话里的图片每次请求都重发：图片多时请求体可能超出服务的上限（Anthropic 以 413 `request_too_large` 拒绝），provider 把它归为上下文过长，开启自动摘要时摘要一次再试（摘要不保留图片），没开时运行失败；没有按请求只发最近几张的做法。
+- IM 的图片（D36）：读入的线程历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；Slack 的 `app_mention` 事件是否带 `files` 没有核实；⚑ D:5/CHINA FLAG: 飞书下载消息资源所需的权限按官方文档写，富文本里 @ 的写法按文档示例写，都没在真实租户验证。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
+- 音频与视频不收：MCP 结果与 ACP 提问里的音频照旧略去。需要时再定：加一种输入只发给声明能收的模型，或由宿主先转成文字；视频交给工具抽帧。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。
 - 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（14 个中 12 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。
 - 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过。
@@ -119,11 +123,11 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 - `--output-schema`、异步审批、OS 级沙箱、由 webhook 或告警触发运行（D10）
 - rpc 模式（D14）；chat 的便利功能（D13）
-- durable 的自动续跑与重放，工具结果中的图片、`structuredContent` 与 `runToolCall`（见 REFERENCE“与 pi 的差异”），codemode
+- durable 的自动续跑与重放，工具结果中的 `structuredContent` 与 `runToolCall`（见 REFERENCE“与 pi 的差异”），codemode
 - MCP 的 stdio、OAuth 与运行中更新工具列表（D8）
 - 完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时、A/B 行为评测框架
 - 事件 JSON 中预算的名字 `model_request_limit` 不改为与设置同名的 `max_model_requests`：事件是对外格式（`schemaVersion`），改名的收益只是名字对齐
 
 ---
 
-ROADMAP.md · v0.58 · 2026年11月
+ROADMAP.md · v0.59 · 2026年11月

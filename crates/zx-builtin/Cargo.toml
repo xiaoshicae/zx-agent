@@ -23,6 +23,8 @@ zx-util.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
+image.workspace = true
 reqwest = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 serde.workspace = true

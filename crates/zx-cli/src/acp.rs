@@ -33,9 +33,9 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities,
-    SessionResumeCapabilities, ToolKind,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId,
+    SessionListCapabilities, SessionResumeCapabilities, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
@@ -48,7 +48,7 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace};
 
 use self::commands::Command;
-use self::turn::{Running, Turn, prompt_text};
+use self::turn::{Prompt, Running, Turn};
 use crate::application::connect;
 use crate::cli::{self, AcpArgs};
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
@@ -137,14 +137,16 @@ impl Host {
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
     /// permission answers keep arriving; the response is sent when the turn ends. A prompt
-    /// without text is refused, as `run` refuses one. A prompt
-    /// that is one of the agent's commands runs the command instead; `/compact` is a turn of
-    /// its own, taken and cancelled as a prompt's is.
+    /// with neither text nor images is refused, as `run` refuses an empty one, and so is one
+    /// with an image that cannot be fitted to the model APIs' limits. A prompt that is one of
+    /// the agent's commands runs the command instead, which takes no images; `/compact` is a
+    /// turn of its own, taken and cancelled as a prompt's is.
     ///
-    /// The session is taken for the turn here, in the dispatch loop: a `session/cancel` that
-    /// follows the prompt at once then finds the turn, though it has not run yet. A session
-    /// that is busy or closed answers the prompt at once.
-    fn prompt(
+    /// The images are fitted and the session is taken for the turn here, in the dispatch
+    /// loop: a `session/cancel` that follows the prompt at once then finds the turn, though it
+    /// has not run yet, and the loop waits only while the images of a prompt are fitted. A
+    /// session that is busy or closed answers the prompt at once.
+    async fn prompt(
         &self,
         request: &PromptRequest,
         responder: Responder<PromptResponse, V1>,
@@ -160,13 +162,20 @@ impl Host {
             };
             return responder.respond_with_error(sessions::unknown_session(&request.session_id.0, why));
         };
-        let text = prompt_text(&request.prompt);
+        let prompt = match Prompt::of(&request.prompt).await {
+            Ok(prompt) => prompt,
+            Err(why) => return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, why)),
+        };
         // The kernel takes any input; an empty one would reach the model as a message.
-        if text.trim().is_empty() {
+        if prompt.is_empty() {
             return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, "the prompt is empty"));
         }
         let session_id = request.session_id.clone();
-        let started = match commands::parse(&text) {
+        let command = commands::parse(&prompt.text);
+        if command.is_some() && !prompt.images.is_empty() {
+            return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, "a command takes no images"));
+        }
+        let started = match command {
             Some(Command::Name(name)) => {
                 return cx.spawn({
                     let cx = cx.clone();
@@ -180,7 +189,7 @@ impl Host {
                 return responder.respond_with_error(Error::new(ErrorCode::INVALID_PARAMS, usage));
             }
             Some(Command::Compact) => session.compact().map(Running::Compaction),
-            None => session.send(text).map(Running::Task),
+            None => session.send(prompt.into_input()).map(Running::Task),
         };
         let running = match started {
             Ok(running) => running,
@@ -323,7 +332,7 @@ async fn client_connection(host: Arc<Host>) -> Result<(), Error> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: PromptRequest, responder, cx| on_prompt.prompt(&request, responder, &cx),
+            async move |request: PromptRequest, responder, cx| on_prompt.prompt(&request, responder, &cx).await,
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
@@ -369,8 +378,8 @@ fn protocol_error(error: anyhow::Error) -> Error {
         .unwrap_or_else(|error| Error::new(ErrorCode::INTERNAL_ERROR, format!("{error:#}")))
 }
 
-/// What the agent offers: closing sessions, which frees them also in memory, and loading,
-/// listing and resuming sessions when it keeps their files.
+/// What the agent offers: images in prompts, closing sessions, which frees them also in
+/// memory, and loading, listing and resuming sessions when it keeps their files.
 fn agent_capabilities(kept: bool) -> AgentCapabilities {
     let mut sessions = SessionCapabilities::new().close(SessionCloseCapabilities::new());
     if kept {
@@ -380,6 +389,7 @@ fn agent_capabilities(kept: bool) -> AgentCapabilities {
     }
     AgentCapabilities::new()
         .load_session(kept)
+        .prompt_capabilities(PromptCapabilities::new().image(true))
         .session_capabilities(sessions)
 }
 

@@ -7,6 +7,7 @@
 - 两个程序：`zx-agent` 的子命令有无人值守的 `run`，终端对话 `chat`（应急与脚本化入口），ACP agent `acp`（交互式界面由 ACP 客户端提供），列出会话的 `sessions`；`zx-im` 是 IM 服务。
 - 流式 provider：OpenAI 兼容服务与 Anthropic Messages API，带错误分类、自动重试与响应大小上限；由 `config.toml` 的 `provider.api` 按名字选用，宿主可注册自己的。
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
+- 图片输入：提问与工具结果都可以带图片，进入会话前缩到模型 API 的上限之内；只发给声明能看图的模型。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
 - 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
