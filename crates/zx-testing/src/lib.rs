@@ -5,12 +5,13 @@
 //!
 //! The modules whose helpers are re-exported here, under the names the tests use. A module
 //! uses only modules listed before it, named in brackets where it uses any:
-//! - `records`: messages a test writes ([`tool_call_block`], [`tool_call_answer`],
-//!   [`answer_reporting`], [`summary_json`], [`summary_of_the_source`])
-//!   and what it reads back:
-//!   [`summarize`], [`replayed_requests`], [`json_lines`], [`read_lines`]
+//! - `records`: messages a test writes ([`tool_call_block`], [`tool_call`],
+//!   [`tool_call_answer`], [`answer_reporting`], [`note`], [`summary_json`],
+//!   [`summary_of_the_source`]) and what it reads back: [`summarize`], [`request_ids`],
+//!   [`replayed_requests`], [`json_lines`], [`read_lines`]
 //! - `stand_ins`: in place of the real thing, [`EchoTool`], [`NotifyingProvider`], which says
-//!   when a request starts, and [`hook_context`], to call a hook directly
+//!   when a request starts, and [`hook_context`] and [`tool_context`], to call a hook or a
+//!   tool directly
 //! - `sessions`: where a test's session comes from ([`Start`], [`Seed`], [`seeded_session`]),
 //!   with the records only the kernel writes, such as a crash leaves them
 //!   ([`Seed::append_record`], [`Seed::record_tool_call_started`]), and where it is kept:
@@ -66,8 +67,8 @@ pub const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 pub use program::signal;
 pub use program::{stderr, stdout};
 pub use records::{
-    answer_reporting, json_lines, read_lines, replayed_requests, summarize, summary_json, summary_of_the_source,
-    tool_call_answer, tool_call_block,
+    answer_reporting, json_lines, note, read_lines, replayed_requests, request_ids, summarize, summary_json,
+    summary_of_the_source, tool_call, tool_call_answer, tool_call_block,
 };
 pub use runner::{
     Approver, Asked, Collect, Driven, RunnerSetup, config, fast_retry, refusal, run_approved, run_prompt,
@@ -77,4 +78,4 @@ pub use sessions::{
     LogStorage, RefusingLog, Seed, Start, create_session_file, header, header_in, open_session_file, read_session_file,
     seeded_session,
 };
-pub use stand_ins::{EchoTool, NotifyingProvider, hook_context};
+pub use stand_ins::{EchoTool, NotifyingProvider, hook_context, tool_context};

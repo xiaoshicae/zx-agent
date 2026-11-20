@@ -17,17 +17,11 @@ use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::{CommandError, SessionError};
 use zx_agent::tools::ToolOutput;
-use zx_agent::transcript::{CustomMessage, Entry};
-use zx_testing::{EchoTool, NotifyingProvider, RefusingLog, RunnerSetup, Start, config, header, refusal, summarize};
-
-fn note(text: &str) -> CustomMessage {
-    CustomMessage {
-        custom_type: "note".into(),
-        content: text.into(),
-        display: true,
-        details: Some(json!({"n": 1})),
-    }
-}
+use zx_agent::transcript::Entry;
+use zx_testing::{
+    EchoTool, NotifyingProvider, RefusingLog, RunnerSetup, Start, config, header, note, refusal, replayed_requests,
+    summarize,
+};
 
 async fn session_in(file: &Path, config: AgentConfig) -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
     RunnerSetup {
@@ -214,22 +208,9 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
 
     assert_eq!(tool_names(&provider, 2), ["echo", "note"]);
     let transcript = zx_testing::read_session_file(&file).unwrap();
-    let declared: Vec<Vec<String>> = transcript
-        .entries()
+    let declared: Vec<Vec<String>> = replayed_requests(&transcript)
         .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(
-                transcript
-                    .replay_request(&started.id)
-                    .unwrap()
-                    .1
-                    .tools
-                    .iter()
-                    .map(|tool| tool.name.clone())
-                    .collect(),
-            ),
-            _ => None,
-        })
+        .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
         .collect();
     assert_eq!(declared, [vec!["echo"], vec!["echo"], vec!["echo", "note"]]);
 }

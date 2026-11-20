@@ -1,8 +1,8 @@
 //! What a test gives the code under test in place of the real thing: a provider that says
-//! when a request starts, a tool that echoes and counts its calls, and the context a hook gets
-//! when a test calls it directly.
+//! when a request starts, a tool that echoes and counts its calls, and the context a hook or
+//! a tool gets when a test calls it directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -161,4 +161,9 @@ impl Tool for EchoTool {
 /// the current directory.
 pub fn hook_context() -> HookContext {
     HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
+}
+
+/// A tool context for calling a tool directly in `cwd`, which nothing cancels.
+pub fn tool_context(cwd: &Path) -> ToolContext {
+    ToolContext::new(cwd.to_path_buf(), CancellationToken::new())
 }

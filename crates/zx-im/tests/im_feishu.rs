@@ -9,11 +9,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::im::{FullBacklog, run_channel, run_channel_with};
+use common::im::{FullBacklog, at, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, FeishuChannel, FeishuConfig,
-    ImChannel, ImError, Inbound, MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,
+    ImError, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
 };
 use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
@@ -64,13 +64,6 @@ fn bot_mention() -> Value {
 
 fn received(event: &Value) -> Vec<u8> {
     payload("im.message.receive_v1", event)
-}
-
-fn at(chat: &str, thread: Option<&str>) -> Destination {
-    Destination {
-        conversation: ConversationId(chat.into()),
-        thread: thread.map(|root| ThreadId(root.into())),
-    }
 }
 
 /// A message from ou_u1 in a group that mentions the bot.

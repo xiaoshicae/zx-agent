@@ -13,7 +13,7 @@ use zx_agent::events::RunOutcome;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
-use zx_testing::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
+use zx_testing::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests, request_ids};
 
 /// Every recorded request of `transcript`, rebuilt: the provider-neutral request and its
 /// OpenAI-compatible body in both system update modes.
@@ -55,18 +55,6 @@ fn assert_fixture_rebuilds(name: &str) {
     let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&transcript)).unwrap());
 
     assert!(rebuilt == expected, "rebuilt requests changed:\n{rebuilt}");
-}
-
-/// Request checkpoint IDs on the session's entry list, in file order.
-fn request_ids(transcript: &Transcript) -> Vec<String> {
-    transcript
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(started.id.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Every request rebuilt from a fresh snapshot of the file.

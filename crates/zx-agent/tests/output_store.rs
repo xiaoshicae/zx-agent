@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, ToolCall, ToolDef};
+use zx_agent::ai::{Message, ToolDef};
 use zx_agent::builtin::output_store::{
     InvalidOutputStoreConfig, OutputStore, OutputStoreConfig, ReadOutputTool, SpillOutputs,
 };
@@ -19,7 +19,7 @@ use zx_agent::hooks::Hook;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::{Session, SessionOptions};
 
-use zx_testing::{RunnerSetup, Start, config, header_in};
+use zx_testing::{RunnerSetup, Start, config, header_in, tool_call, tool_context};
 
 /// Where the stores of these tests keep results, below the working directory as a program
 /// may put them, and the directory above it.
@@ -31,17 +31,6 @@ fn settings() -> OutputStoreConfig {
         threshold_bytes: Some(256),
         ..OutputStoreConfig::new(OUTPUTS)
     }
-}
-fn call(name: &str) -> ToolCall {
-    ToolCall {
-        id: "c".into(),
-        name: name.into(),
-        arguments: json!({}),
-        arguments_error: None,
-    }
-}
-fn ctx(cwd: &Path) -> ToolContext {
-    ToolContext::new(cwd.into(), CancellationToken::new())
 }
 /// The tools the command line exempts from storing: each pages its own output.
 const PAGING_TOOLS: [&str; 3] = [READ_OUTPUT, "read_skill", "read_file"];
@@ -68,7 +57,7 @@ fn stored_file(dir: &Path, id: &str) -> PathBuf {
 /// its place, and the ID of the stored result.
 async fn spill(hook: &SpillOutputs, text: &str) -> (String, String) {
     let result = hook
-        .after_tool(&call("bash"), ToolOutput::ok(text), &zx_testing::hook_context())
+        .after_tool(&tool_call("bash"), ToolOutput::ok(text), &zx_testing::hook_context())
         .await
         .unwrap();
     let id = output_id(&result.content);
@@ -94,7 +83,7 @@ async fn files_are_lazy_persistent_and_contain_the_exact_bounded_tool_result() {
     let (_, reader) = parts(dir.path());
     assert!(
         !reader
-            .execute(json!({"id":id}), &ctx(dir.path()))
+            .execute(json!({"id":id}), &tool_context(dir.path()))
             .await
             .unwrap()
             .content
@@ -108,7 +97,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
     let (hook, _) = parts(dir.path());
     let exact = ToolOutput::error("x".repeat(256));
     assert_eq!(
-        hook.after_tool(&call("bash"), exact.clone(), &zx_testing::hook_context())
+        hook.after_tool(&tool_call("bash"), exact.clone(), &zx_testing::hook_context())
             .await
             .unwrap(),
         exact
@@ -121,7 +110,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
         usage: None,
     };
     let spilled = hook
-        .after_tool(&call("bash"), output.clone(), &zx_testing::hook_context())
+        .after_tool(&tool_call("bash"), output.clone(), &zx_testing::hook_context())
         .await
         .unwrap();
     assert!(spilled.is_error && spilled.terminate);
@@ -144,7 +133,10 @@ async fn a_stored_result_leaves_its_first_page_as_read_output_returns_it() {
         format!("[use read_output with id=\"{id}\", offset={} to continue]", start.len())
     );
     assert!(left.len() <= 256, "{} bytes", left.len());
-    let first_page = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap();
+    let first_page = reader
+        .execute(json!({"id": id}), &tool_context(dir.path()))
+        .await
+        .unwrap();
     assert_eq!(left, first_page.content);
 }
 
@@ -177,7 +169,7 @@ async fn unicode_and_single_long_lines_are_paged_without_loss_or_oversized_pages
         assert!(next > offset);
         offset = next;
         page = reader
-            .execute(json!({"id":id,"offset":offset}), &ctx(dir.path()))
+            .execute(json!({"id":id,"offset":offset}), &tool_context(dir.path()))
             .await
             .unwrap()
             .content;
@@ -185,14 +177,14 @@ async fn unicode_and_single_long_lines_are_paged_without_loss_or_oversized_pages
     assert_eq!(joined, text);
     assert!(
         reader
-            .execute(json!({"id":id,"offset":1}), &ctx(dir.path()))
+            .execute(json!({"id":id,"offset":1}), &tool_context(dir.path()))
             .await
             .unwrap_err()
             .contains("UTF-8 character")
     );
     assert!(
         reader
-            .execute(json!({"id":id,"offset":text.len()+1}), &ctx(dir.path()))
+            .execute(json!({"id":id,"offset":text.len()+1}), &tool_context(dir.path()))
             .await
             .is_err()
     );
@@ -211,13 +203,13 @@ async fn output_ids_cannot_address_arbitrary_paths_and_schema_is_strict() {
         json!({"id":uuid::Uuid::new_v4().to_string(),"extra":true}),
     ] {
         assert!(reader.validate_arguments(&args).is_err(), "{args}");
-        assert!(reader.execute(args, &ctx(dir.path())).await.is_err());
+        assert!(reader.execute(args, &tool_context(dir.path())).await.is_err());
     }
     let missing = json!({"id":uuid::Uuid::new_v4().to_string()});
     assert!(reader.validate_arguments(&missing).is_ok());
     assert!(
         reader
-            .execute(missing, &ctx(dir.path()))
+            .execute(missing, &tool_context(dir.path()))
             .await
             .unwrap_err()
             .contains("cannot read tool output")
@@ -239,7 +231,10 @@ async fn a_link_named_like_an_output_is_not_followed() {
     let id = uuid::Uuid::new_v4().to_string();
     std::os::unix::fs::symlink(&target, outputs.join(format!("{id}.txt"))).unwrap();
 
-    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+    let error = reader
+        .execute(json!({"id": id}), &tool_context(dir.path()))
+        .await
+        .unwrap_err();
 
     assert!(error.contains("cannot read tool output"), "{error}");
     assert!(!error.contains("kept outside"), "{error}");
@@ -251,7 +246,7 @@ async fn a_link_named_like_an_output_is_not_followed() {
 #[cfg(unix)]
 async fn swap_outputs_for_a_link(hook: &SpillOutputs, dir: &Path) -> (tempfile::TempDir, String) {
     hook.after_tool(
-        &call("bash"),
+        &tool_call("bash"),
         ToolOutput::ok("x".repeat(500)),
         &zx_testing::hook_context(),
     )
@@ -273,7 +268,10 @@ async fn an_output_directory_swapped_for_a_link_is_not_read() {
     let (hook, reader) = parts(dir.path());
     let (_elsewhere, id) = swap_outputs_for_a_link(&hook, dir.path()).await;
 
-    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+    let error = reader
+        .execute(json!({"id": id}), &tool_context(dir.path()))
+        .await
+        .unwrap_err();
 
     assert!(error.contains("output directory"), "{error}");
     assert!(!error.contains("from another directory"), "{error}");
@@ -288,7 +286,7 @@ async fn nothing_is_stored_through_an_output_directory_swapped_for_a_link() {
 
     let kept = hook
         .after_tool(
-            &call("bash"),
+            &tool_call("bash"),
             ToolOutput::ok("y".repeat(500)),
             &zx_testing::hook_context(),
         )
@@ -315,7 +313,7 @@ async fn nothing_is_stored_through_a_link_planted_before_the_first_result() {
 
         let kept = hook
             .after_tool(
-                &call("bash"),
+                &tool_call("bash"),
                 ToolOutput::ok("y".repeat(500)),
                 &zx_testing::hook_context(),
             )
@@ -338,7 +336,10 @@ async fn an_output_is_not_read_through_a_link_planted_before_the_first_read() {
     std::fs::create_dir_all(dir.path().join(ABOVE_OUTPUTS)).unwrap();
     std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(OUTPUTS)).unwrap();
 
-    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+    let error = reader
+        .execute(json!({"id": id}), &tool_context(dir.path()))
+        .await
+        .unwrap_err();
 
     assert!(error.contains("symbolic link"), "{error}");
     assert!(!error.contains("from another directory"), "{error}");
@@ -364,7 +365,10 @@ async fn an_output_directory_outside_the_working_directory_may_be_reached_throug
     let (left, id) = spill(&hook, &"z".repeat(500)).await;
 
     assert!(real.join("outputs").join(format!("{id}.txt")).is_file());
-    let page = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap();
+    let page = reader
+        .execute(json!({"id": id}), &tool_context(dir.path()))
+        .await
+        .unwrap();
     assert_eq!(page.content, left);
 }
 
@@ -380,7 +384,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     // Over the cap nothing is written; the bounded result stays inline with the reason.
     let kept = hook
         .after_tool(
-            &call("bash"),
+            &tool_call("bash"),
             ToolOutput::ok("x".repeat(513)),
             &zx_testing::hook_context(),
         )
@@ -391,12 +395,12 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
     let (_, id) = spill(&hook, &"x".repeat(512)).await;
     let args = json!({"id": id});
-    assert!(reader.execute(args.clone(), &ctx(dir.path())).await.is_ok());
+    assert!(reader.execute(args.clone(), &tool_context(dir.path())).await.is_ok());
     let path = stored_file(dir.path(), &id);
     std::fs::write(&path, "x".repeat(513)).unwrap();
     assert!(
         reader
-            .execute(args.clone(), &ctx(dir.path()))
+            .execute(args.clone(), &tool_context(dir.path()))
             .await
             .unwrap_err()
             .contains("over the 512 byte limit")
@@ -404,7 +408,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     std::fs::write(path, [0xff]).unwrap();
     assert!(
         reader
-            .execute(args, &ctx(dir.path()))
+            .execute(args, &tool_context(dir.path()))
             .await
             .unwrap_err()
             .contains("UTF-8")
@@ -436,7 +440,7 @@ fn a_result_not_stored_in_time_stays_inline() {
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             hook.after_tool(
-                &call("bash"),
+                &tool_call("bash"),
                 ToolOutput::ok("x".repeat(500)),
                 &zx_testing::hook_context(),
             ),
@@ -463,7 +467,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let large = ToolOutput::ok("x".repeat(500));
     for name in PAGING_TOOLS {
         assert_eq!(
-            hook.after_tool(&call(name), large.clone(), &zx_testing::hook_context())
+            hook.after_tool(&tool_call(name), large.clone(), &zx_testing::hook_context())
                 .await
                 .unwrap(),
             large
@@ -482,7 +486,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     );
     assert_eq!(
         disabled
-            .after_tool(&call("bash"), large.clone(), &zx_testing::hook_context())
+            .after_tool(&tool_call("bash"), large.clone(), &zx_testing::hook_context())
             .await
             .unwrap(),
         large

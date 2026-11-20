@@ -14,22 +14,22 @@ use tokio::process::{ChildStdout, Command};
 
 use common::zx_agent_in;
 use zx_agent::ai::Message;
-use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, ended, ended_output, write_agent, write_config};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
+use zx_testing::program::{Home, ended, ended_output, retrying_fake_model_config, write_agent, write_config};
 use zx_testing::{json_lines, signal, stderr, stdout, summary_json, tool_call_answer};
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
 
 fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
-    chat_retrying(server, cwd, args, "0")
+    chat_retrying(server, cwd, args, 0)
 }
 
 /// Like `chat`, with the given number of retries for transient errors, unless the test wrote
 /// a config.toml of its own with [`configure`].
-fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
+fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], retries: u32) -> Command {
     if !agent_home(cwd).join("config.toml").exists() {
-        write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
+        write_config(&agent_home(cwd), &base_config(retries, "", ""));
     }
     // chat keeps sessions under the home directory by default; never the real one.
     let mut command = zx_agent_in(cwd, Home::User(&cwd.join(".home")));
@@ -282,7 +282,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
     let id = seed_context(dir.path(), 10_000).await;
     agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":summary_json(&id)},"finish_reason":null}]})];
+    let chunks = vec![text_chunk(&summary_json(&id))];
     let server = MockServer::start(vec![
         Reply::Gate {
             chunks,
@@ -641,9 +641,7 @@ async fn a_retried_error_is_named_once() {
         Reply::text("recovered"),
     ])
     .await;
-    let mut child = chat_retrying(&server, dir.path(), &["--tools", ""], "1")
-        .spawn()
-        .unwrap();
+    let mut child = chat_retrying(&server, dir.path(), &["--tools", ""], 1).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"go\n/quit\n").await.unwrap();
     drop(stdin);
@@ -1042,7 +1040,7 @@ async fn read_terminal_until(terminal: &mut tokio::fs::File, seen: &mut Vec<u8>,
 #[tokio::test]
 async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_continue() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let partial = text_chunk("partial");
     let server = MockServer::start(vec![Reply::Stall(vec![partial]), Reply::text("after cancellation")]).await;
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .spawn()
@@ -1068,7 +1066,7 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
 #[tokio::test]
 async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let partial = text_chunk("partial");
     let server = MockServer::start(vec![Reply::Stall(vec![partial])]).await;
     let mut child = chat(&server, dir.path(), &["--tools", ""]).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -1210,7 +1208,7 @@ async fn ctrl_c_while_idle_keeps_chat_open() {
 async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
     let dir = tempfile::tempdir().unwrap();
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"original"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("original")];
     let server = MockServer::start(vec![
         Reply::Gate {
             chunks,
@@ -1248,7 +1246,7 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
 #[tokio::test]
 async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     let dir = tempfile::tempdir().unwrap();
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("partial")];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
     let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
@@ -1313,7 +1311,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
 #[tokio::test]
 async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     let dir = tempfile::tempdir().unwrap();
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("partial")];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
     let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
@@ -1606,16 +1604,16 @@ fn agent_home(dir: &Path) -> std::path::PathBuf {
     dir.join(".home/.zx-agent")
 }
 
-/// The config.toml of these tests: the key in [`KEY_VAR`], `max_retries` retries, a 10-second
+/// The config.toml of these tests: the key in [`KEY_VAR`], `retries` retries, a 10-second
 /// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
-fn base_config(max_retries: &str, top: &str, rest: &str) -> String {
-    format!("{top}\n[provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = {max_retries}\nidleTimeoutSecs = 10\n{rest}\n")
+fn base_config(retries: u32, top: &str, rest: &str) -> String {
+    retrying_fake_model_config(KEY_VAR, retries, top, &format!("idleTimeoutSecs = 10\n{rest}"))
 }
 
 /// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
 /// [`base_config`] places them.
 fn configure(dir: &Path, top: &str, rest: &str) {
-    write_config(&agent_home(dir), &base_config("0", top, rest));
+    write_config(&agent_home(dir), &base_config(0, top, rest));
 }
 
 /// Write the config.toml of chat in `dir` with `tables` after the provider's keys.

@@ -15,7 +15,7 @@ use tokio::process::Command;
 use common::zx_agent_in;
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::program::{Home, ended_output, write_agent, write_config};
+use zx_testing::program::{Home, ended_output, fake_model_config, write_agent, write_config};
 use zx_testing::{stderr, stdout};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
@@ -43,14 +43,10 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
             ),
         );
     }
-    write_config(
-        &home,
-        &format!(
-            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\n\
-             [provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = 0\n"
-        ),
+    let server = format!(
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\ntools = [\"query\", \"range\"]"
     );
+    write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
 }
 
@@ -74,14 +70,7 @@ fn run(model: &MockServer, dir: &Path, home: &Path) -> Command {
 
 /// The tool results in the model's last request.
 fn tool_results(model: &MockServer) -> Vec<String> {
-    let requests = model.requests();
-    requests
-        .last()
-        .unwrap()
-        .tool_results()
-        .iter()
-        .map(|message| message["content"].as_str().unwrap().to_string())
-        .collect()
+    model.requests().last().unwrap().tool_result_texts()
 }
 
 fn origin(fake: &FakeMcp) -> &str {

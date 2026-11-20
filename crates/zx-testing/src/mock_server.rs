@@ -48,6 +48,14 @@ impl Captured {
             .cloned()
             .collect()
     }
+
+    /// The texts of the tool result messages, in order.
+    pub fn tool_result_texts(&self) -> Vec<String> {
+        self.tool_results()
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect()
+    }
 }
 
 /// The scripted answer to one request.
@@ -113,6 +121,11 @@ impl Reply {
 
 fn usage() -> Value {
     json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+}
+
+/// Streamed `text` that does not end the answer, for [`Reply::Stall`] and [`Reply::Gate`].
+pub fn text_chunk(text: &str) -> Value {
+    json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
 }
 
 /// A running fake server. It stops answering after the scripted replies are used up.

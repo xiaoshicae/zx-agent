@@ -8,11 +8,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use common::im::{FullBacklog, run_channel, run_channel_with};
+use common::im::{FullBacklog, at, run_channel, run_channel_with};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
 };
 use zx_testing::WAIT;
 use zx_testing::fake_slack::{Answer, FakeSlack};
@@ -73,30 +73,24 @@ fn direct(ts: &str, extra: Value) -> Value {
     event(&message)
 }
 
-fn in_thread(conversation: &str, thread: Option<&str>) -> Destination {
-    Destination {
-        conversation: ConversationId(conversation.into()),
-        thread: thread.map(|ts| ThreadId(ts.into())),
-    }
-}
-
-/// A message in a channel that mentions the bot.
-fn message(ts: &str, at: Destination, sender: &str, text: &str) -> Inbound {
-    said(ts, at, ChatKind::Group, Addressee::Bot, text, sender)
+/// A message from U1 in a channel that mentions the bot.
+fn message(ts: &str, at: Destination, text: &str) -> Inbound {
+    said(ts, at, ChatKind::Group, Addressee::Bot, text)
 }
 
 /// A message from U1 in the direct chat D1.
 fn direct_message(ts: &str, text: &str) -> Inbound {
-    said(ts, in_thread("D1", None), ChatKind::Direct, Addressee::Bot, text, "U1")
+    said(ts, at("D1", None), ChatKind::Direct, Addressee::Bot, text)
 }
 
-fn said(ts: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &str, sender: &str) -> Inbound {
+/// The message `ts` from U1 at `at`, in a chat of kind `chat`, addressed to `addressee`.
+fn said(ts: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &str) -> Inbound {
     Inbound::Message {
         id: MessageId(ts.into()),
         at,
         chat,
         addressee,
-        sender: UserId(sender.into()),
+        sender: UserId("U1".into()),
         text: text.into(),
     }
 }
@@ -114,7 +108,7 @@ async fn a_mention_is_acknowledged_and_passed_on_without_the_bot_mention() {
     assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
     assert_eq!(
         running.next().await,
-        message("1.000100", in_thread("C1", None), "U1", "pods in <ns> & logs")
+        message("1.000100", at("C1", None), "pods in <ns> & logs")
     );
     assert_eq!(slack.calls("auth.test")[0].authorization, format!("Bearer {BOT_TOKEN}"));
     assert_eq!(
@@ -138,7 +132,7 @@ async fn a_mention_in_a_thread_names_the_thread() {
         .await;
     assert_eq!(
         running.next().await,
-        message("1.000200", in_thread("C1", Some("1.000100")), "U1", "more")
+        message("1.000200", at("C1", Some("1.000100")), "more")
     );
     running.stop().await.unwrap();
 }
@@ -185,14 +179,8 @@ async fn a_redelivered_message_is_passed_on_once() {
     for id in ["e1", "e2", "e3"] {
         assert_eq!(socket.receive().await, json!({ "envelope_id": id }));
     }
-    assert_eq!(
-        running.next().await,
-        message("3.1", in_thread("C1", None), "U1", "once")
-    );
-    assert_eq!(
-        running.next().await,
-        message("3.2", in_thread("C1", None), "U1", "next")
-    );
+    assert_eq!(running.next().await, message("3.1", at("C1", None), "once"));
+    assert_eq!(running.next().await, message("3.2", at("C1", None), "next"));
     running.stop().await.unwrap();
 }
 
@@ -243,7 +231,7 @@ async fn a_button_click_becomes_a_decision_in_the_cards_thread() {
     assert_eq!(
         running.next().await,
         Inbound::Decision {
-            at: in_thread("C1", Some("4.1")),
+            at: at("C1", Some("4.1")),
             user: UserId("U2".into()),
             approval: ApprovalId("A1".into()),
             choice: Choice::Deny,
@@ -269,7 +257,7 @@ async fn a_click_finds_its_thread_in_the_button_value() {
     assert_eq!(
         running.next().await,
         Inbound::Decision {
-            at: in_thread("C1", Some("4.1")),
+            at: at("C1", Some("4.1")),
             user: UserId("U2".into()),
             approval: ApprovalId("A2".into()),
             choice: Choice::AllowOnce,
@@ -286,10 +274,7 @@ async fn an_event_without_its_wrapper_is_passed_on_too() {
     // The Socket Mode page's own example puts the bare event in the payload.
     let bare = json!({"type": "app_mention", "user": "U1", "text": "<@UBOT> bare", "ts": "4.5", "channel": "C1"});
     socket.send(envelope("e1", "events_api", &bare)).await;
-    assert_eq!(
-        running.next().await,
-        message("4.5", in_thread("C1", None), "U1", "bare")
-    );
+    assert_eq!(running.next().await, message("4.5", at("C1", None), "bare"));
     running.stop().await.unwrap();
 }
 
@@ -309,10 +294,7 @@ async fn a_disconnect_message_makes_the_channel_reconnect() {
             &mention("5.1", None, "<@UBOT> still here"),
         ))
         .await;
-    assert_eq!(
-        running.next().await,
-        message("5.1", in_thread("C1", None), "U1", "still here")
-    );
+    assert_eq!(running.next().await, message("5.1", at("C1", None), "still here"));
     assert_eq!(slack.calls("apps.connections.open").len(), 2);
     running.stop().await.unwrap();
 }
@@ -343,7 +325,7 @@ async fn a_rejected_app_token_stops_the_channel_with_a_configuration_error() {
 async fn text_is_posted_in_the_thread_with_entities_escaped() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
-    let to = in_thread("C1", Some("6.1"));
+    let to = at("C1", Some("6.1"));
     let posted = channel.send(&to, &Post::Text("a < b & c > d".into())).await.unwrap();
     let call = &slack.calls("chat.postMessage")[0];
     assert_eq!(call.authorization, format!("Bearer {BOT_TOKEN}"));
@@ -360,7 +342,7 @@ async fn long_text_continues_in_the_thread_of_its_first_part() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
     let text = "x".repeat(4000 * 2 + 10);
-    let posted = channel.send(&in_thread("C1", None), &Post::Text(text)).await.unwrap();
+    let posted = channel.send(&at("C1", None), &Post::Text(text)).await.unwrap();
     let calls = slack.calls("chat.postMessage");
     let lengths: Vec<usize> = calls
         .iter()
@@ -385,7 +367,7 @@ async fn an_approval_card_has_two_buttons_that_carry_the_approval_id() {
             reason: "needs approval".into(),
         },
     };
-    channel.send(&in_thread("C1", Some("7.1")), &card).await.unwrap();
+    channel.send(&at("C1", Some("7.1")), &card).await.unwrap();
     let body = &slack.calls("chat.postMessage")[0].body;
     let request = body["blocks"][0]["text"]["text"].as_str().unwrap();
     assert!(
@@ -414,7 +396,7 @@ async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
             reason: "needs approval".into(),
         },
     };
-    let posted = channel.send(&in_thread("C1", Some("8.1")), &card).await.unwrap();
+    let posted = channel.send(&at("C1", Some("8.1")), &card).await.unwrap();
     let request = slack.calls("chat.postMessage")[0].body["blocks"][0].clone();
     let closed = Replacement::ApprovalResolved {
         card: ApprovalCard {
@@ -440,7 +422,7 @@ async fn a_status_update_replaces_the_text_and_leaves_out_blocks() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
     let posted = channel
-        .send(&in_thread("C1", Some("9.1")), &Post::Text("working".into()))
+        .send(&at("C1", Some("9.1")), &Post::Text("working".into()))
         .await
         .unwrap();
     channel
@@ -459,7 +441,7 @@ async fn a_refused_edit_posts_the_text_instead() {
     slack.script("chat.update", vec![Answer::Error("message_not_found")]);
     let channel = channel(&slack);
     let posted = channel
-        .send(&in_thread("C1", Some("9.1")), &Post::Text("working".into()))
+        .send(&at("C1", Some("9.1")), &Post::Text("working".into()))
         .await
         .unwrap();
 
@@ -482,7 +464,7 @@ async fn a_rate_limited_post_waits_and_is_retried() {
     slack.script("chat.postMessage", vec![Answer::RateLimited { retry_after_secs: 0 }]);
     let channel = channel(&slack);
     channel
-        .send(&in_thread("C1", Some("10.1")), &Post::Text("hello".into()))
+        .send(&at("C1", Some("10.1")), &Post::Text("hello".into()))
         .await
         .unwrap();
     assert_eq!(slack.calls("chat.postMessage").len(), 2);
@@ -493,7 +475,7 @@ async fn posts_to_one_chat_are_spaced_out() {
     let slack = FakeSlack::start().await;
     let interval = Duration::from_millis(300);
     let channel = channel_with(&slack, interval);
-    let to = in_thread("C1", Some("11.1"));
+    let to = at("C1", Some("11.1"));
     let started = tokio::time::Instant::now();
     channel.send(&to, &Post::Text("one".into())).await.unwrap();
     channel.send(&to, &Post::Text("two".into())).await.unwrap();
@@ -657,8 +639,8 @@ async fn replies_in_a_thread_are_passed_on_with_whom_they_mention() {
     for (n, frame) in frames.iter().enumerate() {
         socket.send(envelope(&format!("e{n}"), "events_api", frame)).await;
     }
-    let at = in_thread("C1", thread);
-    let group = |ts, addressee, text| said(ts, at.clone(), ChatKind::Group, addressee, text, "U1");
+    let at = at("C1", thread);
+    let group = |ts, addressee, text| said(ts, at.clone(), ChatKind::Group, addressee, text);
     assert_eq!(running.next().await, group("6.2", Addressee::Nobody, "and then?"));
     assert_eq!(
         running.next().await,
@@ -678,10 +660,10 @@ async fn a_thread_reply_also_sent_to_the_channel_is_passed_on() {
 
     socket.send(envelope("e1", "events_api", &broadcast)).await;
 
-    let at = in_thread("C1", Some("6.0"));
+    let at = at("C1", Some("6.0"));
     assert_eq!(
         running.next().await,
-        said("6.2", at, ChatKind::Group, Addressee::Nobody, "and then?", "U1")
+        said("6.2", at, ChatKind::Group, Addressee::Nobody, "and then?")
     );
     running.stop().await.unwrap();
 }
@@ -723,14 +705,21 @@ async fn another_bots_reply_in_a_thread_is_heard_and_starts_nothing() {
     for (n, frame) in frames.iter().enumerate() {
         socket.send(envelope(&format!("e{n}"), "events_api", frame)).await;
     }
-    let at = in_thread("C1", Some("9.0"));
+    let at = at("C1", Some("9.0"));
     assert_eq!(
         running.next().await,
-        said("9.1", at.clone(), ChatKind::Group, Addressee::Others, "resolved", "B9")
+        Inbound::Message {
+            id: MessageId("9.1".into()),
+            at: at.clone(),
+            chat: ChatKind::Group,
+            addressee: Addressee::Others,
+            sender: UserId("B9".into()),
+            text: "resolved".into(),
+        }
     );
     assert_eq!(
         running.next().await,
-        said("9.6", at, ChatKind::Group, Addressee::Nobody, "anyone?", "U1")
+        said("9.6", at, ChatKind::Group, Addressee::Nobody, "anyone?")
     );
     running.stop().await.unwrap();
 }
@@ -753,14 +742,8 @@ async fn a_mention_that_arrives_as_both_events_is_passed_on_once() {
     socket
         .send(envelope("e3", "events_api", &mention("7.2", None, "<@UBOT> next")))
         .await;
-    assert_eq!(
-        running.next().await,
-        message("7.1", in_thread("C1", None), "U1", "once")
-    );
-    assert_eq!(
-        running.next().await,
-        message("7.2", in_thread("C1", None), "U1", "next")
-    );
+    assert_eq!(running.next().await, message("7.1", at("C1", None), "once"));
+    assert_eq!(running.next().await, message("7.2", at("C1", None), "next"));
     running.stop().await.unwrap();
 }
 
@@ -777,7 +760,7 @@ async fn a_thread_is_read_without_the_messages_of_bots_or_edits() {
         ]}))],
     );
     let read = channel(&slack)
-        .thread_history(&in_thread("C1", Some("8.0")), 50)
+        .thread_history(&at("C1", Some("8.0")), 50)
         .await
         .unwrap();
     let earlier = |ts: &str, sender: &str, text: &str| Said {
@@ -823,7 +806,7 @@ async fn a_thread_is_read_with_what_other_bots_said_once_the_bot_knows_itself() 
     let running = run_channel(channel.clone(), WAIT);
     let _socket = slack.socket().await;
 
-    let read = channel.thread_history(&in_thread("C1", Some("8.0")), 50).await.unwrap();
+    let read = channel.thread_history(&at("C1", Some("8.0")), 50).await.unwrap();
 
     let earlier = |ts: &str, sender: &str, text: &str| Said {
         id: MessageId(ts.into()),
@@ -875,10 +858,7 @@ async fn a_thread_of_several_pages_is_read_to_its_end_for_its_latest_messages() 
             replies_page(&["8.3", "8.4"], ""),
         ],
     );
-    let read = channel(&slack)
-        .thread_history(&in_thread("C1", Some("8.0")), 3)
-        .await
-        .unwrap();
+    let read = channel(&slack).thread_history(&at("C1", Some("8.0")), 3).await.unwrap();
     assert_eq!(timestamps(&read), ["8.2", "8.3", "8.4"]);
     let calls = slack.calls("conversations.replies");
     let cursors: Vec<Option<&str>> = calls.iter().map(|call| call.arg("cursor")).collect();
@@ -900,7 +880,7 @@ async fn a_later_page_that_cannot_be_read_leaves_the_messages_read_so_far() {
         ],
     );
     let (channel, mut reports) = reporting(config(&slack));
-    let read = tokio::time::timeout(WAIT, channel.thread_history(&in_thread("C1", Some("8.0")), 50))
+    let read = tokio::time::timeout(WAIT, channel.thread_history(&at("C1", Some("8.0")), 50))
         .await
         .expect("the rate limit of a later page was waited out")
         .unwrap();
@@ -922,7 +902,7 @@ async fn a_thread_of_too_many_pages_gives_the_latest_messages_of_those_read() {
         .collect();
     slack.script("conversations.replies", pages);
     let (channel, mut reports) = reporting(config(&slack));
-    let read = channel.thread_history(&in_thread("C1", Some("8.0")), 2).await.unwrap();
+    let read = channel.thread_history(&at("C1", Some("8.0")), 2).await.unwrap();
     assert_eq!(timestamps(&read), ["8.3", "8.4"]);
     assert_eq!(slack.calls("conversations.replies").len(), 5);
     let report = reports.try_recv().unwrap();
@@ -972,7 +952,7 @@ async fn an_acknowledgement_is_a_reaction_and_a_repeated_one_is_no_error() {
     slack.script("reactions.add", vec![Answer::Error("already_reacted")]);
     let channel = channel(&slack);
     let steered = MessageRef {
-        at: in_thread("C1", Some("9.0")),
+        at: at("C1", Some("9.0")),
         id: MessageId("9.1".into()),
     };
     channel.acknowledge(&steered).await.unwrap();

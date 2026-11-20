@@ -662,10 +662,6 @@ fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
 }
 
 /// The tool message that the mock server's request `index` carried.
-fn sent_tool_result(server: &MockServer, index: usize) -> Value {
-    server.requests()[index].tool_results().remove(0)
-}
-
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
@@ -691,7 +687,7 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
         "{stderr}"
     );
     assert!(!dir.path().join("ran-again").exists(), "the command ran again");
-    let tool = sent_tool_result(&server, 0);
+    let tool = server.requests()[0].tool_results().remove(0);
     assert_eq!(tool["tool_call_id"], "c1");
     assert!(
         tool["content"]
@@ -752,7 +748,7 @@ async fn a_killed_run_is_recovered_by_the_next_run_without_repeating_the_command
         "ran\n",
         "the command ran again"
     );
-    let tool = sent_tool_result(&server, 1);
+    let tool = server.requests()[1].tool_results().remove(0);
     assert_eq!(tool["tool_call_id"], "c1");
     assert!(
         tool["content"]

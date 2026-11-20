@@ -10,10 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::tools::{FindTool, GrepTool, LsTool};
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
-
-fn ctx(dir: &Path) -> ToolContext {
-    ToolContext::new(dir.to_path_buf(), CancellationToken::new())
-}
+use zx_testing::tool_context;
 
 /// A small project: sources at two depths, a dotfile, and a version control directory.
 fn project() -> tempfile::TempDir {
@@ -30,15 +27,15 @@ fn project() -> tempfile::TempDir {
 }
 
 async fn grep(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    GrepTool::default().execute(args, &ctx(dir)).await
+    GrepTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn find(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    FindTool::default().execute(args, &ctx(dir)).await
+    FindTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn ls(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    LsTool::default().execute(args, &ctx(dir)).await
+    LsTool::default().execute(args, &tool_context(dir)).await
 }
 
 /// The result lines without the notes in brackets.

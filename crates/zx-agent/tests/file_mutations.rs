@@ -1,5 +1,5 @@
 //! File coordination across cancellation and independently built sessions.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{FileMutationQueue, WriteFileTool, executor_tools};
-use zx_agent::tools::{Tool, ToolContext};
-use zx_testing::WAIT;
+use zx_agent::tools::Tool;
+use zx_testing::{WAIT, tool_context};
 
 /// Holds the first operation after it has started; cancellation cannot interrupt its write.
 #[derive(Default)]
@@ -57,10 +57,6 @@ impl Executor for HeldFile {
     }
 }
 
-fn context(cwd: PathBuf) -> ToolContext {
-    ToolContext::new(cwd, CancellationToken::new())
-}
-
 #[tokio::test]
 async fn dropping_a_write_keeps_its_file_locked_until_the_write_finishes() {
     let dir = tempfile::tempdir().unwrap();
@@ -73,14 +69,14 @@ async fn dropping_a_write_keeps_its_file_locked_until_the_write_finishes() {
     let cwd = dir.path().to_path_buf();
     let task = tokio::spawn(async move {
         first
-            .execute(json!({"path": "f", "content": "old"}), &context(cwd))
+            .execute(json!({"path": "f", "content": "old"}), &tool_context(&cwd))
             .await
     });
     executor.started.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
 
-    let ctx = context(dir.path().into());
+    let ctx = tool_context(dir.path());
     let next = tool.execute(json!({"path": "f", "content": "new"}), &ctx);
     tokio::pin!(next);
     let early = tokio::time::timeout(Duration::from_millis(50), &mut next).await;
@@ -111,7 +107,7 @@ async fn independent_toolsets_coordinate_edits_of_the_same_file() {
             .remove(0)
     };
     let (first, second) = (tools(), tools());
-    let ctx = context(dir.path().into());
+    let ctx = tool_context(dir.path());
     let edit = first.execute(json!({"path":"f", "edits":[{"oldText":"a=0", "newText":"a=1"}]}), &ctx);
     tokio::pin!(edit);
     tokio::select! {

@@ -89,11 +89,6 @@ fn prompts(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The user messages the model received in request `index`.
-fn sent(server: &MockServer, index: usize) -> Vec<String> {
-    server.requests()[index].user_texts()
-}
-
 #[tokio::test]
 async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory() {
     let dirs = Dirs::new();
@@ -189,7 +184,7 @@ async fn resume_continues_the_most_recent_session_of_this_working_directory() {
     let output = dirs.chat(&server, &["--resume"], "next\n/quit\n").await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(sent(&server, 0), ["newer", "next"]);
+    assert_eq!(server.requests()[0].user_texts(), ["newer", "next"]);
     assert_eq!(prompts(&newer), ["newer", "next"]);
     assert_eq!(session_files(&dir).len(), 3, "no new file");
     assert!(stderr(&output).contains("resumed 1 message(s) from the session file"));
@@ -205,7 +200,7 @@ async fn resume_takes_a_session_id_prefix_that_names_one_session() {
 
     let output = dirs.chat(&server, &["--resume", "aaaa"], "next\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(sent(&server, 0), ["older", "next"]);
+    assert_eq!(server.requests()[0].user_texts(), ["older", "next"]);
     assert_eq!(prompts(&older), ["older", "next"]);
 
     for (prefix, error) in [
@@ -320,7 +315,7 @@ async fn new_starts_another_file_in_the_session_directory() {
     let output = dirs.chat(&server, &[], "first\n/new\nsecond\n/quit\n").await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(sent(&server, 1), ["second"]);
+    assert_eq!(server.requests()[1].user_texts(), ["second"]);
     let mut prompts: Vec<_> = session_files(&dirs.session_dir())
         .iter()
         .map(|path| prompts(path))

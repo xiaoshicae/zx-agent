@@ -2,12 +2,11 @@
 //! protocol eras, tool selection and naming, calls and their results, errors, timeouts and
 //! cancellation.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
@@ -16,7 +15,7 @@ use zx_agent::events::RunOutcome;
 use zx_agent::extensions::Extension;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
-use zx_testing::{RunnerSetup, config, run_prompt, summarize};
+use zx_testing::{RunnerSetup, config, run_prompt, summarize, tool_context};
 
 const TOKEN: &str = "mcp-token-1234";
 
@@ -35,16 +34,14 @@ async fn connect(fake: &FakeMcp, tools: &[&str]) -> Server {
     Server::connect(settings(fake, tools)).await.unwrap()
 }
 
-fn context() -> ToolContext {
-    ToolContext::new(PathBuf::from("."), CancellationToken::new())
-}
-
 fn the_tool(server: &Server, name: &str) -> Arc<dyn Tool> {
     server.tools().into_iter().find(|tool| tool.name() == name).unwrap()
 }
 
 async fn call(server: &Server, name: &str, args: serde_json::Value) -> Result<ToolOutput, String> {
-    the_tool(server, name).execute(args, &context()).await
+    the_tool(server, name)
+        .execute(args, &tool_context(Path::new(".")))
+        .await
 }
 
 fn three_tools() -> Vec<serde_json::Value> {
@@ -246,7 +243,7 @@ async fn cancelling_a_call_stops_waiting_and_abandons_the_request() {
     fake.reply("query", vec![Reply::Hang]);
     let server = connect(&fake, &["query"]).await;
     let tool = the_tool(&server, "prom__query");
-    let ctx = context();
+    let ctx = tool_context(Path::new("."));
     let cancel = ctx.cancel.clone();
     let running = tokio::spawn(async move { tool.execute(json!({}), &ctx).await });
     fake.wait_for("tools/call", 1).await;
@@ -417,7 +414,7 @@ async fn the_model_calls_a_server_tool_through_the_loop() {
 /// A tool context whose progress updates are collected.
 fn observed() -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {
     let (progress, updates) = tokio::sync::mpsc::channel(16);
-    let mut ctx = context();
+    let mut ctx = tool_context(Path::new("."));
     ctx.progress = Some(progress);
     (ctx, updates)
 }

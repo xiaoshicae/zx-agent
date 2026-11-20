@@ -20,7 +20,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
 use zx_testing::{
     EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
-    summarize, take_queued_inputs,
+    request_ids, summarize, take_queued_inputs,
 };
 
 /// A stored record, as a database row would hold it.
@@ -1183,15 +1183,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
             _ => None,
         })
         .collect();
-    let recorded: Vec<String> = runner
-        .transcript()
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(started.id.clone()),
-            _ => None,
-        })
-        .collect();
+    let recorded = request_ids(&runner.transcript());
     assert_eq!(
         requests,
         [

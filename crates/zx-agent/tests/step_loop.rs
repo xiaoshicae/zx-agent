@@ -923,6 +923,8 @@ async fn details_reach_the_end_event_and_the_result_message() {
     );
 }
 
+/// The usage each `ToolExecutionEnd` event reports, read as [`end_details`] reads their
+/// details; one function for both would take the field as a callback.
 fn end_usages(sink: &Collect) -> Vec<Option<Usage>> {
     sink.events()
         .into_iter()

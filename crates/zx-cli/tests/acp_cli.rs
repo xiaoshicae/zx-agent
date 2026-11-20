@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::zx_agent_in;
-use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
 use zx_testing::{stderr, summary_json};
 
@@ -419,9 +419,7 @@ async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
 
 /// A model answer that begins and then never ends: a turn that is not cancelled does not end.
 fn stalled_answer() -> Reply {
-    Reply::Stall(vec![
-        json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}),
-    ])
+    Reply::Stall(vec![text_chunk("partial")])
 }
 
 /// The request that starts a turn of `session` with `text`, as request `id`.

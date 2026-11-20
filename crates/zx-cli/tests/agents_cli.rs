@@ -47,10 +47,7 @@ fn system(server: &MockServer, index: usize) -> String {
 }
 
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].tool_results()[0]["content"]
-        .as_str()
-        .unwrap()
-        .into()
+    server.requests()[index].tool_result_texts().remove(0)
 }
 /// Write the agent that `run` in `dir` uses: `agents/unattended.md` in its zx-agent home,
 /// with `front` over the built-in agent its `extends` names, the unattended one when it names

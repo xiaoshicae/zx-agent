@@ -58,7 +58,12 @@ pub enum Home<'a> {
 /// API key in the variable `key_env`, no retries, and `rest` after these provider keys (more
 /// of them, or further tables). The model's address goes in `ZX_BASE_URL`.
 pub fn fake_model_config(key_env: &str, top: &str, rest: &str) -> String {
-    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = 0\n{rest}\n")
+    retrying_fake_model_config(key_env, 0, top, rest)
+}
+
+/// [`fake_model_config`], with `retries` retries of a failure that may pass.
+pub fn retrying_fake_model_config(key_env: &str, retries: u32, top: &str, rest: &str) -> String {
+    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = {retries}\n{rest}\n")
 }
 
 /// A zx-agent home directory of its own, for `ZX_AGENT_HOME`: a `config.toml` and the

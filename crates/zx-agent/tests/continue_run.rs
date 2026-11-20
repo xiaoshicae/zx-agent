@@ -16,8 +16,8 @@ use zx_agent::tools::Tool;
 use zx_agent::transcript::{CustomMessage, Entry};
 
 use zx_testing::{
-    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, summarize,
-    take_queued_inputs, tool_call_answer, tool_call_block,
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, replayed_requests,
+    summarize, take_queued_inputs, tool_call_answer, tool_call_block,
 };
 
 async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
@@ -256,15 +256,7 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
     runner.continue_run().await.unwrap();
 
     let transcript = zx_testing::read_session_file(&path).unwrap();
-    let id = transcript
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(started.id.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(transcript.replay_request(&id).unwrap().1, provider.requests()[0]);
+    assert_eq!(replayed_requests(&transcript), provider.requests());
 }
 
 #[tokio::test]

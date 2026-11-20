@@ -11,7 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::executor::{Captured, CommandEnd, CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, WriteFileTool};
-use zx_agent::tools::{ExecutionMode, Tool, ToolContext};
+use zx_agent::tools::{ExecutionMode, Tool};
+use zx_testing::tool_context;
 
 /// What a tool asked its executor to do.
 #[derive(Debug, PartialEq)]
@@ -83,10 +84,6 @@ impl Executor for Recorder {
     }
 }
 
-fn ctx() -> ToolContext {
-    ToolContext::new(PathBuf::from("/work"), CancellationToken::new())
-}
-
 #[tokio::test]
 async fn bash_hands_the_whole_command_to_its_executor() {
     let executor = Recorder::new(|| CommandEnd::Exited(0));
@@ -96,7 +93,10 @@ async fn bash_hands_the_whole_command_to_its_executor() {
     };
 
     let output = tool
-        .execute(json!({"command": "ls -l", "timeoutSecs": 7}), &ctx())
+        .execute(
+            json!({"command": "ls -l", "timeoutSecs": 7}),
+            &tool_context(Path::new("/work")),
+        )
         .await
         .unwrap();
 
@@ -141,7 +141,10 @@ async fn bash_reports_every_way_a_command_can_end() {
             executor: Recorder::new(end),
             ..BashTool::default()
         };
-        let output = tool.execute(json!({"command": "x"}), &ctx()).await.unwrap();
+        let output = tool
+            .execute(json!({"command": "x"}), &tool_context(Path::new("/work")))
+            .await
+            .unwrap();
         assert_eq!(output.content, format!("out\n{status}"));
         assert_eq!(output.is_error, is_error, "{status}");
     }
@@ -160,7 +163,10 @@ async fn read_file_reads_the_resolved_path_through_its_executor() {
     };
 
     let output = tool
-        .execute(json!({"path": "logs/app.log", "offset": 2}), &ctx())
+        .execute(
+            json!({"path": "logs/app.log", "offset": 2}),
+            &tool_context(Path::new("/work")),
+        )
         .await
         .unwrap();
 
@@ -235,9 +241,12 @@ async fn grep_hands_its_script_to_its_executor() {
         executor: recorder.clone(),
     };
 
-    grep.execute(json!({"pattern": "it's", "path": "src"}), &ctx())
-        .await
-        .unwrap();
+    grep.execute(
+        json!({"pattern": "it's", "path": "src"}),
+        &tool_context(Path::new("/work")),
+    )
+    .await
+    .unwrap();
 
     let requests = recorder.requests.lock().unwrap();
     let [Request::Run { command, cwd, .. }] = requests.as_slice() else {
@@ -314,7 +323,7 @@ impl Executor for Probe {
 #[tokio::test]
 async fn commands_on_this_machine_do_not_see_the_hidden_variables_whichever_tool_runs_them() {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolContext::new(dir.path().to_path_buf(), CancellationToken::new());
+    let ctx = tool_context(dir.path());
     let executor = |hidden_env: &[&str]| -> Arc<dyn Executor> {
         Arc::new(Probe(LocalExecutor {
             hidden_env: hidden_env.iter().map(ToString::to_string).collect(),
@@ -350,7 +359,7 @@ async fn the_file_tools_read_and_write_through_their_executor() {
 
     edit.execute(
         json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
-        &ctx(),
+        &tool_context(Path::new("/work")),
     )
     .await
     .unwrap();

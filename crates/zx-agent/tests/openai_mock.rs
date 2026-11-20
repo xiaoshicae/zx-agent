@@ -14,8 +14,8 @@ use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind, RunOutcome};
 use zx_agent::transcript::SessionHeader;
-use zx_testing::mock_server::{MockServer, Reply};
-use zx_testing::{RunnerSetup, Seed, Start, config, fast_retry};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
+use zx_testing::{RunnerSetup, Seed, Start, config, fast_retry, request_ids};
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
@@ -402,8 +402,7 @@ async fn a_stalled_stream_fails_after_the_idle_timeout() {
 
 #[tokio::test]
 async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
-    let first_chunk = json!({"choices":[{"index":0,"delta":{"content":"partial"}}]});
-    let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
+    let server = MockServer::start(vec![Reply::Stall(vec![text_chunk("partial")])]).await;
     // Cancelled at the first streamed delta, to cancel a response mid-stream without
     // depending on timing.
     let (runner, _) = setup(&server, Duration::from_secs(10))
@@ -619,17 +618,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     runner.run("go").await;
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
     // The audit replays the request with its key.
-    let replayed = runner
-        .transcript()
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            zx_agent::transcript::Entry::RequestStarted(started) => {
-                Some(runner.transcript().replay_request(&started.id).unwrap())
-            }
-            _ => None,
-        })
-        .unwrap();
+    let transcript = runner.transcript();
+    let replayed = transcript.replay_request(&request_ids(&transcript)[0]).unwrap();
     assert_eq!(replayed.0.cache_key.as_deref(), Some("session-42"));
     assert_eq!(replayed.1.cache_key.as_deref(), Some("session-42"));
 

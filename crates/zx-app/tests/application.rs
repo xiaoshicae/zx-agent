@@ -23,6 +23,7 @@ use zx_app::{
 };
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
+use zx_testing::program::{agent_text, write_agent_file};
 use zx_util::sync::lock;
 
 /// The value of a secret file of the configuration, which tool results must not show.
@@ -42,14 +43,10 @@ fn configured() -> Config {
 }
 
 /// The user's file of the built-in agent `unattended` in `home`, with `front` in its front
-/// matter.
+/// matter and instructions of its own.
 fn agent_in(home: &Path, front: &str) {
-    std::fs::create_dir_all(home.join("agents")).unwrap();
-    std::fs::write(
-        home.join("agents/unattended.md"),
-        format!("+++\nextends = \"unattended\"\n{front}\n[context]\ndiscover = false\n+++\nExplicit host role.\n"),
-    )
-    .unwrap();
+    let front = format!("extends = \"unattended\"\n{front}\n[context]\ndiscover = false");
+    write_agent_file(home, "unattended", &agent_text(&front, "Explicit host role.\n"));
 }
 
 fn role_in(home: &Path) {
@@ -106,7 +103,7 @@ fn offered(request: &Captured) -> Vec<String> {
 
 /// What the first tool result of `request` says.
 fn first_result(request: &Captured) -> String {
-    request.tool_results()[0]["content"].as_str().unwrap().to_string()
+    request.tool_result_texts().remove(0)
 }
 
 /// Puts the secret into every tool result, as a careless hook might.

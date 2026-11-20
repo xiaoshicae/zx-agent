@@ -21,12 +21,12 @@ use zx_agent::events::{ApprovalResult, Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, FinishedStep, Hook, HookContext, HookResult, HookStage, StepDecision};
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::Entry;
 use zx_agent::{CancelSignal, SessionOptions};
 use zx_testing::{
     Asked, EchoTool, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines, refusal, run_approved,
-    run_prompt, summarize, take_queued_inputs,
+    run_prompt, summarize, take_queued_inputs, tool_call, tool_context,
 };
 
 struct Decides(PolicyDecision);
@@ -616,7 +616,7 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
     let hook = RedactSecrets::new(["", "token", "token-long", "令牌"].into_iter().map(str::to_string));
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::error("token-long，令牌 token"),
             &zx_testing::hook_context(),
         )
@@ -624,15 +624,6 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
         .unwrap();
     assert_eq!(output.content, "[REDACTED]，[REDACTED] [REDACTED]");
     assert!(output.is_error);
-}
-
-fn redaction_call() -> ToolCall {
-    ToolCall {
-        id: "c".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    }
 }
 
 #[tokio::test]
@@ -643,7 +634,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([token.clone()]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("a first-token b"),
             &zx_testing::hook_context(),
         )
@@ -654,7 +645,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
     std::fs::write(&token, "second-token").unwrap();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("first-token second-token"),
             &zx_testing::hook_context(),
         )
@@ -671,7 +662,7 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
     let hook = RedactSecrets::new(["key".to_string()]).with_secret_files([dir.path().join("absent"), empty]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("key stays out, the rest stays"),
             &zx_testing::hook_context(),
         )
@@ -686,17 +677,14 @@ async fn a_secret_file_that_is_not_utf8_is_redacted_as_tools_print_it() {
     // "pässword" in Latin-1: the tools decode output lossily, so it prints as "p\u{FFFD}ssword".
     std::fs::write(dir.path().join("password"), b"p\xe4ssword\n").unwrap();
     let printed = BashTool::default()
-        .execute(
-            json!({"command": "cat password"}),
-            &ToolContext::new(dir.path().to_path_buf(), CancellationToken::new()),
-        )
+        .execute(json!({"command": "cat password"}), &tool_context(dir.path()))
         .await
         .unwrap();
     assert!(printed.content.contains("p\u{FFFD}ssword"), "{}", printed.content);
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().join("password")]);
 
     let output = hook
-        .after_tool(&redaction_call(), printed, &zx_testing::hook_context())
+        .after_tool(&tool_call("echo"), printed, &zx_testing::hook_context())
         .await
         .unwrap();
 
@@ -711,7 +699,11 @@ async fn a_secret_file_over_the_limit_fails_the_hook() {
     std::fs::write(&large, "x".repeat(64 * 1024 + 1)).unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([large]);
     let error = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("output"), &zx_testing::hook_context())
+        .after_tool(
+            &tool_call("echo"),
+            ToolOutput::ok("output"),
+            &zx_testing::hook_context(),
+        )
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
@@ -780,7 +772,7 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("token-a token-hidden token-x"),
             &zx_testing::hook_context(),
         )
@@ -791,7 +783,7 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     std::fs::write(dir.path().join("cluster-b"), "token-b").unwrap();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok("token-b"),
             &zx_testing::hook_context(),
         )
@@ -815,7 +807,7 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     let all: Vec<String> = (0..count).map(|index| format!("token-{index:02}")).collect();
     let output = hook
         .after_tool(
-            &redaction_call(),
+            &tool_call("echo"),
             ToolOutput::ok(all.join(" ")),
             &zx_testing::hook_context(),
         )

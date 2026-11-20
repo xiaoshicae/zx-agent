@@ -163,6 +163,17 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     assert_eq!(recorded, Some(20.0), "the compaction record carries the cost");
 }
 
+/// Compaction by a token trigger of `tokens` alone, keeping 1 byte of recent messages.
+fn only_token_trigger(tokens: u64) -> Config {
+    Config {
+        trigger_bytes: None,
+        trigger_tokens: Some(TokenTrigger::Above(tokens)),
+        keep_recent_bytes: 1,
+        timeout: Duration::from_secs(1),
+        ..Config::default()
+    }
+}
+
 async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'static str>, usize) {
     let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
@@ -171,13 +182,7 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
     ]));
     let (runner, events) = RunnerSetup {
         session: seed.into(),
-        compaction: Config {
-            trigger_bytes: None,
-            trigger_tokens: Some(TokenTrigger::Above(trigger_tokens)),
-            keep_recent_bytes: 1,
-            timeout: Duration::from_secs(1),
-            ..Config::default()
-        },
+        compaction: only_token_trigger(trigger_tokens),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
@@ -210,13 +215,7 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
     ]));
     let (runner, _) = RunnerSetup {
         session: seed.into(),
-        compaction: Config {
-            trigger_bytes: None,
-            trigger_tokens: Some(TokenTrigger::Above(100)),
-            keep_recent_bytes: 1,
-            timeout: Duration::from_secs(1),
-            ..Config::default()
-        },
+        compaction: only_token_trigger(100),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()
@@ -244,13 +243,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
     ]));
     let (runner, _) = RunnerSetup {
         session: seed.into(),
-        compaction: Config {
-            trigger_bytes: None,
-            trigger_tokens: Some(TokenTrigger::Above(100)),
-            keep_recent_bytes: 1,
-            timeout: Duration::from_secs(1),
-            ..Config::default()
-        },
+        compaction: only_token_trigger(100),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build()

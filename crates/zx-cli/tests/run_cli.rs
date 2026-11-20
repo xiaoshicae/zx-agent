@@ -19,7 +19,7 @@ use tokio::process::Command;
 
 use common::zx_agent_in;
 use zx_testing::http::{Request, read_request, silent_listener};
-use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{
     AgentHome, Home, agent_text, ended, ended_output, fake_model_config, write_agent_file, write_config,
 };
@@ -531,7 +531,7 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("session.jsonl");
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})];
+    let chunks = vec![text_chunk("first")];
     let server = MockServer::start(vec![
         Reply::Gate {
             chunks,

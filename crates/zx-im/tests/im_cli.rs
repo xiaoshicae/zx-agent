@@ -17,6 +17,8 @@ use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{self, Home, fake_model_config, write_agent};
 use zx_testing::{json_lines, stderr, stdout};
 
+/// The variable that config.toml names for the fake model's API key.
+const KEY_VAR: &str = "ZX_IM_CLI_TEST_KEY";
 const APP_TOKEN: &str = "xapp-1-im-test-token";
 const BOT_TOKEN: &str = "xoxb-im-test-token";
 /// How long a test waits for the program to start serving: longer than [`zx_testing::WAIT`],
@@ -54,7 +56,7 @@ fn zx_im_in(cwd: &Path, home: Home<'_>) -> Command {
 /// home in `dir` has a config.toml without retries.
 fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
-    program::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
+    program::write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_im_in(dir, Home::Agent(&home));
     command
         .args(["--config", config.to_str().unwrap(), "--model", "mock"])
@@ -475,14 +477,10 @@ fn mcp_home(dir: &Path, url: &str) -> PathBuf {
         "assistant",
         "tools = []\n[context]\ndiscover = false\n[permissions]\nallow = [\"prom__query\"]\n",
     );
-    program::write_config(
-        &home,
-        &format!(
-            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\n\
-             [provider]\napiKeyEnv = \"ZX_IM_CLI_TEST_KEY\"\nmaxRetries = 0\n"
-        ),
+    let server = format!(
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\ntools = [\"query\", \"range\"]"
     );
+    program::write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
 }
 

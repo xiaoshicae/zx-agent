@@ -19,18 +19,14 @@ use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, e
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 
-use zx_testing::{RunnerSetup, Start, config};
-
-fn ctx(dir: &Path) -> ToolContext {
-    ToolContext::new(dir.to_path_buf(), CancellationToken::new())
-}
+use zx_testing::{RunnerSetup, Start, config, tool_context};
 
 async fn write(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    WriteFileTool::default().execute(args, &ctx(dir)).await
+    WriteFileTool::default().execute(args, &tool_context(dir)).await
 }
 
 async fn edit(dir: &Path, args: Value) -> Result<ToolOutput, String> {
-    EditFileTool::default().execute(args, &ctx(dir)).await
+    EditFileTool::default().execute(args, &tool_context(dir)).await
 }
 
 #[tokio::test]
@@ -280,7 +276,7 @@ async fn a_write_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
     std::fs::write(&file, "old\n").unwrap();
     let content = "a line of the new content\n".repeat(LARGE_BYTES / 26);
     let tool = WriteFileTool::default();
-    let ctx = ctx(dir.path());
+    let ctx = tool_context(dir.path());
 
     let call = tool.execute(json!({"path": "f.txt", "content": content}), &ctx);
     drop_once_the_write_has_begun(call, &file, "old\n".len()).await;
@@ -301,7 +297,7 @@ async fn an_edit_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
     std::fs::write(&file, &original).unwrap();
     let changed = original.replace("MARK", "CHANGED");
     let tool = EditFileTool::default();
-    let ctx = ctx(dir.path());
+    let ctx = tool_context(dir.path());
 
     let call = tool.execute(
         json!({"path": "f.txt", "edits": [{"oldText": "MARK", "newText": "CHANGED"}]}),
@@ -396,7 +392,7 @@ async fn edits_of_different_files_in_one_batch_do_not_wait_for_each_other() {
         Duration::from_secs(5),
         tool.execute(
             json!({"path": "b.txt", "edits": [{"oldText": "x", "newText": "y"}]}),
-            &ctx(dir.path()),
+            &tool_context(dir.path()),
         ),
     )
     .await;

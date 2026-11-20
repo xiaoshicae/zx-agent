@@ -1,5 +1,5 @@
-//! A channel under test, running until the test stops it, and a backlog that cannot keep
-//! anything.
+//! A channel under test, running until the test stops it, a backlog that cannot keep
+//! anything, and where a message is.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +9,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use zx_im::{Backlog, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog, MessageKey};
+use zx_im::{
+    Backlog, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog, MessageKey, ThreadId,
+};
 
 /// A running channel: what it passes on, and how to stop it.
 pub(crate) struct Running {
@@ -85,5 +87,13 @@ impl Backlog for FullBacklog {
 
     async fn pending(&self) -> Result<Vec<(MessageKey, String)>, String> {
         Ok(Vec::new())
+    }
+}
+
+/// Where a message is: in `conversation`, in the thread under `root` when there is one.
+pub(crate) fn at(conversation: &str, root: Option<&str>) -> Destination {
+    Destination {
+        conversation: ConversationId(conversation.into()),
+        thread: root.map(|root| ThreadId(root.into())),
     }
 }

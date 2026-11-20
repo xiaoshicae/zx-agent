@@ -1018,17 +1018,9 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home
         .unwrap()
 }
 
-/// The leading system message of the first model request.
-fn system_prompt(server: &MockServer) -> String {
-    server.requests()[0].system_text()
-}
-
 /// The first tool result in model request `index`.
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].tool_results()[0]["content"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    server.requests()[index].tool_result_texts().remove(0)
 }
 
 #[tokio::test]
@@ -1051,7 +1043,7 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
     .await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let prompt = system_prompt(&server);
+    let prompt = server.requests()[0].system_text();
     assert!(
         prompt.contains("OS: Fake Linux 1, Linux kernel 6.0.0-fake (x86_64), in a container from image fake:1"),
         "{prompt}"

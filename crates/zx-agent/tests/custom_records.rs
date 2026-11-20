@@ -5,16 +5,7 @@ use serde_json::json;
 
 use zx_agent::ai::{Message, UserMessageKind};
 use zx_agent::transcript::{CustomMessage, Transcript};
-use zx_testing::{header, read_lines, summarize};
-
-fn note(text: &str) -> CustomMessage {
-    CustomMessage {
-        custom_type: "note".into(),
-        content: text.into(),
-        display: true,
-        details: Some(json!({"n": 1})),
-    }
-}
+use zx_testing::{header, note, read_lines, summarize};
 
 #[tokio::test]
 async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries_stay_out() {
