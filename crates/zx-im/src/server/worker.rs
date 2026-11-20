@@ -21,9 +21,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::now_ms;
-use zx_agent::input::PendingInput;
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
+use zx_agent::transcript::CustomMessage;
 
 use crate::{Addressee, ApprovalCard, ApprovalId, Choice, ImChannel, MessageRef, Post, Replacement, UserId};
 
@@ -329,7 +329,14 @@ struct Worker {
     /// next message is meant for the bot even without a mention.
     answering: Option<UserId>,
     /// Messages not answered and not yet in the session, which a run holds meanwhile.
-    heard: Vec<PendingInput>,
+    heard: Vec<Heard>,
+}
+
+/// What someone said that the bot does not answer, until the session records it.
+struct Heard {
+    message: CustomMessage,
+    /// Its share of the budget and its receipt, which go once it is recorded.
+    hold: (InputPermit, Receipt),
 }
 
 impl Worker {

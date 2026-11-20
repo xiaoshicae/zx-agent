@@ -99,19 +99,3 @@ pub(super) async fn left_pending(shared: &Shared, backlog: &dyn Backlog) -> Vec<
     }
     left
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    impl Receipt {
-        /// A receipt that completes nothing, for the tests of what carries one.
-        pub(in crate::server) fn unconnected() -> Self {
-            Self {
-                key: None,
-                handled: mpsc::unbounded_channel().0,
-                stop: CancellationToken::new(),
-            }
-        }
-    }
-}

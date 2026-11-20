@@ -1,12 +1,12 @@
 //! Input admission, and context recorded without starting a run.
 
 use zx_agent::Session;
-use zx_agent::input::Input;
+use zx_agent::input::{Input, PendingInput};
 
 use crate::Addressee;
 use crate::server::outlet::{Asked, said};
 
-use super::{AfterRun, Command, Incoming, Phase, Running, Worker, WorkerInput};
+use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -36,19 +36,11 @@ impl Worker {
             };
         }
         let content = self.out.attributed(&incoming.sender, &incoming.text).await;
-        let input = if answer {
-            Input::User {
-                text: content,
-                actor: Some(incoming.sender.0.clone()),
-            }
-        } else {
-            Input::Custom(said(content))
+        let permit = match incoming.permit {
+            Some(permit) => permit.resize(content.len()),
+            None => self.budget.try_reserve(content.len()),
         };
-        let admitted = match incoming.permit {
-            Some(permit) => permit.attach(input, incoming.receipt),
-            None => self.budget.try_admit(input, incoming.receipt),
-        };
-        let Some(pending) = admitted else {
+        let Some(permit) = permit else {
             self.out
                 .failed("pending input capacity exceeded; message was not accepted".into());
             // Talk the bot only records is refused without a word in the conversation.
@@ -57,14 +49,22 @@ impl Worker {
             }
             return;
         };
+        let hold = (permit, incoming.receipt);
         if !answer {
             self.answering = None;
-            self.heard.push(pending);
+            self.heard.push(Heard {
+                message: said(content),
+                hold,
+            });
             self.record_heard().await;
             return;
         }
-        self.answering = Some(incoming.sender.clone());
-        let asked = Asked(pending);
+        let input = Input::User {
+            text: content,
+            actor: Some(incoming.sender.0.clone()),
+        };
+        self.answering = Some(incoming.sender);
+        let asked = Asked(PendingInput::held(input, hold));
         let taken = match &mut self.phase {
             // A run that `/cancel` or `/new` stopped takes no more input: what is asked now
             // runs next.
@@ -122,12 +122,12 @@ impl Worker {
     }
 
     pub(super) async fn record_in(&mut self, session: &Session) {
-        for pending in std::mem::take(&mut self.heard) {
-            if let Input::Custom(message) = pending.input()
-                && let Err(error) = session.append_custom_message(message.clone()).await
-            {
+        for Heard { message, hold } in std::mem::take(&mut self.heard) {
+            if let Err(error) = session.append_custom_message(message).await {
                 self.out.failed(format!("cannot record a message: {error}"));
             }
+            // Recorded, or reported as not: the message is handled.
+            drop(hold);
         }
     }
 }
