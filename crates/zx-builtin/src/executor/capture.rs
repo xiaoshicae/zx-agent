@@ -76,8 +76,8 @@ pub(super) async fn await_end(child: &mut Child, timeout: Duration, cancel: &Can
     tokio::select! {
         status = child.wait() => match status {
             Ok(status) => match status.code() {
+                // Also how `docker exec` reports a command ended by signal N: as 128 + N.
                 Some(code) => CommandEnd::Exited(code),
-                // Also how `docker exec` reports a command ended by signal N: 128 + N.
                 None => CommandEnd::Signaled,
             },
             Err(e) => CommandEnd::WaitFailed(e.to_string()),

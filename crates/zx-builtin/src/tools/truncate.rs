@@ -1,12 +1,12 @@
 //! Output truncation (pi: truncateHead / truncateTail). Tools must bound what they return,
 //! or large outputs overflow the model context.
 
+use crate::text::prefix_within;
+
 /// Default line limit for tool output (pi: DEFAULT_MAX_LINES).
 pub const MAX_LINES: usize = 2000;
 /// Default byte limit for tool output (pi: DEFAULT_MAX_BYTES).
 pub const MAX_BYTES: usize = 50 * 1024;
-
-use crate::text::prefix_within;
 
 /// Truncated text and what was cut.
 #[derive(Debug, PartialEq, Eq)]

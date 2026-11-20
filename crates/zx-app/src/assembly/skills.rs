@@ -69,10 +69,6 @@ impl Tool for ReadSkillTool {
         READ_SKILL
     }
 
-    fn effects(&self) -> Effects {
-        Effects::ReadOnly
-    }
-
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: READ_SKILL.into(),
@@ -94,6 +90,10 @@ impl Tool for ReadSkillTool {
                 "additionalProperties": false,
             }),
         }
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
