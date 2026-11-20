@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::FeishuChannel;
 use crate::ImError;
-use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
+use crate::platform::{RATE_LIMIT_RETRIES, body_within, content_type_is, rate_limit_wait};
 
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -86,6 +86,36 @@ impl FeishuChannel {
         let lifetime = Duration::from_secs(secs).min(MAX_TOKEN_LIFETIME);
         *cached = Some((token.to_string(), Instant::now() + lifetime));
         Ok(token.to_string())
+    }
+
+    /// The file a resource API answers `path` with, at most `max_bytes`. An answer in JSON,
+    /// or one with a status other than success, is a refusal, its code included.
+    pub(super) async fn resource(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, ImError> {
+        let url = format!("{}{path}", self.config.api_base.trim_end_matches('/'));
+        let token = self.token().await?;
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| ImError::Transport(format!("feishu {path}: {error}")))?;
+        let status = response.status();
+        if !status.is_success() || content_type_is(&response, "application/json") {
+            // A body that is not JSON leaves no code; the status then explains the failure.
+            let answer: Option<Value> = response.json().await.ok();
+            let code = answer.as_ref().map_or(Value::Null, |answer| answer["code"].clone());
+            let detail = answer
+                .as_ref()
+                .and_then(|answer| answer["msg"].as_str())
+                .unwrap_or("no message");
+            return Err(ImError::Transport(format!(
+                "feishu {path}: HTTP {status}, code {code}: {detail}"
+            )));
+        }
+        body_within(response, max_bytes)
+            .await
+            .map_err(|error| ImError::Transport(format!("feishu {path}: {error}")))
     }
 
     /// Call an open API method. A frequency limit is waited out and retried.

@@ -1,5 +1,5 @@
-//! A fake Feishu open platform: the token, long-connection endpoint and message APIs, and
-//! long connections the test drives frame by frame. Frames are encoded here independently
+//! A fake Feishu open platform: the token, long-connection endpoint and message APIs, the
+//! images of messages, and long connections the test drives frame by frame. Frames are encoded here independently
 //! of the channel's own codec, so that a mistake mirrored in both cannot go unnoticed.
 
 use std::collections::{HashMap, VecDeque};
@@ -14,12 +14,12 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::WAIT;
-use crate::http::{read_request, response};
+use crate::http::{read_request, response, response_bytes};
 
 /// One API call.
 #[derive(Clone, Debug)]
 pub struct Call {
-    /// Which API: token, endpoint, create, reply, edit or patch.
+    /// Which API: token, endpoint, create, reply, edit, patch or resource.
     pub route: &'static str,
     /// Path and query.
     pub path: String,
@@ -54,8 +54,13 @@ pub struct FakeFeishu {
     calls: Arc<Mutex<Vec<Call>>>,
     called: Arc<Notify>,
     scripted: Arc<Mutex<HashMap<&'static str, VecDeque<Answer>>>>,
+    /// The images of messages, by key.
+    images: Images,
     sockets: mpsc::UnboundedReceiver<Socket>,
 }
+
+/// Images by key.
+type Images = Arc<Mutex<HashMap<String, Vec<u8>>>>;
 
 impl FakeFeishu {
     /// Start with this ping interval in the connection settings it hands out.
@@ -70,23 +75,24 @@ impl FakeFeishu {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let called = Arc::new(Notify::new());
         let scripted: Arc<Mutex<HashMap<&'static str, VecDeque<Answer>>>> = Arc::default();
-        let (log, notify, script) = (calls.clone(), called.clone(), scripted.clone());
+        let images = Images::default();
+        let (log, notify, script, kept) = (calls.clone(), called.clone(), scripted.clone(), images.clone());
         tokio::spawn(async move {
             let posted = Arc::new(Mutex::new(0u64));
             loop {
                 let (stream, _) = api.accept().await.unwrap();
-                let settings = Settings {
-                    address: address.clone(),
-                    ping_secs,
+                let fake = Answering {
+                    settings: Settings {
+                        address: address.clone(),
+                        ping_secs,
+                    },
+                    log: log.clone(),
+                    called: notify.clone(),
+                    scripted: script.clone(),
+                    posted: posted.clone(),
+                    images: kept.clone(),
                 };
-                tokio::spawn(answer(
-                    stream,
-                    settings,
-                    log.clone(),
-                    notify.clone(),
-                    script.clone(),
-                    posted.clone(),
-                ));
+                tokio::spawn(fake.answer(stream));
             }
         });
         let (sockets_to, sockets) = mpsc::unbounded_channel();
@@ -105,8 +111,15 @@ impl FakeFeishu {
             calls,
             called,
             scripted,
+            images,
             sockets,
         }
+    }
+
+    /// Keep the image `key` with `bytes`, which the message resource API gives for any
+    /// message.
+    pub fn image(&self, key: &str, bytes: Vec<u8>) {
+        self.images.lock().unwrap().insert(key.to_string(), bytes);
     }
 
     /// Answer the next calls of `route` this way, in order, before answering normally.
@@ -363,48 +376,81 @@ fn route(method: &str, path: &str) -> &'static str {
         ("POST", path) if path.ends_with("/reply") => "reply",
         ("PUT", _) => "edit",
         ("PATCH", _) => "patch",
+        ("GET", path) if path.contains("/resources/") => "resource",
         _ => "unknown",
     }
 }
 
-async fn answer(
-    mut stream: TcpStream,
+/// What answers one connection to the API.
+struct Answering {
     settings: Settings,
     log: Arc<Mutex<Vec<Call>>>,
     called: Arc<Notify>,
     scripted: Arc<Mutex<HashMap<&'static str, VecDeque<Answer>>>>,
     posted: Arc<Mutex<u64>>,
-) {
-    let Some(request) = read_request(&mut stream).await else {
-        return;
-    };
-    let route = route(&request.method, &request.path);
-    let call = Call {
-        route,
-        path: request.path.clone(),
-        authorization: request.header("authorization").unwrap_or_default().to_string(),
-        locale: request.header("locale").map(String::from),
-        body: request.json(),
-    };
-    let scripted = scripted.lock().unwrap().get_mut(route).and_then(VecDeque::pop_front);
-    let reply = match scripted {
-        Some(Answer::Code(code)) => response("200 OK", &[], &json!({"code": code, "msg": "refused"}).to_string()),
-        Some(Answer::Status(status, code)) => response(
-            &format!("{status} Refused"),
-            &[],
-            &json!({"code": code, "msg": "refused", "error_description": "refused"}).to_string(),
-        ),
-        Some(Answer::RateLimited { reset_secs }) => response(
-            "429 Too Many Requests",
-            &[("x-ogw-ratelimit-reset", reset_secs.to_string())],
-            &json!({"code": 99_991_400, "msg": "request trigger frequency limit"}).to_string(),
-        ),
-        None => response("200 OK", &[], &normal(route, &settings, &posted).to_string()),
-    };
-    log.lock().unwrap().push(call);
-    called.notify_waiters();
-    stream.write_all(reply.as_bytes()).await.unwrap();
-    stream.shutdown().await.ok();
+    images: Images,
+}
+
+impl Answering {
+    async fn answer(self, mut stream: TcpStream) {
+        let Some(request) = read_request(&mut stream).await else {
+            return;
+        };
+        let route = route(&request.method, &request.path);
+        let call = Call {
+            route,
+            path: request.path.clone(),
+            authorization: request.header("authorization").unwrap_or_default().to_string(),
+            locale: request.header("locale").map(String::from),
+            body: request.json(),
+        };
+        let scripted = self
+            .scripted
+            .lock()
+            .unwrap()
+            .get_mut(route)
+            .and_then(VecDeque::pop_front);
+        let reply = match scripted {
+            Some(Answer::Code(code)) => {
+                response("200 OK", &[], &json!({"code": code, "msg": "refused"}).to_string()).into_bytes()
+            }
+            Some(Answer::Status(status, code)) => response(
+                &format!("{status} Refused"),
+                &[],
+                &json!({"code": code, "msg": "refused", "error_description": "refused"}).to_string(),
+            )
+            .into_bytes(),
+            Some(Answer::RateLimited { reset_secs }) => response(
+                "429 Too Many Requests",
+                &[("x-ogw-ratelimit-reset", reset_secs.to_string())],
+                &json!({"code": 99_991_400, "msg": "request trigger frequency limit"}).to_string(),
+            )
+            .into_bytes(),
+            None if route == "resource" => self.image(&request.path),
+            None => response("200 OK", &[], &normal(route, &self.settings, &self.posted).to_string()).into_bytes(),
+        };
+        self.log.lock().unwrap().push(call);
+        self.called.notify_waiters();
+        stream.write_all(&reply).await.unwrap();
+        stream.shutdown().await.ok();
+    }
+
+    /// The image a resource path names, `…/resources/<key>?type=image`; as Feishu does, a
+    /// refusal in JSON for one it does not keep.
+    fn image(&self, path: &str) -> Vec<u8> {
+        let key = path
+            .rsplit_once("/resources/")
+            .map_or("", |(_, rest)| rest.split('?').next().unwrap_or_default());
+        match self.images.lock().unwrap().get(key) {
+            Some(bytes) => response_bytes("200 OK", "image/png", bytes),
+            None => response(
+                "400 Bad Request",
+                &[],
+                &json!({"code": 234_003, "msg": "File not in msg."}).to_string(),
+            )
+            .into_bytes(),
+        }
+    }
 }
 
 /// What Feishu answers when the call succeeds.

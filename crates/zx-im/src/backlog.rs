@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use zx_util::sync::lock;
 
 pub(crate) use self::files::BacklogFiles;
-use crate::{Addressee, ChatKind, ConversationId, Destination, Inbound, MessageId, ThreadId, UserId};
+use crate::{Addressee, ChatKind, ConversationId, Destination, ImageRef, Inbound, MessageId, ThreadId, UserId};
 
 /// Handled messages a [`MemoryBacklog`] remembers, to know them when they are delivered
 /// again: platforms redeliver only for a short while, and this covers far more messages than
@@ -159,6 +159,10 @@ struct Record {
     addressee: Addressee,
     sender: String,
     text: String,
+    /// The images attached, by what the platform calls them, not their bytes, which the
+    /// channel fetches when the message is answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<ImageRef>,
 }
 
 /// The key and the record the backlog keeps for `event`, which arrived on `platform`; `None`
@@ -172,6 +176,7 @@ pub(crate) fn record(platform: &str, event: &Inbound) -> Option<(MessageKey, Str
             addressee,
             sender,
             text,
+            images,
         } => {
             let key = MessageKey {
                 platform: platform.to_string(),
@@ -184,6 +189,7 @@ pub(crate) fn record(platform: &str, event: &Inbound) -> Option<(MessageKey, Str
                 addressee: *addressee,
                 sender: sender.0.clone(),
                 text: text.clone(),
+                images: images.clone(),
             };
             let record = serde_json::to_string(&record).expect("strings and unit variants always encode as JSON");
             Some((key, record))
@@ -207,6 +213,7 @@ pub(crate) fn message(key: &MessageKey, record: &str) -> Result<Inbound, String>
         addressee: record.addressee,
         sender: UserId(record.sender),
         text: record.text,
+        images: record.images,
     })
 }
 
@@ -257,6 +264,10 @@ mod tests {
             addressee: Addressee::Others,
             sender: UserId("U1".into()),
             text: "多字节 \"quoted\"".into(),
+            images: vec![ImageRef {
+                key: "https://files.slack.com/files-pri/T1-F1/shot.png".into(),
+                name: "shot.png".into(),
+            }],
         };
         let (kept, record) = super::record("slack", &event).unwrap();
         assert_eq!(kept, key("m1"));
@@ -268,6 +279,7 @@ mod tests {
                 "addressee": "others",
                 "sender": "U1",
                 "text": "多字节 \"quoted\"",
+                "images": [{"key": "https://files.slack.com/files-pri/T1-F1/shot.png", "name": "shot.png"}],
             })
         );
         assert_eq!(message(&kept, &record), Ok(event));
@@ -276,5 +288,14 @@ mod tests {
                 .unwrap_err()
                 .contains("record of message m1 is not one")
         );
+    }
+
+    #[test]
+    fn a_record_kept_before_images_were_is_a_message_without_any() {
+        let record = r#"{"thread":null,"chat":"direct","addressee":"bot","sender":"U1","text":"hi"}"#;
+        let Ok(Inbound::Message { images, text, .. }) = message(&key("m1"), record) else {
+            panic!("the record is a message");
+        };
+        assert_eq!((text.as_str(), images.len()), ("hi", 0));
     }
 }

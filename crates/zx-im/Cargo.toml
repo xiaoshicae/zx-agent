@@ -47,6 +47,8 @@ toml.workspace = true
 zx-agent = { workspace = true, features = ["testing"] }
 zx-testing.workspace = true
 
+# The images that the tests attach to messages.
+image.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }
 

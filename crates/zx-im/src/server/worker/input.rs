@@ -6,12 +6,12 @@ use zx_agent::input::{Input, PendingInput};
 use super::{AfterRun, Command, Heard, Incoming, Phase, Running, Worker, WorkerInput};
 use crate::Addressee;
 use crate::server::admission::Limit;
-use crate::server::outlet::{Asked, said};
+use crate::server::outlet::{Asked, said, unshown, with_notes};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
         match input {
-            WorkerInput::Message(incoming) => self.message(incoming).await,
+            WorkerInput::Message(incoming) => self.message(*incoming).await,
             WorkerInput::Decision { user, approval, choice } => self.decide(user, approval, choice).await,
         }
     }
@@ -35,7 +35,15 @@ impl Worker {
                 Command::Compact => self.compact().await,
             };
         }
-        let content = self.out.attributed(&incoming.sender, &incoming.text).await;
+        // The images of what the bot answers are fetched; of the rest, the model reads their
+        // names.
+        let (images, notes) = if answer {
+            self.out.images(&incoming.message, &incoming.images).await
+        } else {
+            (Vec::new(), incoming.images.iter().map(unshown).collect())
+        };
+        let text = with_notes(&incoming.text, &notes);
+        let content = self.out.attributed(&incoming.sender, &text).await;
         let permit = match incoming.permit {
             Some(permit) => permit.resize(content.len()),
             None => self.budget.try_reserve(content.len()),
@@ -60,7 +68,7 @@ impl Worker {
         }
         let input = Input::User {
             text: content,
-            images: Vec::new(),
+            images,
             actor: Some(incoming.sender.0.clone()),
         };
         self.answering = Some(incoming.sender);

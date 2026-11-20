@@ -1,5 +1,6 @@
 //! The Slack channel against a fake Slack: Socket Mode messages and clicks, acknowledgement,
-//! deduplication, reconnection, credential errors, posting, cards, rate limits and the stop.
+//! deduplication, reconnection, credential errors, posting, cards, rate limits, the images of
+//! messages and the stop.
 
 mod common;
 
@@ -10,17 +11,16 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, ImChannel, ImError, ImageRef, Inbound,
+    MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
 };
 use zx_testing::WAIT;
-use zx_testing::fake_slack::{Answer, FakeSlack};
+use zx_testing::fake_slack::{Answer, BOT_TOKEN, FakeSlack};
 use zx_testing::http::silent_listener;
 
 use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
 
 const APP_TOKEN: &str = "xapp-test";
-const BOT_TOKEN: &str = "xoxb-test";
 
 fn config(slack: &FakeSlack) -> SlackConfig {
     let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
@@ -93,6 +93,7 @@ fn said(ts: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &
         addressee,
         sender: UserId("U1".into()),
         text: text.into(),
+        images: Vec::new(),
     }
 }
 
@@ -716,6 +717,7 @@ async fn another_bots_reply_in_a_thread_is_heard_and_starts_nothing() {
             addressee: Addressee::Others,
             sender: UserId("B9".into()),
             text: "resolved".into(),
+            images: Vec::new(),
         }
     );
     assert_eq!(
@@ -963,5 +965,107 @@ async fn an_acknowledgement_is_a_reaction_and_a_repeated_one_is_no_error() {
     assert_eq!(
         calls[1].body,
         json!({"channel": "C1", "timestamp": "9.1", "name": "eyes"})
+    );
+}
+
+/// A message of the direct chat D1, for fetching its images.
+fn posted_message() -> MessageRef {
+    MessageRef {
+        at: at("D1", None),
+        id: MessageId("1.000100".into()),
+    }
+}
+
+#[tokio::test]
+async fn a_message_passes_on_its_images_and_no_other_files() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    let shot = slack.file("shot.png", "image/png", b"png".to_vec());
+    let files = json!({"subtype": "file_share", "text": "what is this?", "files": [
+        {"id": "F1", "name": "shot.png", "mimetype": "image/png", "url_private": "https://unused.invalid/x", "url_private_download": shot},
+        {"id": "F2", "name": "report.pdf", "mimetype": "application/pdf", "url_private": "https://files.slack.com/files-pri/T1-F2/report.pdf"},
+        {"id": "F3", "name": "connect.png", "mimetype": "image/png", "file_access": "check_file_info"},
+    ]});
+    socket
+        .send(envelope("e1", "events_api", &direct("1.000100", files)))
+        .await;
+    socket.receive().await;
+    let Inbound::Message { text, images, .. } = running.next().await else {
+        panic!("expected a message");
+    };
+    assert_eq!(text, "what is this?");
+    assert_eq!(
+        images,
+        [ImageRef {
+            key: shot,
+            name: "shot.png".into()
+        }]
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_image_is_fetched_with_the_bot_token() {
+    let slack = FakeSlack::start().await;
+    let key = slack.file("shot.png", "image/png", b"png bytes".to_vec());
+    let image = ImageRef {
+        key,
+        name: "shot.png".into(),
+    };
+    let bytes = channel(&slack).image(&posted_message(), &image, 1024).await.unwrap();
+    assert_eq!(bytes, b"png bytes");
+    let fetched = slack.calls("/files-pri/T1-F1/shot.png");
+    assert_eq!(fetched[0].authorization, format!("Bearer {BOT_TOKEN}"));
+}
+
+#[tokio::test]
+async fn an_image_larger_than_asked_for_is_refused() {
+    let slack = FakeSlack::start().await;
+    let key = slack.file("big.png", "image/png", vec![0; 100]);
+    let image = ImageRef {
+        key,
+        name: "big.png".into(),
+    };
+    let error = channel(&slack).image(&posted_message(), &image, 99).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "slack file big.png: the file is larger than 99 bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_file_slack_does_not_keep_is_refused_without_sending_the_token() {
+    let slack = FakeSlack::start().await;
+    let image = ImageRef {
+        key: "https://example.com/files-pri/T1-F1/shot.png".into(),
+        name: "shot.png".into(),
+    };
+    let error = channel(&slack)
+        .image(&posted_message(), &image, 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "slack: https://example.com/files-pri/T1-F1/shot.png is not a URL of a file Slack keeps"
+    );
+    assert!(slack.calls("/files-pri/T1-F1/shot.png").is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_page_in_place_of_the_file_points_at_the_missing_scope() {
+    let slack = FakeSlack::start().await;
+    let key = slack.file("shot.png", "image/png", b"png".to_vec());
+    let mut config = config(&slack);
+    config.bot_token = "xoxb-without-files-read".into();
+    let channel = SlackChannel::new(config).unwrap();
+    let image = ImageRef {
+        key,
+        name: "shot.png".into(),
+    };
+    let error = channel.image(&posted_message(), &image, 1024).await.unwrap_err();
+    assert!(
+        error.to_string().contains("the bot token may lack files:read"),
+        "{error}"
     );
 }

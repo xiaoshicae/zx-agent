@@ -286,6 +286,7 @@ impl Router {
                 addressee,
                 sender,
                 text,
+                images,
             } => {
                 // Dropped with the message wherever the message ends here, which handles it.
                 let receipt = self.receipts.receipt(MessageKey {
@@ -306,6 +307,7 @@ impl Router {
                         sender,
                         addressee,
                         text,
+                        images,
                         permit: None,
                         receipt,
                     };
@@ -346,7 +348,7 @@ impl Router {
         if incoming.text.len() > self.shared.max_pending_bytes.get() && !is_control(&incoming.text) {
             return self.over_capacity(channel, &key, addressee, Limit::MessageBytes);
         }
-        let input = WorkerInput::Message(incoming);
+        let input = WorkerInput::Message(Box::new(incoming));
         let input = match self.workers.get_mut(&key) {
             Some(worker) => match worker.forward(input) {
                 Forward::Sent => return,
