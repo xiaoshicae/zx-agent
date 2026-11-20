@@ -19,9 +19,8 @@ use super::{ServerEvent, ServerSink, Shared, timed};
 /// completes the message ([`Backlog::complete`]), unless the server is stopping: what it has
 /// not handled by then stays pending, for the next start.
 pub(super) struct Receipt {
-    /// Taken as the receipt is dropped. Boxed, as every message carries a receipt through
-    /// the queues.
-    key: Option<Box<MessageKey>>,
+    /// Taken as the receipt is dropped.
+    key: Option<MessageKey>,
     handled: mpsc::UnboundedSender<MessageKey>,
     stop: CancellationToken,
 }
@@ -34,7 +33,7 @@ impl Drop for Receipt {
         if let Some(key) = self.key.take() {
             // Fails only once the completing task has failed, which is reported; the message
             // is then handled again at the next start.
-            self.handled.send(*key).ok();
+            self.handled.send(key).ok();
         }
     }
 }
@@ -48,7 +47,7 @@ pub(super) struct Receipts {
 impl Receipts {
     pub(super) fn receipt(&self, key: MessageKey) -> Receipt {
         Receipt {
-            key: Some(Box::new(key)),
+            key: Some(key),
             handled: self.handled.clone(),
             stop: self.stop.clone(),
         }

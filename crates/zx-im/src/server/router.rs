@@ -108,7 +108,7 @@ impl WorkerHandle {
                 Forward::Sent
             }
             Err(mpsc::error::TrySendError::Full(_)) => Forward::Full,
-            Err(mpsc::error::TrySendError::Closed(input)) => Forward::Ended(input),
+            Err(mpsc::error::TrySendError::Closed(input)) => Forward::Ended(Box::new(input)),
         }
     }
 }
@@ -121,8 +121,9 @@ enum Forward {
     OverBudget,
     /// Its inbox is full, so the input is dropped.
     Full,
-    /// The worker has ended, after a panic: the input comes back.
-    Ended(WorkerInput),
+    /// The worker has ended, after a panic: the input comes back, boxed, as this is rare and
+    /// the input large.
+    Ended(Box<WorkerInput>),
 }
 
 /// What a router is made of.
@@ -353,7 +354,7 @@ impl Router {
                 Forward::OverBudget => return self.over_capacity(channel, &key, addressee, Limit::Pending),
                 Forward::Full => return self.over_capacity(channel, &key, addressee, Limit::Inbox),
                 // A new worker takes over.
-                Forward::Ended(input) => input,
+                Forward::Ended(input) => *input,
             },
             None => input,
         };

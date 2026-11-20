@@ -144,8 +144,10 @@ fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, V
     let mut rest = Vec::new();
     let mut current = String::new();
     let mut count = 0;
+    // What `push` writes of one character.
+    let mut piece = String::new();
     for c in text.chars() {
-        let mut piece = String::new();
+        piece.clear();
         push(&mut piece, c);
         let size = piece.chars().count();
         if count + size > max && count > 0 {

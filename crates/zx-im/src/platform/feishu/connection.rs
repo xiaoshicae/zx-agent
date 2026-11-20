@@ -263,7 +263,7 @@ impl FeishuChannel {
         let delivery = keep(inlet, self.events(&payload), self.config.on_error.as_ref()).await;
         // Acknowledged before anything is handled: Feishu redelivers what is not acknowledged
         // in time.
-        let acknowledgement = link.socket.send(Message::binary(acknowledge(&frame).encode()));
+        let acknowledgement = link.socket.send(Message::binary(acknowledge(frame).encode()));
         delivery
             .finish(inlet, acknowledgement)
             .await
@@ -299,21 +299,11 @@ fn ping(service: i32) -> Frame {
 
 /// The acknowledgement of a data frame: the frame itself, with the time spent appended as
 /// `biz_rt` and a success code as payload (`ws/client_message.go`).
-fn acknowledge(frame: &Frame) -> Frame {
-    let mut headers = frame.headers.clone();
+fn acknowledge(mut frame: Frame) -> Frame {
     // Acknowledged on arrival, before any handling.
-    headers.push(("biz_rt".into(), "0".into()));
-    Frame {
-        seq_id: frame.seq_id,
-        log_id: frame.log_id,
-        service: frame.service,
-        method: frame.method,
-        headers,
-        payload_encoding: frame.payload_encoding.clone(),
-        payload_type: frame.payload_type.clone(),
-        payload: ACK_PAYLOAD.to_vec(),
-        log_id_new: frame.log_id_new.clone(),
-    }
+    frame.headers.push(("biz_rt".into(), "0".into()));
+    frame.payload = ACK_PAYLOAD.to_vec();
+    frame
 }
 
 /// The `service_id` query parameter of the connection address, which pings carry; 0 when
@@ -472,7 +462,7 @@ mod tests {
     #[test]
     fn an_acknowledgement_echoes_the_frame_with_biz_rt_and_a_success_code() {
         let frame = fragment("m", 1, 0, "{}");
-        let ack = acknowledge(&frame);
+        let ack = acknowledge(frame.clone());
         assert_eq!(ack.headers[..frame.headers.len()], frame.headers[..]);
         assert_eq!(ack.header("biz_rt"), Some("0"));
         assert_eq!(ack.payload, ACK_PAYLOAD);
