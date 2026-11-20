@@ -292,7 +292,7 @@ approvers = ["slack:U0123456789"]       # 只有这些用户能批准或拒绝�
 
 [limits]
 maxRunning = 4               # 同时运行的会话数，默认 4，其余排队
-maxConversations = 128       # 运行、排队和空闲的会话 worker 总数，默认 128
+maxConversations = 128       # 同时服务的会话数：运行的、排队的与空闲而会话尚未释放的，默认 128
 maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
 maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
 idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文件），默认 1800
@@ -311,4 +311,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.29 · 2026年11月
+CONFIGURATION.md · v0.30 · 2026年11月
