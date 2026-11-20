@@ -13,18 +13,16 @@ use super::{HISTORY_PAGE_MESSAGES, MAX_RETRY_AFTER, SETUP_ERRORS, SlackChannel};
 
 impl SlackChannel {
     /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON
-    /// `body`. A rate limit is waited out and retried; a method error that retrying cannot
-    /// fix is a configuration error.
+    /// `body`. A rate limit is waited out and retried. As an [`ImError`], a refusal that
+    /// retrying cannot fix is a configuration error.
     pub(super) async fn call(
         &self,
         method: &str,
         token: &str,
         args: &[(&str, &str)],
         body: Option<&Value>,
-    ) -> Result<Value, ImError> {
-        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES)
-            .await
-            .map_err(ImError::from)
+    ) -> Result<Value, CallError> {
+        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES).await
     }
 
     /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times: after
@@ -87,7 +85,7 @@ impl SlackChannel {
         tokio::select! {
             biased;
             () = cancel.cancelled() => None,
-            answer = self.call(method, token, &[], None) => Some(answer),
+            answer = self.call(method, token, &[], None) => Some(answer.map_err(ImError::from)),
         }
     }
 
@@ -160,15 +158,9 @@ impl SlackChannel {
             body.insert("blocks".into(), blocks);
         }
         let body = Value::Object(body);
-        self.call_retrying(
-            "chat.update",
-            &self.config.bot_token,
-            &[],
-            Some(&body),
-            RATE_LIMIT_RETRIES,
-        )
-        .await
-        .map(drop)
+        self.call("chat.update", &self.config.bot_token, &[], Some(&body))
+            .await
+            .map(drop)
     }
 }
 

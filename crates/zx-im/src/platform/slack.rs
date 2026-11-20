@@ -381,7 +381,7 @@ impl ImChannel for SlackChannel {
     async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
         let token = &self.config.bot_token;
         let answer = match self.call("users.info", token, &[("user", user.0.as_str())], None).await {
-            Err(ImError::Transport(error)) if error.ends_with("user_not_found") => {
+            Err(CallError::Refused { code, .. }) if code == "user_not_found" => {
                 let answer = self.call("bots.info", token, &[("bot", user.0.as_str())], None).await?;
                 return Ok(answer["bot"]["name"].as_str().map(String::from));
             }
@@ -407,8 +407,8 @@ impl ImChannel for SlackChannel {
             .await
         {
             // Acknowledged before, as by a redelivery.
-            Err(ImError::Transport(error)) if error.ends_with("already_reacted") => Ok(()),
-            other => other.map(|_| ()),
+            Err(CallError::Refused { code, .. }) if code == "already_reacted" => Ok(()),
+            other => other.map(drop).map_err(ImError::from),
         }
     }
 }
