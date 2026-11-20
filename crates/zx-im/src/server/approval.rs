@@ -76,7 +76,30 @@ impl ApprovalEvents {
                 tool: tool_name.clone(),
                 result: *approval,
             },
-            _ => return,
+            // Nothing about approvals: a new event about them is to be told apart above.
+            EventKind::RunStart { .. }
+            | EventKind::RunEnd { .. }
+            | EventKind::AttemptStart { .. }
+            | EventKind::StepStart { .. }
+            | EventKind::RequestStart { .. }
+            | EventKind::MessageStart { .. }
+            | EventKind::MessageUpdate { .. }
+            | EventKind::MessageEnd { .. }
+            | EventKind::CustomEntry { .. }
+            | EventKind::ToolExecutionStart { .. }
+            | EventKind::ToolExecutionUpdate { .. }
+            | EventKind::ToolDecision { .. }
+            | EventKind::ToolExecutionEnd { .. }
+            | EventKind::StepEnd { .. }
+            | EventKind::AttemptEnd { .. }
+            | EventKind::RetryScheduled { .. }
+            | EventKind::ContextOverflow { .. }
+            | EventKind::ContextEdited { .. }
+            | EventKind::HookFailed { .. }
+            | EventKind::CompactionStart { .. }
+            | EventKind::CompactionEnd { .. }
+            | EventKind::CompactionFailed { .. }
+            | EventKind::ToolCallRecovered { .. } => return,
         };
         // Reading the run must not wait for the worker, which may be waiting for the run.
         // The channel holds the updates of approvals asked one at a time, two per approval,
