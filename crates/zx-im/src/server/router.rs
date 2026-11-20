@@ -15,7 +15,7 @@ use crate::{
 
 use super::admission::InputBudget;
 use super::received::Receipts;
-use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
+use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{SessionKey, Shared};
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
@@ -25,7 +25,8 @@ const INBOUND_CAPACITY: usize = 64;
 const INBOX_CAPACITY: usize = 32;
 /// Idle notices of conversations, which the router handles at once.
 const RETIRE_CAPACITY: usize = 16;
-/// Short control messages remain usable even with a tiny configured text budget.
+/// Longest command that takes no share of the pending input: a command stays usable even
+/// with a tiny text budget, and a long text is not a command anyway.
 const MAX_CONTROL_BYTES: usize = 64;
 
 /// The conversation a message belongs to: the direct chat, or the thread in a group. A
@@ -49,6 +50,12 @@ fn conversation(
         conversation: at.conversation.clone(),
         thread,
     })
+}
+
+/// Whether `text` is one of the conversations' commands, which take no share of the pending
+/// input.
+fn is_control(text: &str) -> bool {
+    text.len() <= MAX_CONTROL_BYTES && Command::parse(text).is_some()
 }
 
 /// Run one channel, which keeps its messages in `backlog`, tagging what it receives with its
@@ -88,8 +95,7 @@ impl WorkerHandle {
         if let WorkerInput::Message(incoming) = &mut input {
             // A closed worker's input may be handed to a new worker with a new budget.
             incoming.permit = None;
-            let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
-            if !control {
+            if !is_control(&incoming.text) {
                 incoming.permit = self.budget.try_reserve(incoming.text.len());
                 if incoming.permit.is_none() {
                     return Forward::Full;
@@ -319,8 +325,7 @@ impl Router {
         if addressee != Addressee::Bot && !self.workers.contains_key(&key) && self.shared.session_of(&key).is_none() {
             return;
         }
-        let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
-        if incoming.text.len() > self.shared.max_pending_bytes.get() && !control {
+        if incoming.text.len() > self.shared.max_pending_bytes.get() && !is_control(&incoming.text) {
             self.over_capacity(channel, &key, addressee);
             return;
         }

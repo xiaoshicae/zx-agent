@@ -6,7 +6,7 @@ use zx_agent::input::Input;
 use crate::Addressee;
 use crate::server::outlet::{Asked, said};
 
-use super::{AfterRun, CANCEL_COMMAND, COMPACT_COMMAND, Incoming, NEW_COMMAND, Phase, Running, Worker, WorkerInput};
+use super::{AfterRun, Command, Incoming, Phase, Running, Worker, WorkerInput};
 
 impl Worker {
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -28,13 +28,12 @@ impl Worker {
 
     async fn message(&mut self, incoming: Incoming) {
         let answer = self.answers(&incoming);
-        if answer {
-            match incoming.text.trim() {
-                CANCEL_COMMAND => return self.cancel().await,
-                NEW_COMMAND => return self.renew().await,
-                COMPACT_COMMAND => return self.compact().await,
-                _ => {}
-            }
+        if answer && let Some(command) = Command::parse(&incoming.text) {
+            return match command {
+                Command::Cancel => self.cancel().await,
+                Command::New => self.renew().await,
+                Command::Compact => self.compact().await,
+            };
         }
         let content = self.out.attributed(&incoming.sender, &incoming.text).await;
         let input = if answer {

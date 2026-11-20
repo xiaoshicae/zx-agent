@@ -33,12 +33,6 @@ use super::outlet::{Asked, Finished, Opened, Outlet, answer_of};
 use super::received::Receipt;
 use super::{ApprovalRecord, ServerEvent, SessionKey, Shared};
 
-/// Sent alone, cancels the conversation's run.
-const CANCEL_COMMAND: &str = "/cancel";
-/// Sent alone, starts a new session for the conversation, as chat's `/new` does.
-const NEW_COMMAND: &str = "/new";
-/// Sent alone, summarizes the earlier part of the conversation, as chat's `/compact` does.
-const COMPACT_COMMAND: &str = "/compact";
 /// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
 const UPDATE_CAPACITY: usize = 16;
 
@@ -266,9 +260,28 @@ async fn step(phase: &mut Phase, idle: Duration, lifecycle: Lifecycle) -> Step {
     }
 }
 
-/// Whether `text` is one of the conversation's commands rather than something to answer.
-pub(super) fn is_command(text: &str) -> bool {
-    matches!(text.trim(), CANCEL_COMMAND | NEW_COMMAND | COMPACT_COMMAND)
+/// A conversation's commands, each sent alone.
+#[derive(Clone, Copy)]
+pub(super) enum Command {
+    /// `/cancel`: cancels the conversation's run.
+    Cancel,
+    /// `/new`: starts a new session for the conversation, as chat's `/new` does.
+    New,
+    /// `/compact`: summarizes the earlier part of the conversation, as chat's `/compact` does.
+    Compact,
+}
+
+impl Command {
+    /// The command `text` is, alone but for the whitespace around it; `None` for anything
+    /// else, which is to be answered.
+    pub(super) fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "/cancel" => Some(Self::Cancel),
+            "/new" => Some(Self::New),
+            "/compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
 }
 
 /// Why the conversation has no session to run or record in.
