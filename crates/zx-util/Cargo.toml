@@ -1,6 +1,6 @@
 [package]
 name = "zx-util"
-description = "Small helpers the crates of the zx-agent workspace share: locks, bounded text, randomness, defaults, environment variables, registries, lines on stdout and stderr; not part of the API"
+description = "Small helpers the crates of the zx-agent workspace share: locks, bounded text and amounts, randomness, defaults, environment variables, registries, lines on stdout and stderr; not part of the API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

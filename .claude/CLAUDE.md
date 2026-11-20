@@ -12,7 +12,7 @@
 
 | crate | 负责 |
 |---|---|
-| `zx-util` | 各 crate 共用的小工具：加锁、文本截短、随机数、判断默认值、读环境变量、按名字登记、不会 panic 的输出行；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
+| `zx-util` | 各 crate 共用的小工具：加锁、文本截短与小额数字的显示、随机数、判断默认值、读环境变量、按名字登记、不会 panic 的输出行；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
 | `zx-ai` | 消息类型、流式事件、`Provider` 契约 |
 | `zx-ai-openai` | OpenAI 兼容的 provider；模型层里依赖 reqwest 的只有两个 provider 与它们共用的 `zx-ai-http`，都不依赖内核 |
 | `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |

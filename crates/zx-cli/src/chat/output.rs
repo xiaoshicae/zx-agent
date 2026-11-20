@@ -9,7 +9,7 @@ use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopRea
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
-use zx_util::text::clip;
+use zx_util::text::{amount, clip};
 
 use super::term::{Style, Terminal, Tone, elapsed_text};
 use crate::cli::{ColorArg, OutputMode};
@@ -287,14 +287,13 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
         };
         format!(" · {} in · {} out{cached}", report.usage.input, report.usage.output)
     };
-    let cost = report.usage.total_cost.map(cost_text).unwrap_or_default();
+    let cost = report.usage.total_cost.map(cost_part).unwrap_or_default();
     format!("[turn] {requests}{retries}{usage}{cost} · {}", elapsed_text(elapsed))
 }
 
-/// ` · cost 0.0123`, in the prices' unit, whatever the currency: four decimals, since a turn
-/// costs a small fraction of a unit.
-pub(super) fn cost_text(total_cost: f64) -> String {
-    format!(" · cost {total_cost:.4}")
+/// ` · cost 0.0123`, in the prices' unit, shown as [`amount`] shows amounts.
+pub(super) fn cost_part(total_cost: f64) -> String {
+    format!(" · cost {}", amount(total_cost))
 }
 
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its

@@ -16,6 +16,7 @@ use zx_app::otel::{Telemetry, TraceHook, TraceParent};
 use zx_app::shutdown::next_event;
 use zx_app::{Application, Approvals, SessionPlace};
 use zx_util::stdio::{eprint_line, print_line};
+use zx_util::text::amount;
 
 use crate::application::{connect, open_or_create};
 use crate::cli::{self, OutputMode, RunArgs};
@@ -241,7 +242,7 @@ fn print_report(report: &RunReport, output: OutputMode, file: Option<&Path>) {
             };
             let cost = usage
                 .total_cost
-                .map(|cost| format!(" cost={cost:.4}"))
+                .map(|cost| format!(" cost={}", amount(cost)))
                 .unwrap_or_default();
             let session = file
                 .map(|path| format!(" session={}", path.display()))
