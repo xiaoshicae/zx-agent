@@ -60,12 +60,12 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     );
 }
 
-struct Approver {
+struct CountingApprover {
     approval: ApprovalDecision,
     calls: AtomicUsize,
 }
 #[async_trait]
-impl zx_testing::Approver for Approver {
+impl zx_testing::Approver for CountingApprover {
     async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision> {
         assert_eq!(request.reason, "review");
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -88,7 +88,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
             FauxStep::text("done"),
         ]));
         let tool = Arc::new(EchoTool::new("echo"));
-        let host = Arc::new(Approver {
+        let host = Arc::new(CountingApprover {
             approval,
             calls: AtomicUsize::new(0),
         });
@@ -130,7 +130,7 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     let provider = Arc::new(FauxProvider::new(steps));
     let tool = Arc::new(EchoTool::new("echo"));
     let denied = Arc::new(AtomicBool::new(false));
-    let host = Arc::new(Approver {
+    let host = Arc::new(CountingApprover {
         approval: ApprovalDecision::AllowSession,
         calls: AtomicUsize::new(0),
     });
@@ -228,7 +228,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
         FauxStep::text("handled"),
     ]));
     let checks = Arc::new(AtomicUsize::new(0));
-    let host = Arc::new(Approver {
+    let host = Arc::new(CountingApprover {
         approval: ApprovalDecision::AllowOnce,
         calls: AtomicUsize::new(0),
     });
@@ -1133,7 +1133,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         config
             .policies
             .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
-        let host = Arc::new(Approver {
+        let host = Arc::new(CountingApprover {
             approval,
             calls: AtomicUsize::new(0),
         });

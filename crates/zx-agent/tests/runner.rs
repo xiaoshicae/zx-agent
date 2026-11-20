@@ -736,14 +736,14 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
 }
 
 /// Holds the first `message_end` of the user input `text` until the run is dropped.
-struct HoldInput {
+struct HoldMessageEnd {
     text: &'static str,
     held: std::sync::atomic::AtomicBool,
     reached: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
-impl Hook for HoldInput {
+impl Hook for HoldMessageEnd {
     fn observes(&self, event: &EventKind) -> bool {
         matches!(event, EventKind::MessageEnd { .. })
     }
@@ -769,8 +769,8 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     let mut setup = setup(&provider);
     let reached = Arc::new(tokio::sync::Notify::new());
     setup.config.hooks.push_with_timeout(
-        "hold_input",
-        Arc::new(HoldInput {
+        "hold_message_end",
+        Arc::new(HoldMessageEnd {
             text: "queued",
             held: std::sync::atomic::AtomicBool::new(false),
             reached: reached.clone(),

@@ -548,9 +548,9 @@ impl ToolPolicy for Ask {
         PolicyDecision::Ask("review".into())
     }
 }
-struct Approver(AtomicUsize);
+struct CountingApprover(AtomicUsize);
 #[async_trait]
-impl zx_testing::Approver for Approver {
+impl zx_testing::Approver for CountingApprover {
     async fn confirm(&self, _request: &zx_testing::Asked) -> Option<ApprovalDecision> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Some(ApprovalDecision::AllowSession)
@@ -567,7 +567,7 @@ async fn model_switching_retains_approval_grants() {
     };
     let first = Arc::new(FauxProvider::new(steps()));
     let next = Arc::new(FauxProvider::new(steps()));
-    let host = Arc::new(Approver(AtomicUsize::new(0)));
+    let host = Arc::new(CountingApprover(AtomicUsize::new(0)));
     let mut config = config(first, vec![Arc::new(zx_testing::EchoTool::new("echo"))]);
     config.policies.push("ask", Arc::new(Ask));
     let (session, _) = RunnerSetup {

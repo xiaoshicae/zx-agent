@@ -77,7 +77,7 @@ fn only_session(sessions: &Path) -> String {
     std::fs::read_to_string(&files[0]).unwrap()
 }
 
-fn write_config(dir: &Path, text: &str) -> PathBuf {
+fn write_im_config(dir: &Path, text: &str) -> PathBuf {
     let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
     path
@@ -154,7 +154,7 @@ async fn configuration_errors_are_reported_before_serving() {
     ];
     for (config, extra, unset, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), config);
+        let path = write_im_config(dir.path(), config);
         let mut command = im(dir.path(), &path, "http://127.0.0.1:9/v1");
         command.args(extra);
         if let Some(variable) = unset {
@@ -183,7 +183,7 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     let command = "echo app=$SLACK_APP_TOKEN bot=$SLACK_BOT_TOKEN; cat token.txt";
     let model = MockServer::start(vec![Reply::bash("c1", command), Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &format!("{VALID}\n[limits]\nidleSecs = 600\n")
             .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
@@ -274,7 +274,7 @@ async fn im_tells_the_model_how_the_conversation_reaches_people() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -306,7 +306,7 @@ async fn configured_replies_and_card_labels_replace_the_english_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::bash("c1", "echo hi"), Reply::text("done")]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &format!(
             "{VALID}\n[replies]\nworking = \"处理中…\"\n[cardLabels]\ntitle = \"需要审批\"\nallowed = \"已批准\"\n"
@@ -359,7 +359,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
     // The model never answers, so the run is still going when the server is killed.
     let model = MockServer::start(vec![Reply::Stall(Vec::new())]).await;
     let mut slack = FakeSlack::start().await;
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -423,7 +423,7 @@ async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_ag
         "conversations.replies",
         vec![Answer::RateLimited { retry_after_secs: 60 }],
     );
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
@@ -511,7 +511,7 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
     .await;
     let model = MockServer::start(Vec::new()).await;
     // Nothing listens on port 9, so the Slack connection keeps failing; this test stops first.
-    let config = write_config(
+    let config = write_im_config(
         dir.path(),
         "[slack]\napiBase = \"http://127.0.0.1:9/api\"\n[access]\nconversations = [\"slack:C1\"]\n\
          approvers = [\"slack:U2\"]\n[sessions]\ndir = \"sessions\"\n",

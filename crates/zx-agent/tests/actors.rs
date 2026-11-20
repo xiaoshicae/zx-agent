@@ -23,10 +23,10 @@ type Told = (BTreeMap<String, String>, Option<String>);
 
 /// Remembers what it was told at each call it was asked about.
 #[derive(Default)]
-struct RecordingPolicy(Mutex<Vec<Told>>);
+struct ContextRecordingPolicy(Mutex<Vec<Told>>);
 
 #[async_trait]
-impl ToolPolicy for RecordingPolicy {
+impl ToolPolicy for ContextRecordingPolicy {
     async fn check(&self, _call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
         self.0.lock().unwrap().push((ctx.labels.clone(), ctx.actor.clone()));
         PolicyDecision::Allow
@@ -70,9 +70,9 @@ fn one_call() -> [FauxStep; 2] {
 
 /// The session `session` whose model calls `echo` once in each of `runs` runs, with a policy
 /// and a hook that remember what they were told.
-async fn observed(session: Start, runs: usize) -> (Driven, Arc<RecordingPolicy>, RecordingHook) {
+async fn observed(session: Start, runs: usize) -> (Driven, Arc<ContextRecordingPolicy>, RecordingHook) {
     let provider = Arc::new(FauxProvider::new((0..runs).flat_map(|_| one_call())));
-    let policy = Arc::new(RecordingPolicy::default());
+    let policy = Arc::new(ContextRecordingPolicy::default());
     let hook = RecordingHook::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.policies.push("recording", policy.clone());

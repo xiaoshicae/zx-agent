@@ -232,7 +232,7 @@ fn extension_names_must_be_given_and_unique() {
 /// Counts how often it is asked for its hooks, and gives one that remembers the sessions
 /// whose input it saw.
 #[derive(Default)]
-struct Asked {
+struct CountingExtension {
     asked: AtomicUsize,
     seen: Arc<Mutex<Vec<String>>>,
 }
@@ -247,7 +247,7 @@ impl Hook for Remember {
     }
 }
 
-impl Extension for Asked {
+impl Extension for CountingExtension {
     fn name(&self) -> &str {
         "asked"
     }
@@ -261,7 +261,7 @@ impl Extension for Asked {
 #[tokio::test]
 async fn an_extension_is_asked_once_and_its_hooks_serve_every_session() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
-    let extension = Arc::new(Asked::default());
+    let extension = Arc::new(CountingExtension::default());
     let mut config = base(provider);
     config.extensions = vec![extension.clone()];
     let agent = Agent::new(config).unwrap();

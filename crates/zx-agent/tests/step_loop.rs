@@ -745,10 +745,10 @@ impl Tool for Renaming {
 
 /// Allows every call and records the arguments it was asked about.
 #[derive(Default)]
-struct RecordingPolicy(Mutex<Vec<Value>>);
+struct ArgumentRecordingPolicy(Mutex<Vec<Value>>);
 
 #[async_trait]
-impl ToolPolicy for RecordingPolicy {
+impl ToolPolicy for ArgumentRecordingPolicy {
     async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.lock().unwrap().push(call.arguments.clone());
         PolicyDecision::Allow
@@ -769,7 +769,7 @@ async fn policy_and_tool_see_prepared_arguments_while_the_context_keeps_the_orig
         FauxStep::text("done"),
     ]);
     let tool = Arc::new(Renaming::default());
-    let policy = Arc::new(RecordingPolicy::default());
+    let policy = Arc::new(ArgumentRecordingPolicy::default());
     let config = with_policy(config(provider.clone(), vec![tool.clone()]), policy.clone());
     let mut context = Vec::new();
 
