@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["json-schema"]
 # Check the arguments of every tool call against the JSON Schema the tool declares, and the
@@ -37,6 +40,3 @@ zx-ai = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 # The doctests start their runtime with `#[tokio::main]`.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-
-[lints]
-workspace = true

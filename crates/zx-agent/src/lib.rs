@@ -25,8 +25,8 @@
 //! - [`builtin`]: the implementations of `zx-builtin`: the built-in tools (`builtin::tools`),
 //!   where they run commands (`builtin::executor`), the policies (`builtin::policy`), the
 //!   hooks that continue a cut-off answer, redact known secrets and save long results
-//!   (`builtin::continuation`, `builtin::redact`, `builtin::output_store`), and the tools of
-//!   external MCP servers (`builtin::mcp`)
+//!   (`builtin::continuation`, `builtin::redact`, `builtin::output_store`), sessions kept as
+//!   JSONL files (`builtin::jsonl`), and the tools of external MCP servers (`builtin::mcp`)
 //!
 //! What brings an agent to people is built on this library and is not part of it: the
 //! configuration the programs share with other hosts (`zx-app`), the command line (`zx-cli`,
