@@ -220,6 +220,31 @@ async fn an_overloaded_api_is_unavailable_with_its_wait() {
 }
 
 #[tokio::test]
+async fn a_stream_that_ends_without_a_stop_reason_broke_off_and_is_tried_again() {
+    let server = MockServer::start(vec![
+        answer(vec![started(), text(0, "partial")]),
+        answer(vec![started(), text(0, "whole"), ended("end_turn")]),
+    ])
+    .await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&server)
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(
+        (report.outcome, report.retries),
+        (RunOutcome::Completed, 1),
+        "{report:?}"
+    );
+    assert_eq!(report.final_text, "whole");
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
 async fn a_refusal_fails_the_run_as_refused() {
     let server = MockServer::start(vec![Reply::Sse(vec![
         started()[0].clone(),

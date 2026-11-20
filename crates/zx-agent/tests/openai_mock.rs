@@ -236,6 +236,30 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
 }
 
 #[tokio::test]
+async fn a_stream_that_ends_without_a_finish_reason_broke_off_and_is_tried_again() {
+    let cut_off = Reply::Sse(vec![
+        json!({"choices": [{"index": 0, "delta": {"content": "partial"}}]}),
+    ]);
+    let server = MockServer::start(vec![cut_off, Reply::text("whole")]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(
+        (report.outcome, report.retries),
+        (RunOutcome::Completed, 1),
+        "{report:?}"
+    );
+    assert_eq!(report.final_text, "whole");
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
 async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
     let server = MockServer::start(vec![Reply::Sse(vec![json!({"choices":[{
         "index": 0, "delta": {"content": "partial"}, "finish_reason": "server_interrupted"

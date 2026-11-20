@@ -264,7 +264,8 @@ pub enum ProviderErrorKind {
     /// The service is overloaded, failing or otherwise unavailable for now: an HTTP 5xx or an
     /// error that says so.
     Unavailable,
-    /// The connection failed, or broke off before the response ended.
+    /// The connection failed, or broke off before the response ended, as does a stream that
+    /// ends without saying how the answer ended.
     Transport,
     /// The service did not answer, or stopped sending, within the time allowed, or says that
     /// it timed out itself: an HTTP 408 or an error that says so.
@@ -280,7 +281,8 @@ pub enum ProviderErrorKind {
     /// The service ended the response with a reason of its own instead of an answer, such as
     /// a content filter; the error's `code` holds the reason.
     Refused,
-    /// The response broke the protocol: data that cannot be read, or no end where one was due.
+    /// The response broke the protocol: data that cannot be read, or a whole answer where a
+    /// stream was asked for.
     Protocol,
     /// The response exceeded a byte limit of the provider's settings.
     ResourceLimit,

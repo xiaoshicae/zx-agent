@@ -91,7 +91,7 @@ impl Events {
 /// What a provider makes of the answer streamed so far.
 pub trait Answer {
     /// The complete message. Fails on a stream that ended without saying how the answer
-    /// ended.
+    /// ended, which [`end`] reports as broken off.
     fn finish(&self) -> Result<AssistantMessage, String>;
 
     /// The message so far, ended by `stop_reason` with `error` and its `provider_error`.
@@ -108,9 +108,11 @@ pub trait Answer {
 /// content streamed before the failure. Nothing is sent to a consumer that went away.
 pub async fn end(outcome: Result<(), Failure>, answer: &impl Answer, started: Instant, tx: &mut EventSender) {
     let mut message = match outcome {
-        Ok(()) => answer
-            .finish()
-            .unwrap_or_else(|error| answer.failure(StopReason::Error, error, Some(ProviderErrorKind::Protocol.into()))),
+        // A stream that ends before saying how the answer ended broke off, as when a gateway
+        // or proxy cuts it: asking again may get the whole answer (pi: `connection.?closed`).
+        Ok(()) => answer.finish().unwrap_or_else(|error| {
+            answer.failure(StopReason::Error, error, Some(ProviderErrorKind::Transport.into()))
+        }),
         Err(Failure::Aborted) => answer.failure(StopReason::Aborted, ABORTED_MESSAGE, None),
         Err(Failure::Closed) => return,
         Err(Failure::Error {
