@@ -46,8 +46,8 @@ use scripts::{
 
 use super::capture::{Capture, await_end, collect};
 use super::{
-    Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, directory_error, over_limit_error,
-    special_file_error,
+    Captured, CommandEnd, CommandOutput, Executor, SHELL, ShellCommand, directory_read_error, directory_write_error,
+    over_limit_error, special_file_error,
 };
 use zx_core::tools::ExecutionMode;
 
@@ -244,7 +244,7 @@ where
 {
     command.stderr(Stdio::piped());
     let script = async {
-        let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("cannot start docker exec: {e}"))?;
         let stderr = Capture::spawn(child.stderr.take());
         let moved = transfer(&mut child).await?;
         let status = child
@@ -285,7 +285,7 @@ async fn write_script(command: Command, path: &Path, contents: &[u8]) -> Result<
     let (status, (), stderr) = file_script(command, &WRITING, path, write).await?;
     match status.code() {
         Some(0) => Ok(()),
-        Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
+        Some(EXIT_DIRECTORY) => Err(directory_write_error(path)),
         Some(EXIT_SPECIAL) => Err(special_file_error(path)),
         Some(EXIT_NO_DIRECTORY) => Err(format!(
             "cannot create the directory of {} in the container: {}",
@@ -342,9 +342,7 @@ impl Executor for ContainerExecutor {
             [SHELL, request.command],
         );
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to start docker exec: {e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("cannot start docker exec: {e}"))?;
         let cleanup = Cleanup {
             executor: self,
             armed: true,
@@ -392,7 +390,7 @@ impl Executor for ContainerExecutor {
                 check_read_within(path, &bytes, max_bytes)?;
                 Ok(bytes)
             }
-            Some(EXIT_DIRECTORY) => Err(directory_error(path)),
+            Some(EXIT_DIRECTORY) => Err(directory_read_error(path)),
             Some(EXIT_MISSING) => Err(format!("cannot read {}: no such file in the container", path.display())),
             Some(EXIT_SPECIAL) => Err(special_file_error(path)),
             Some(EXIT_DENIED) => Err(format!(
@@ -493,7 +491,7 @@ async fn probe(target: &Target, config: &ContainerConfig, workspace: &Path) -> P
     );
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Probe::NotReady(format!("cannot run docker exec: {e}")),
+        Ok(Err(e)) => return Probe::NotReady(format!("cannot start docker exec: {e}")),
         Err(_) => {
             return Probe::NotReady(format!("docker exec did not answer within {PROBE_TIMEOUT:?}"));
         }

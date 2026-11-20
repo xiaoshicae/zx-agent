@@ -240,7 +240,7 @@ tools = ["query", "query_range"]
 
 ## skills
 
-skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[Use read_skill with name="<名称>", offset=<偏移> to continue.]`。
+skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[use read_skill with name="<名称>", offset=<偏移> to continue]`。
 
 ## 上下文管理
 
@@ -259,7 +259,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ## 工具结果落盘
 
-agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页至多 2000 行，放得下时是整行（超长的一行在字符边界切开，下一页接着读），连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
+agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[use read_output with id="<输出 ID>", offset=<偏移> to continue]`），其余由模型用 `read_output` 分页读取；一页至多 2000 行，放得下时是整行（超长的一行在字符边界切开，下一页接着读），连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
 
 | 键 | 语义 |
 |---|---|
@@ -311,4 +311,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.30 · 2026年11月
+CONFIGURATION.md · v0.31 · 2026年11月

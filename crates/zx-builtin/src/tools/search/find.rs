@@ -168,8 +168,8 @@ impl Tool for FindTool {
             Wording {
                 empty: "No files found.",
                 more: "more files match",
-                advice: "Narrow the pattern or path, or raise limit",
-                long_lines: "long paths were cut",
+                advice: "narrow the pattern or path, or raise limit",
+                long_lines: "long paths were truncated",
                 also_not_applied: None,
             },
         )

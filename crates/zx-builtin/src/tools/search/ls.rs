@@ -100,8 +100,8 @@ impl Tool for LsTool {
             Wording {
                 empty: "(empty directory)",
                 more: "more entries exist",
-                advice: "Raise limit, or list a subdirectory",
-                long_lines: "long names were cut",
+                advice: "raise limit, or list a subdirectory",
+                long_lines: "long names were truncated",
                 also_not_applied: None,
             },
         )

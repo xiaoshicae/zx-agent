@@ -164,6 +164,11 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
 }
 
+/// The error of a read that the call's cancellation stopped. Public, not part of the API:
+/// zx-app's read_skill uses it.
+#[doc(hidden)]
+pub const READ_CANCELLED: &str = "the read was cancelled";
+
 /// `operation`, unless the call is cancelled first. Public, not part of the API: zx-app's
 /// read_skill uses it.
 #[doc(hidden)]

@@ -10,7 +10,7 @@ use crate::config::{MAX_FILE_BYTES, READ_SKILL, Skill};
 use zx_agent::ai::ToolDef;
 use zx_agent::builtin::tools::paging::{Links, Pager, read_text};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
-use zx_agent::builtin::tools::{parse_args, unless_cancelled};
+use zx_agent::builtin::tools::{READ_CANCELLED, parse_args, unless_cancelled};
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 /// The read_skill tool: it reads the body of one of the agent's skills. It runs nothing and
@@ -108,7 +108,7 @@ impl Tool for ReadSkillTool {
         // that registers one may name it through a link.
         let text = unless_cancelled(ctx, read_text(&skill.path, MAX_FILE_BYTES, Links::Follow))
             .await
-            .ok_or("skill read cancelled")?
+            .ok_or(READ_CANCELLED)?
             .map_err(|error| format!("cannot read skill {:?}: {error}", skill.name))?;
         let pager = Pager {
             tool: READ_SKILL,
@@ -174,7 +174,7 @@ mod tests {
             .unwrap()
             .content;
         let (prefix, footer) = first
-            .split_once("\n[Use read_skill with name=\"review\", offset=")
+            .split_once("\n[use read_skill with name=\"review\", offset=")
             .unwrap();
         let offset: usize = footer.split_whitespace().next().unwrap().parse().unwrap();
         assert_eq!(prefix.len(), offset);
@@ -216,7 +216,7 @@ mod tests {
         ctx.cancel.cancel();
         assert_eq!(
             tool.execute(json!({"name":"review"}), &ctx).await.unwrap_err(),
-            "skill read cancelled"
+            "the read was cancelled"
         );
     }
 

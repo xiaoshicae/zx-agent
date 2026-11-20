@@ -57,10 +57,7 @@ impl Pager<'_> {
     /// The footer that tells the model to read on from byte `next`.
     fn footer(&self, next: usize) -> String {
         let (name, value) = self.argument;
-        format!(
-            "\n[Use {} with {name}={value:?}, offset={next} to continue.]",
-            self.tool
-        )
+        format!("\n[use {} with {name}={value:?}, offset={next} to continue]", self.tool)
     }
 }
 
@@ -79,7 +76,7 @@ pub async fn read_text(path: &Path, max_bytes: u64, links: Links) -> Result<Stri
             Unreadable::Io(error) => format!("{}: {error}", path.display()),
             Unreadable::Link => format!("{} is a symbolic link, which is not followed", path.display()),
             Unreadable::Directory | Unreadable::Special => format!("{} is not a regular file", path.display()),
-            Unreadable::Over => format!("{} is over the {max_bytes} byte file limit", path.display()),
+            Unreadable::Over => format!("{} is over the {max_bytes} byte limit", path.display()),
         })?;
     String::from_utf8(bytes).map_err(|error| format!("{} is not UTF-8 text: {error}", path.display()))
 }
@@ -98,7 +95,7 @@ mod tests {
 
     /// The text of `page` and the offset its footer names, if it has one.
     fn split(page: &str) -> (&str, Option<usize>) {
-        match page.split_once("\n[Use read_text with name=\"notes\", offset=") {
+        match page.split_once("\n[use read_text with name=\"notes\", offset=") {
             Some((text, footer)) => (text, footer.split(' ').next().and_then(|next| next.parse().ok())),
             None => (page, None),
         }
@@ -172,7 +169,7 @@ mod tests {
         for (path, expected) in [
             (dir.path().join("missing.txt"), "missing.txt: "),
             (dir.path().to_path_buf(), "is not a regular file"),
-            (large, "large.txt is over the 10 byte file limit"),
+            (large, "large.txt is over the 10 byte limit"),
             (binary, "binary.txt is not UTF-8 text"),
         ] {
             let error = read_text(&path, 10, Links::Follow).await.unwrap_err();

@@ -122,15 +122,19 @@ async fn bash_reports_every_way_a_command_can_end() {
         (|| CommandEnd::Signaled, "[terminated by a signal]", true),
         (
             || CommandEnd::WaitFailed("gone".into()),
-            "[failed to wait for the process: gone]",
+            "[cannot wait for the command: gone]",
             true,
         ),
         (
             || CommandEnd::TimedOut,
-            "[timed out after 120s; process group killed]",
+            "[timed out after 120s; its processes were stopped]",
             true,
         ),
-        (|| CommandEnd::Cancelled, "[cancelled; process group killed]", true),
+        (
+            || CommandEnd::Cancelled,
+            "[cancelled; its processes were stopped]",
+            true,
+        ),
     ];
     for (end, status, is_error) in cases {
         let tool = BashTool {

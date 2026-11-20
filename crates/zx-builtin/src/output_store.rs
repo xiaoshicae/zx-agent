@@ -21,7 +21,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ai::{ToolCall, ToolDef};
 use crate::tools::paging::{Links, Pager, read_text};
-use crate::tools::{READ_OUTPUT, parse_args, unless_cancelled};
+use crate::tools::{READ_CANCELLED, READ_OUTPUT, parse_args, unless_cancelled};
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
@@ -206,7 +206,7 @@ impl OutputStore {
     async fn write(&self, text: &str) -> HookResult<String> {
         if text.len() > self.config.max_file_bytes {
             return Err(format!(
-                "tool result is {} bytes, over the {} byte file limit",
+                "tool result is {} bytes, over the {} byte limit",
                 text.len(),
                 self.config.max_file_bytes
             ));
@@ -376,7 +376,7 @@ impl Tool for ReadOutputTool {
             name: READ_OUTPUT.into(),
             description: "Read on in a tool result that was too long to show whole. Such a result ends with a \
                           footer that names its id and the UTF-8 byte offset of the next page; pass both. Only \
-                          results this agent stored are readable."
+                          results this agent stored are readable. Read-only."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -404,7 +404,7 @@ impl Tool for ReadOutputTool {
         let path = self.store.path(&args.id)?;
         let read = unless_cancelled(ctx, self.store.read(&path)).await;
         let text = read
-            .ok_or_else(|| "output read cancelled".to_string())?
+            .ok_or(READ_CANCELLED)?
             .map_err(|error| format!("cannot read tool output: {error}"))?;
         Ok(ToolOutput::ok(self.store.pager(&args.id).page(&text, args.offset)?))
     }

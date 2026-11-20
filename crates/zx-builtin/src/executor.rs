@@ -122,10 +122,14 @@ pub trait Executor: Send + Sync {
 /// the search tools' scripts are POSIX, which it runs too.
 const SHELL: &str = "bash";
 
-/// The error for `path` being a directory where a file was expected, with what the model
-/// can do instead.
-fn directory_error(path: &Path) -> String {
+/// The error for reading `path`, a directory, with what the model can do instead.
+fn directory_read_error(path: &Path) -> String {
     format!("{} is a directory; use bash `ls` to list it", path.display())
+}
+
+/// The error for writing to `path`, a directory, with what the model can do instead.
+fn directory_write_error(path: &Path) -> String {
+    format!("{} is a directory; write to the path of a file instead", path.display())
 }
 
 /// The error for `path` being neither a regular file nor a directory.

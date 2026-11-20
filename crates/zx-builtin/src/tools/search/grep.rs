@@ -176,8 +176,8 @@ impl Tool for GrepTool {
             Wording {
                 empty: "No matches found.",
                 more: "more matches exist",
-                advice: "Narrow the pattern, path or glob, or raise limit",
-                long_lines: "long lines were cut",
+                advice: "narrow the pattern, path or glob, or raise limit",
+                long_lines: "long lines were truncated",
                 // grep's --include takes the file name only.
                 also_not_applied: args
                     .glob()

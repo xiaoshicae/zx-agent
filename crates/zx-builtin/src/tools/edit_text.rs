@@ -73,10 +73,11 @@ fn find(content: &str, old: &str) -> Option<(usize, usize)> {
     content.find(&old).map(|start| (start, old.len()))
 }
 
-/// Name an edit in an error, as pi does: "the text" for a single edit.
-fn which(index: usize, total: usize) -> String {
+/// Name an edit in an error: `single` when it is the only one, such as pi's "the text", else
+/// its place in `edits`.
+fn which(index: usize, total: usize, single: &str) -> String {
     if total == 1 {
-        "the text".to_string()
+        single.to_string()
     } else {
         format!("edits[{index}]")
     }
@@ -107,13 +108,16 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<Stri
     let total = edits.len();
     for (index, edit) in edits.iter().enumerate() {
         if edit.old_text.is_empty() {
-            return Err(format!("{} has an empty oldText in {path}", which(index, total)));
+            return Err(format!(
+                "{} has an empty oldText in {path}",
+                which(index, total, "the edit")
+            ));
         }
         // Empty in the form texts are compared in: it would match everywhere and nowhere.
         if tolerant(&edit.old_text).is_empty() {
             return Err(format!(
                 "{} has an oldText of only spaces in {path}; include the text beside them, which says where to edit",
-                which(index, total)
+                which(index, total, "the edit")
             ));
         }
     }
@@ -151,14 +155,14 @@ fn locate<'a>(
         let Some((start, len)) = find(base, &edit.old_text) else {
             return Err(format!(
                 "could not find {} in {path}; oldText must match the file exactly, including whitespace and line breaks",
-                which(index, total)
+                which(index, total, "the text")
             ));
         };
         let occurrences = tolerant_content.matches(&tolerant(&edit.old_text)).count();
         if occurrences > 1 {
             return Err(format!(
                 "found {occurrences} occurrences of {} in {path}; oldText must be unique, so include more of the surrounding text",
-                which(index, total)
+                which(index, total, "the text")
             ));
         }
         replacements.push(Replacement {

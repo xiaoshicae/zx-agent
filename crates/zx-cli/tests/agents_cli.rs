@@ -104,7 +104,7 @@ fn cat_result(text: &str) -> String {
 /// The ID of the stored result and the offset of the next page, from the footer of `page`.
 fn footer(page: &str) -> (String, usize) {
     let (_, footer) = page
-        .rsplit_once("\n[Use read_output with id=\"")
+        .rsplit_once("\n[use read_output with id=\"")
         .unwrap_or_else(|| panic!("no footer of a stored result in {page:?}"));
     let (id, rest) = footer.split_once("\", offset=").unwrap();
     let offset = rest.split(' ').next().unwrap().parse().unwrap();

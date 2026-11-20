@@ -20,7 +20,7 @@ async fn pages_through_a_file() {
         .unwrap();
     assert_eq!(
         page.content,
-        "line 3\nline 4\n[Showing lines 3-4 of 10. Use offset=5 to continue.]"
+        "line 3\nline 4\n[showing lines 3-4 of 10; use offset=5 to continue]"
     );
 
     let rest = tool
@@ -139,7 +139,7 @@ async fn long_files_end_with_a_hint_to_continue() {
         .await
         .unwrap();
     let expected = format!(
-        "[Showing lines 1-{MAX_LINES} of {}. Use offset={} to continue.]",
+        "[showing lines 1-{MAX_LINES} of {}; use offset={} to continue]",
         MAX_LINES + 5,
         MAX_LINES + 1
     );
@@ -172,8 +172,8 @@ async fn a_line_over_the_byte_limit_is_reported_as_cut() {
     assert_eq!(
         note,
         format!(
-            "[Line 1 of 1 was cut: showing {} of {} bytes. read_file cannot page within a line; \
-                 use another tool, such as bash, to read the rest.]",
+            "[line 1 of 1 was truncated to {} of its {} bytes; read_file cannot page within a line, \
+                 so read the rest with another tool, such as bash]",
             shown.len(),
             line.len()
         )
@@ -193,8 +193,8 @@ async fn a_cut_line_is_not_counted_as_shown_when_more_lines_follow() {
     assert_eq!(
         &output.content[MAX_BYTES..],
         format!(
-            "\n[Line 1 of 2 was cut: showing {MAX_BYTES} of {} bytes. read_file cannot page within a line; \
-                 use another tool, such as bash, to read the rest. Use offset=2 to continue.]",
+            "\n[line 1 of 2 was truncated to {MAX_BYTES} of its {} bytes; read_file cannot page within a \
+                 line, so read the rest with another tool, such as bash; use offset=2 to continue]",
             long.len()
         )
     );
@@ -212,7 +212,7 @@ async fn a_line_that_fits_the_byte_limit_is_not_reported_as_cut() {
     assert!(output.content.starts_with(&line));
     assert_eq!(
         &output.content[MAX_BYTES..],
-        "\n[Showing lines 1-1 of 2. Use offset=2 to continue.]"
+        "\n[showing lines 1-1 of 2; use offset=2 to continue]"
     );
 }
 

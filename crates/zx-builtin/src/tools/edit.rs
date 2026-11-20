@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::edit_text::{Edit, apply_edits, lf_endings, split_bom, unified_patch};
-use super::mutation::{FileMutationQueue, write_locked};
+use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
 use super::{DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -148,12 +148,11 @@ impl Tool for EditFileTool {
         let args = Args::parse(&args)?;
         let shown = args.path.trim();
         let path = resolve(&ctx.cwd, &args.path)?;
-        let cancelled = || "edit cancelled before the file was changed".to_string();
         let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
-            .ok_or_else(cancelled)?;
+            .ok_or(CHANGE_CANCELLED)?;
         let read = unless_cancelled(ctx, self.executor.read_file(&path, DEFAULT_MAX_FILE_BYTES)).await;
-        let bytes = read.ok_or_else(cancelled)??;
+        let bytes = read.ok_or(CHANGE_CANCELLED)??;
         if looks_binary(&bytes) {
             return Err(format!(
                 "{} looks like a binary file; edit_file edits text only",
@@ -169,12 +168,7 @@ impl Tool for EditFileTool {
         let (bom, text) = split_bom(&raw);
         let changed = apply_edits(text, &args.edits, shown)?;
         let contents = format!("{bom}{changed}");
-        // Checked last before writing: the executor finishes a write it has begun, also when
-        // this call is dropped meanwhile, so that no file is left empty or cut short.
-        if ctx.cancel.is_cancelled() {
-            return Err(cancelled());
-        }
-        write_locked(self.executor.clone(), path.clone(), contents.into_bytes(), turn).await?;
+        write_locked(ctx, self.executor.clone(), path.clone(), contents.into_bytes(), turn).await?;
 
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));
@@ -197,7 +191,7 @@ fn is_single_edit(value: &Value) -> bool {
 /// `patch` within [`MAX_PATCH_BYTES`], with a note when it was cut.
 fn bounded_patch(patch: &str) -> String {
     prefix_noted(patch, MAX_PATCH_BYTES, |kept, total| {
-        format!("\n[patch cut at {kept} of {total} bytes]\n")
+        format!("\n[patch truncated at {kept} of {total} bytes]\n")
     })
 }
 
@@ -256,7 +250,9 @@ mod tests {
         // The limit falls inside a character; what is kept is a String, so it ends before it.
         let text = format!("x{}", "界".repeat(MAX_PATCH_BYTES / 3 + 10));
         let cut = bounded_patch(&text);
-        let (kept, note) = cut.split_once("\n[patch cut at ").expect("the patch is cut");
+        let (kept, note) = cut
+            .split_once("\n[patch truncated at ")
+            .expect("the patch is truncated");
         assert!(
             text.starts_with(kept) && kept.len() <= MAX_PATCH_BYTES,
             "{} bytes kept",

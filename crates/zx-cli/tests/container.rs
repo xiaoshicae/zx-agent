@@ -597,7 +597,11 @@ async fn file_writes_map_each_refusal_to_an_actionable_error() {
     let executor = fake.start(fake.config()).await.unwrap();
     let path = Path::new("/srv/app.conf");
     for (code, error, message) in [
-        ("94", "", "/srv/app.conf is a directory"),
+        (
+            "94",
+            "",
+            "/srv/app.conf is a directory; write to the path of a file instead",
+        ),
         (
             "96",
             "",

@@ -41,8 +41,8 @@ const ENGINE_MARKER: &str = "zx-engine=";
 const RIPGREP: &str = "rg";
 /// Directories of version control systems, skipped when `.gitignore` cannot be read.
 const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
-/// The note after a line cut to [`MAX_LINE_BYTES`].
-const LINE_CUT: &str = " [line cut]";
+/// The note after a line truncated to [`MAX_LINE_BYTES`].
+const LINE_TRUNCATED: &str = " [line truncated]";
 
 /// `text` as one single-quoted shell word: nothing in it is interpreted.
 pub(crate) fn quote(text: &str) -> String {
@@ -114,7 +114,7 @@ async fn search(executor: &dyn Executor, script: &str, ctx: &ToolContext) -> Res
         }
         CommandEnd::Cancelled => return Err("the search was cancelled".into()),
         CommandEnd::Signaled => return Err("the search was ended by a signal".into()),
-        CommandEnd::WaitFailed(error) => return Err(format!("the search could not be waited for: {error}")),
+        CommandEnd::WaitFailed(error) => return Err(format!("cannot wait for the search: {error}")),
     }
     let mut engine = None;
     // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
@@ -142,7 +142,7 @@ fn bound(text: &str) -> (String, bool) {
     for line in text.lines() {
         if line.len() > MAX_LINE_BYTES {
             lines.push_str(prefix_within(line, MAX_LINE_BYTES));
-            lines.push_str(LINE_CUT);
+            lines.push_str(LINE_TRUNCATED);
             cut = true;
         } else {
             lines.push_str(line);
@@ -158,7 +158,7 @@ fn bound(text: &str) -> (String, bool) {
 fn report(searched: &Searched, lines: &str, mut notes: Vec<String>) -> ToolOutput {
     if !searched.stderr.trim().is_empty() {
         let first = searched.stderr.lines().next().unwrap_or_default();
-        let first = prefix_noted(first, MAX_LINE_BYTES, |_, _| LINE_CUT.to_string());
+        let first = prefix_noted(first, MAX_LINE_BYTES, |_, _| LINE_TRUNCATED.to_string());
         notes.push(format!("some paths could not be searched: {first}"));
     }
     let mut text = lines.to_string();
@@ -184,7 +184,7 @@ struct Wording {
     more: &'static str,
     /// What to do to see the rest.
     advice: &'static str,
-    /// That lines too long to show whole were cut short, such as "long paths were cut".
+    /// That lines too long to show whole were truncated, such as "long paths were truncated".
     long_lines: &'static str,
     /// What else the system's program left out, besides `.gitignore`, when it searched in
     /// place of ripgrep.
@@ -210,7 +210,7 @@ fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOut
     let mut notes = Vec::new();
     if more || kept < all.len() {
         notes.push(format!(
-            "{}; showing the first {kept} lines. {}",
+            "{}; showing the first {kept} lines; {}",
             wording.more, wording.advice
         ));
     } else if cut {
@@ -402,7 +402,7 @@ mod tests {
         let tool = grep_with(stderr.as_bytes());
         let output = tool.execute(json!({"pattern": "hit"}), &ctx()).await.unwrap();
         assert!(output.content.starts_with("src/a.rs:1:hit\n"), "{}", output.content);
-        assert!(output.content.contains(LINE_CUT), "{}", output.content);
+        assert!(output.content.contains(LINE_TRUNCATED), "{}", output.content);
         assert!(
             output.content.len() <= MAX_LINE_BYTES + 100,
             "{} bytes",
@@ -445,8 +445,8 @@ mod tests {
         let (text, cut) = bound(&format!("short\n{line}\n"));
         assert!(cut);
         let second = text.lines().nth(1).unwrap();
-        assert!(second.ends_with(LINE_CUT), "{second}");
-        assert!(second.len() <= MAX_LINE_BYTES + LINE_CUT.len());
+        assert!(second.ends_with(LINE_TRUNCATED), "{second}");
+        assert!(second.len() <= MAX_LINE_BYTES + LINE_TRUNCATED.len());
         assert_eq!(bound("a\nb\n"), ("a\nb\n".to_string(), false));
     }
 

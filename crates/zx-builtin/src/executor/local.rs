@@ -12,7 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::capture::{Capture, await_end, collect};
 use super::environment::machine_section;
-use super::{CommandOutput, Executor, SHELL, ShellCommand, directory_error, over_limit_error, special_file_error};
+use super::{
+    CommandOutput, Executor, SHELL, ShellCommand, directory_read_error, directory_write_error, over_limit_error,
+    special_file_error,
+};
 use crate::files::{Links, Unreadable, read_regular};
 
 /// Runs commands as child processes of the agent, with the `bash` found on `PATH`, and reads
@@ -83,7 +86,7 @@ impl Executor for LocalExecutor {
         // Lead a new process group so a timeout can stop pipelines and background children.
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn().map_err(|e| format!("failed to start {SHELL}: {e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("cannot start {SHELL}: {e}"))?;
         let mut group = ProcessGroup(child.id());
         let stdout = Capture::spawn(child.stdout.take());
         let stderr = Capture::spawn(child.stderr.take());
@@ -100,7 +103,7 @@ impl Executor for LocalExecutor {
             .await
             .map_err(|unreadable| match unreadable {
                 Unreadable::Io(error) => format!("cannot read {}: {error}", path.display()),
-                Unreadable::Directory => directory_error(path),
+                Unreadable::Directory => directory_read_error(path),
                 // Links are followed, so none is refused as a link.
                 Unreadable::Link | Unreadable::Special => special_file_error(path),
                 Unreadable::Over => over_limit_error(path, max_bytes),
@@ -153,10 +156,10 @@ fn overwrite_regular_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes).map_err(unwritable)
 }
 
-/// Refuse what is not a regular file, with a hint for directories.
+/// Refuse to write what is not a regular file, with a hint for directories.
 fn regular_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if meta.is_dir() {
-        return Err(directory_error(path));
+        return Err(directory_write_error(path));
     }
     if !meta.is_file() {
         return Err(special_file_error(path));

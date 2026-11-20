@@ -266,14 +266,14 @@ async fn ls_says_how_many_entries_it_shows_when_the_output_is_cut() {
 }
 
 #[tokio::test]
-async fn long_matching_lines_are_cut() {
+async fn long_matching_lines_are_truncated() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("min.js"), format!("needle{}\n", "x".repeat(5000))).unwrap();
 
     let output = grep(dir.path(), json!({"pattern": "needle"})).await.unwrap();
 
     let line = output.content.lines().next().unwrap();
-    assert!(line.ends_with(" [line cut]"), "{line}");
+    assert!(line.ends_with(" [line truncated]"), "{line}");
     assert!(line.len() < 600, "{}", line.len());
 }
 

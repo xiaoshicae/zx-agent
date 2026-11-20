@@ -121,9 +121,9 @@ fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
         CommandEnd::Exited(0) => ("[exit code: 0]".to_string(), false),
         CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
         CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
-        CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
-        CommandEnd::TimedOut => (format!("[timed out after {limit:?}; process group killed]"), true),
-        CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
+        CommandEnd::WaitFailed(e) => (format!("[cannot wait for the command: {e}]"), true),
+        CommandEnd::TimedOut => (format!("[timed out after {limit:?}; its processes were stopped]"), true),
+        CommandEnd::Cancelled => ("[cancelled; its processes were stopped]".to_string(), true),
     }
 }
 

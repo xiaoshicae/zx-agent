@@ -54,7 +54,7 @@ fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
 /// The output ID that the footer of a stored result's page names.
 fn output_id(page: &str) -> String {
     let (_, footer) = page
-        .rsplit_once("\n[Use read_output with id=\"")
+        .rsplit_once("\n[use read_output with id=\"")
         .unwrap_or_else(|| panic!("no footer of a stored result in {page:?}"));
     footer.split('"').next().unwrap().to_string()
 }
@@ -141,10 +141,7 @@ async fn a_stored_result_leaves_its_first_page_as_read_output_returns_it() {
     assert!(!start.is_empty() && text.starts_with(start), "{left}");
     assert_eq!(
         footer,
-        format!(
-            "[Use read_output with id=\"{id}\", offset={} to continue.]",
-            start.len()
-        )
+        format!("[use read_output with id=\"{id}\", offset={} to continue]", start.len())
     );
     assert!(left.len() <= 256, "{} bytes", left.len());
     let first_page = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap();
@@ -162,7 +159,7 @@ async fn unicode_and_single_long_lines_are_paged_without_loss_or_oversized_pages
     let mut joined = String::new();
     loop {
         assert!(page.len() <= 256);
-        let Some((body, footer)) = page.split_once("\n[Use read_output") else {
+        let Some((body, footer)) = page.split_once("\n[use read_output") else {
             joined.push_str(&page);
             break;
         };
@@ -390,11 +387,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
         .await
         .unwrap();
     assert!(kept.content.starts_with(&"x".repeat(513)));
-    assert!(
-        kept.content.contains("over the 512 byte file limit"),
-        "{}",
-        kept.content
-    );
+    assert!(kept.content.contains("over the 512 byte limit"), "{}", kept.content);
     assert!(!dir.path().join(ABOVE_OUTPUTS).exists());
     let (_, id) = spill(&hook, &"x".repeat(512)).await;
     let args = json!({"id": id});
@@ -406,7 +399,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
             .execute(args.clone(), &ctx(dir.path()))
             .await
             .unwrap_err()
-            .contains("file limit")
+            .contains("over the 512 byte limit")
     );
     std::fs::write(path, [0xff]).unwrap();
     assert!(
@@ -560,7 +553,7 @@ async fn cancellation_skips_writes_and_reads() {
             .execute(json!({"id":uuid::Uuid::new_v4().to_string()}), &ctx)
             .await
             .unwrap_err(),
-        "output read cancelled"
+        "the read was cancelled"
     );
 }
 
