@@ -108,7 +108,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 # requestFields = { thinking = { type = "disabled" } }
 ```
 
-思考模式默认开启，`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
+思考模式默认开启（2026-11-21 实测：不带 `thinking` 字段时与显式开启一样返回推理内容；不设 `reasoning` 时 zx-agent 不发这个字段，由服务的默认决定），`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
 
 ⚑ D:5/CHINA FLAG: `deepseek-flash` 收图片（[Vision 指南](https://api-docs.deepseek.com/guides/vision)），要发图片时在 `[[models]]` 写 `input = ["text", "image"]`；⚑ D:5/CHINA FLAG: `deepseek-v4-pro` 不收（[价格页](https://api-docs.deepseek.com/quick_start/pricing)）。`deepseek-flash` 收发图片在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；`deepseek-v4-pro` 不收图片只依据文档。
 
@@ -344,4 +344,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.35 · 2026年11月
+CONFIGURATION.md · v0.36 · 2026年11月
