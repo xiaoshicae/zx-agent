@@ -135,6 +135,14 @@ fn answer_after_a_drop() -> AssistantMessage {
     }
 }
 
+/// A PNG signature, as an image's base64.
+fn image() -> Image {
+    Image {
+        mime_type: "image/png".into(),
+        data: "iVBORw0KGgo=".into(),
+    }
+}
+
 /// A response that failed: the server limited the rate and asked for a wait.
 fn failed_answer() -> AssistantMessage {
     AssistantMessage {
@@ -159,6 +167,7 @@ fn tool_result_details_are_recorded_only_when_present() {
         tool_call_id: "c1".into(),
         tool_name: "bash".into(),
         content: "ok".into(),
+        images: Vec::new(),
         is_error: false,
         timestamp: 4,
         duration_ms: None,
@@ -191,6 +200,7 @@ fn messages_keep_the_session_file_format() {
         (
             Message::User {
                 content: "go".into(),
+                images: Vec::new(),
                 timestamp: 2,
                 kind: UserMessageKind::Prompt,
             },
@@ -232,6 +242,7 @@ fn messages_keep_the_session_file_format() {
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
                 content: "ok".into(),
+                images: Vec::new(),
                 is_error: false,
                 timestamp: 8,
                 duration_ms: Some(4),
@@ -272,6 +283,47 @@ fn input_transformations_are_recorded_only_when_present() {
 }
 
 #[test]
+fn images_are_recorded_beside_the_text_of_their_message() {
+    let cases = [
+        (
+            Message::User {
+                content: "go".into(),
+                images: vec![image()],
+                timestamp: 2,
+                kind: UserMessageKind::Prompt,
+            },
+            json!({
+                "role": "user", "content": "go",
+                "images": [{"mimeType": "image/png", "data": "iVBORw0KGgo="}], "timestamp": 2
+            }),
+        ),
+        (
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "c2".into(),
+                tool_name: "read".into(),
+                content: "Read image file [image/png]".into(),
+                images: vec![image()],
+                is_error: false,
+                timestamp: 9,
+                duration_ms: None,
+                details: None,
+                usage: None,
+            }),
+            json!({
+                "role": "toolResult", "toolCallId": "c2", "toolName": "read",
+                "content": "Read image file [image/png]",
+                "images": [{"mimeType": "image/png", "data": "iVBORw0KGgo="}],
+                "isError": false, "timestamp": 9
+            }),
+        ),
+    ];
+    for (message, expected) in cases {
+        assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Message>(expected).unwrap(), message);
+    }
+}
+
+#[test]
 fn tool_call_blocks_keep_the_session_file_format_with_and_without_an_arguments_error() {
     // Compared as text, so the order of the fields counts too.
     let cases = [
@@ -302,6 +354,7 @@ fn tool_result_usage_is_recorded_only_when_present() {
         tool_call_id: "c2".into(),
         tool_name: "ask_model".into(),
         content: "yes".into(),
+        images: Vec::new(),
         is_error: false,
         timestamp: 9,
         duration_ms: None,

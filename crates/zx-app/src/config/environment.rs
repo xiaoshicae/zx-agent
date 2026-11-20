@@ -162,6 +162,16 @@ struct RawModel {
     id: String,
     context_window: Option<u64>,
     cost: Option<ModelCost>,
+    /// What the model takes in; text alone when absent (pi: `input`, `["text"]` by default).
+    input: Option<Vec<ModelInput>>,
+}
+
+/// One kind of input a `[[models]]` entry says the model takes.
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ModelInput {
+    Text,
+    Image,
 }
 
 impl Config {
@@ -329,11 +339,18 @@ impl RawConfig {
                 "more than one [[models]] entry has the id {:?}",
                 model.id
             );
+            let input = model.input.unwrap_or_else(|| vec![ModelInput::Text]);
+            ensure!(
+                input.contains(&ModelInput::Text),
+                "models.{}: input must include \"text\"",
+                model.id
+            );
             config.models.insert(
                 model.id,
                 ModelMeta {
                     context_window: model.context_window,
                     cost: model.cost,
+                    takes_images: input.contains(&ModelInput::Image),
                 },
             );
         }

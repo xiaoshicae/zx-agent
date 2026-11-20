@@ -84,22 +84,31 @@ impl Opened {
 pub(super) struct Asked(pub(super) PendingInput);
 
 impl Asked {
-    /// Several messages as one prompt, which holds what each held until the session records
-    /// it; the sender of the last message is whom the answer is for.
+    /// Several messages as one prompt, with the images of all, which holds what each held
+    /// until the session records it; the sender of the last message is whom the answer is
+    /// for.
     pub(super) fn joined(asked: Vec<Self>) -> PendingInput {
         let mut texts = Vec::with_capacity(asked.len());
+        let mut images = Vec::new();
         let mut actor = None;
         let mut holds = Vec::with_capacity(asked.len());
         for Asked(pending) in asked {
             let (input, hold) = pending.into_parts();
-            if let Input::User { text, actor: sender } = input {
+            if let Input::User {
+                text,
+                images: sent,
+                actor: sender,
+            } = input
+            {
                 texts.push(text);
+                images.extend(sent);
                 actor = sender;
             }
             holds.extend(hold);
         }
         let prompt = Input::User {
             text: texts.join("\n\n"),
+            images,
             actor,
         };
         PendingInput::held(prompt, holds)

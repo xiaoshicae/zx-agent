@@ -92,6 +92,10 @@ pub struct ModelMeta {
     /// Prices, for the cost of each response; `None` leaves costs unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelCost>,
+    /// Whether the model takes images (pi: `input` includes `image`). A request to a model
+    /// that does not carries a note in place of the images ([`Request::takes_images`]).
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
+    pub takes_images: bool,
 }
 
 /// Prices per million tokens (pi: `ModelCost`), in one currency of the host's choosing:
@@ -400,6 +404,36 @@ impl AssistantMessage {
     }
 }
 
+/// An image given to the model (pi: `ImageContent`): the bytes of a PNG, JPEG, GIF or WebP
+/// file, in standard base64, and their media type. Whoever takes an image in fits it to the
+/// limits of the model APIs first (`zx_agent::builtin::images`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Image {
+    /// The media type, such as `image/png`.
+    pub mime_type: String,
+    /// The bytes, in standard base64 with padding.
+    pub data: String,
+}
+
+/// What a provider sends in place of the images of a user message when the model takes none
+/// (pi: `NON_VISION_USER_IMAGE_PLACEHOLDER`).
+pub const USER_IMAGES_OMITTED: &str = "(image omitted: model does not support images)";
+
+/// What a provider sends in place of the images of a tool result when the model takes none
+/// (pi: `NON_VISION_TOOL_IMAGE_PLACEHOLDER`).
+pub const TOOL_IMAGES_OMITTED: &str = "(tool image omitted: model does not support images)";
+
+/// `text` followed by `note` on a line of its own, or `note` alone when `text` is blank: how
+/// a provider says that something of a message was left out.
+pub fn with_note(text: &str, note: &str) -> String {
+    if text.trim().is_empty() {
+        note.to_string()
+    } else {
+        format!("{text}\n{note}")
+    }
+}
+
 /// What a provider sends the model as the result of a tool call whose result is empty.
 pub const EMPTY_TOOL_RESULT: &str = "(no output)";
 
@@ -414,6 +448,10 @@ pub struct ToolResultMessage {
     pub tool_call_id: String,
     pub tool_name: String,
     pub content: String,
+    /// Images the tool returned (pi: the image blocks of a result's `content`), which the
+    /// model sees after the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     pub is_error: bool,
     pub timestamp: u64,
     /// How long `execute()` took; absent when the tool did not run.
@@ -456,6 +494,10 @@ pub enum Message {
     System(SystemMessage),
     User {
         content: String,
+        /// Images sent with the text (pi: the image blocks of a user message's `content`),
+        /// which the model sees before the text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
         timestamp: u64,
         #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
         kind: UserMessageKind,
@@ -467,8 +509,14 @@ pub enum Message {
 impl Message {
     /// A user message stamped with the current time.
     pub fn user(text: impl Into<String>) -> Self {
+        Self::user_with_images(text, Vec::new())
+    }
+
+    /// A user message of `text` and `images`, stamped with the current time.
+    pub fn user_with_images(text: impl Into<String>, images: Vec<Image>) -> Self {
         Self::User {
             content: text.into(),
+            images,
             timestamp: now_ms(),
             kind: UserMessageKind::Prompt,
         }
@@ -478,6 +526,7 @@ impl Message {
     pub fn continuation(text: impl Into<String>) -> Self {
         Self::User {
             content: text.into(),
+            images: Vec::new(),
             timestamp: now_ms(),
             kind: UserMessageKind::ContinueAnswer,
         }
@@ -560,6 +609,11 @@ pub struct Request {
     /// Providers send it only when configured to; the request audit records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// Whether the model takes images ([`ModelMeta::takes_images`]). When it does not, a
+    /// provider sends [`USER_IMAGES_OMITTED`] or [`TOOL_IMAGES_OMITTED`] in place of the
+    /// images of a message (pi: `downgradeUnsupportedImages`); the session keeps them.
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
+    pub takes_images: bool,
 }
 
 /// How hard a reasoning model thinks before it answers (pi: `ThinkingLevel`).

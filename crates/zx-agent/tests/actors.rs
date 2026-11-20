@@ -54,6 +54,7 @@ impl Hook for RecordingHook {
 fn sent_by(actor: &str, text: &str) -> Input {
     Input::User {
         text: text.into(),
+        images: Vec::new(),
         actor: Some(actor.into()),
     }
 }

@@ -287,3 +287,73 @@ async fn refuses_directories_binaries_and_bad_offsets() {
     );
     assert!(tool.execute(json!({"path": "missing"}), &c).await.is_err());
 }
+
+/// A PNG of `width` by `height` black pixels.
+fn black_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::DynamicImage::new_rgb8(width, height)
+        .write_to(std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn an_image_is_returned_as_an_image() {
+    use base64::Engine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = black_png(4, 3);
+    std::fs::write(dir.path().join("shot.png"), &bytes).unwrap();
+
+    let read = ReadFileTool::default()
+        .execute(json!({"path": "shot.png"}), &ctx(dir.path()))
+        .await
+        .unwrap();
+
+    assert_eq!(read.content, "Read image file [image/png]");
+    assert_eq!(read.images.len(), 1);
+    assert_eq!(read.images[0].mime_type, "image/png");
+    assert_eq!(
+        read.images[0].data,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+}
+
+#[tokio::test]
+async fn a_large_image_is_scaled_and_the_model_told_by_how_much() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("wide.png"), black_png(3000, 100)).unwrap();
+
+    let read = ReadFileTool::default()
+        .execute(json!({"path": "wide.png"}), &ctx(dir.path()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        read.content,
+        "Read image file [image/png]\n[Image: original 3000x100, displayed at 2000x67. Multiply coordinates by 1.50 to \
+         map to original image.]"
+    );
+    assert_eq!(read.images.len(), 1);
+}
+
+#[tokio::test]
+async fn a_broken_image_is_an_error_that_says_what_to_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = black_png(8, 8);
+    std::fs::write(dir.path().join("cut.png"), &bytes[..bytes.len() / 2]).unwrap();
+
+    let error = ReadFileTool::default()
+        .execute(json!({"path": "cut.png"}), &ctx(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.contains("cut.png is an image that cannot be shown: cannot decode the image"),
+        "{error}"
+    );
+    assert!(
+        error.ends_with("use bash to convert it or to make it smaller"),
+        "{error}"
+    );
+}

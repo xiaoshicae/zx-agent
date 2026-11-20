@@ -80,6 +80,7 @@ pub(super) fn result_with_details(details: Option<serde_json::Value>) -> Message
         tool_call_id: "c1".into(),
         tool_name: "bash".into(),
         content: "visible".into(),
+        images: Vec::new(),
         is_error: false,
         timestamp: 1,
         duration_ms: None,

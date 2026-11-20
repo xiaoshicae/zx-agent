@@ -27,9 +27,11 @@ use zx_core::extensions::Extension;
 use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 use crate::ai::{ToolDef, api_identifier};
+use crate::images;
 use crate::sync::lock;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
+use crate::tools::unless_cancelled;
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).
@@ -493,10 +495,32 @@ async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId) {
     let _ = tokio::time::timeout(GIVE_UP_TIMEOUT, notice).await;
 }
 
-/// The tool output of a result: its text, bounded, and whether the server reported an error.
-fn output_of(result: &CallToolResult) -> ToolOutput {
+/// The tool output of a result: its text, bounded, its images fitted to the model APIs'
+/// limits, and whether the server reported an error. An image that cannot be fitted is a
+/// line of the text that says why.
+async fn output_of(result: &CallToolResult) -> ToolOutput {
+    let mut images = Vec::new();
+    let mut refusals = Vec::new();
+    for block in &result.content {
+        if let ContentBlock::Image(image) = block {
+            match images::fit_base64(&image.data).await {
+                Ok(fitted) => {
+                    images.push(fitted.image);
+                    refusals.push(None);
+                }
+                Err(reason) => refusals.push(Some(reason)),
+            }
+        }
+    }
+    let text = render(result, &refusals);
     ToolOutput {
-        content: truncate_head_noted(&render(result), "result"),
+        // A result of images alone has no text to bound.
+        content: if text.is_empty() {
+            text
+        } else {
+            truncate_head_noted(&text, "result")
+        },
+        images,
         // Absent means false.
         is_error: result.is_error == Some(true),
         ..ToolOutput::default()
@@ -535,18 +559,28 @@ impl Tool for McpTool {
             return Err("the arguments must be a JSON object".to_string());
         };
         let result = self.call(arguments, ctx).await?;
-        Ok(output_of(&result))
+        unless_cancelled(ctx, output_of(&result)).await.ok_or_else(|| {
+            format!(
+                "the call to {} was cancelled while its images were prepared",
+                self.remote
+            )
+        })
     }
 }
 
 /// The text the model gets: text blocks as they are, a line for content it cannot read, and
-/// the structured result when there is no other content.
-fn render(result: &CallToolResult) -> String {
+/// the structured result when there is no other content. Images go beside the text, except
+/// those whose fitting failed: `refusals` holds, image by image, why or `None`.
+fn render(result: &CallToolResult, refusals: &[Option<String>]) -> String {
+    let mut refusals = refusals.iter();
     let mut parts: Vec<String> = Vec::new();
     for block in &result.content {
         parts.push(match block {
             ContentBlock::Text(text) => text.text.clone(),
-            ContentBlock::Image(image) => format!("[image {} omitted]", image.mime_type),
+            ContentBlock::Image(image) => match refusals.next() {
+                Some(Some(reason)) => format!("[image {} omitted: {reason}]", image.mime_type),
+                _ => continue,
+            },
             ContentBlock::Audio(audio) => format!("[audio {} omitted]", audio.mime_type),
             ContentBlock::ResourceLink(link) => format!("[resource {} ({})]", link.uri, link.name),
             ContentBlock::Resource(embedded) => match &embedded.resource {
@@ -567,10 +601,18 @@ fn render(result: &CallToolResult) -> String {
     {
         parts.push(structured.to_string());
     }
-    if parts.is_empty() {
+    if parts.is_empty() && !has_images(result) {
         return "(no content)".to_string();
     }
     parts.join("\n")
+}
+
+/// Whether `result` holds an image.
+fn has_images(result: &CallToolResult) -> bool {
+    result
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)))
 }
 
 #[cfg(test)]

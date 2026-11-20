@@ -60,6 +60,7 @@ impl Worker {
         }
         let input = Input::User {
             text: content,
+            images: Vec::new(),
             actor: Some(incoming.sender.0.clone()),
         };
         self.answering = Some(incoming.sender);

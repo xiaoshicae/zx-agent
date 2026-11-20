@@ -98,6 +98,7 @@ fn tool_output_flags_default_to_false() {
     round_trip(
         &ToolOutput {
             content: "done".into(),
+            images: Vec::new(),
             is_error: true,
             terminate: false,
             details: None,

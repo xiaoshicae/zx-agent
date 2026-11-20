@@ -59,6 +59,7 @@ fn body_pairs_tool_calls_with_results() {
             tool_call_id: id.into(),
             tool_name: "bash".into(),
             content: "ok".into(),
+            images: Vec::new(),
             is_error: false,
             timestamp: 0,
             duration_ms: None,
@@ -81,6 +82,7 @@ fn body_pairs_tool_calls_with_results() {
         max_tokens: Some(100),
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     };
     let body = body_of(&request, &options(SystemUpdates::default()));
     let roles: Vec<&str> = body["messages"]
@@ -118,6 +120,7 @@ fn tool_result_details_stay_out_of_the_body() {
                 tool_call_id: "a".into(),
                 tool_name: "bash".into(),
                 content: "ok".into(),
+                images: Vec::new(),
                 is_error: false,
                 timestamp: 0,
                 duration_ms: None,
@@ -137,6 +140,7 @@ fn tool_result_details_stay_out_of_the_body() {
         max_tokens: None,
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     };
     let body = body_of(&request, &options(SystemUpdates::default()));
     assert_eq!(
@@ -168,6 +172,7 @@ fn sent(messages: Vec<Message>, system_updates: SystemUpdates) -> Vec<(String, S
         max_tokens: None,
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     };
     let body = body_of(&request, &options(system_updates));
     body["messages"]
@@ -250,6 +255,7 @@ fn assistant_entries(messages: Vec<Message>) -> Vec<Value> {
         max_tokens: None,
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     };
     let body = body_of(&request, &options(SystemUpdates::default()));
     body["messages"]
@@ -293,6 +299,7 @@ fn partly_reasoned() -> Request {
         max_tokens: None,
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     }
 }
 
@@ -349,6 +356,7 @@ fn replayable_request() -> Request {
         max_tokens: Some(64),
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     }
 }
 
@@ -648,5 +656,125 @@ fn the_output_limit_is_written_in_the_chosen_field_and_replays() {
     assert!(
         body.get("max_tokens").is_none() && body.get("max_completion_tokens").is_none(),
         "{body}"
+    );
+}
+
+/// An image with a stand-in for its data, which the conversion does not read.
+fn png() -> Image {
+    Image {
+        mime_type: "image/png".into(),
+        data: "AAAA".into(),
+    }
+}
+
+/// The content part of [`png`].
+fn png_part() -> Value {
+    json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}})
+}
+
+/// A request of `messages` to a model that takes images when `takes_images` says so.
+fn image_request(messages: Vec<Message>, takes_images: bool) -> Request {
+    Request {
+        model: "m".into(),
+        messages,
+        tools: Vec::new(),
+        max_tokens: None,
+        reasoning: None,
+        cache_key: None,
+        takes_images,
+    }
+}
+
+/// An answer of `p` that calls `read` once for each of `ids`.
+fn reads(ids: &[&str]) -> Message {
+    let calls = ids
+        .iter()
+        .map(|id| {
+            ContentBlock::ToolCall(ToolCall {
+                id: (*id).into(),
+                name: "read".into(),
+                arguments: json!({}),
+                arguments_error: None,
+            })
+        })
+        .collect();
+    Message::Assistant(AssistantMessage::new("p", "m", StopReason::ToolUse, calls))
+}
+
+/// The result of the call `id`: `content` and an image.
+fn image_result(id: &str, content: &str) -> Message {
+    Message::ToolResult(ToolResultMessage {
+        tool_call_id: id.into(),
+        tool_name: "read".into(),
+        content: content.into(),
+        images: vec![png()],
+        is_error: false,
+        timestamp: 0,
+        duration_ms: None,
+        details: None,
+        usage: None,
+    })
+}
+
+#[test]
+fn a_user_message_sends_its_images_before_its_text() {
+    let request = image_request(vec![Message::user_with_images("what is this?", vec![png()])], true);
+    let body = body_of(&request, &BodyOptions::default());
+    assert_eq!(
+        body["messages"][0],
+        json!({"role": "user", "content": [png_part(), {"type": "text", "text": "what is this?"}]})
+    );
+}
+
+#[test]
+fn the_images_of_tool_results_follow_the_results_in_a_user_message() {
+    let request = image_request(
+        vec![
+            Message::user("look"),
+            reads(&["a", "b"]),
+            image_result("a", "Read image file [image/png]"),
+            image_result("b", ""),
+        ],
+        true,
+    );
+    let body = body_of(&request, &BodyOptions::default());
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 5, "{body}");
+    assert_eq!(
+        messages[2],
+        json!({"role": "tool", "tool_call_id": "a", "content": "Read image file [image/png]"})
+    );
+    assert_eq!(
+        messages[3],
+        json!({"role": "tool", "tool_call_id": "b", "content": "(see attached image)"})
+    );
+    assert_eq!(
+        messages[4],
+        json!({"role": "user", "content": [
+            {"type": "text", "text": "Attached image(s) from tool result:"}, png_part(), png_part()
+        ]})
+    );
+}
+
+#[test]
+fn a_model_that_takes_no_images_gets_a_note_in_their_place() {
+    let request = image_request(
+        vec![
+            Message::user_with_images("what is this?", vec![png()]),
+            reads(&["a"]),
+            image_result("a", "Read image file [image/png]"),
+        ],
+        false,
+    );
+    let body = body_of(&request, &BodyOptions::default());
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3, "{body}");
+    assert_eq!(
+        messages[0]["content"],
+        "what is this?\n(image omitted: model does not support images)"
+    );
+    assert_eq!(
+        messages[2]["content"],
+        "Read image file [image/png]\n(tool image omitted: model does not support images)"
     );
 }

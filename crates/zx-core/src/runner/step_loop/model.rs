@@ -28,6 +28,7 @@ impl StepLoop<'_> {
             Err(error) => return Err(self.hook_failed(error).await),
         };
         check_priced(&config.models, &settings.model, self.scope.cost_budget).map_err(Halt::Failed)?;
+        let takes_images = config.models.get(&settings.model).is_some_and(|meta| meta.takes_images);
         let request = Request {
             model: settings.model,
             messages,
@@ -37,6 +38,7 @@ impl StepLoop<'_> {
             max_tokens: config.max_tokens,
             reasoning: settings.reasoning,
             cache_key: config.cache_key.clone(),
+            takes_images,
         };
         let provider = config.provider.as_ref();
         let request_entry = self

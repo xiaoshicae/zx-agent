@@ -103,6 +103,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
     );
     let output = ToolOutput {
         content: "界".repeat(86),
+        images: Vec::new(),
         is_error: true,
         terminate: true,
         details: None,

@@ -65,6 +65,7 @@ fn exchange(id: &str) -> [Message; 2] {
         tool_call_id: id.into(),
         tool_name: "read_file".into(),
         content: format!("value of {id}"),
+        images: Vec::new(),
         is_error: false,
         timestamp: 0,
         duration_ms: None,

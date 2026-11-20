@@ -35,6 +35,7 @@ fn result(id: &str, content: &str) -> Message {
         tool_call_id: id.into(),
         tool_name: "bash".into(),
         content: content.into(),
+        images: Vec::new(),
         is_error: false,
         timestamp: 0,
         duration_ms: None,
@@ -51,6 +52,7 @@ fn request(messages: Vec<Message>) -> Request {
         max_tokens: None,
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     }
 }
 
@@ -430,5 +432,104 @@ fn the_record_names_the_conversion_and_its_options() {
     assert_eq!(
         request_options(&options),
         json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "inline"})
+    );
+}
+
+/// An image with a stand-in for its data, which the conversion does not read.
+fn png() -> Image {
+    Image {
+        mime_type: "image/png".into(),
+        data: "AAAA".into(),
+    }
+}
+
+/// The block of [`png`].
+fn png_block() -> Value {
+    json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}})
+}
+
+/// The result of the call `id`, failed or not: `content` and an image.
+fn image_result(id: &str, content: &str, is_error: bool) -> Message {
+    Message::ToolResult(ToolResultMessage {
+        tool_call_id: id.into(),
+        tool_name: "read".into(),
+        content: content.into(),
+        images: vec![png()],
+        is_error,
+        timestamp: 0,
+        duration_ms: None,
+        details: None,
+        usage: None,
+    })
+}
+
+/// `request(messages)` to a model that takes images.
+fn seeing(messages: Vec<Message>) -> Request {
+    Request {
+        takes_images: true,
+        ..request(messages)
+    }
+}
+
+#[test]
+fn a_user_message_sends_its_images_before_its_text() {
+    let body = body_of(
+        &seeing(vec![Message::user_with_images("what is this?", vec![png()])]),
+        SystemUpdates::Collapse,
+    );
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0], png_block());
+    assert_eq!(content[1]["text"], "what is this?");
+    assert_eq!(content.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_result_carries_its_images_and_a_failed_one_sends_them_after_the_results() {
+    let body = body_of(
+        &seeing(vec![
+            Message::user("look"),
+            answer(vec![call("a"), call("b")]),
+            image_result("a", "Read image file [image/png]", false),
+            image_result("b", "cannot", true),
+        ]),
+        SystemUpdates::Collapse,
+    );
+    let turn = body["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(turn.len(), 4, "{body}");
+    assert_eq!(
+        turn[0],
+        json!({"type": "tool_result", "tool_use_id": "a", "content": [
+            {"type": "text", "text": "Read image file [image/png]"}, png_block()
+        ], "is_error": false})
+    );
+    assert_eq!(
+        turn[1],
+        json!({"type": "tool_result", "tool_use_id": "b",
+            "content": "cannot\n(image attached after the tool results)", "is_error": true})
+    );
+    assert_eq!(
+        turn[2],
+        json!({"type": "text", "text": "Images from the error result of tool call b (read):"})
+    );
+    assert_eq!(turn[3]["source"], png_block()["source"]);
+}
+
+#[test]
+fn a_model_that_takes_no_images_gets_a_note_in_their_place() {
+    let body = body_of(
+        &request(vec![
+            Message::user_with_images("what is this?", vec![png()]),
+            answer(vec![call("a")]),
+            image_result("a", "Read image file [image/png]", false),
+        ]),
+        SystemUpdates::Collapse,
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["text"],
+        "what is this?\n(image omitted: model does not support images)"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0]["content"],
+        "Read image file [image/png]\n(tool image omitted: model does not support images)"
     );
 }

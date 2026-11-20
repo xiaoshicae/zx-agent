@@ -27,9 +27,13 @@ zx-util = { path = "crates/zx-util" }
 agent-client-protocol = { version = "5.0", default-features = false, features = ["stdio"] }
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+# Images are fitted to the models' limits before they are stored: decoded, scaled down and
+# encoded again. Only the formats the model APIs take.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 jsonschema = { version = "0.33", default-features = false }
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }

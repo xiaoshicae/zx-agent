@@ -273,6 +273,7 @@ async fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_tes
         ModelMeta {
             context_window: None,
             cost: Some(price),
+            takes_images: false,
         },
     );
     RunnerSetup {

@@ -366,6 +366,7 @@ async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
         max_tokens: Some(100),
         reasoning: None,
         cache_key: None,
+        takes_images: false,
     };
     let source = RequestSource::Summary {
         compaction_id: started,
@@ -399,6 +400,7 @@ fn exchange(id: &str) -> [Message; 2] {
         tool_call_id: id.into(),
         tool_name: "read_file".into(),
         content: format!("value of {id}"),
+        images: Vec::new(),
         is_error: false,
         timestamp: 0,
         duration_ms: None,

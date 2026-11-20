@@ -253,6 +253,7 @@ mod tests {
             max_tokens: None,
             reasoning: None,
             cache_key: None,
+            takes_images: false,
         }
     }
 

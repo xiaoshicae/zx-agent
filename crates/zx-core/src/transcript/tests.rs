@@ -214,6 +214,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         .unwrap();
     let request = crate::ai::Request {
         cache_key: None,
+        takes_images: false,
         model: "m".into(),
         messages: transcript.messages(),
         tools: vec![],

@@ -21,6 +21,10 @@ pub struct RequestConfig {
     /// The request's prompt cache key, absent unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// Whether the model took images, which decides what the request sent in their place
+    /// ([`Request::takes_images`]); absent when it did not.
+    #[serde(default, skip_serializing_if = "zx_util::default::is_default")]
+    pub takes_images: bool,
     pub provider_options: Value,
 }
 
@@ -85,6 +89,7 @@ impl Transcript {
             max_tokens: request.max_tokens,
             reasoning: request.reasoning,
             cache_key: request.cache_key.clone(),
+            takes_images: request.takes_images,
             provider_options,
         };
         let unchanged = self
@@ -127,6 +132,7 @@ impl Transcript {
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             cache_key: config.cache_key.clone(),
+            takes_images: config.takes_images,
         };
         Ok((config, request))
     }
@@ -233,6 +239,7 @@ mod tests {
             max_tokens: None,
             reasoning: None,
             cache_key: None,
+            takes_images: false,
         }
     }
 
@@ -317,5 +324,38 @@ mod tests {
         let error = refusal_of_a_request(&transcript, &last, &configs[0]);
 
         assert!(error.contains("is not the one in force on this branch"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn whether_the_model_took_images_is_recorded_and_replayed() {
+        let mut transcript = Transcript::in_memory(header());
+        let seeing = Request {
+            takes_images: true,
+            ..request_for("m")
+        };
+        let blind = transcript
+            .record_request(&request_for("m"), "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+        let id = transcript
+            .record_request(&seeing, "p", json!({}), RequestSource::Task)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config_ids(&transcript).len(),
+            2,
+            "a change of it is a new configuration"
+        );
+        let configs: Vec<Value> = transcript
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, Entry::RequestConfig(_)))
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect();
+        assert_eq!(configs[0]["config"].get("takesImages"), None, "absent when false");
+        assert_eq!(configs[1]["config"]["takesImages"], json!(true));
+        assert!(!transcript.replay_request(&blind).unwrap().1.takes_images);
+        assert!(transcript.replay_request(&id).unwrap().1.takes_images);
     }
 }
