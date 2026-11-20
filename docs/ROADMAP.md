@@ -83,7 +83,6 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 待用户决定：`run -` 从 stdin 读提问不设上限（chat 每行至多 1 MiB）；调度器误把大文件接到 stdin 时，会整个读进内存、记入会话再发给模型。上限取多少待定。
 - 待用户决定：⚑ D:5/CHINA FLAG: 飞书在私聊里回复不开话题，靠进程内记下的私聊集合判断；集合只在收到消息时写入，重启后从 backlog 重放的私聊消息用不上它，超长回答的第二段起会按话题回复。根因是 `Destination` 不带聊天种类，要改的是平台接口（让目的地带上 `ChatKind`，或服务对私聊不构造线程目的地），属设计调整。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块的消息发送（软件/代码）] Subject to Legal/Export Compliance approval。
-- 待用户决定：`zx-builtin` 的三个错误枚举（`InvalidContainerConfig`、`UnusableWorkspace`、`InvalidOutputStoreConfig`）手写 `Display` 与 `Error`，而规则 03 要调用方区分种类的错误用 `thiserror` 派生；`zx-builtin` 没有这条依赖（D2 已授权）。给它加上，或在规则 03 写明没有这条依赖的 crate 手写（2026-11-19 的评审提出）。
 - 待用户决定：根目录给 reqwest 开的 feature `stream` 代码用不到（读流用 `Response::chunk()`）；rmcp 自己会打开它，去掉只影响不含 MCP 的构建，如只依赖模型层的宿主。动依赖的配置按红线 5 先征得同意；去掉时规则 01 里 reqwest 的 feature 清单一起改（2026-11-19 的评审提出）。
 - IM 平台的连接刚建立就被断开时立即重连，退避每次重置，反复如此时重连的节奏只靠平台的限频；断开现在会记一条日志，是否计入退避未定。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（IM 服务丢消息已由 D33 的 backlog 解决）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
@@ -128,4 +127,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.57 · 2026年11月
+ROADMAP.md · v0.58 · 2026年11月

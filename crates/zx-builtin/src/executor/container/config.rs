@@ -112,74 +112,53 @@ impl ContainerConfig {
 /// A setting of a [`ContainerConfig`] that cannot be used. `Display` names the field as the
 /// struct does; a host that reads the settings from a file of its own matches the variant to
 /// name its own key.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidContainerConfig {
     /// `image` is empty.
+    #[error("image is empty")]
     EmptyImage,
     /// `user` is empty.
+    #[error("user is empty")]
     EmptyUser,
     /// `user`, given here, is root, by name or by UID 0.
+    #[error("user {0:?} is root; commands must run as an unprivileged user")]
     RootUser(String),
     /// `memory` is empty.
+    #[error("memory is empty")]
     EmptyMemory,
     /// `pids_limit` is zero.
+    #[error("pids_limit must be greater than zero")]
     ZeroPidsLimit,
     /// `network` names no network.
+    #[error("network is empty")]
     EmptyNetwork,
     /// `network`, given here, would share a network namespace outside the sandbox: `host` or
     /// `container:<name>`.
+    #[error(
+        "network {0:?} would share a network namespace outside the sandbox; use bridge, none or a network of your own"
+    )]
     SharedNetwork(String),
 }
-
-impl fmt::Display for InvalidContainerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyImage => f.write_str("image is empty"),
-            Self::EmptyUser => f.write_str("user is empty"),
-            Self::RootUser(user) => write!(f, "user {user:?} is root; commands must run as an unprivileged user"),
-            Self::EmptyMemory => f.write_str("memory is empty"),
-            Self::ZeroPidsLimit => f.write_str("pids_limit must be greater than zero"),
-            Self::EmptyNetwork => f.write_str("network is empty"),
-            Self::SharedNetwork(network) => write!(
-                f,
-                "network {network:?} would share a network namespace outside the sandbox; use bridge, none or a network of your own"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for InvalidContainerConfig {}
 
 /// The command user of a container cannot use its workspace as it is mounted, which
 /// [`ContainerExecutor::start`](super::ContainerExecutor::start) found. `Display` names the
 /// settings that change it as [`ContainerConfig`] does; a host that reads them from a file of
 /// its own finds this error by downcasting and names its own keys.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UnusableWorkspace {
     /// `user` cannot read the workspace.
+    #[error(
+        "user {user} cannot read the workspace {}; make it readable by others, or set `user` to one who can read it",
+        .workspace.display()
+    )]
     Unreadable { user: String, workspace: PathBuf },
     /// `user` cannot write the workspace, which is mounted writable.
+    #[error(
+        "user {user} cannot write the workspace {}; set `user` to its owner, or mount it read-only (`workspace_access: Access::ReadOnly`)",
+        .workspace.display()
+    )]
     Unwritable { user: String, workspace: PathBuf },
 }
-
-impl fmt::Display for UnusableWorkspace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unreadable { user, workspace } => write!(
-                f,
-                "user {user} cannot read the workspace {}; make it readable by others, or set `user` to one who can read it",
-                workspace.display()
-            ),
-            Self::Unwritable { user, workspace } => write!(
-                f,
-                "user {user} cannot write the workspace {}; set `user` to its owner, or mount it read-only (`workspace_access: Access::ReadOnly`)",
-                workspace.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for UnusableWorkspace {}
 
 /// Check that `workspace` can be mounted at its own path: absolute, and UTF-8 without the
 /// characters that `--mount` would read as the end of a field.

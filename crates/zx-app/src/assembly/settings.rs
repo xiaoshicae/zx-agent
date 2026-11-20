@@ -31,20 +31,13 @@ const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 
 /// No model was given, and the configuration names none: the error of a start without a
 /// model, which a host recognizes by downcasting, to name its own ways to give one.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("no model: none was given, and {config_file} sets no model")]
 pub struct NoModel {
     /// The configuration that names no model: the path of config.toml, or `config.toml` when
     /// the configuration was not read from a file.
     pub config_file: String,
 }
-
-impl std::fmt::Display for NoModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no model: none was given, and {} sets no model", self.config_file)
-    }
-}
-
-impl std::error::Error for NoModel {}
 
 /// config.toml with the host's model and the variables over it, the defaults filled in.
 pub(super) struct Settings {
