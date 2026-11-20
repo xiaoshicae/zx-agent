@@ -9,6 +9,7 @@ use std::fmt;
 use super::RunLimits;
 use crate::ai::{ModelMeta, Usage};
 use crate::events::Budget;
+use crate::text::amount;
 
 /// What a run has spent so far, over all its attempts, and its budgets.
 #[derive(Default)]
@@ -93,7 +94,8 @@ impl fmt::Display for Exhausted {
             ),
             Self::Cost { spent, cost_budget } => write!(
                 formatter,
-                "cost budget reached ({spent:.4} spent, cost_budget = {cost_budget})"
+                "cost budget reached ({} spent, cost_budget = {cost_budget})",
+                amount(*spent)
             ),
         }
     }
@@ -150,5 +152,23 @@ impl RunAccounting {
             return Some(Exhausted::Cost { spent, cost_budget });
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reached_cost_budget_shows_a_small_spending_to_its_first_two_digits() {
+        let reached = Exhausted::Cost {
+            spent: 0.000_062_1,
+            cost_budget: 0.000_05,
+        };
+
+        assert_eq!(
+            reached.to_string(),
+            "cost budget reached (0.000062 spent, cost_budget = 0.00005)"
+        );
     }
 }

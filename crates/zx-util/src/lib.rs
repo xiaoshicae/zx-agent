@@ -6,7 +6,8 @@
 //! reading files without blocking on a FIFO, stays with the crate that owns that concern.
 //!
 //! - [`sync`]: a lock that recovers from poisoning, and a task aborted when it is dropped
-//! - [`text`]: text bounded by characters or bytes, cut on character boundaries
+//! - [`text`]: text bounded by characters or bytes, cut on character boundaries, and
+//!   amounts that keep their first digits however small
 //! - [`random`]: randomness for spreading retries and reconnections
 //! - [`default`]: [`default::is_default`], for leaving a type's default, such as a zero count,
 //!   out of serialized records

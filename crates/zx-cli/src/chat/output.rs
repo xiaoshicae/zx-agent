@@ -9,12 +9,12 @@ use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopRea
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
-use zx_util::text::clip;
+use zx_util::text::{amount, clip};
 
 use super::term::{Style, Terminal, Tone, elapsed_text};
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, print_json_line};
-use crate::render::{Severity, answer_end_line, call_label, cost_text, patch_of, progress_line, visible};
+use crate::render::{Severity, answer_end_line, call_label, patch_of, progress_line, visible};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;
@@ -291,9 +291,9 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
     format!("[turn] {requests}{retries}{usage}{cost} · {}", elapsed_text(elapsed))
 }
 
-/// ` · cost 0.0123`, in the prices' unit, shown as [`cost_text`] shows costs.
+/// ` · cost 0.0123`, in the prices' unit, shown as [`amount`] shows amounts.
 pub(super) fn cost_part(total_cost: f64) -> String {
-    format!(" · cost {}", cost_text(total_cost))
+    format!(" · cost {}", amount(total_cost))
 }
 
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its
