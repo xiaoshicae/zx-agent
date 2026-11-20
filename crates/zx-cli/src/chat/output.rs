@@ -5,7 +5,9 @@ use std::io::IsTerminal;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, Role, StopReason, ToolCall, ToolResultMessage};
+use zx_agent::ai::{
+    AssistantMessage, ContentBlock, Delta, Message, Role, StopReason, ToolCall, ToolResultMessage, Usage,
+};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_util::sync::lock;
@@ -34,6 +36,19 @@ pub(super) struct Totals {
     pub(super) total_cost: Option<f64>,
 }
 
+impl Totals {
+    /// Count `requests` model requests, of a turn or of a summary, and what they used.
+    fn count(&mut self, requests: u32, usage: &Usage) {
+        self.requests = self.requests.saturating_add(u64::from(requests));
+        self.input_tokens = self.input_tokens.saturating_add(usage.input);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cache_read);
+        if let Some(cost) = usage.total_cost {
+            self.total_cost = Some(self.total_cost.unwrap_or(0.0) + cost);
+        }
+    }
+}
+
 struct TextState {
     terminal: Terminal,
     /// The tool calls of the latest answer by call ID, labelled for their result lines.
@@ -42,6 +57,9 @@ struct TextState {
     totals: Totals,
     /// The last model error printed in this run, so a retry line need not repeat it.
     last_error: Option<String>,
+    /// The error of a compaction that failed once it began, printed as it happened, so its
+    /// report need not repeat it.
+    compaction_error: Option<String>,
 }
 
 pub(super) struct Output {
@@ -67,6 +85,7 @@ impl Output {
                 wrote_text: false,
                 totals: Totals::default(),
                 last_error: None,
+                compaction_error: None,
             }),
         }
     }
@@ -113,15 +132,8 @@ impl Output {
             OutputMode::Jsonl => {}
             OutputMode::Text => {
                 let mut state = lock(&self.text);
-                let totals = &mut state.totals;
-                totals.turns = totals.turns.saturating_add(1);
-                totals.requests = totals.requests.saturating_add(u64::from(report.model_requests));
-                totals.input_tokens = totals.input_tokens.saturating_add(report.usage.input);
-                totals.output_tokens = totals.output_tokens.saturating_add(report.usage.output);
-                totals.cached_tokens = totals.cached_tokens.saturating_add(report.usage.cache_read);
-                if let Some(cost) = report.usage.total_cost {
-                    totals.total_cost = Some(totals.total_cost.unwrap_or(0.0) + cost);
-                }
+                state.totals.turns = state.totals.turns.saturating_add(1);
+                state.totals.count(report.model_requests, &report.usage);
                 if let Some(error) = &report.error {
                     state.terminal.line(Tone::Error, &format!("[chat] {}", visible(error)));
                 }
@@ -133,21 +145,34 @@ impl Output {
     pub(super) fn compaction_report(&self, report: &compaction::Report) {
         match self.mode {
             OutputMode::Jsonl => print_json_line(&serde_json::json!({"type":"compaction_report","report":report})),
-            OutputMode::Text => match report.outcome {
-                Outcome::Noop => self.line(Tone::Dim, "[compact] no eligible old messages to summarize"),
-                Outcome::Completed => self.line(
-                    Tone::Dim,
-                    &format!(
-                        "[compact] requests={} tokens={}",
-                        report.requests, report.usage.total_tokens
+            OutputMode::Text => {
+                let mut state = lock(&self.text);
+                // A summary request is spent whether or not its summary was kept.
+                state.totals.count(report.requests, &report.usage);
+                let printed = state.compaction_error.take();
+                match report.outcome {
+                    Outcome::Noop => state
+                        .terminal
+                        .line(Tone::Dim, "[compact] no eligible old messages to summarize"),
+                    Outcome::Completed => state.terminal.line(
+                        Tone::Dim,
+                        &format!(
+                            "[compact] requests={} tokens={}",
+                            report.requests, report.usage.total_tokens
+                        ),
                     ),
-                ),
-                Outcome::Failed | Outcome::Cancelled => {
-                    if let Some(error) = &report.error {
-                        self.line(Tone::Error, &format!("[compact] {}", visible(error)));
+                    // A compaction that failed once it began said why as it happened.
+                    Outcome::Failed | Outcome::Cancelled => {
+                        if let Some(error) = &report.error
+                            && printed.as_ref() != Some(error)
+                        {
+                            state
+                                .terminal
+                                .line(Tone::Error, &format!("[compact] {}", visible(error)));
+                        }
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -260,6 +285,11 @@ impl Output {
             } if state.last_error.as_ref() == Some(error) => {
                 let line = format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)");
                 state.terminal.line(Tone::Warn, &line);
+            }
+            // The compaction's report that follows need not repeat the error.
+            EventKind::CompactionFailed { error, .. } => {
+                state.compaction_error = Some(error.clone());
+                progress(&mut state, &event.event);
             }
             // Everything else is printed as `run` prints it; `progress_line` covers every event.
             other => progress(&mut state, other),
