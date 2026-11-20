@@ -501,25 +501,42 @@ mod tests {
         );
     }
 
+    /// The wait after an answer whose `Retry-After` is `value`, or that has none.
+    fn retry_after(value: Option<HeaderValue>) -> Duration {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = value {
+            headers.insert(RETRY_AFTER, value);
+        }
+        rate_limit_wait(&headers, RETRY_AFTER)
+    }
+
     #[test]
-    fn a_rate_limit_wait_is_capped_and_defaults_to_one_second() {
-        let wait = |value: Option<HeaderValue>| {
-            let mut headers = HeaderMap::new();
-            if let Some(value) = value {
-                headers.insert(RETRY_AFTER, value);
-            }
-            rate_limit_wait(&headers, RETRY_AFTER)
-        };
-        assert_eq!(wait(None), Duration::from_secs(1));
-        assert_eq!(wait(Some(HeaderValue::from_static("soon"))), Duration::from_secs(1));
-        // Not text: as good as missing.
+    fn a_rate_limit_wait_is_the_seconds_the_platform_names() {
+        assert_eq!(retry_after(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
         assert_eq!(
-            wait(Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+            retry_after(Some(HeaderValue::from_static(" 5 "))),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_wait_is_capped() {
+        assert_eq!(
+            retry_after(Some(HeaderValue::from_static("100000"))),
+            MAX_RATE_LIMIT_WAIT
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_wait_without_a_number_of_seconds_is_one_second() {
+        assert_eq!(retry_after(None), Duration::from_secs(1));
+        assert_eq!(
+            retry_after(Some(HeaderValue::from_static("soon"))),
             Duration::from_secs(1)
         );
-        assert_eq!(wait(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
-        assert_eq!(wait(Some(HeaderValue::from_static(" 5 "))), Duration::from_secs(5));
-        assert_eq!(wait(Some(HeaderValue::from_static("100000"))), MAX_RATE_LIMIT_WAIT);
+        // Not text: as good as missing.
+        let not_text = HeaderValue::from_bytes(&[0xff]).unwrap();
+        assert_eq!(retry_after(Some(not_text)), Duration::from_secs(1));
         // Only the named header counts.
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
@@ -527,28 +544,48 @@ mod tests {
     }
 
     #[test]
-    fn a_backoff_doubles_up_to_the_longest_wait_and_starts_over_when_reset() {
+    fn a_backoff_doubles_up_to_the_longest_wait() {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(5));
         let waits: Vec<u64> = (0..5).map(|_| backoff.advance().as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 5, 5]);
+    }
+
+    #[test]
+    fn a_reset_backoff_starts_over() {
+        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(5));
+        backoff.advance();
+        backoff.advance();
         backoff.reset();
         assert_eq!(backoff.advance(), Duration::from_secs(1));
     }
 
     #[test]
-    fn a_keepalive_pings_at_once_and_counts_a_new_interval_from_the_last_ping() {
+    fn a_keepalive_pings_at_once() {
         let before = Instant::now();
-        let mut keepalive = Keepalive::new(Duration::from_secs(10));
+        let keepalive = Keepalive::new(Duration::from_secs(10));
         assert!(keepalive.next_ping() <= Instant::now());
         assert!(keepalive.deadline() >= before + Duration::from_secs(25));
+    }
+
+    #[test]
+    fn a_new_ping_interval_counts_from_the_last_ping() {
+        let before = Instant::now();
+        let mut keepalive = Keepalive::new(Duration::from_secs(10));
         keepalive.pinged();
         let pinged = Instant::now();
         assert!(keepalive.next_ping() >= before + Duration::from_secs(10));
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(10));
         keepalive.set_interval(Duration::from_secs(3));
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(3));
-        // The margin shrinks to a short interval.
-        assert_eq!(keepalive.silence(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn the_silence_margin_shrinks_to_a_short_interval() {
+        assert_eq!(Keepalive::new(Duration::from_secs(3)).silence(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn a_ping_interval_is_capped() {
         assert_eq!(
             Keepalive::new(Duration::MAX).silence(),
             Keepalive::MAX_INTERVAL * 2 + Keepalive::MARGIN

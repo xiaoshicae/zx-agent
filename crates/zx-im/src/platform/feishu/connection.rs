@@ -407,14 +407,16 @@ mod tests {
     }
 
     #[test]
-    fn bad_fragment_headers_and_stale_parts_are_dropped() {
+    fn a_fragment_beyond_its_sum_is_dropped() {
+        let mut fragments = Fragments::default();
+        assert_eq!(add(&mut fragments, fragment("m", 2, 2, "x"), Instant::now()), None);
+        assert!(fragments.partial.is_empty());
+    }
+
+    #[test]
+    fn a_part_older_than_the_fragments_wait_is_dropped() {
         let mut fragments = Fragments::default();
         let now = Instant::now();
-        assert_eq!(
-            add(&mut fragments, fragment("m", 2, 2, "x"), now),
-            None,
-            "seq beyond sum"
-        );
         assert_eq!(add(&mut fragments, fragment("m", 2, 0, "a"), now), None);
         let later = now + FRAGMENT_TTL + Duration::from_millis(1);
         assert_eq!(

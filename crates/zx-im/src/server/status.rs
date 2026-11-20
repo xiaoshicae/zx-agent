@@ -271,11 +271,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_cut_short_is_passed_over_and_a_broken_record_is_an_error() {
+    async fn a_write_cut_short_is_passed_over() {
         let dir = tempfile::tempdir().unwrap();
         let store = StatusFiles::open(dir.path()).unwrap();
         std::fs::write(dir.path().join("slack.C1.m1.partial"), "{\"platform\":").unwrap();
         assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_broken_record_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StatusFiles::open(dir.path()).unwrap();
         std::fs::write(dir.path().join("slack.C1.m2.json"), "{\"platform\":").unwrap();
         let error = store.list().await.unwrap_err();
         assert!(error.contains("slack.C1.m2.json is not a status record"), "{error}");

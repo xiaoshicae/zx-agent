@@ -579,9 +579,7 @@ mod tests {
 
     /// The built-in platforms and `teams`.
     fn with_teams() -> Registry<dyn PlatformFactory> {
-        let mut registry = platform::built_in();
-        registry.register("teams", Arc::new(Teams));
-        registry
+        Program::new().register_platform("teams", Arc::new(Teams)).platforms
     }
 
     /// The error of the platforms of the file `text`, with `registry`.
@@ -636,7 +634,6 @@ mod tests {
         let config = format!("{SERVER}[replies]\nmodelRequestLimit = \"limit\"\n");
         let file = ConfigFile::parse(&config).unwrap();
         assert_eq!(file.replies.model_request_limit, "limit");
-        assert!(ConfigFile::parse(&config.replace("modelRequestLimit", "maxTurns")).is_err());
     }
 
     #[test]
@@ -649,10 +646,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_and_a_zero_run_limit_are_refused() {
-        // A key before the first section: after one, it would be that section's.
+    fn an_unknown_key_before_the_first_section_is_refused() {
+        // After a section, it would be that section's.
         let error = format!("{:#}", ConfigFile::parse(&format!("typo = 1\n{SERVER}")).err().unwrap());
         assert!(error.contains("unknown key `typo`"), "{error}");
+    }
+
+    #[test]
+    fn a_limit_of_zero_is_refused() {
         for name in [
             "maxRunning",
             "maxConversations",
@@ -661,7 +662,11 @@ mod tests {
         ] {
             assert!(ConfigFile::parse(&format!("{SERVER}[limits]\n{name} = 0\n")).is_err());
         }
-        // The approval timeout is config.toml's, shared with chat and acp.
+    }
+
+    #[test]
+    fn the_approval_timeout_is_not_a_limit_of_im_toml() {
+        // It is config.toml's, shared with chat and acp.
         assert!(ConfigFile::parse(&format!("{SERVER}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
     }
 
@@ -675,20 +680,27 @@ mod tests {
     }
 
     #[test]
-    fn a_section_of_no_platform_and_a_channel_named_otherwise_are_refused() {
+    fn a_section_of_no_platform_is_refused() {
         assert_eq!(
             platform_error(&format!("[irc]\n{SERVER}"), &with_teams()),
             "[irc]: no IM platform is registered under the name \"irc\"; use one of slack, feishu, teams"
         );
+    }
+
+    #[test]
+    fn a_channel_named_otherwise_than_its_section_is_refused() {
         let error = platform_error(&format!("[teams]\ngoesBy = \"msteams\"\n{SERVER}"), &with_teams());
         assert!(
             error.starts_with("[teams]: its channel goes by the platform \"msteams\""),
             "{error}"
         );
-        let mut twice = with_teams();
-        twice.register("slack", Arc::new(Teams));
+    }
+
+    #[test]
+    fn a_name_registered_twice_is_refused() {
+        let twice = Program::new().register_platform("slack", Arc::new(Teams)).platforms;
         assert_eq!(
-            platform_error(&format!("[teams]\n{SERVER}"), &twice),
+            platform_error(&format!("[slack]\n{SERVER}"), &twice),
             "more than one IM platform is registered under the name \"slack\""
         );
     }

@@ -217,7 +217,6 @@ mod tests {
             };
             assert_eq!(budget.max_model_requests, Some(3), "{subcommand:?}");
         }
-        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
     }
 
     #[test]

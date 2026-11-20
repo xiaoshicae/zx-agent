@@ -161,11 +161,19 @@ mod tests {
     }
 
     #[test]
-    fn a_shrunk_reservation_and_withdrawn_input_return_their_share() {
+    fn a_shrunk_reservation_returns_the_difference() {
         let budget = budget(2, 6);
-        let first = budget.try_reserve(6).unwrap().resize(1).unwrap();
+        let shrunk = budget.try_reserve(6).unwrap().resize(1).unwrap();
+        assert_eq!(budget.reserved(), (1, 1));
+        drop(shrunk);
+        assert_eq!(budget.reserved(), (0, 0));
+    }
+
+    #[test]
+    fn withdrawn_input_returns_its_share() {
+        let budget = budget(2, 6);
         let queues = InputQueues::default();
-        queues.steer(PendingInput::held("a", first));
+        queues.steer(PendingInput::held("a", budget.try_reserve(1).unwrap()));
         queues.follow_up(PendingInput::held("12345", budget.try_reserve(5).unwrap()));
         assert!(budget.try_reserve(0).is_none());
         assert!(queues.withdraw(&"a".into()));
