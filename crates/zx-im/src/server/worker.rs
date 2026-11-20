@@ -31,8 +31,9 @@ use crate::{Addressee, ApprovalId, Choice, ImChannel, MessageRef, UserId};
 
 use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
-use super::outlet::{Asked, Finished, Opened, Outlet, answer_of};
+use super::outlet::{Asked, Finished, Opened, Outlet};
 use super::received::Receipt;
+use super::render::answer_of;
 use super::{ServerEvent, SessionKey, Shared};
 use cards::Card;
 pub(super) use commands::Command;
