@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use zx_ai::ApiKey;
 use zx_ai::ProviderErrorKind;
-use zx_ai::provider::ApiKey;
 
 use crate::failure::{Failure, transport_failure};
 

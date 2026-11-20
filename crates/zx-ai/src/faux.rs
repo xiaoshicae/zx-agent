@@ -7,10 +7,10 @@ use std::sync::Mutex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::provider::{ABORTED_MESSAGE, EventReceiver, EventSender, Provider, event_channel, send_event};
 use super::types::{
     AssistantMessage, ContentBlock, Delta, ProviderError, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms,
 };
+use super::{ABORTED_MESSAGE, EventReceiver, EventSender, Provider, event_channel, send_event};
 use zx_util::sync::lock;
 
 /// One scripted response.

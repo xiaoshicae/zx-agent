@@ -1,4 +1,5 @@
-//! The provider contract, and the API key a provider authenticates with.
+//! The provider contract, and the API key a provider authenticates with (pi:
+//! packages/agent/src/types.ts).
 
 use std::fmt;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
 
 /// A model provider.
 ///
-/// Contract (same as pi's `StreamFn`, packages/agent/src/types.ts):
+/// Contract (same as pi's `StreamFn`):
 /// - `stream` returns immediately; setup and I/O run in a background task.
 /// - It never panics and never returns an error. Every failure becomes a final
 ///   `StreamEvent::Error` whose message has `stop_reason` `Error` or `Aborted`,

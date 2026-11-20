@@ -619,7 +619,7 @@ impl Provider for SilentProvider {
 
     fn stream(&self, _request: Request, _cancel: CancellationToken) -> EventReceiver {
         // Dropping the sender ends the stream at once.
-        let (_sender, receiver) = zx_agent::ai::provider::event_channel();
+        let (_sender, receiver) = zx_agent::ai::event_channel();
         receiver
     }
 }

@@ -1,5 +1,5 @@
 use serde_json::Map;
-use zx_ai::provider::Provider;
+use zx_ai::Provider;
 use zx_ai::{ApiKey, SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
 
 use super::*;

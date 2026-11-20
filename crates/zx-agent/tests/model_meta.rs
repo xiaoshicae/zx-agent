@@ -10,11 +10,11 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, ProviderErrorKind, Request, StopReason, StreamEvent,
     Usage,
 };
+use zx_agent::ai::{EventReceiver, event_channel, send_event};
 use zx_agent::compaction::{self, Config, TokenTrigger};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};

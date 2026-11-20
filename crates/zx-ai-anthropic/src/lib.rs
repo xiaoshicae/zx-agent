@@ -6,11 +6,13 @@
 //! `Provider` contract. The `zx-agent` crate re-exports this crate as
 //! `zx_agent::ai::anthropic`.
 //!
-//! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
-//! request and what kind each is (the statuses and error types of the API) in `failure.rs`
-//! and the message built from the stream's events in `accumulate.rs`; this module holds the
-//! provider and the HTTP flow of one request, with what the HTTP providers share
-//! (`zx-ai-http`).
+//! This module holds the provider and the HTTP flow of one request, with what the HTTP
+//! providers share (`zx-ai-http`):
+//! - `config`: the settings and their checks
+//! - `request`: the request body, the options recorded with it, and the body rebuilt from them
+//! - `failure`: the failures of a request, and what kind each is by the statuses and error
+//!   types of the API
+//! - `accumulate`: the message built from the stream's events
 
 mod accumulate;
 mod config;
@@ -21,7 +23,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
+use zx_ai::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use zx_ai::{ProviderErrorKind, Request, StreamEvent, now_ms};
 use zx_ai_http::failure::answers_json;
 use zx_ai_http::request::{api_key, send};
@@ -134,7 +136,7 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
     let config = post.config;
     let mut request = post.client.post(&post.url).json(&post.body);
     if !config.names_version() {
-        request = request.header(VERSION_HEADER, config::DEFAULT_API_VERSION);
+        request = request.header(VERSION_HEADER, DEFAULT_API_VERSION);
     }
     for (name, value) in &config.headers {
         request = request.header(name.as_str(), value.as_str());

@@ -9,7 +9,7 @@ use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use zx_ai::provider::ApiKey;
+use zx_ai::ApiKey;
 use zx_ai_http::DEFAULT_MAX_EVENT_BYTES;
 use zx_ai_http::settings::{check_base_url, check_headers, check_limits};
 

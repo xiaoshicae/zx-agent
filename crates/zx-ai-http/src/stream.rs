@@ -5,8 +5,10 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use zx_ai::provider::{ABORTED_MESSAGE, EventSender, send_event};
-use zx_ai::{AssistantMessage, ProviderError, ProviderErrorKind, StopReason, StreamEvent, duration_ms};
+use zx_ai::{
+    ABORTED_MESSAGE, AssistantMessage, EventSender, ProviderError, ProviderErrorKind, StopReason, StreamEvent,
+    duration_ms, send_event,
+};
 
 use crate::failure::{Failure, transport_failure};
 use crate::sse::SseParser;
