@@ -35,7 +35,11 @@ const ACCESS_TEXT: &[&str] = &[
 /// tokens, please wait"), so it is never taken for an overflow.
 const RATE_LIMIT_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "too many requests", "throttl"];
 
-/// Wording of a service that fails, is overloaded or cannot be reached for now.
+/// Wording of a service that says it timed out itself.
+const TIMEOUT_TEXT: &[&str] = &["timed out"];
+
+/// Wording of a service that fails, is overloaded or cannot be reached for now. A gateway's
+/// timeout is the gateway's status, a 504, which is a failing service's.
 const UNAVAILABLE_TEXT: &[&str] = &[
     "overloaded",
     "server_busy",
@@ -47,10 +51,6 @@ const UNAVAILABLE_TEXT: &[&str] = &[
     "bad gateway",
     "service unavailable",
     "gateway timeout",
-    "timed out",
-    "stream stalled",
-    "stream read failed",
-    "request failed",
     "connection",
     "temporarily",
 ];
@@ -125,7 +125,8 @@ fn of_code(code: &str) -> Option<ProviderErrorKind> {
 }
 
 /// The kind that the lowercased wording `text` of an error says: an overflow first, then a
-/// refusal of credentials, permissions or quota, rate limiting and an unavailable service.
+/// refusal of credentials, permissions or quota, rate limiting, a timeout and an unavailable
+/// service.
 fn of_wording(text: &str) -> ProviderErrorKind {
     if says_overflow(text) {
         ProviderErrorKind::ContextOverflow
@@ -133,6 +134,8 @@ fn of_wording(text: &str) -> ProviderErrorKind {
         ProviderErrorKind::AccessDenied
     } else if mentions_any(text, RATE_LIMIT_TEXT) {
         ProviderErrorKind::RateLimited
+    } else if mentions_any(text, TIMEOUT_TEXT) {
+        ProviderErrorKind::Timeout
     } else if mentions_any(text, UNAVAILABLE_TEXT) {
         ProviderErrorKind::Unavailable
     } else {
@@ -285,16 +288,31 @@ mod tests {
     #[test]
     fn classifies_errors_by_their_wording() {
         for (text, kind) in [
-            ("HTTP 503: service unavailable", ProviderErrorKind::Unavailable),
-            ("HTTP 529: overloaded_error", ProviderErrorKind::Unavailable),
-            ("stream stalled: no data for 120s", ProviderErrorKind::Unavailable),
-            ("HTTP 429: slow down", ProviderErrorKind::RateLimited),
-            ("HTTP 401: invalid api key", ProviderErrorKind::AccessDenied),
-            ("HTTP 429: insufficient_quota", ProviderErrorKind::AccessDenied),
-            ("HTTP 400: context_length_exceeded", ProviderErrorKind::ContextOverflow),
+            (
+                "The service is unavailable: service unavailable",
+                ProviderErrorKind::Unavailable,
+            ),
+            ("overloaded_error", ProviderErrorKind::Unavailable),
+            ("The upstream request timed out", ProviderErrorKind::Timeout),
+            ("Too many requests, slow down", ProviderErrorKind::RateLimited),
+            ("Invalid API key provided", ProviderErrorKind::AccessDenied),
+            (
+                "You exceeded your current quota: insufficient_quota",
+                ProviderErrorKind::AccessDenied,
+            ),
+            ("context_length_exceeded", ProviderErrorKind::ContextOverflow),
         ] {
             assert_eq!(of_error(None, text), kind, "{text}");
         }
+    }
+
+    #[test]
+    fn a_failed_request_is_not_taken_for_an_unavailable_service() {
+        // The words this client used for its own failures say nothing about a server's error.
+        assert_eq!(
+            of_error(None, "Request failed validation: unknown parameter"),
+            ProviderErrorKind::Other
+        );
     }
 
     #[test]
@@ -302,9 +320,9 @@ mod tests {
         // Every overflow phrase and code is an overflow, including those that only the
         // overflow tables know: a transient phrase next to them does not make it transient.
         for text in [
-            "HTTP 500: your input exceeds the context window of this model",
-            "HTTP 503: prompt is too long for the model",
-            "HTTP 502: request_too_large",
+            "Internal server error: your input exceeds the context window of this model",
+            "Service unavailable: prompt is too long for the model",
+            "Bad gateway: request_too_large",
         ] {
             assert_eq!(of_error(None, text), ProviderErrorKind::ContextOverflow, "{text}");
         }
