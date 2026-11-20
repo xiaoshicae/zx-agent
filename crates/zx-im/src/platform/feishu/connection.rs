@@ -166,7 +166,8 @@ impl FeishuChannel {
             Some(code) if RETRY_CODES.contains(&code) => return Ok(later(format!("code {code}, retrying"))),
             code => {
                 let detail = answer["msg"].as_str().unwrap_or("no message");
-                return Err(ImError::Config(format!("{PREFIX}: code {code:?}: {detail}")));
+                let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
+                return Err(ImError::Config(format!("{PREFIX}: code {code}: {detail}")));
             }
         }
         // The address carries a ticket: it is used, never shown.

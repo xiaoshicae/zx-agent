@@ -290,7 +290,7 @@ impl ImChannel for FeishuChannel {
                     Ok(_) => {}
                     // Feishu refused the edit (a message allows 20 edits, within a time the
                     // tenant's admin sets): post the text instead of losing it.
-                    Err(CallError::Api { code: Some(_), .. }) => {
+                    Err(CallError::Refused(_)) => {
                         self.post_text(&thread, &first).await?;
                     }
                     Err(error) => return Err(error.into()),
