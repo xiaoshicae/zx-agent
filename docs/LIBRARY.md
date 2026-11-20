@@ -1,6 +1,6 @@
 # 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-builtin` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：`config.toml`、agent 文件、OpenTelemetry 导出与进程的收尾在应用层 `zx-app`（见下文“与命令行共用配置”）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai` 或 `zx-ai-anthropic`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`，关掉时内核只检查参数是 JSON 对象，其余由工具自己检查；`zx-builtin` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。测试用的脚本化 provider `ai::faux::FauxProvider`（按脚本回答，记下每个请求）只在 feature `testing` 打开时编译，默认关闭：嵌入方的测试在 `[dev-dependencies]` 里给 `zx-agent` 加上这个 feature。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-builtin` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：`config.toml`、agent 文件、OpenTelemetry 导出与进程的收尾在应用层 `zx-app`（见下文“与命令行共用配置”）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai` 或 `zx-ai-anthropic`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`，关掉时内核只检查参数是 JSON 对象，其余由工具自己检查；`zx-builtin` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。测试用的脚本化 provider `ai::faux::FauxProvider`（按脚本回答，记下每个请求）只在 feature `testing` 打开时编译，默认关闭：宿主的测试在 `[dev-dependencies]` 里给 `zx-agent` 加上这个 feature。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -14,7 +14,7 @@ while let Some(event) = run.next().await {
 let report = run.wait().await;                // 只要结果时直接 session.send(..)?.wait().await
 ```
 
-库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。安全相关的默认值也一样：没有策略时每个工具调用都放行；`LocalExecutor` 默认不对命令隐藏任何环境变量（`hidden_env` 为空，API key 也不例外）；工具输出只在注册了 `builtin::redact::RedactSecrets` 钩子时脱敏。完整的组装见仓库的 `crates/zx-agent/examples/library.rs`（`cargo build --example library` 编译它），这三样它都做了；上面的流程在 `Agent` 的 rustdoc 中另有 doctest。
+库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由宿主给出。安全相关的默认值也一样：没有策略时每个工具调用都放行；`LocalExecutor` 默认不对命令隐藏任何环境变量（`hidden_env` 为空，API key 也不例外）；工具输出只在注册了 `builtin::redact::RedactSecrets` 钩子时脱敏。完整的组装见仓库的 `crates/zx-agent/examples/library.rs`（`cargo build --example library` 编译它），这三样它都做了；上面的流程在 `Agent` 的 rustdoc 中另有 doctest。
 
 ## 导览
 
