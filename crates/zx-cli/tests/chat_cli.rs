@@ -1,5 +1,8 @@
 //! Interactive frontend contracts against the local fake HTTP service; no paid APIs.
 mod common;
+#[cfg(unix)]
+#[path = "common/pty.rs"]
+mod pty;
 
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -288,7 +291,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
         Reply::text("queued answer"),
     ])
     .await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(
         &server,
         dir.path(),
@@ -1100,7 +1103,7 @@ async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
 async fn lines_pasted_together_into_a_terminal_are_one_message() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("got it")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1124,7 +1127,7 @@ async fn lines_pasted_together_into_a_terminal_are_one_message() {
 async fn a_terminal_separates_answers_with_blank_lines() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("answer")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut command = chat(&server, dir.path(), &["--tools", ""]);
     command
         .stdin(Stdio::from(slave.try_clone().unwrap()))
@@ -1218,7 +1221,7 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
         Reply::text("steered"),
     ])
     .await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1249,7 +1252,7 @@ async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     let dir = tempfile::tempdir().unwrap();
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1314,7 +1317,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     let dir = tempfile::tempdir().unwrap();
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1371,7 +1374,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
 async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker")]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
         .stdin(Stdio::from(slave))
         .spawn()

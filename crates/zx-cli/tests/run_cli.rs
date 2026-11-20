@@ -3,6 +3,9 @@
 //! budgets, denied calls, trace export, and the wiring that only main.rs does. No network or
 //! API key needed.
 mod common;
+#[cfg(unix)]
+#[path = "common/pty.rs"]
+mod pty;
 
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -474,7 +477,7 @@ async fn an_answer_written_to_a_terminal_cannot_drive_it() {
 
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text(TITLE_ANSWER)]).await;
-    let (mut terminal, slave) = common::pty();
+    let (mut terminal, slave) = pty::open();
     let mut command = run(&server, dir.path());
     command.stdout(Stdio::from(slave)).stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();

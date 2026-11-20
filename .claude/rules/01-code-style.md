@@ -7,7 +7,7 @@ paths:
 
 格式由 rustfmt 决定，能用 lint 查的条款在 `Cargo.toml` 的 `[workspace.lints]`，阈值在 `clippy.toml`。这里只列工具查不出的约定。
 
-- **`#[allow]` 的唯一例外**（红线 3）：`crates/zx-cli/tests/common/mod.rs` 的 `#![allow(dead_code, reason = "...")]`，原因写在它的 `reason` 里。`#[expect]` 的理由写成能核对的一句话（`one arm per event variant`）。
+- **`#[expect]` 的理由**写成能核对的一句话（`one arm per event variant`）；不用 `#[allow]`（红线 3）。几个测试二进制共用的辅助，只有其中一部分用到的，单放一个文件，由用到的二进制经 `#[path]` 引入（`crates/zx-cli/tests/common/pty.rs`）。
 - **导入分三组**，组之间空一行：标准库、外部 crate、本 crate（`crate::`、`super::`）。
 - **可见性最小化**：默认私有，crate 内共享用 `pub(crate)`，只有库的使用者需要的才 `pub`。
 - **函数**：参数超过 5 个就打包成结构体；不用 bool 参数切换行为，改用枚举或拆成两个函数。
