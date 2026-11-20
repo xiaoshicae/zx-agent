@@ -1,4 +1,4 @@
-//! The `grep` tool: file contents matching a pattern, with ripgrep or POSIX grep.
+//! The `grep` tool: file contents matching a pattern, with ripgrep or the system's grep.
 
 use std::sync::Arc;
 
@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    MAX_LINE_BYTES, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, glob_of, positive, quote,
-    ripgrep_excludes, search, search_path,
+    MAX_LINE_BYTES, VCS_DIRECTORIES, WITHOUT_DOT_SLASH, Wording, choose_engine, finish, first_lines, glob_of, limit_or,
+    quote, ripgrep_excludes, search, search_path,
 };
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -64,12 +64,17 @@ impl Args {
         if args.context > MAX_CONTEXT {
             return Err(format!("context must be at most {MAX_CONTEXT}"));
         }
-        let limit = positive(args.limit, DEFAULT_LIMIT, "limit")?;
+        let limit = limit_or(args.limit, DEFAULT_LIMIT)?;
         Ok((args, limit))
     }
 
-    /// The shell script: ripgrep when installed, otherwise POSIX grep, each line cut, at most
-    /// `lines` lines.
+    /// The model's glob, as both programs take it, if it gives one.
+    fn glob(&self) -> Option<&str> {
+        self.glob.as_deref().map(glob_of).filter(|glob| !glob.is_empty())
+    }
+
+    /// The shell script: ripgrep when installed, otherwise the system's grep, paths without
+    /// `./`, each line cut, at most `lines` lines.
     fn script(&self, lines: usize) -> String {
         let path = quote(&search_path(self.path.as_deref()));
         let pattern = quote(&self.pattern);
@@ -86,7 +91,7 @@ impl Args {
         } else {
             grep.push("-E".into());
         }
-        if let Some(glob) = self.glob.as_deref().map(glob_of).filter(|glob| !glob.is_empty()) {
+        if let Some(glob) = self.glob() {
             rg.push(format!("--glob {}", quote(glob)));
             // grep matches --include against file names only.
             let name = glob.rsplit('/').next().unwrap_or(glob);
@@ -103,7 +108,7 @@ impl Args {
         rg.push(format!("-- {pattern} {path}"));
         grep.push(format!("-e {pattern} -- {path}"));
         format!(
-            "{} | {}",
+            "{} | {WITHOUT_DOT_SLASH} | {}",
             choose_engine(&rg.join(" "), "grep", &grep.join(" ")),
             first_lines(lines)
         )
@@ -157,19 +162,27 @@ impl Tool for GrepTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let (args, limit) = Args::parse(&args)?;
-        // A match with its context, and the separator between groups of them.
-        let lines = limit.saturating_mul(2 * args.context + 2).min(MAX_LINES);
+        // Without context every line is a match; with it, a match comes with its context and
+        // the separator between groups of them.
+        let lines = if args.context == 0 {
+            limit
+        } else {
+            limit.saturating_mul(2 * args.context + 2).min(MAX_LINES)
+        };
         let searched = search(self.executor.as_ref(), &args.script(lines), ctx).await?;
-        // Without context every line is a match, so only `limit` of them are shown.
-        let shown = if args.context == 0 { limit } else { lines };
         finish(
             &searched,
-            shown,
+            lines,
             Wording {
                 empty: "No matches found.",
                 more: "more matches exist",
                 advice: "Narrow the pattern, path or glob, or raise limit",
                 long_lines: "long lines were cut",
+                // grep's --include takes the file name only.
+                also_not_applied: args
+                    .glob()
+                    .is_some_and(|glob| glob.contains('/'))
+                    .then_some("the directories of the glob"),
             },
         )
     }

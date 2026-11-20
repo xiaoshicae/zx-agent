@@ -1,5 +1,5 @@
 //! The grep, find and ls tools on this machine. They use ripgrep when it is installed and
-//! POSIX grep and find otherwise; the assertions hold for both.
+//! the system's grep and find otherwise; the assertions hold for both.
 
 #![cfg(unix)]
 
@@ -42,13 +42,8 @@ async fn ls(dir: &Path, args: Value) -> Result<ToolOutput, String> {
 }
 
 /// The result lines without the notes in brackets.
-fn lines(output: &ToolOutput) -> Vec<String> {
-    output
-        .content
-        .lines()
-        .filter(|line| !line.starts_with('['))
-        .map(|line| line.trim_start_matches("./").to_string())
-        .collect()
+fn lines(output: &ToolOutput) -> Vec<&str> {
+    output.content.lines().filter(|line| !line.starts_with('[')).collect()
 }
 
 #[test]

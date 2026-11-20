@@ -3,8 +3,8 @@
 //!
 //! They run system programs through the executor, so in a container they search the
 //! container. ripgrep is used when it is installed, and then `.gitignore` is respected; pi
-//! downloads it instead, which zx-agent does not do. Without it, POSIX `grep` and `find` do
-//! the work and skip only the version control directories. Every value from the model reaches
+//! downloads it instead, which zx-agent does not do. Without it, the system's `grep` and
+//! `find` do the work and skip only the version control directories. Every value from the model reaches
 //! the shell single-quoted, so it is never interpreted.
 //!
 //! This module holds what the tools share: running a script and reading what it printed,
@@ -36,8 +36,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LINE_BYTES: usize = 500;
 /// The marker a script writes to standard error to say which program searched.
 const ENGINE_MARKER: &str = "zx-engine=";
-/// The name the engine marker gives ripgrep; any other name is the POSIX program that searched
-/// instead.
+/// The name the engine marker gives ripgrep; any other name is the system's program that
+/// searched instead.
 const RIPGREP: &str = "rg";
 /// Directories of version control systems, skipped when `.gitignore` cannot be read.
 const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
@@ -58,6 +58,12 @@ pub(crate) fn quote(text: &str) -> String {
 fn first_lines(shown: usize) -> String {
     format!("head -n {} | LC_ALL=C cut -c 1-{}", shown + 1, MAX_LINE_BYTES + 1)
 }
+
+/// The filter that drops the `./` before each path, as ripgrep and grep print the paths
+/// under `.`, the directory they search by default. `sed` reads bytes in the C locale: where
+/// it reads characters, macOS `sed` stops at a line that is not text in the user's encoding,
+/// and prints nothing.
+const WITHOUT_DOT_SLASH: &str = "LC_ALL=C sed 's|^\\./||'";
 
 /// The script that searches with `rg` when ripgrep is installed and with `fallback`, the
 /// program named `name`, otherwise; each announces itself with the engine marker on
@@ -84,8 +90,8 @@ struct Searched {
     stdout: String,
     /// Standard error without the engine marker.
     stderr: String,
-    /// The name of the program the script chose, from its marker: [`RIPGREP`] or a POSIX
-    /// program.
+    /// The name of the program the script chose, from its marker: [`RIPGREP`] or the
+    /// system's program.
     engine: Option<String>,
     /// Bytes the executor dropped because there were too many.
     dropped: usize,
@@ -113,16 +119,13 @@ async fn search(executor: &dyn Executor, script: &str, ctx: &ToolContext) -> Res
     let mut engine = None;
     // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
     let stderr_text = String::from_utf8_lossy(&output.stderr.bytes);
-    let stderr: Vec<&str> = stderr_text
-        .lines()
-        .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
-            Some(name) => {
-                engine = Some(name.to_string());
-                false
-            }
-            None => true,
-        })
-        .collect();
+    let mut stderr = Vec::new();
+    for line in stderr_text.lines() {
+        match line.strip_prefix(ENGINE_MARKER) {
+            Some(name) => engine = Some(name.to_string()),
+            None => stderr.push(line),
+        }
+    }
     Ok(Searched {
         stdout: String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
         stderr: stderr.join("\n"),
@@ -150,21 +153,16 @@ fn bound(text: &str) -> (String, bool) {
     (kept.text, cut || kept.truncated)
 }
 
-/// The result text: the lines, then notes on what was cut, which program searched and the
-/// errors the programs reported alongside their results.
-fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutput {
-    if let Some(program) = searched.engine.as_deref().filter(|name| *name != RIPGREP) {
-        notes.push(format!(
-            "ripgrep is not installed, so {program} searched and .gitignore was not applied"
-        ));
-    }
+/// The result text: the lines, then the `notes`, then the errors the programs reported
+/// alongside their results.
+fn report(searched: &Searched, lines: &str, mut notes: Vec<String>) -> ToolOutput {
     if !searched.stderr.trim().is_empty() {
         let first = searched.stderr.lines().next().unwrap_or_default();
         let first = prefix_noted(first, MAX_LINE_BYTES, |_, _| LINE_CUT.to_string());
         notes.push(format!("some paths could not be searched: {first}"));
     }
     let mut text = lines.to_string();
-    for note in notes.iter() {
+    for note in &notes {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -188,11 +186,15 @@ struct Wording {
     advice: &'static str,
     /// That lines too long to show whole were cut short, such as "long paths were cut".
     long_lines: &'static str,
+    /// What else the system's program left out, besides `.gitignore`, when it searched in
+    /// place of ripgrep.
+    also_not_applied: Option<&'static str>,
 }
 
 /// The result of a search that shows at most `shown` of its lines: the lines, then the notes
-/// `wording` gives, then which program searched and what it reported. A note says how many
-/// lines are shown whenever some are not, by `shown` or by the bound of a result.
+/// `wording` gives, then which program searched, what it left out and what it reported. A
+/// note says how many lines are shown whenever some are not, by `shown` or by the bound of a
+/// result.
 fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOutput, String> {
     if let Some(error) = failed(searched) {
         return Err(error);
@@ -214,7 +216,16 @@ fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOut
     } else if cut {
         notes.push(wording.long_lines.to_string());
     }
-    Ok(report(searched, &text, &mut notes))
+    if let Some(program) = searched.engine.as_deref().filter(|name| *name != RIPGREP) {
+        let not_applied = match wording.also_not_applied {
+            Some(also) => format!(".gitignore and {also} were"),
+            None => ".gitignore was".to_string(),
+        };
+        notes.push(format!(
+            "ripgrep is not installed, so {program} searched and {not_applied} not applied"
+        ));
+    }
+    Ok(report(searched, &text, notes))
 }
 
 /// The error when a search produced nothing but errors, bounded like a result.
@@ -237,10 +248,13 @@ fn search_path(raw: Option<&str>) -> String {
     if raw.is_empty() { ".".into() } else { raw.into() }
 }
 
-/// The limit asked for, at most [`MAX_LINES`], which is all a result can show anyway.
-fn positive(limit: Option<usize>, default: usize, name: &str) -> Result<usize, String> {
+/// The limit asked for, at most [`MAX_LINES`], which is all a result can show anyway, or
+/// `default` when none was. Zero is refused.
+fn limit_or(limit: Option<usize>, default: usize) -> Result<usize, String> {
     match limit {
-        Some(0) => Err(format!("{name} must be at least 1; omit it for {default}")),
+        Some(0) => Err(format!(
+            "limit must be at least 1; omit it to use the default of {default}"
+        )),
         Some(limit) => Ok(limit.min(MAX_LINES)),
         None => Ok(default),
     }
@@ -327,6 +341,45 @@ mod tests {
         assert_eq!(output.stdout, b"one\n\xe9two\nthree\n", "{output:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_dot_filter_keeps_the_lines_after_one_that_is_not_utf8() {
+        let script = format!("printf './one\\n./\\351two\\n./three\\n' | {WITHOUT_DOT_SLASH}");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("LC_ALL", "en_US.UTF-8")
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"one\n\xe9two\nthree\n", "{output:?}");
+    }
+
+    #[tokio::test]
+    async fn the_note_on_grep_in_place_of_ripgrep_says_what_it_left_out() {
+        let tool = grep_with(b"zx-engine=grep\n");
+        let names = tool
+            .execute(json!({"pattern": "hit", "glob": "*.rs"}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            names
+                .content
+                .contains("so grep searched and .gitignore was not applied]"),
+            "{}",
+            names.content
+        );
+        let paths = tool
+            .execute(json!({"pattern": "hit", "glob": "src/*.rs"}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            paths
+                .content
+                .contains("so grep searched and .gitignore and the directories of the glob were not applied]"),
+            "{}",
+            paths.content
+        );
+    }
+
     #[tokio::test]
     async fn a_search_that_only_produced_errors_reports_them_bounded() {
         // Many unreadable files: the executor keeps up to a mebibyte of such lines.
@@ -399,7 +452,7 @@ mod tests {
 
     #[test]
     fn limits_are_capped_at_what_a_result_can_show() {
-        assert_eq!(positive(Some(1_000_000), 10, "limit"), Ok(MAX_LINES));
-        assert_eq!(positive(None, 10, "limit"), Ok(10));
+        assert_eq!(limit_or(Some(1_000_000), 10), Ok(MAX_LINES));
+        assert_eq!(limit_or(None, 10), Ok(10));
     }
 }

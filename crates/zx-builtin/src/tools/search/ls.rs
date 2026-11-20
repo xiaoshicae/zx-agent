@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Wording, finish, first_lines, positive, quote, search, search_path};
+use super::{Wording, finish, first_lines, limit_or, quote, search, search_path};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::tools::parse_args;
@@ -43,7 +43,7 @@ impl Args {
     /// The arguments of a call, checked, and the most entries it shows.
     fn parse(args: &Value) -> Result<(Self, usize), String> {
         let args: Self = parse_args(args)?;
-        let limit = positive(args.limit, DEFAULT_LIMIT, "limit")?;
+        let limit = limit_or(args.limit, DEFAULT_LIMIT)?;
         Ok((args, limit))
     }
 
@@ -102,6 +102,7 @@ impl Tool for LsTool {
                 more: "more entries exist",
                 advice: "Raise limit, or list a subdirectory",
                 long_lines: "long names were cut",
+                also_not_applied: None,
             },
         )
     }

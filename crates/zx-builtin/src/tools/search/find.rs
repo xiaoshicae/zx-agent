@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, glob_of, positive, quote, ripgrep_excludes, search,
-    search_path,
+    VCS_DIRECTORIES, WITHOUT_DOT_SLASH, Wording, choose_engine, finish, first_lines, glob_of, limit_or, quote,
+    ripgrep_excludes, search, search_path,
 };
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -60,7 +60,7 @@ impl Args {
                 "pattern has more than {MAX_ANY_DEPTH} `{ANY_DEPTH}`; write one with fewer"
             ));
         }
-        let limit = positive(args.limit, DEFAULT_LIMIT, "limit")?;
+        let limit = limit_or(args.limit, DEFAULT_LIMIT)?;
         Ok((args, limit))
     }
 
@@ -104,7 +104,7 @@ fn posix_find(glob: &str) -> String {
         .map(|directory| format!("-name {directory}"))
         .collect::<Vec<_>>()
         .join(" -o ");
-    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | sed 's|^\\./||'")
+    format!("find . \\( {prune} \\) -prune -o {test} -type f -print | {WITHOUT_DOT_SLASH}")
 }
 
 /// The patterns that find's `-path` takes for `glob`, which together match what it matches.
@@ -170,6 +170,7 @@ impl Tool for FindTool {
                 more: "more files match",
                 advice: "Narrow the pattern or path, or raise limit",
                 long_lines: "long paths were cut",
+                also_not_applied: None,
             },
         )
     }
