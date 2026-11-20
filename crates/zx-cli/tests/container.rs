@@ -1322,12 +1322,8 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let Some(image) = docker_image() else { return };
     let home = container_home(&image);
     let (_dir, workspace) = real_workspace();
-    let call = json!({"index": 0, "id": "r1", "type": "function",
-        "function": {"name": "read_file", "arguments": "{\"path\":\"/etc/os-release\"}"}});
     let server = MockServer::start(vec![
-        Reply::Sse(vec![
-            json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}]}),
-        ]),
+        Reply::tool_call("r1", "read_file", &json!({"path": "/etc/os-release"})),
         Reply::text("done"),
     ])
     .await;

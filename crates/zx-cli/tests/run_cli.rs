@@ -203,11 +203,9 @@ async fn sigterm_exits_5() {
         .unwrap();
     // Once the request arrives, the run is in progress and its signal handler is installed.
     server.wait_for_requests(1).await;
-    let pid = child.id().unwrap().to_string();
-    let killed = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(killed.success());
+    zx_testing::signal(&child, "-TERM").await;
 
-    let output = child.wait_with_output().await.unwrap();
+    let output = ended_output(child).await;
 
     assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
 }
@@ -511,10 +509,7 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
     // The model names a tool that does not exist, then the server fails with a body that
     // tries to clear the screen. Both texts reach stderr.
     let server = MockServer::start(vec![
-        Reply::Sse(vec![json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": "c1", "type": "function",
-            "function": {"name": "x\u{1b}[2J", "arguments": "{}"}
-        }]}, "finish_reason": "tool_calls"}]})]),
+        Reply::tool_call("c1", "x\u{1b}[2J", &json!({})),
         Reply::Status(400, "bad\u{1b}[2J"),
     ])
     .await;

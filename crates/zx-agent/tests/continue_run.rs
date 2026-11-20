@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ProviderErrorKind, StopReason, ToolCall};
+use zx_agent::ai::{AssistantMessage, Message, ProviderErrorKind, StopReason};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
@@ -17,7 +17,7 @@ use zx_agent::transcript::{CustomMessage, Entry};
 
 use zx_testing::{
     Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, summarize,
-    take_queued_inputs, tool_call_answer,
+    take_queued_inputs, tool_call_answer, tool_call_block,
 };
 
 async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
@@ -106,12 +106,7 @@ async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
     let mut seed = Seed::in_memory(header()).await;
     seed.append_message(Message::user("echo hi")).await.unwrap();
     let mut failed = AssistantMessage::failure("faux", "test-model", StopReason::Error, "the stream broke");
-    failed.content = vec![ContentBlock::ToolCall(ToolCall {
-        id: "c1".into(),
-        name: "echo".into(),
-        arguments: json!({"text": "h"}),
-        arguments_error: None,
-    })];
+    failed.content = vec![tool_call_block("c1", "echo", json!({"text": "h"}))];
     seed.append_message(Message::Assistant(failed)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("second try")]));
     let (runner, _) = runner(&provider, seed.into()).await;

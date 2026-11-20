@@ -977,10 +977,8 @@ async fn an_approved_command_is_shown_with_the_request_and_again_with_its_result
 async fn chat_filters_the_known_api_key_before_tool_results_reach_audit_and_model() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("credentials.txt"), KEY).unwrap();
-    let tool = json!({"choices":[{"index":0,"delta":{"tool_calls":[{
-        "index":0,"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"credentials.txt\"}"}
-    }]},"finish_reason":"tool_calls"}]});
-    let server = MockServer::start(vec![Reply::Sse(vec![tool]), Reply::text("done")]).await;
+    let read = Reply::tool_call("read", "read_file", &json!({"path": "credentials.txt"}));
+    let server = MockServer::start(vec![read, Reply::text("done")]).await;
     let output = run(
         &server,
         dir.path(),
@@ -1600,7 +1598,7 @@ fn window_agent(dir: &Path, window: u64, extra: &str) {
 
 /// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
 fn agent(dir: &Path, front: &str) {
-    write_agent(&dir.join(".home/.zx-agent"), "assistant", front);
+    write_agent(&agent_home(dir), "assistant", front);
 }
 
 /// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.

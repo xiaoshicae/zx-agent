@@ -428,7 +428,7 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
 }
 
 /// A summary that cites the first record the summary request reads.
-fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Value> {
+fn summary_of_the_first_record(body: &serde_json::Value) -> Reply {
     let source = body["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
@@ -438,7 +438,7 @@ fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Valu
         "inferences": [],
         "plans": ["Continue"]
     });
-    vec![json!({"choices": [{"index": 0, "delta": {"content": summary.to_string()}, "finish_reason": "stop"}]})]
+    Reply::text(&summary.to_string())
 }
 
 #[tokio::test]

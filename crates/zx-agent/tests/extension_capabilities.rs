@@ -30,13 +30,12 @@ fn note(text: &str) -> CustomMessage {
 }
 
 async fn session_in(file: &Path, config: AgentConfig) -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
-    let (runner, events) = RunnerSetup {
+    RunnerSetup {
         session: zx_testing::create_session_file(file, header()).await.unwrap().into(),
         ..RunnerSetup::new(config)
     }
     .build()
-    .await;
-    (runner, events)
+    .await
 }
 
 fn kinds(file: &Path) -> Vec<&'static str> {

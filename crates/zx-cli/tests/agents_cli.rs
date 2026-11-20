@@ -77,9 +77,7 @@ fn config(dir: &Path, top: &str) {
     write_config(&agent_home(dir), &fake_model_config(KEY_VAR, top, ""));
 }
 fn skill_reply() -> Reply {
-    Reply::Sse(vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"skill-call","type":"function","function":{"name":"read_skill","arguments":"{\"name\":\"review\"}"}}]},"finish_reason":"tool_calls"}]}),
-    ])
+    Reply::tool_call("skill-call", "read_skill", &json!({"name": "review"}))
 }
 /// An agent with `extra` and the skill `review`, whose body is `SKILL.md` in `dir`: paths
 /// in an agent file are relative to its directory, `agents/` in the zx-agent home.
@@ -124,11 +122,9 @@ fn last_tool_result(body: &Value) -> &str {
         .unwrap()
 }
 
-fn read_output_reply(body: &Value) -> Vec<Value> {
+fn read_output_reply(body: &Value) -> Reply {
     let (id, offset) = footer(last_tool_result(body));
-    vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"output","type":"function","function":{"name":"read_output","arguments":json!({"id":id,"offset":offset}).to_string()}}]},"finish_reason":"tool_calls"}]}),
-    ]
+    Reply::tool_call("output", "read_output", &json!({"id": id, "offset": offset}))
 }
 
 #[tokio::test]

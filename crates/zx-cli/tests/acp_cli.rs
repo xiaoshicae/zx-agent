@@ -313,9 +313,7 @@ async fn a_shell_call_asks_the_client_and_runs_once_allowed() {
     let server = MockServer::start(vec![Reply::bash("c1", "printf approved > marker"), Reply::text("done")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", "bash"]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 99, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}}))
-        .await;
+    acp.write(prompt_request(99, &session, "go")).await;
 
     let call = acp.next_update().await;
     assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
@@ -374,9 +372,7 @@ async fn a_rejected_call_never_runs_and_the_model_hears_why() {
     let server = MockServer::start(vec![Reply::bash("c1", "printf no > marker"), Reply::text("ok")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", "bash"]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 7, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}}))
-        .await;
+    acp.write(prompt_request(7, &session, "go")).await;
     let call = acp.next_update().await;
     assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
     let (id, _) = acp.next_request("session/request_permission").await;
@@ -407,9 +403,7 @@ async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
     let server = MockServer::start(vec![stalled_answer(), Reply::text("again")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 5, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "first"}]}}))
-        .await;
+    acp.write(prompt_request(5, &session, "first")).await;
     let chunk = acp.next_update().await;
     assert_eq!(text_of(&chunk), "partial");
     acp.notify("session/cancel", json!({"sessionId": session})).await;
@@ -541,9 +535,7 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
     );
     let mut acp = Acp::start_in(&server, dir.path(), &[], Some(home.path())).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "write"}]}}))
-        .await;
+    acp.write(prompt_request(3, &session, "write")).await;
 
     let call = acp.next_update().await;
     assert_eq!(call["kind"], "edit", "{call}");
@@ -1189,9 +1181,7 @@ async fn closing_a_session_cancels_its_turn() {
     let server = MockServer::start(vec![stalled_answer()]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
-    acp.write(json!({"jsonrpc": "2.0", "id": 50, "method": "session/prompt",
-        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "first"}]}}))
-        .await;
+    acp.write(prompt_request(50, &session, "first")).await;
     assert_eq!(text_of(&acp.next_update().await), "partial");
 
     let closed = acp.close(&session).await;

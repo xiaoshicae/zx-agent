@@ -13,8 +13,8 @@ use zx_agent::AgentConfig;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, ProviderErrorKind, Request, StopReason, SystemPrompt,
-    ToolCall, ToolDef, Usage,
+    EventReceiver, Message, PREAMBLE, Provider, ProviderErrorKind, Request, StopReason, SystemPrompt, ToolCall,
+    ToolDef, Usage,
 };
 use zx_agent::events::{Budget, EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
@@ -23,6 +23,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use zx_testing::{
     Collect, Driven, EchoTool, RunnerSetup, config, run_prompt, run_prompt_with, summarize, take_queued_inputs,
+    tool_call_block,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -420,12 +421,7 @@ async fn failures_become_error_results_and_the_loop_continues() {
 #[tokio::test]
 async fn length_stop_fails_tool_calls_without_running_them() {
     let cut_off = FauxStep::Respond {
-        blocks: vec![ContentBlock::ToolCall(ToolCall {
-            id: "t".into(),
-            name: "echo".into(),
-            arguments: json!({"text": "cut"}),
-            arguments_error: None,
-        })],
+        blocks: vec![tool_call_block("t", "echo", json!({"text": "cut"}))],
         stop: StopReason::Length,
     };
     let provider = provider([cut_off, FauxStep::text("retried")]);

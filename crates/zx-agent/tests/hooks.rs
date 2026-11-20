@@ -614,15 +614,9 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
 #[tokio::test]
 async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
     let hook = RedactSecrets::new(["", "token", "token-long", "令牌"].into_iter().map(str::to_string));
-    let call = ToolCall {
-        id: "c".into(),
-        name: "echo".into(),
-        arguments: json!({}),
-        arguments_error: None,
-    };
     let output = hook
         .after_tool(
-            &call,
+            &redaction_call(),
             ToolOutput::error("token-long，令牌 token"),
             &zx_testing::hook_context(),
         )

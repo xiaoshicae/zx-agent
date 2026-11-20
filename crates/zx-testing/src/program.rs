@@ -190,7 +190,7 @@ pub fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Send `name` (as `kill` spells it, such as `TERM`) to `child`.
+/// Send the signal `name` to `child`, written as `kill` takes it, such as `-TERM`.
 #[cfg(unix)]
 pub async fn signal(child: &tokio::process::Child, name: &str) {
     assert!(

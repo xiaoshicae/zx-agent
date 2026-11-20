@@ -19,9 +19,9 @@ use zx_testing::{json_lines, stderr, stdout};
 
 const APP_TOKEN: &str = "xapp-1-im-test-token";
 const BOT_TOKEN: &str = "xoxb-im-test-token";
-/// How long a test waits for the program to start or stop: longer than [`zx_testing::WAIT`],
-/// as a program starts up first. Only reached when it never does.
-const PROGRAM_WAIT: Duration = Duration::from_secs(20);
+/// How long a test waits for the program to start serving: longer than [`zx_testing::WAIT`],
+/// as it connects its MCP servers first. Only reached when it never does.
+const START_WAIT: Duration = Duration::from_secs(20);
 
 /// The error for a `[feishu]` section whose secret is not set: a build without that platform
 /// refuses the section itself.
@@ -242,13 +242,8 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     assert!(recorded.contains("run it"));
     assert!(!recorded.contains(BOT_TOKEN));
 
-    let pid = child.id().unwrap().to_string();
-    let killed = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(killed.success());
-    let output = tokio::time::timeout(PROGRAM_WAIT, child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&child, "-TERM").await;
+    let output = program::ended_output(child).await;
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let log: Vec<Value> = json_lines(&stdout(&output));
@@ -401,13 +396,8 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
             &json!("The service restarted: this task did not finish; please send it again.")
         )
     );
-    let pid = second.id().unwrap().to_string();
-    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(stopped.success());
-    let output = tokio::time::timeout(PROGRAM_WAIT, second.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&second, "-TERM").await;
+    let output = program::ended_output(second).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }
 
@@ -466,13 +456,8 @@ async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_ag
         (&updates[0].body["channel"], &updates[0].body["text"]),
         (&json!("C1"), &json!("late answer"))
     );
-    let pid = second.id().unwrap().to_string();
-    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
-    assert!(stopped.success());
-    let output = tokio::time::timeout(PROGRAM_WAIT, second.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    zx_testing::signal(&second, "-TERM").await;
+    let output = program::ended_output(second).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(left(&pending).is_empty(), "{:?}", left(&pending));
 }
@@ -529,7 +514,7 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
         .unwrap();
     let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
     let mut seen = Vec::new();
-    tokio::time::timeout(PROGRAM_WAIT, async {
+    tokio::time::timeout(START_WAIT, async {
         while let Some(line) = lines.next_line().await.unwrap() {
             let serving = line.starts_with("[im] platforms=");
             seen.push(line);

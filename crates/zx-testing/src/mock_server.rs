@@ -54,8 +54,9 @@ impl Captured {
 pub enum Reply {
     /// Stream these chunks, then `[DONE]`.
     Sse(Vec<Value>),
-    /// Build SSE chunks from the request body, e.g. to read a newly generated output ID.
-    Dynamic(fn(&Value) -> Vec<Value>),
+    /// Build the reply from the request body, e.g. to read a newly generated output ID; the
+    /// reply it builds is of another kind.
+    Dynamic(fn(&Value) -> Reply),
     /// Stream these chunks, then keep the connection open without sending anything more.
     Stall(Vec<Value>),
     /// Send partial output, then finish only after the test releases the gate.
@@ -177,7 +178,7 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
         return;
     };
     let reply = match reply {
-        Reply::Dynamic(build) => Reply::Sse(build(&request.body)),
+        Reply::Dynamic(build) => build(&request.body),
         reply => reply,
     };
     log.lock().unwrap().push(request);
@@ -215,7 +216,7 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             // Limit/cancellation tests intentionally close the connection early.
             let _ = stream.write_all(response.as_bytes()).await;
         }
-        Reply::Dynamic(_) => unreachable!("dynamic replies are resolved before recording the request"),
+        Reply::Dynamic(_) => panic!("a dynamic reply built another dynamic reply"),
     }
 }
 

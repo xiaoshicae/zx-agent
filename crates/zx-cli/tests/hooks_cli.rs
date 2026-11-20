@@ -20,10 +20,7 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
     let session = dir.path().join("session.jsonl");
     std::fs::write(dir.path().join("credentials.txt"), format!("token={KEY}\n")).unwrap();
     let server = MockServer::start(vec![
-        Reply::Sse(vec![json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": "read1", "type": "function",
-            "function": {"name": "read_file", "arguments": "{\"path\":\"credentials.txt\"}"}
-        }]}, "finish_reason": "tool_calls"}]})]),
+        Reply::tool_call("read1", "read_file", &json!({"path": "credentials.txt"})),
         Reply::text("done"),
     ])
     .await;

@@ -1737,12 +1737,7 @@ async fn the_session_records_the_sender_of_each_message_it_answers_as_its_actor(
     let status = h.posted(&thread("m1"), working).await;
     h.updated(&status, text("two")).await;
 
-    let key = SessionKey {
-        platform: PLATFORM.into(),
-        conversation: ConversationId(CHAT.into()),
-        thread: Some(ThreadId("m1".into())),
-    };
-    let id = h.sessions.of(&key).await.unwrap().remove(0);
+    let id = h.sessions.of(&key("m1")).await.unwrap().remove(0);
     let stored = Transcript::snapshot(h.sessions.storage.read(&id).await.unwrap()).unwrap();
     let actors: Vec<Option<&str>> = stored
         .entries()
