@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
 use crate::{Destination, ImError, MessageId, MessageRef, ThreadId};
 
-use super::{HISTORY_PAGE_MESSAGES, MAX_RETRY_AFTER, SETUP_ERRORS, SlackChannel};
+use super::{HISTORY_PAGE_MESSAGES, SETUP_ERRORS, SlackChannel};
 
 impl SlackChannel {
     /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON
@@ -58,7 +58,7 @@ impl SlackChannel {
             let status = response.status();
             if status == StatusCode::TOO_MANY_REQUESTS && retries < rate_limit_retries {
                 retries += 1;
-                let wait = rate_limit_wait(response.headers(), RETRY_AFTER, MAX_RETRY_AFTER);
+                let wait = rate_limit_wait(response.headers(), RETRY_AFTER);
                 tokio::time::sleep(wait).await;
                 continue;
             }

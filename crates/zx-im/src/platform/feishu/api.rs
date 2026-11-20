@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use crate::ImError;
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
 
-use super::{FeishuChannel, MAX_INTERVAL};
+use super::FeishuChannel;
 
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -105,7 +105,7 @@ impl FeishuChannel {
                     message: format!("feishu {path}: {error}"),
                 })?;
             let status = response.status();
-            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET, MAX_INTERVAL);
+            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET);
             // A body that is not JSON leaves no code; the status then explains the failure.
             let answer: Option<Value> = response.json().await.ok();
             let code = answer.as_ref().and_then(|answer| answer["code"].as_i64());

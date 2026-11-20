@@ -339,7 +339,7 @@ fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>,
             .get(name)
             .map_err(|error| anyhow::anyhow!("[{name}]: {error}"))?;
         let built = factory
-            .channel(PlatformInput {
+            .build(PlatformInput {
                 section,
                 labels: &file.card_labels,
                 on_error: failure_log(name),
@@ -576,7 +576,7 @@ mod tests {
     struct Teams;
 
     impl PlatformFactory for Teams {
-        fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+        fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
             let name = input.section.get("goesBy").and_then(toml::Value::as_str);
             Ok(BuiltChannel {
                 channel: Arc::new(Named(name.unwrap_or("teams").into())),

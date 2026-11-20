@@ -7,8 +7,8 @@ use zx_util::sync::lock;
 
 use crate::platform::report;
 use crate::{
-    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
-    ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
+    MessageId, ThreadId, UserId,
 };
 
 use super::FeishuChannel;
@@ -160,7 +160,7 @@ const ZERO_WIDTH_SPACE: char = '\u{200B}';
 
 /// `text` with every mention tag (`<at …>`, which notifies people, everyone with
 /// `user_id="all"`) broken by a zero-width space after its `<`.
-pub(super) fn without_mentions(text: &str) -> String {
+fn without_mentions(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find('<') {
@@ -176,8 +176,21 @@ pub(super) fn without_mentions(text: &str) -> String {
 
 /// `text` with no run of three backticks, which would end the code block of a card that
 /// shows it: a zero-width space goes between every two.
-pub(super) fn without_fences(text: &str) -> String {
+fn without_fences(text: &str) -> String {
     text.replace("``", &format!("`{ZERO_WIDTH_SPACE}`"))
+}
+
+/// What a card shows of the request `card`, open and once closed. What the request says
+/// mentions nobody, and its summary stays in the code block.
+pub(super) fn card_request(labels: &CardLabels, card: &ApprovalCard) -> String {
+    format!(
+        "**{}**: `{}`\n```\n{}\n```\n{}: {}",
+        labels.title,
+        without_mentions(&card.tool),
+        without_fences(&without_mentions(&card.summary)),
+        labels.reason,
+        without_mentions(&card.reason)
+    )
 }
 
 /// A card in JSON 2.0 that can be updated, as a string.

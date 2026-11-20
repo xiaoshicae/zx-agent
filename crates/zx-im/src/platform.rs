@@ -35,8 +35,9 @@ use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
 pub use feishu::{FeishuChannel, FeishuConfig};
 pub use slack::{SlackChannel, SlackConfig};
 
-/// The name of Feishu's section, which a build without the platform refuses by name.
-#[cfg(not(feature = "feishu"))]
+/// The names the built-in platforms are registered under, which their channels go by.
+/// Feishu's is known also to a build without it, which refuses its section by name.
+const SLACK: &str = "slack";
 const FEISHU: &str = "feishu";
 
 /// Builds a platform's channel from the section of im.toml named as the platform is
@@ -44,7 +45,7 @@ const FEISHU: &str = "feishu";
 pub trait PlatformFactory: Send + Sync {
     /// The channel `input` describes. Fails on a section it cannot use, the error naming its
     /// keys as im.toml writes them, and on a credential it cannot read.
-    fn channel(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel>;
+    fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel>;
 }
 
 /// What a platform's channel is built from.
@@ -71,12 +72,12 @@ pub struct BuiltChannel {
 pub(crate) fn built_in() -> Registry<dyn PlatformFactory> {
     let slack: Arc<dyn PlatformFactory> = Arc::new(slack::Slack);
     #[cfg(feature = "feishu")]
-    let feishu = (feishu::PLATFORM, Arc::new(feishu::Feishu) as Arc<dyn PlatformFactory>);
+    let feishu: Arc<dyn PlatformFactory> = Arc::new(feishu::Feishu);
     #[cfg(not(feature = "feishu"))]
-    let feishu = (FEISHU, Arc::new(NotBuilt) as Arc<dyn PlatformFactory>);
+    let feishu: Arc<dyn PlatformFactory> = Arc::new(NotBuilt);
     Registry::new(
         "IM platform",
-        vec![(slack::PLATFORM.to_string(), slack), (feishu.0.to_string(), feishu.1)],
+        vec![(SLACK.to_string(), slack), (FEISHU.to_string(), feishu)],
     )
 }
 
@@ -86,7 +87,7 @@ struct NotBuilt;
 
 #[cfg(not(feature = "feishu"))]
 impl PlatformFactory for NotBuilt {
-    fn channel(&self, _input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
+    fn build(&self, _input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         anyhow::bail!("this build of zx-im has no such platform: it was built without the cargo feature `feishu`")
     }
 }
@@ -182,16 +183,23 @@ fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, V
     }
 }
 
+/// Longest wait a rate limit is given: a longer one is more likely a bad header than a real
+/// wait (Slack's limits, for one, are per minute: Rate limits, "Tiers"), and a send that
+/// waits that long is dropped by the server's outbound timeout anyway, a connection attempt
+/// by the stop.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
+
 /// How long a rate-limited call waits before it is tried again: the seconds in the header
-/// `name` of `headers`, the answer's, in which the platform says so, but at most `longest`;
-/// one second when that header is missing, not text, or not a number of seconds.
-fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName, longest: Duration) -> Duration {
+/// `name` of `headers`, the answer's, in which the platform says so, but at most
+/// [`MAX_RATE_LIMIT_WAIT`]; one second when that header is missing, not text, or not a
+/// number of seconds.
+fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName) -> Duration {
     let secs = headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(1);
-    Duration::from_secs(secs).min(longest)
+    Duration::from_secs(secs).min(MAX_RATE_LIMIT_WAIT)
 }
 
 /// One delivery's events once its messages are kept in the backlog ([`keep`]).
@@ -474,13 +482,12 @@ mod tests {
 
     #[test]
     fn a_rate_limit_wait_is_capped_and_defaults_to_one_second() {
-        let longest = Duration::from_secs(60);
         let wait = |value: Option<HeaderValue>| {
             let mut headers = HeaderMap::new();
             if let Some(value) = value {
                 headers.insert(RETRY_AFTER, value);
             }
-            rate_limit_wait(&headers, RETRY_AFTER, longest)
+            rate_limit_wait(&headers, RETRY_AFTER)
         };
         assert_eq!(wait(None), Duration::from_secs(1));
         assert_eq!(wait(Some(HeaderValue::from_static("soon"))), Duration::from_secs(1));
@@ -491,11 +498,11 @@ mod tests {
         );
         assert_eq!(wait(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
         assert_eq!(wait(Some(HeaderValue::from_static(" 5 "))), Duration::from_secs(5));
-        assert_eq!(wait(Some(HeaderValue::from_static("100000"))), longest);
+        assert_eq!(wait(Some(HeaderValue::from_static("100000"))), MAX_RATE_LIMIT_WAIT);
         // Only the named header counts.
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
-        assert_eq!(rate_limit_wait(&headers, "x-reset", longest), Duration::from_secs(1));
+        assert_eq!(rate_limit_wait(&headers, "x-reset"), Duration::from_secs(1));
     }
 
     #[test]
