@@ -88,7 +88,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（IM 服务丢消息已由 D33 的 backlog 解决）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
-- 图片（D36）：只对模拟服务测试过，没有在真实的 OpenAI 兼容服务与 Anthropic API 上验收；尺寸与大小都在上限内的 GIF 原样发送，动图是否被各服务接受没有验证；每张图片按约 1200 token 估算上下文，不按尺寸。会话里的图片每次请求都重发：图片多时请求体可能超出服务的上限（Anthropic 以 413 `request_too_large` 拒绝），provider 把它归为上下文过长，开启自动摘要时摘要一次再试（摘要不保留图片），没开时运行失败；没有按请求只发最近几张的做法。
+- 图片（D36）：经 `openai` provider 在 ⚑ D:5/CHINA FLAG: DeepSeek 与经 OpenRouter 的 Claude Haiku 5.5 上验证过（2026-11-20，第 6 节），Anthropic provider 收发图片没有在真实 API 上验证；尺寸与大小都在上限内的 GIF 原样发送，动图是否被各服务接受没有验证；每张图片按约 1200 token 估算上下文，不按尺寸。会话里的图片每次请求都重发：图片多时请求体可能超出服务的上限（Anthropic 以 413 `request_too_large` 拒绝），provider 把它归为上下文过长，开启自动摘要时摘要一次再试（摘要不保留图片），没开时运行失败；没有按请求只发最近几张的做法。
 - IM 的图片（D36）：读入的线程历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；Slack 的 `app_mention` 事件是否带 `files` 没有核实；⚑ D:5/CHINA FLAG: 飞书下载消息资源所需的权限按官方文档写，富文本里 @ 的写法按文档示例写，都没在真实租户验证。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
 - 音频与视频不收：MCP 结果与 ACP 提问里的音频照旧略去。需要时再定：加一种输入只发给声明能收的模型，或由宿主先转成文字；视频交给工具抽帧。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。
@@ -101,7 +101,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 只记录付费或真实环境上的运行；常规测试每个 PR 都跑，CI 覆盖 Linux 与 macOS，本地使用 macOS。
 
-⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: DeepSeek：下表前三行的运行把请求发往该服务的 API]
+⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: DeepSeek：下表中写明经 DeepSeek 的各行把请求发往该服务的 API] Subject to Legal/Export Compliance approval
 
 | 日期 | 运行 | 结果 |
 |---|---|---|
@@ -111,6 +111,9 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 | — | `provider.systemUpdates = "inline"` | 只在一个服务上验证过 |
 | — | `provider.api = "anthropic"` | 只对模拟服务（`crates/zx-agent/tests/anthropic_mock.rs`）测试过，没有调用真实 API |
 | 2026-11-19 | 经 Anthropic provider 向 `claude-haiku-5-5` 验证 `thinking.block_binding`（计划三次请求：产生思考，再以 `"error"` 与 `"drop_block"` 各重放一次改过开头的对话） | 未能进行：第一个请求返回 400 “credit balance is too low”，没有产生用量，其余两次没有发出；这项配置仍只经单元测试与加载检查 |
+| 2026-11-20 | 经 `openai` provider 向 ⚑ D:5/CHINA FLAG: DeepSeek `https://api.deepseek.com` 的 ⚑ D:5/CHINA FLAG: `deepseek-flash`（关闭思考，`maxTokens` 256）：`run` 的纯文本、`read_file` 往返与 `run @图片`，ACP 带图片的一轮；再在 `[[models]]` 声明 `input = ["text", "image"]`，跑 `run @图片` 与 `read_file` 读图 | 均通过。未声明看图时模型收到 `(image omitted: model does not support images)`，会话存原图；ACP 声明 `image: true`；声明后两种图片都答对颜色。8 个请求约 7700 token；事件、会话与 stderr 都不含 API key |
+| 2026-11-20 | 经 `openai` provider 向 OpenRouter `https://openrouter.ai/api/v1` 的 `anthropic/claude-haiku-5.5`：纯文本、`run @图片`、`read_file` 读图 | 均通过。4 个请求约 4500 token，按 `[[models]]` 的单价约 $0.0006，第一次运行的花费与 OpenRouter 记下的一致 |
+| 2026-11-20 | 经 Anthropic provider 向 `claude-haiku-5-5`（纯文本、图片、`thinking.block_binding`） | 未能进行：第一个请求同样返回 400 “credit balance is too low”，没有用量。OpenRouter 的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）按其文档以 `Authorization: Bearer` 认证，这个 provider 只发 `x-api-key`，没有经它测试 |
 | — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`crates/zx-cli/tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
 | 2026-11-01 | `deploy/kubernetes/` 在本机 Docker Desktop 的 Kubernetes v1.36.1（2 个 arm64 节点，local-path ext4），假模型 | 镜像、只读账号、run、chat 审批、`operator.yaml` 的每项写操作、定时巡检、脱敏、会话文件锁与清理均符合预期；多集群由同一集群扮演远端，新增集群约 1 分钟后生效。读 agent 自身 `/proc/<pid>/environ` 被拒一项在 agent 不再设为不可 dump 后不成立，未重测 |
 | — | IM 组件（当时名为 `serve`，此后改为子命令 `im`、再拆为程序 `zx-im`，都未重测），Slack 指向不可达地址 | 启动、`/proc/1/environ` 中没有 API key、重试日志不含凭据、SIGTERM 后退出码 0、孤儿进程被回收、与 `multicluster` 组件共存 |
@@ -130,4 +133,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.59 · 2026年11月
+ROADMAP.md · v0.60 · 2026年11月
