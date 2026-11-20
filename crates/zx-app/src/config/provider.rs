@@ -11,7 +11,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use zx_agent::ai::Reasoning;
-use zx_agent::ai::anthropic::AnthropicConfig;
+use zx_agent::ai::anthropic::{AnthropicConfig, ApiKeyHeader};
 use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
 
@@ -108,13 +108,13 @@ struct BuiltInKeys {
     max_tokens_field: Option<String>,
     fill_missing_reasoning: bool,
     prompt_cache_key: bool,
+    api_key_header: Option<String>,
 }
 
 impl BuiltInKeys {
     /// The keys of `options`, checked: an address that is not empty, a positive idle timeout,
-    /// request fields and headers with names, and no header named `key_header`, which comes
-    /// from the API key.
-    fn read(options: &toml::Table, key_header: &str) -> Result<Self> {
+    /// and request fields and headers with names.
+    fn read(options: &toml::Table) -> Result<Self> {
         let keys: Self = toml::Value::Table(options.clone())
             .try_into()
             .context("invalid [provider] settings")?;
@@ -132,12 +132,19 @@ impl BuiltInKeys {
         );
         for name in keys.headers.keys() {
             ensure!(!name.trim().is_empty(), "provider.headers: a header has no name");
+        }
+        Ok(keys)
+    }
+
+    /// Refuse a header named `key_header`, which carries the API key.
+    fn refuse_key_header(&self, key_header: &str) -> Result<()> {
+        for name in self.headers.keys() {
             ensure!(
                 !name.trim().eq_ignore_ascii_case(key_header),
                 "provider.headers: {key_header} comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
             );
         }
-        Ok(keys)
+        Ok(())
     }
 
     /// Refuse the keys only the OpenAI-compatible provider reads, for the provider `api`.
@@ -160,7 +167,12 @@ impl BuiltInKeys {
 /// The settings of the OpenAI-compatible provider that `options` give, over its defaults,
 /// checked, also against the `reasoning` level; without the API key, which the assembly reads.
 pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<OpenAiConfig> {
-    let keys = BuiltInKeys::read(options, "Authorization")?;
+    let keys = BuiltInKeys::read(options)?;
+    keys.refuse_key_header("Authorization")?;
+    ensure!(
+        keys.api_key_header.is_none(),
+        "provider.apiKeyHeader is a setting of the {ANTHROPIC} provider, not of {OPENAI}"
+    );
     let mut config = OpenAiConfig::default();
     if let Some(url) = keys.base_url {
         config.base_url = url;
@@ -196,9 +208,15 @@ pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>)
 /// defaults, checked, also against the `reasoning` level; without the API key, which the
 /// assembly reads.
 pub(crate) fn anthropic_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<AnthropicConfig> {
-    let keys = BuiltInKeys::read(options, "x-api-key")?;
+    let keys = BuiltInKeys::read(options)?;
     keys.refuse_openai_keys(ANTHROPIC)?;
-    let mut config = AnthropicConfig::default();
+    let api_key_header: ApiKeyHeader =
+        parsed("provider.apiKeyHeader", keys.api_key_header.clone())?.unwrap_or_default();
+    keys.refuse_key_header(api_key_header.name())?;
+    let mut config = AnthropicConfig {
+        api_key_header,
+        ..AnthropicConfig::default()
+    };
     // The address, the request fields, the headers and the idle timeout are set as for the
     // OpenAI-compatible provider: the two configurations share no type to set them through.
     if let Some(url) = keys.base_url {
@@ -229,6 +247,34 @@ mod tests {
 
     fn table(text: &str) -> toml::Table {
         toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn the_anthropic_key_may_go_as_a_bearer_token_and_no_header_may_carry_it_too() {
+        let bearer = anthropic_config(&table("apiKeyHeader = 'authorization'"), None).unwrap();
+        assert_eq!(bearer.api_key_header, ApiKeyHeader::Authorization);
+        let error = format!(
+            "{:#}",
+            anthropic_config(
+                &table("apiKeyHeader = 'authorization'\nheaders = { Authorization = 'Bearer x' }"),
+                None
+            )
+            .unwrap_err()
+        );
+        assert!(
+            error.contains("provider.headers: authorization comes from the API key"),
+            "{error}"
+        );
+        // By default the key goes as x-api-key, and a gateway's own Authorization may be set.
+        assert!(anthropic_config(&table("headers = { Authorization = 'Bearer x' }"), None).is_ok());
+        let error = format!(
+            "{:#}",
+            openai_config(&table("apiKeyHeader = 'authorization'"), None).unwrap_err()
+        );
+        assert!(
+            error.contains("provider.apiKeyHeader is a setting of the anthropic provider"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -305,6 +351,11 @@ mod tests {
             anthropic_config(&table("systemUpdates = 'merge'"), None).unwrap_err()
         );
         assert!(error.contains("provider.systemUpdates: unknown variant"), "{error}");
+        let error = format!(
+            "{:#}",
+            anthropic_config(&table("apiKeyHeader = 'bearer'"), None).unwrap_err()
+        );
+        assert!(error.contains("provider.apiKeyHeader: unknown variant"), "{error}");
         // A provider a host registers checks its own keys.
         let custom = ProviderSettings {
             api: "mine".into(),

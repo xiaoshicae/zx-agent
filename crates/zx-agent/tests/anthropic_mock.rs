@@ -6,25 +6,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, DEFAULT_API_VERSION};
+use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, ApiKeyHeader, DEFAULT_API_VERSION};
 use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::events::RunOutcome;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::{RunnerSetup, config, fast_retry};
 
-/// A runner whose Anthropic provider talks to `server`, with a bash tool and a one-line
-/// system prompt.
-fn setup(server: &MockServer) -> RunnerSetup {
-    let provider = AnthropicMessages::new(AnthropicConfig {
+/// The settings of a provider that talks to `server` with the key `test-key`.
+fn settings(server: &MockServer) -> AnthropicConfig {
+    AnthropicConfig {
         // The fake serves any path; the provider adds `/v1/messages` to the address.
         base_url: server.base_url.trim_end_matches("/v1").to_string(),
         api_key: "test-key".into(),
         use_system_proxy: false,
         idle_timeout: Duration::from_secs(10),
         ..AnthropicConfig::default()
-    })
-    .unwrap();
+    }
+}
+
+/// A runner whose Anthropic provider talks to `server`, with a bash tool and a one-line
+/// system prompt.
+fn setup(server: &MockServer) -> RunnerSetup {
+    setup_with(settings(server))
+}
+
+/// [`setup`] with the provider's `settings`.
+fn setup_with(settings: AnthropicConfig) -> RunnerSetup {
+    let provider = AnthropicMessages::new(settings).unwrap();
     let mut config = config(Arc::new(provider), vec![Arc::new(BashTool::default())]);
     config.model = "claude-test".into();
     config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "You are a test.");
@@ -80,6 +89,25 @@ fn answer(parts: Vec<Vec<Value>>) -> Reply {
 fn error_reply(status: u16, headers: &str, kind: &str, message: &str) -> Reply {
     let body = json!({"type": "error", "error": {"type": kind, "message": message}}).to_string();
     Reply::error(status, headers, &body)
+}
+
+#[tokio::test]
+async fn the_key_goes_as_a_bearer_token_when_the_settings_say_so() {
+    let server = MockServer::start(vec![answer(vec![started(), text(0, "ok"), ended("end_turn")])]).await;
+    let (runner, _) = setup_with(AnthropicConfig {
+        api_key_header: ApiKeyHeader::Authorization,
+        ..settings(&server)
+    })
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    // The fake records the request head in lower case.
+    let headers = &server.requests()[0].headers;
+    assert!(headers.contains("authorization: bearer test-key"), "{headers}");
+    assert!(!headers.contains("x-api-key"), "{headers}");
 }
 
 #[tokio::test]

@@ -4,8 +4,8 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde::de::IntoDeserializer;
 use serde::de::value::{Error as NameError, StrDeserializer};
+use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zx_ai::ApiKey;
@@ -19,8 +19,11 @@ pub const DEFAULT_API_VERSION: &str = "2026-10-21";
 /// The header that names the API version.
 pub(crate) const VERSION_HEADER: &str = "anthropic-version";
 
-/// The header that carries the API key.
+/// The header the Anthropic API takes the API key in.
 pub(crate) const KEY_HEADER: &str = "x-api-key";
+
+/// The header that carries the API key as a bearer token.
+const BEARER_HEADER: &str = "authorization";
 
 /// Default maximum raw SSE response bytes per model request, thinking included.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -45,12 +48,16 @@ pub struct AnthropicConfig {
     /// Base URL without `/v1/messages`, e.g. `https://api.anthropic.com`: an http or https
     /// address that ends with its path, without a query or a fragment.
     pub base_url: String,
-    /// The key sent as `x-api-key`, fixed or asked for before each request.
+    /// The key, fixed or asked for before each request, sent in the header
+    /// `api_key_header` names.
     pub api_key: ApiKey,
+    /// Which header carries the key: `x-api-key` unless a server that offers the same
+    /// protocol takes it as a bearer token.
+    pub api_key_header: ApiKeyHeader,
     /// Headers added to every request, such as `anthropic-beta`. One named
-    /// `anthropic-version` replaces [`DEFAULT_API_VERSION`]; `x-api-key` is refused, since the
-    /// key goes through `api_key`. Neither the names nor the values are recorded in the
-    /// session.
+    /// `anthropic-version` replaces [`DEFAULT_API_VERSION`]; the one `api_key_header` names
+    /// is refused, since the key goes through `api_key`. Neither the names nor the values
+    /// are recorded in the session.
     pub headers: Vec<(String, String)>,
     /// Name recorded on assistant messages.
     pub provider_name: String,
@@ -72,6 +79,7 @@ impl Default for AnthropicConfig {
         Self {
             base_url: "https://api.anthropic.com".to_string(),
             api_key: ApiKey::None,
+            api_key_header: ApiKeyHeader::default(),
             headers: Vec::new(),
             provider_name: "anthropic".to_string(),
             idle_timeout: Duration::from_secs(120),
@@ -91,7 +99,7 @@ impl AnthropicConfig {
         check_base_url(&self.base_url)?;
         check_limits(self.idle_timeout, self.max_response_bytes, self.max_sse_event_bytes)?;
         self.body.check()?;
-        check_headers(&self.headers, KEY_HEADER)
+        check_headers(&self.headers, self.api_key_header.name())
     }
 
     /// Whether the headers name the API version, in place of the default.
@@ -108,6 +116,7 @@ impl fmt::Debug for AnthropicConfig {
         f.debug_struct("AnthropicConfig")
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key)
+            .field("api_key_header", &self.api_key_header)
             .field(
                 "headers",
                 &self.headers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
@@ -183,17 +192,51 @@ pub enum SystemUpdates {
     Inline,
 }
 
-/// Parsed by the names serde gives the variants, as the named settings of the
-/// OpenAI-compatible provider are: case and surrounding whitespace are ignored, and the error
-/// lists the names.
 impl std::str::FromStr for SystemUpdates {
     type Err = String;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let name = text.trim().to_ascii_lowercase();
-        let name: StrDeserializer<'_, NameError> = name.as_str().into_deserializer();
-        Self::deserialize(name).map_err(|error| error.to_string())
+        by_name(text)
     }
+}
+
+/// Which header carries the API key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiKeyHeader {
+    /// `x-api-key: <key>`, as the Anthropic API takes it.
+    #[default]
+    XApiKey,
+    /// `Authorization: Bearer <key>`, as a gateway that offers the same protocol may take
+    /// it, such as OpenRouter's.
+    Authorization,
+}
+
+impl ApiKeyHeader {
+    /// The header's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::XApiKey => KEY_HEADER,
+            Self::Authorization => BEARER_HEADER,
+        }
+    }
+}
+
+impl std::str::FromStr for ApiKeyHeader {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        by_name(text)
+    }
+}
+
+/// A setting parsed by the names serde gives its variants, as the named settings of the
+/// OpenAI-compatible provider are: case and surrounding whitespace are ignored, and the error
+/// lists the names.
+fn by_name<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+    let name = text.trim().to_ascii_lowercase();
+    let name: StrDeserializer<'_, NameError> = name.as_str().into_deserializer();
+    T::deserialize(name).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -208,6 +251,26 @@ mod tests {
         assert_eq!("collapse".parse(), Ok(SystemUpdates::Collapse));
         let error = "merge".parse::<SystemUpdates>().unwrap_err();
         assert!(error.contains("`collapse`") && error.contains("`inline`"), "{error}");
+    }
+
+    #[test]
+    fn the_key_goes_in_the_header_the_settings_name_and_no_other_header_sets_it() {
+        assert_eq!(" X-API-Key ".parse(), Ok(ApiKeyHeader::XApiKey));
+        assert_eq!("authorization".parse(), Ok(ApiKeyHeader::Authorization));
+        let error = "bearer".parse::<ApiKeyHeader>().unwrap_err();
+        assert!(
+            error.contains("`x-api-key`") && error.contains("`authorization`"),
+            "{error}"
+        );
+
+        let with = |api_key_header, name: &str| AnthropicConfig {
+            api_key_header,
+            headers: vec![(name.into(), "v".into())],
+            ..AnthropicConfig::default()
+        };
+        assert!(with(ApiKeyHeader::Authorization, "Authorization").check().is_err());
+        assert!(with(ApiKeyHeader::Authorization, "x-api-key").check().is_ok());
+        assert!(with(ApiKeyHeader::XApiKey, "Authorization").check().is_ok());
     }
 
     #[test]
