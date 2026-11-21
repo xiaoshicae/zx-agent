@@ -21,7 +21,7 @@
 | `--no-session` | 关闭 | 仅 `chat` 与 `acp`：不写会话文件 |
 | `--resume [ID 前缀]` | 关闭 | 仅 `chat`，不能与 `--session` 同用 |
 | `--continue` | 关闭 | 仅 `run`，须给出已存在的 `--session`，不能再给提示词：不加新输入，让模型接着回答（如崩溃之后）。会话以失败或被取消的回答结尾时先省略该回答；以完成的回答结尾且没有排队的消息时以 1 结束、不发请求 |
-| `--output` | `text` | 仅 `run` 与 `chat`。`text`：进度与诊断在 stderr，最终回答在 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
+| `--output` | `text` | 仅 `run` 与 `chat`。`text`：进度与诊断在 stderr，最终回答在 stdout；`run` 没有得到回答时（失败、超时、被中止，或模型还要请求时预算用完）stdout 为空，最后的文字留在会话与 `jsonl` 的 `run_end` 里，截断的回答见退出码 6；`jsonl`：每个事件一行 JSON，输出到 stdout |
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
@@ -236,4 +236,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.23 · 2026年11月
+REFERENCE.md · v0.24 · 2026年11月
