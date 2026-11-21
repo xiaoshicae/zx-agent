@@ -14,7 +14,8 @@ use zx_agent::transcript::{CustomMessage, SessionQuery};
 use zx_agent::{Agent, Session, SessionOptions, compaction};
 use zx_app::shutdown::next_event;
 
-use super::approval::{ApprovalEvents, ApprovalUpdate};
+use super::progress::{RunEvents, RunUpdate};
+use super::render::Ending;
 use super::{Replies, SessionKey, Shared, timed};
 use crate::{Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, UserId};
 
@@ -139,6 +140,28 @@ impl Finished {
     }
 }
 
+/// The message that says that the conversation's work goes on ([`Replies::working`]), which
+/// what ends the work takes the place of.
+pub(super) enum Status {
+    /// Posting it failed: what ends the work is posted on its own.
+    Missing,
+    /// Nothing was posted after it: what ends the work replaces it.
+    Latest(MessageRef),
+    /// An approval card was posted after it: an answer goes below the card, where it is read
+    /// last, and the status says so ([`Replies::answer_below`]); a notice replaces it.
+    Covered(MessageRef),
+}
+
+impl Status {
+    /// An approval card was posted after the status.
+    pub(super) fn cover(&mut self) {
+        *self = match std::mem::replace(self, Self::Missing) {
+            Self::Latest(posted) | Self::Covered(posted) => Self::Covered(posted),
+            Self::Missing => Self::Missing,
+        };
+    }
+}
+
 /// Where the conversation posts and reports. Separate from the worker (`worker.rs`) so that
 /// posting borrows only these fields while the worker's own state stays with the worker.
 pub(super) struct Outlet {
@@ -151,10 +174,27 @@ pub(super) struct Outlet {
 impl Outlet {
     /// Post text in the conversation. A failure is reported to the operator and returns `None`.
     pub(super) async fn post(&self, text: String) -> Option<MessageRef> {
-        let message = Post::Text(text);
+        self.send(&Post::Text(text)).await
+    }
+
+    /// Post `message` in the conversation. A failure is reported to the operator and returns
+    /// `None`.
+    async fn send(&self, message: &Post) -> Option<MessageRef> {
         self.shared
-            .bounded(Some(&self.key), "post", self.channel.send(&self.to, &message))
+            .bounded(Some(&self.key), "post", self.channel.send(&self.to, message))
             .await
+    }
+
+    /// Post that the work goes on ([`Replies::working`]), kept before the work goes on:
+    /// should the process end from here on, the next start replaces it.
+    pub(super) async fn post_status(&self) -> Status {
+        match self.post(self.replies().working.clone()).await {
+            Some(status) => {
+                self.shared.keep_status(&self.key, &status).await;
+                Status::Latest(status)
+            }
+            None => Status::Missing,
+        }
     }
 
     /// Replace a posted message; false when it was not replaced. A failure is reported to the
@@ -274,26 +314,22 @@ impl Outlet {
         timed(self.shared.outbound_timeout, "post the approval request", post).await
     }
 
-    /// Run `prompt` in `session` to its end, as the task of a run does. How its approvals
-    /// end goes to the worker through `updates`; `stop`, the server stopping, cancels the
-    /// run, which is still read to its end.
+    /// Run `prompt` in `session` to its end, as the task of a run does. Its approvals, and the
+    /// answers it goes on from, go to the worker through `updates`; `stop`, the server
+    /// stopping, cancels the run, which is still read to its end.
     pub(super) fn run(
         &self,
         session: &Session,
         prompt: PendingInput,
-        updates: &mpsc::Sender<ApprovalUpdate>,
+        updates: &mpsc::Sender<RunUpdate>,
         stop: CancellationToken,
     ) -> impl Future<Output = Result<Finished, SessionError>> + Send + 'static {
         let session = session.clone();
-        let approvals = ApprovalEvents {
-            updates: updates.clone(),
-            key: self.key.clone(),
-            sink: Arc::clone(&self.shared.sink),
-        };
+        let mut events = RunEvents::new(updates.clone(), self.key.clone(), Arc::clone(&self.shared.sink));
         async move {
             let mut run = session.send(prompt)?;
             while let Some(event) = next_event(&mut run, &session, &stop).await {
-                approvals.forward(&event);
+                events.forward(&event);
             }
             Ok(Finished::Run(run.wait().await))
         }
@@ -314,29 +350,54 @@ impl Outlet {
         }
     }
 
-    /// Replace the status with `answer`, how the work ended, or post it when no status was
-    /// posted or the status could not be replaced.
-    pub(super) async fn answer(&self, answer: String, status: Option<MessageRef>) {
-        match status {
-            Some(posted) => {
-                // Forgotten first: should the process end between the two, the status still
-                // says the work goes on, as it did before statuses were kept; the other order
-                // could have the next start replace this answer.
-                self.shared.forget_status(&self.key, &posted).await;
-                let replacement = Replacement::Text(answer);
-                // Forgotten, the status would say the work goes on for good. An update that
-                // failed after the platform took it, as one that timed out may have, shows
-                // the answer twice: better than never.
-                if !self.replace(&posted, &replacement).await
-                    && let Replacement::Text(answer) = replacement
-                {
-                    self.post(answer).await;
-                }
+    /// Put `ending` where the status was, or, for an answer once a card covers the status,
+    /// below the card; post it on its own when no status was posted.
+    pub(super) async fn end(&self, ending: Ending, status: Status) {
+        match (ending, status) {
+            (Ending::Answer(answer), Status::Covered(posted)) => self.answer_below(answer, posted).await,
+            (Ending::Answer(text) | Ending::Notice(text), Status::Latest(posted) | Status::Covered(posted)) => {
+                self.replace_status(text, posted).await;
             }
-            None => {
-                self.post(answer).await;
+            (Ending::Answer(text) | Ending::Notice(text), Status::Missing) => {
+                self.post(text).await;
             }
         }
+    }
+
+    /// Replace the status `posted` with `text`, or post `text` when the status could not be
+    /// replaced.
+    async fn replace_status(&self, text: String, posted: MessageRef) {
+        // Forgotten first: should the process end between the two, the status still says
+        // the work goes on, as it did before statuses were kept; the other order could have
+        // the next start replace this text.
+        self.shared.forget_status(&self.key, &posted).await;
+        let replacement = Replacement::Text(text);
+        // Forgotten, the status would say the work goes on for good. An update that failed
+        // after the platform took it, as one that timed out may have, shows the text twice:
+        // better than never.
+        if !self.replace(&posted, &replacement).await
+            && let Replacement::Text(text) = replacement
+        {
+            self.post(text).await;
+        }
+    }
+
+    /// Post `answer` below what covers the status `posted`, and have the status say so. An
+    /// answer that could not be posted replaces the status instead.
+    async fn answer_below(&self, answer: String, posted: MessageRef) {
+        // Forgotten first, as in `replace_status`.
+        self.shared.forget_status(&self.key, &posted).await;
+        let message = Post::Text(answer);
+        let text = if self.send(&message).await.is_some() {
+            self.replies().answer_below.clone()
+        } else if let Post::Text(answer) = message {
+            // Not posted: the answer takes the status's place, above the card, rather than
+            // nowhere.
+            answer
+        } else {
+            unreachable!("the answer is posted as text");
+        };
+        self.replace(&posted, &Replacement::Text(text)).await;
     }
 
     pub(super) fn failed(&self, error: String) {

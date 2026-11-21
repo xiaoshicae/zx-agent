@@ -36,6 +36,33 @@ async fn a_running_status_is_kept_and_forgotten_before_the_answer_replaces_it() 
 }
 
 #[tokio::test]
+async fn the_status_posted_as_a_run_goes_on_after_an_answer_is_kept_in_its_turn() {
+    let gate = Gate::new();
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first answer"), FauxStep::text("second answer")],
+        answer_gate: Some(gate.clone()),
+        statuses: Some(Vec::new()),
+        ..Setup::default()
+    });
+    h.say("m1", None, "write it").await;
+    let first = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    assert_eq!(h.next().await, Sent::Kept(first.clone()));
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    h.say("m2", Some("m1"), "and one more thing").await;
+    h.acknowledged(&thread("m1"), "m2").await;
+    gate.release.cancel();
+    assert_eq!(h.next().await, Sent::Forgot(first.clone()));
+    h.updated(&first, text("first answer")).await;
+    let second = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    assert_eq!(h.next().await, Sent::Kept(second.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(second.clone()));
+    h.updated(&second, text("second answer")).await;
+    let statuses = h.statuses.clone().unwrap();
+    h.stop().await.unwrap();
+    assert!(statuses.kept().is_empty());
+}
+
+#[tokio::test]
 async fn a_status_left_by_an_earlier_process_is_replaced_and_forgotten() {
     let left = left_in("m0", "s0");
     let mut h = start(Setup {
