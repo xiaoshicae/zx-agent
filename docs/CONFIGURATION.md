@@ -108,7 +108,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 # requestFields = { thinking = { type = "disabled" } }
 ```
 
-思考模式默认开启，`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
+思考模式默认开启（2026-11-21 实测：不带 `thinking` 字段时与显式开启一样返回推理内容；不设 `reasoning` 时 zx-agent 不发这个字段，由服务的默认决定），`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
 
 ⚑ D:5/CHINA FLAG: `deepseek-flash` 收图片（[Vision 指南](https://api-docs.deepseek.com/guides/vision)），要发图片时在 `[[models]]` 写 `input = ["text", "image"]`；⚑ D:5/CHINA FLAG: `deepseek-v4-pro` 不收（[价格页](https://api-docs.deepseek.com/quick_start/pricing)）。`deepseek-flash` 收发图片在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；`deepseek-v4-pro` 不收图片只依据文档。
 
@@ -129,7 +129,7 @@ input = ["text", "image"]
 cost = { input = 0.10, output = 0.50, cacheRead = 0.01, cacheWrite = 0.125 }   # 美元每百万 token
 ```
 
-模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key。这个示例在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；当时 `cost` 只写了 `input` 与 `output`，缓存的读写单价（`input_cache_read`、`input_cache_write`）是事后按价目补的。`[[models]]` 不写缓存单价时按 0 计，读写缓存的请求算出的花费就偏低，花费预算也随之失准。提示词达到 10 万 token 时，OpenRouter 按更高一档的单价计费（`pricing.overrides`），`[[models]]` 只有一档。
+模型 ID、单价与收哪些输入，由 `https://openrouter.ai/api/v1/models` 列出（`pricing`、`architecture.input_modalities`），查询不需要 key，缓存的读写单价（`input_cache_read`、`input_cache_write`）也在其中。`[[models]]` 不写缓存单价时按 0 计，读写缓存的请求算出的花费就偏低，花费预算也随之失准。提示词达到 10 万 token 时，OpenRouter 按更高一档的单价计费（`pricing.overrides`），`[[models]]` 只有一档。
 
 调 Claude 也可以用 `anthropic` provider，经 OpenRouter 的 Anthropic Messages 兼容接口（`https://openrouter.ai/api/v1/messages`）。这个接口按其文档以 `Authorization: Bearer` 认证，所以要设 `apiKeyHeader`；`model` 与 `[[models]]` 同上：
 
@@ -344,4 +344,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.35 · 2026年11月
+CONFIGURATION.md · v0.36 · 2026年11月
