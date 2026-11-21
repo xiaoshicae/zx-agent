@@ -89,7 +89,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
 - 图片（D36）：经 `openai` provider 在 ⚑ D:5/CHINA FLAG: DeepSeek 上验证过（2026-11-20，第 6 节），Anthropic provider 收发图片没有在真实 API 上验证；尺寸与大小都在上限内的 GIF 原样发送：⚑ D:5/CHINA FLAG: DeepSeek 接受，动图答的是第一帧（2026-11-20），其他服务没有验证；每张图片按约 1200 token 估算上下文，不按尺寸。会话里的图片每次请求都重发：图片多时请求体可能超出服务的上限（Anthropic 以 413 `request_too_large` 拒绝），provider 把它归为上下文过长，开启自动摘要时摘要一次再试（摘要不保留图片），没开时运行失败；没有按请求只发最近几张的做法。
-- IM 的图片（D36）：读入的线程历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；Slack 的 `app_mention` 事件是否带 `files` 没有核实；⚑ D:5/CHINA FLAG: 飞书下载消息资源所需的权限按官方文档写，富文本里 @ 的写法按文档示例写，都没在真实租户验证。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
+- IM 的图片（D36）：读入的线程历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；⚑ D:5/CHINA FLAG: 飞书下载消息资源所需的权限按官方文档写，富文本里 @ 的写法按文档示例写，都没在真实租户验证。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
 - 音频与视频不收：MCP 结果与 ACP 提问里的音频照旧略去。需要时再定：加一种输入只发给声明能收的模型，或由宿主先转成文字；视频交给工具抽帧。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。
 - 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（14 个中 12 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。
@@ -115,6 +115,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 | 2026-11-20 | 经 Anthropic provider 向 `claude-haiku-5-5`（纯文本、图片、`thinking.block_binding`） | 未能进行：第一个请求同样返回 400 “credit balance is too low”，没有用量 |
 | 2026-11-20 | 直连 ⚑ D:5/CHINA FLAG: DeepSeek `https://api.deepseek.com` 的 ⚑ D:5/CHINA FLAG: `deepseek-flash`（`openai` provider，关闭思考，清空环境变量运行、只传 key）：`run` 的 bash、策略拒绝加 `--fail-on-denied`、`--token-budget`、`--cost-budget`、输出截断与续写、不存在的模型、`--timeout-secs` 与 Ctrl+C 之后的 `--continue`、一个回答里的两个 `read_file`、超出上限的图片、GIF；开启思考的工具往返；`chat` 的 `/compact`、`--resume` 与 `AGENTS.md`；`acp` 的审批（允许一次、拒绝）与取消；另有 10 个不发请求的场景（配置与参数错误以 2 退出，`sessions` 与 chat 的本地命令以 0 退出） | 均符合预期。退出码依次为 0、9、7、8、6、1、4、5，两次 `--continue` 都续上；bash 读不到 key 所在的变量；两个调用的结果按调用顺序写入；2600×2000、7.9 MB 的 PNG 缩成 2000×1538 的 JPEG 后答对颜色；GIF 被接受，先绿后蓝的动图答“绿”；带推理内容的工具调用回传后，下一次请求成功；ACP 允许后执行，拒绝后调用为 failed，取消后 `stopReason` 为 `cancelled`；`/compact` 的摘要比原对话还长时保留原对话。发现三处显示问题，另行修正：预算报错的花费按四位小数显示（0.000062 显示为 0.0001）、`/compact` 失败时同一行打印两次、摘要请求不计入 `/status`。约 41 个请求、4.3 万 token；输出、会话与 stderr 都不含 API key |
 | 2026-11-21 | 直连 ⚑ D:5/CHINA FLAG: DeepSeek 的 ⚑ D:5/CHINA FLAG: `deepseek-flash`（清空环境变量运行、只传 key）：同一道需要推理的题，直接请求时不带 `thinking` 字段、显式开启、显式关闭各 3 次；本地服务记下 zx-agent 不设 `reasoning` 时的请求体；zx-agent 不带这个字段跑 2 次；经本地的 CONNECT 代理（只转发 TLS，不解密）把第一条连接切断两次：一次在收到约 15 KB 时（流的前 18%），一次在 TLS 握手中 | 默认开启思考：不带字段的 3 次都返回推理内容（69–99 个推理 token），与显式开启相同，显式关闭的 3 次都没有；zx-agent 不设 `reasoning` 时请求体不带思考字段，两次运行都记下了思考块。两次切断都在约 2 秒后重试一次并完成（`retries=1`，退出 0）：流中途断开时，会话先记下失败的回答，再记 `context_edit`，用户消息没有重发；握手中断开时，第一个请求没有到达服务。15 个请求约 2 千 token；输出与会话都不含 API key |
+| 2026-11-21 | `zx-im` 接真实的 Slack 工作区（Socket Mode），模型为直连的 ⚑ D:5/CHINA FLAG: `deepseek-flash`：频道里 @ 机器人、线程里不 @ 接话、自动放行的只读命令、未授权与已授权的私聊、任务进行中 SIGTERM、停机期间发的私聊、`/cancel`（空闲与运行中）、`/compact`、`/new`、空闲释放后再发消息、审批卡片的放行与随任务超时的取消、@ 时附图片 | 均符合文档：停机期间的消息在重启约 1 分钟后由 Slack 重投并得到回答；`app_mention` 事件带 `files`，bot 缺 `files:read` 时下载图片得到 403，模型收到说明；放行后 bash 读不到两个 Slack token 与 key 所在的变量，会话与日志里没有它们的值。发现两处显示问题与一处日志时间，另行修正：模型答完后才读到插话时，前一个回答不显示；回答排在审批卡片之上；`approval` 日志的时间取在卡片改完之后 |
 | — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`crates/zx-cli/tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
 | 2026-11-01 | `deploy/kubernetes/` 在本机 Docker Desktop 的 Kubernetes v1.36.1（2 个 arm64 节点，local-path ext4），假模型 | 镜像、只读账号、run、chat 审批、`operator.yaml` 的每项写操作、定时巡检、脱敏、会话文件锁与清理均符合预期；多集群由同一集群扮演远端，新增集群约 1 分钟后生效。读 agent 自身 `/proc/<pid>/environ` 被拒一项在 agent 不再设为不可 dump 后不成立，未重测 |
 | — | IM 组件（当时名为 `serve`，此后改为子命令 `im`、再拆为程序 `zx-im`，都未重测），Slack 指向不可达地址 | 启动、`/proc/1/environ` 中没有 API key、重试日志不含凭据、SIGTERM 后退出码 0、孤儿进程被回收、与 `multicluster` 组件共存 |
@@ -134,4 +135,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.62 · 2026年11月
+ROADMAP.md · v0.63 · 2026年11月

@@ -40,7 +40,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `model` | 模型 ID |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
 | `maxTokens` | 每次回复的输出 token 上限，大于零；不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
-| `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝 |
+| `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝。等待的时间也计入运行的时间上限（`--timeout-secs`）：那个上限先到时，运行以超时结束，审批算作取消 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
 | `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKeyEnv`、`maxRetries` 以外的键 |
@@ -344,4 +344,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.36 · 2026年11月
+CONFIGURATION.md · v0.37 · 2026年11月
