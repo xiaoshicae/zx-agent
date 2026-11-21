@@ -75,11 +75,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-im/tests/im_server/` | IM 服务（线束在 `main.rs`，测试按主题分在同目录的 `conversations`、`commands`、`approvals`、`runs`、`lifecycle`、`statuses`、`images` 里）：会话划分与接话、`/new`、`/cancel` 与 `/compact`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答、要回答的消息的图片下载后交给模型（用不了的在正文里写明原因，至多 4 张，不回答的只写名字） |
+| `crates/zx-im/tests/im_server/` | IM 服务（线束在 `main.rs`，测试按主题分在同目录的 `conversations`、`commands`、`approvals`、`runs`、`lifecycle`、`statuses`、`images` 里）：会话划分与接话、`/new`、`/cancel` 与 `/compact`、审批、运行名额与插话、待处理消息的容量、空闲释放与停止（没处理的消息留在 backlog）、启动时的会话索引与先读线程再建会话（之前没有会话时听到的话不另记）、回答替换不了状态时另发、模型答完后因插话接着运行时先发出这个回答、发过审批卡片后回答另发在卡片之后（发不出时仍替换状态）、审批记录取审批结束的时间、重启后处理 backlog 里留下的消息与替换遗留的状态、处理完的消息再投递时不再回答、要回答的消息的图片下载后交给模型（用不了的在正文里写明原因，至多 4 张，不回答的只写名字） |
 | `crates/zx-im/tests/im_slack.rs` | Slack channel 对假 Slack；存不进 backlog 的消息不确认投递；其他机器人的消息只听不答，自己的不听；消息里的图片只传引用、其他文件略去，用 bot token 下载，超限与别处的 URL 被拒 |
 | ⚑ D:5/CHINA FLAG: `crates/zx-im/tests/im_feishu.rs` | 飞书 channel 对假开放平台；存不进 backlog 的消息不确认投递；图片与富文本消息带图片引用，经消息资源接口下载，被拒与超限报错 |
 | `crates/zx-im/tests/im_cli.rs` | 程序 `zx-im`：配置错误（⚑ D:5/CHINA FLAG: 不带 feature `feishu` 的构建按名字拒绝 `[feishu]` 段）、开始服务前连上 MCP 服务器、完整流程、提示词中说明对话怎样送达的一段、被 SIGKILL 结束后再启动时回答它没处理完的消息（仅 Unix） |
 
 ---
 
-TESTS.md · v0.24 · 2026年11月
+TESTS.md · v0.25 · 2026年11月

@@ -30,14 +30,15 @@ use zx_agent::transcript::CustomMessage;
 use self::cards::Card;
 pub(super) use self::commands::Command;
 use super::admission::{InputBudget, InputPermit};
-use super::approval::ApprovalUpdate;
-use super::outlet::{Asked, Finished, Opened, Outlet};
+use super::outlet::{Asked, Finished, Opened, Outlet, Status};
+use super::progress::RunUpdate;
 use super::received::Receipt;
-use super::render::answer_of;
+use super::render::{Ending, ending_of};
 use super::{ServerEvent, SessionKey, Shared};
 use crate::{Addressee, ApprovalId, Choice, ImChannel, ImageRef, MessageRef, UserId};
 
-/// Approval updates waiting for the worker; [`ApprovalEvents`] explains why few ever wait.
+/// Run updates waiting for the worker; [`RunEvents`](super::progress::RunEvents) explains why
+/// few ever wait.
 const UPDATE_CAPACITY: usize = 16;
 
 /// A message for the conversation, as the router passes it on.
@@ -94,9 +95,10 @@ pub(super) async fn run(setup: WorkerSetup) {
             break;
         }
         tokio::select! {
-            // Updates first: a card is registered, and closed, before the run that asked ends.
+            // Updates first: a card is registered, and closed, and an answer the run went on
+            // from is posted, before the run that sent them ends.
             biased;
-            Some(update) = worker.updated.recv() => worker.approval(update).await,
+            Some(update) = worker.updated.recv() => worker.update(update).await,
             () = worker.stop.cancelled(), if !worker.lifecycle.closing() => {
                 worker.lifecycle = Lifecycle::Stopping;
                 // Input waiting for a slot will not run. A run stops through its token and
@@ -185,8 +187,8 @@ struct Waiting {
 struct Running {
     task: JoinHandle<Result<Finished, SessionError>>,
     slot: OwnedSemaphorePermit,
-    /// The message that says that the work goes on, replaced by its answer at the end.
-    status: Option<MessageRef>,
+    /// The message that says that the work goes on, replaced by its answer.
+    status: Status,
     open: Opened,
     after: AfterRun,
     /// What was asked once `/cancel` or `/new` stopped the run, which takes no more input: it
@@ -283,8 +285,8 @@ struct Worker {
     received: u64,
     retire_to: mpsc::Sender<Retire>,
     stop: CancellationToken,
-    updates: mpsc::Sender<ApprovalUpdate>,
-    updated: mpsc::Receiver<ApprovalUpdate>,
+    updates: mpsc::Sender<RunUpdate>,
+    updated: mpsc::Receiver<RunUpdate>,
     lifecycle: Lifecycle,
     phase: Phase,
     cards: Vec<Card>,
@@ -413,12 +415,7 @@ impl Worker {
         slot: OwnedSemaphorePermit,
         work: impl Future<Output = Result<Finished, SessionError>> + Send + 'static,
     ) {
-        let status = self.out.post(self.out.replies().working.clone()).await;
-        if let Some(status) = &status {
-            // Kept before the work starts: should the process end from here on, the next
-            // start replaces this status.
-            self.out.shared.keep_status(&self.out.key, status).await;
-        }
+        let status = self.out.post_status().await;
         self.phase = Phase::Running(Running {
             task: tokio::spawn(work),
             slot,
@@ -427,6 +424,25 @@ impl Worker {
             after: AfterRun::Continue,
             asked: Vec::new(),
         });
+    }
+
+    async fn update(&mut self, update: RunUpdate) {
+        match update {
+            RunUpdate::Approval(update) => self.approval(update).await,
+            RunUpdate::Answered(answer) => self.answered(answer).await,
+        }
+    }
+
+    /// Post `answer`, which the model finished before the run went on to what was steered
+    /// into it, in place of the status; then post a new status for what follows.
+    async fn answered(&mut self, answer: String) {
+        // Updates are read before the end of the run that sent them, so the run goes on.
+        let Phase::Running(running) = &mut self.phase else {
+            return;
+        };
+        let status = std::mem::replace(&mut running.status, Status::Missing);
+        self.out.end(Ending::Answer(answer), status).await;
+        running.status = self.out.post_status().await;
     }
 
     /// Go on with what `waiting` held once its run slot came: run what was asked, or record
@@ -464,14 +480,14 @@ impl Worker {
         } = running;
         drop(slot);
         let cancelled = matches!(&ended, Ok(finished) if finished.cancelled());
-        let answer = if cancelled && self.lifecycle.closing() {
+        let ending = if cancelled && self.lifecycle.closing() {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
             // the same way and is told the same.
-            self.out.replies().stopped.clone()
+            Ending::Notice(self.out.replies().stopped.clone())
         } else {
-            answer_of(ended, self.out.replies())
+            ending_of(ended, self.out.replies())
         };
-        self.out.answer(answer, status).await;
+        self.out.end(ending, status).await;
         let (open, leftover) = self.leftover(open);
         if self.lifecycle.closing() {
             // A stopping server writes nothing more: what was asked or heard and not written

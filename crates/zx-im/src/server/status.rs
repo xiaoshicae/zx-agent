@@ -20,8 +20,11 @@ const FILES: &str = "status files";
 /// Keeps the status message of each run while it runs: the one that says
 /// [`Replies::working`](super::Replies::working).
 ///
-/// The server keeps a status once it is posted and removes it just before the run's answer
-/// replaces it. What [`list`](Self::list) returns as the server starts is therefore what an
+/// The server keeps a status once it is posted and removes it just before it is replaced: by
+/// an answer, by how the run ended, or by
+/// [`Replies::answer_below`](super::Replies::answer_below) when the answer follows a card. A
+/// run that goes on after an answer posts a new status, kept in turn. What
+/// [`list`](Self::list) returns as the server starts is therefore what an
 /// earlier process left behind when it ended without replacing them, by a crash or a kill;
 /// the server replaces those with [`Replies::interrupted`](super::Replies::interrupted).
 #[async_trait]

@@ -32,10 +32,11 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, Usage};
+use zx_agent::ai::{Message, StopReason, Usage};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
-use zx_agent::events::ApprovalResult;
+use zx_agent::events::{ApprovalResult, Event, EventKind};
+use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{
@@ -109,6 +110,8 @@ struct FakeChannel {
     next: AtomicUsize,
     fail: Option<String>,
     updates: Updates,
+    /// A text the platform refuses to post; it records the post either way.
+    refused_post: Option<String>,
     /// What every thread holds before the bot is mentioned there.
     history: Vec<Said>,
     /// Holds each reading of a thread's history, when there is one.
@@ -190,6 +193,9 @@ impl ImChannel for FakeChannel {
                 posted: posted.clone(),
             })
             .unwrap();
+        if matches!((message, &self.refused_post), (Post::Text(text), Some(refused)) if text == refused) {
+            return Err(ImError::Transport("post refused".into()));
+        }
         Ok(posted)
     }
 
@@ -269,7 +275,7 @@ impl StatusStore for Statuses {
 }
 
 /// Holds what reaches it until it is released, once armed: the setup of the sessions of the
-/// thread `slow-thread`, or the reading of a thread's history.
+/// thread `slow-thread`, the reading of a thread's history, or a run that has an answer.
 struct Gate {
     armed: AtomicBool,
     entered: tokio::sync::Notify,
@@ -330,6 +336,25 @@ impl Summarizer for Held {
     }
 }
 
+/// Holds a run at its gate once the model has finished an answer, before the run looks for
+/// messages steered into it: a message sent meanwhile comes after the answer.
+struct HeldAnswer(Arc<Gate>);
+
+#[async_trait]
+impl Hook for HeldAnswer {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
+        if let EventKind::MessageEnd {
+            message: Message::Assistant(answer),
+            ..
+        } = &event.event
+            && answer.stop_reason == StopReason::Stop
+        {
+            self.0.pass().await;
+        }
+        Ok(())
+    }
+}
+
 /// What the tests know of the sessions the server opens: the scripted model, the `echo`
 /// tool, the storage that keeps them in memory, how often a session was set up, and how
 /// often the server read the storage's headers or listed sessions. It is the agent's session
@@ -372,11 +397,13 @@ impl Sessions {
     /// `approval_timeout`; everything else is allowed. A summary leaves the latest
     /// `keep_recent_bytes` of the talk as they are, the agent's default without a number,
     /// and with `summary_gate` is made by a summarizer that waits there, not by the model.
+    /// With `answer_gate`, a run waits there each time the model has finished an answer.
     fn agent(
         self: &Arc<Self>,
         approval_timeout: Duration,
         keep_recent_bytes: Option<usize>,
         summary_gate: Option<Arc<Gate>>,
+        answer_gate: Option<Arc<Gate>>,
     ) -> Agent {
         let tools: Vec<Arc<dyn Tool>> = vec![self.echo.clone()];
         let mut config = config(self.provider.clone(), tools);
@@ -385,6 +412,9 @@ impl Sessions {
         }
         if let Some(gate) = summary_gate {
             config.summarizer = Some(Arc::new(Held(gate)));
+        }
+        if let Some(gate) = answer_gate {
+            config.hooks.push("held_answer", Arc::new(HeldAnswer(gate)));
         }
         config.approvals = ApprovalMode::Wait(approval_timeout);
         config.policies.push(
@@ -487,6 +517,8 @@ struct Setup {
     statuses: Option<Vec<(SessionKey, MessageRef)>>,
     broken: Option<Broken>,
     updates: Updates,
+    /// A text the channel refuses to post.
+    refused_post: Option<String>,
     history: Vec<Said>,
     names: HashMap<String, String>,
     /// The images the channel gives, by key.
@@ -496,6 +528,9 @@ struct Setup {
     /// Where a summarizer of the host waits before it summarizes; the model summarizes
     /// without one.
     summary_gate: Option<Arc<Gate>>,
+    /// Where a run waits once the model has finished an answer, before it looks for
+    /// messages steered into it.
+    answer_gate: Option<Arc<Gate>>,
 }
 
 impl Default for Setup {
@@ -521,11 +556,13 @@ impl Default for Setup {
             statuses: None,
             broken: None,
             updates: Updates::default(),
+            refused_post: None,
             history: Vec::new(),
             names: HashMap::new(),
             images: HashMap::new(),
             keep_recent_bytes: None,
             summary_gate: None,
+            answer_gate: None,
         }
     }
 }
@@ -555,7 +592,12 @@ fn start(setup: Setup) -> Harness {
         setup_gate: setup.setup_gate,
         forgotten: Mutex::default(),
     });
-    let agent = sessions.agent(setup.approval_timeout, setup.keep_recent_bytes, setup.summary_gate);
+    let agent = sessions.agent(
+        setup.approval_timeout,
+        setup.keep_recent_bytes,
+        setup.summary_gate,
+        setup.answer_gate,
+    );
     let (inject, events_in) = mpsc::channel(16);
     let (sent_to, sent) = mpsc::unbounded_channel();
     let statuses = setup.statuses.map(|left| {
@@ -573,6 +615,7 @@ fn start(setup: Setup) -> Harness {
         next: AtomicUsize::new(0),
         fail: setup.fail_channel,
         updates: setup.updates,
+        refused_post: setup.refused_post,
         history: setup.history,
         history_gate: setup.history_gate,
         names: setup.names,

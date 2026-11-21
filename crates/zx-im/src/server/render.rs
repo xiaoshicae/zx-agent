@@ -6,29 +6,38 @@ use zx_agent::events::{Budget, RunOutcome, RunReport};
 use super::Replies;
 use super::outlet::Finished;
 
-/// The text that replaces the status message once the work `ended`: its answer, or why it
-/// gave none.
-pub(super) fn answer_of(ended: Result<Finished, String>, replies: &Replies) -> String {
+/// What ends a piece of work in the conversation.
+#[derive(Debug, PartialEq)]
+pub(super) enum Ending {
+    /// The model's answer, with a note when the run stopped short of finishing it.
+    Answer(String),
+    /// How the work ended when it gave no answer: cancelled, timed out, failed, without text,
+    /// or a compaction's result.
+    Notice(String),
+}
+
+/// What ends the work that `ended`: its answer, or why it gave none.
+pub(super) fn ending_of(ended: Result<Finished, String>, replies: &Replies) -> Ending {
     match ended {
         Ok(Finished::Run(report)) => render(&report, replies),
-        Ok(Finished::Compaction(report)) => render_compaction(&report, replies),
-        Err(error) => format!("{}{error}", replies.failed),
+        Ok(Finished::Compaction(report)) => Ending::Notice(render_compaction(&report, replies)),
+        Err(error) => Ending::Notice(format!("{}{error}", replies.failed)),
     }
 }
 
-/// The text that replaces the status message at the end of a run.
-fn render(report: &RunReport, replies: &Replies) -> String {
+/// What ends a run.
+fn render(report: &RunReport, replies: &Replies) -> Ending {
     let answer = report.final_text.trim();
     let noted = |note: &str| {
         if answer.is_empty() {
-            note.to_string()
+            Ending::Notice(note.to_string())
         } else {
-            format!("{answer}\n\n{note}")
+            Ending::Answer(format!("{answer}\n\n{note}"))
         }
     };
     match report.outcome {
-        RunOutcome::Completed if answer.is_empty() => replies.no_answer.clone(),
-        RunOutcome::Completed => answer.to_string(),
+        RunOutcome::Completed if answer.is_empty() => Ending::Notice(replies.no_answer.clone()),
+        RunOutcome::Completed => Ending::Answer(answer.to_string()),
         RunOutcome::Truncated => noted(&replies.truncated),
         RunOutcome::BudgetExhausted { budget, truncated } => {
             let reached = match budget {
@@ -43,9 +52,9 @@ fn render(report: &RunReport, replies: &Replies) -> String {
             }
         }
         // The last answer in the session may be an earlier run's, so it is not repeated.
-        RunOutcome::TimedOut => replies.timed_out.clone(),
-        RunOutcome::Cancelled => replies.cancelled.clone(),
-        RunOutcome::Failed => failure(report.error.as_deref(), replies),
+        RunOutcome::TimedOut => Ending::Notice(replies.timed_out.clone()),
+        RunOutcome::Cancelled => Ending::Notice(replies.cancelled.clone()),
+        RunOutcome::Failed => Ending::Notice(failure(report.error.as_deref(), replies)),
     }
 }
 
@@ -97,11 +106,11 @@ mod tests {
         let replies = Replies::default();
         assert_eq!(
             render(&report(RunOutcome::Completed, " done \n", None), &replies),
-            "done"
+            Ending::Answer("done".into())
         );
         assert_eq!(
             render(&report(RunOutcome::Completed, "", None), &replies),
-            replies.no_answer
+            Ending::Notice(replies.no_answer.clone())
         );
     }
 
@@ -110,21 +119,21 @@ mod tests {
         let replies = Replies::default();
         assert_eq!(
             render(&report(RunOutcome::Truncated, "part", None), &replies),
-            format!("part\n\n{}", replies.truncated)
+            Ending::Answer(format!("part\n\n{}", replies.truncated))
         );
         let exhausted = |budget, truncated| RunOutcome::BudgetExhausted { budget, truncated };
         assert_eq!(
             render(&report(exhausted(Budget::ModelRequests, false), "", None), &replies),
-            replies.model_request_limit
+            Ending::Notice(replies.model_request_limit.clone())
         );
         assert_eq!(
             render(&report(exhausted(Budget::Tokens, false), "part", None), &replies),
-            format!("part\n\n{}", replies.token_budget)
+            Ending::Answer(format!("part\n\n{}", replies.token_budget))
         );
         // Cut off as well: both are said.
         assert_eq!(
             render(&report(exhausted(Budget::Cost, true), "part", None), &replies),
-            format!("part\n\n{}\n{}", replies.truncated, replies.cost_budget)
+            Ending::Answer(format!("part\n\n{}\n{}", replies.truncated, replies.cost_budget))
         );
     }
 
@@ -133,15 +142,15 @@ mod tests {
         let replies = Replies::default();
         assert_eq!(
             render(&report(RunOutcome::TimedOut, "earlier", None), &replies),
-            replies.timed_out
+            Ending::Notice(replies.timed_out.clone())
         );
         assert_eq!(
             render(&report(RunOutcome::Cancelled, "earlier", None), &replies),
-            replies.cancelled
+            Ending::Notice(replies.cancelled.clone())
         );
         assert_eq!(
             render(&report(RunOutcome::Failed, "earlier", Some("HTTP 500")), &replies),
-            format!("{}HTTP 500", replies.failed)
+            Ending::Notice(format!("{}HTTP 500", replies.failed))
         );
     }
 

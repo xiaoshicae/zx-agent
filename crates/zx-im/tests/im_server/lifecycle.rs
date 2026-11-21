@@ -285,6 +285,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             next: AtomicUsize::new(0),
             fail: None,
             updates: Updates::default(),
+            refused_post: None,
             history: Vec::new(),
             history_gate: None,
             names: HashMap::new(),

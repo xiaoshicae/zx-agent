@@ -10,6 +10,8 @@
 //! - `outlet`: where a conversation posts, and the session it holds
 //! - `render`: the text that says how a conversation's work ended
 //! - `approval`: approval requests of a run, as cards in the conversation
+//! - `progress`: what a run tells its conversation while it goes on: its approvals, and the
+//!   answers it goes on from
 //! - `status`: the status message of each run, kept so that a restart can replace it
 //! - `received`: each message's receipt until it is handled, and what an earlier process
 //!   left pending in the backlog
@@ -17,6 +19,7 @@
 mod admission;
 mod approval;
 mod outlet;
+mod progress;
 mod received;
 mod render;
 mod replies;

@@ -1,17 +1,14 @@
 //! Approvals in the chat: a card with buttons, decided by an approver's click.
 //!
 //! The task that reads a run passes its approval events on to the worker
-//! ([`ApprovalEvents`]): the worker posts a card for each request, resolves the request when
-//! an approver clicks, and closes the card when the run reports how the approval ended.
-
-use std::sync::Arc;
+//! ([`RunEvents`](super::progress::RunEvents)): the worker posts a card for each request,
+//! resolves the request when an approver clicks, and closes the card when the run reports how
+//! the approval ended.
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_util::text::clip;
 
-use super::{ServerEvent, ServerSink, SessionKey};
 use crate::{ApprovalCard, ApprovalId};
 
 /// Longest command or argument text shown on a card; longer text ends with "...". A card is
@@ -35,84 +32,66 @@ pub(super) enum ApprovalUpdate {
         tool_call_id: String,
         tool: String,
         result: ApprovalResult,
+        /// When the run reported it, in milliseconds since the Unix epoch: when the approval
+        /// ended, which is before its card closes.
+        at_ms: u64,
     },
 }
 
-/// Passes the approval events of a run on to the worker, which posts and closes the cards.
-pub(super) struct ApprovalEvents {
-    pub(super) updates: mpsc::Sender<ApprovalUpdate>,
-    pub(super) key: SessionKey,
-    pub(super) sink: Arc<dyn ServerSink>,
-}
-
-impl ApprovalEvents {
-    /// Pass `event` on if it is about an approval.
-    pub(super) fn forward(&self, event: &Event) {
-        let update = match &event.event {
-            EventKind::ApprovalRequested {
-                approval_id,
-                tool_name,
-                args,
-                reason,
-                ..
-            } => ApprovalUpdate::Requested {
-                id: ApprovalId(approval_id.clone()),
-                card: ApprovalCard {
-                    tool: tool_name.clone(),
-                    summary: summarize(args),
-                    reason: reason.clone(),
-                },
-            },
-            EventKind::ApprovalResolved {
-                approval_id,
-                tool_call_id,
-                tool_name,
-                approval,
-                ..
-            } => ApprovalUpdate::Resolved {
-                id: approval_id.clone().map(ApprovalId),
-                tool_call_id: tool_call_id.clone(),
+/// What `event` tells the worker about an approval; `None` when it is not about one.
+pub(super) fn approval_update(event: &Event) -> Option<ApprovalUpdate> {
+    match &event.event {
+        EventKind::ApprovalRequested {
+            approval_id,
+            tool_name,
+            args,
+            reason,
+            ..
+        } => Some(ApprovalUpdate::Requested {
+            id: ApprovalId(approval_id.clone()),
+            card: ApprovalCard {
                 tool: tool_name.clone(),
-                result: *approval,
+                summary: summarize(args),
+                reason: reason.clone(),
             },
-            // Nothing about approvals: a new event about them is to be told apart above.
-            EventKind::RunStart { .. }
-            | EventKind::RunEnd { .. }
-            | EventKind::AttemptStart { .. }
-            | EventKind::StepStart { .. }
-            | EventKind::RequestStart { .. }
-            | EventKind::MessageStart { .. }
-            | EventKind::MessageUpdate { .. }
-            | EventKind::MessageEnd { .. }
-            | EventKind::CustomEntry { .. }
-            | EventKind::ToolExecutionStart { .. }
-            | EventKind::ToolExecutionUpdate { .. }
-            | EventKind::ToolDecision { .. }
-            | EventKind::ToolExecutionEnd { .. }
-            | EventKind::StepEnd { .. }
-            | EventKind::AttemptEnd { .. }
-            | EventKind::RetryScheduled { .. }
-            | EventKind::ContextOverflow { .. }
-            | EventKind::ContextEdited { .. }
-            | EventKind::HookFailed { .. }
-            | EventKind::CompactionStart { .. }
-            | EventKind::CompactionEnd { .. }
-            | EventKind::CompactionFailed { .. }
-            | EventKind::ToolCallRecovered { .. } => return,
-        };
-        // Reading the run must not wait for the worker, which may be waiting for the run.
-        // The channel holds the updates of approvals asked one at a time, two per approval,
-        // and the worker drains it between its other steps, so it is not expected to fill.
-        // If it did, a request would get no card and end when nobody answers it in time, or
-        // a card would stay open. A closed channel means the worker has ended: nobody needs
-        // the update.
-        match self.updates.try_send(update) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => self.sink.emit(&ServerEvent::Failed {
-                key: Some(self.key.clone()),
-                error: "an approval update was dropped: its card is missing or stays open".into(),
-            }),
-        }
+        }),
+        EventKind::ApprovalResolved {
+            approval_id,
+            tool_call_id,
+            tool_name,
+            approval,
+            ..
+        } => Some(ApprovalUpdate::Resolved {
+            id: approval_id.clone().map(ApprovalId),
+            tool_call_id: tool_call_id.clone(),
+            tool: tool_name.clone(),
+            result: *approval,
+            at_ms: event.at_ms,
+        }),
+        // Nothing about approvals: a new event about them is to be told apart above.
+        EventKind::RunStart { .. }
+        | EventKind::RunEnd { .. }
+        | EventKind::AttemptStart { .. }
+        | EventKind::StepStart { .. }
+        | EventKind::RequestStart { .. }
+        | EventKind::MessageStart { .. }
+        | EventKind::MessageUpdate { .. }
+        | EventKind::MessageEnd { .. }
+        | EventKind::CustomEntry { .. }
+        | EventKind::ToolExecutionStart { .. }
+        | EventKind::ToolExecutionUpdate { .. }
+        | EventKind::ToolDecision { .. }
+        | EventKind::ToolExecutionEnd { .. }
+        | EventKind::StepEnd { .. }
+        | EventKind::AttemptEnd { .. }
+        | EventKind::RetryScheduled { .. }
+        | EventKind::ContextOverflow { .. }
+        | EventKind::ContextEdited { .. }
+        | EventKind::HookFailed { .. }
+        | EventKind::CompactionStart { .. }
+        | EventKind::CompactionEnd { .. }
+        | EventKind::CompactionFailed { .. }
+        | EventKind::ToolCallRecovered { .. } => None,
     }
 }
 

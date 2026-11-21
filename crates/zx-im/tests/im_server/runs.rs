@@ -31,7 +31,8 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
         },
     )
     .await;
-    h.updated(&status_a, text("a done")).await;
+    h.posted(&thread("a"), text("a done")).await;
+    h.updated(&status_a, text(&h.replies.answer_below)).await;
     let status_b = h.posted(&thread("b"), working).await;
     h.updated(&status_b, text("b done")).await;
     assert_eq!(h.requests()[2], ["user:U-asker: task b"]);
@@ -60,7 +61,8 @@ async fn a_message_during_a_run_is_steered_into_it() {
         },
     )
     .await;
-    h.updated(&status, text("final")).await;
+    h.posted(&thread("m1"), text("final")).await;
+    h.updated(&status, text(&h.replies.answer_below)).await;
     assert_eq!(
         h.requests()[1],
         [
@@ -68,6 +70,35 @@ async fn a_message_during_a_run_is_steered_into_it() {
             "assistant:calls[c1]",
             "tool:c1=done",
             "user:U-asker: also check the logs"
+        ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_the_run_goes_on_from_is_posted_before_the_next_one() {
+    let gate = Gate::new();
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first answer"), FauxStep::text("second answer")],
+        answer_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    h.say("m1", None, "write it").await;
+    let first = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    // Steered after the model finished its answer: the run goes on to answer this too.
+    h.say("m2", Some("m1"), "and one more thing").await;
+    h.acknowledged(&thread("m1"), "m2").await;
+    gate.release.cancel();
+    h.updated(&first, text("first answer")).await;
+    let second = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    h.updated(&second, text("second answer")).await;
+    assert_eq!(
+        h.requests()[1],
+        [
+            "user:U-asker: write it",
+            "assistant:first answer",
+            "user:U-asker: and one more thing"
         ]
     );
     h.stop().await.unwrap();

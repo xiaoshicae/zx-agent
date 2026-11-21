@@ -4,9 +4,9 @@
 use serde::Deserialize;
 
 /// The prompt section that tells the model what it cannot see of a conversation the server
-/// runs: whose words a message carries, and that of all it writes in a run only the last
-/// answer is posted, in place of [`Replies::working`]. The agent's instructions name no host,
-/// so the host that builds the agent adds it.
+/// runs: whose words a message carries, and that of all it writes only its answers are
+/// posted, not the text before a tool call. The agent's instructions name no host, so the
+/// host that builds the agent adds it.
 pub(crate) const CONVERSATION_SECTION: &str = "conversation";
 pub(crate) const CONVERSATION: &str = "You talk with people through a chat platform. In a group several people write, \
      and each message starts with its sender's name. Only your final answer to a message is posted there, not the \
@@ -18,8 +18,12 @@ pub(crate) const CONVERSATION: &str = "You talk with people through a chat platf
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Replies {
-    /// Posted when a run starts; replaced by the answer when it ends.
+    /// Posted when a run starts, and again when it goes on after an answer; replaced by the
+    /// answer that follows, or by how the run ended.
     pub working: String,
+    /// Replaces [`working`](Self::working) when an approval card was posted after it: the
+    /// answer is then posted below the card, where it is read last.
+    pub answer_below: String,
     /// Posted when a conversation waits for a free run slot.
     pub queued: String,
     /// The server or conversation has no capacity for this message; it was not accepted.
@@ -67,6 +71,7 @@ impl Default for Replies {
     fn default() -> Self {
         Self {
             working: "Working…".into(),
+            answer_below: "Done; the answer is below.".into(),
             queued: "Queued: as many tasks as allowed are running; this one starts when one ends.".into(),
             overloaded:
                 "Too many pending messages or conversations; this message was not accepted. Please try again later."

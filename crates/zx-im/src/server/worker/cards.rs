@@ -1,7 +1,6 @@
 //! The conversation's approval cards: a card posted for each request, the request resolved
 //! by an approver's click, and the card closed when the run reports how the approval ended.
 
-use zx_agent::ai::now_ms;
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
 
@@ -65,20 +64,25 @@ impl Worker {
         }
     }
 
-    /// A call waits for approval: post its card. Without a card nobody can decide, so the
-    /// call is denied, and the model hears why.
+    /// A call waits for approval: post its card, below the run's status. Without a card nobody
+    /// can decide, so the call is denied, and the model hears why.
     async fn post_card(&mut self, id: ApprovalId, shown: ApprovalCard) {
         let request = Post::ApprovalRequest {
             id: id.clone(),
             card: shown.clone(),
         };
         match self.out.post_card(&request).await {
-            Ok(posted) => self.cards.push(Card {
-                id,
-                shown,
-                posted,
-                state: CardState::Open,
-            }),
+            Ok(posted) => {
+                if let Phase::Running(running) = &mut self.phase {
+                    running.status.cover();
+                }
+                self.cards.push(Card {
+                    id,
+                    shown,
+                    posted,
+                    state: CardState::Open,
+                });
+            }
             Err(error) => {
                 // The request may have ended meanwhile; then there is nothing to deny.
                 drop(self.resolve(&id, ApprovalDecision::Deny(error)));
@@ -94,6 +98,7 @@ impl Worker {
                 tool_call_id,
                 tool,
                 result,
+                at_ms,
             } => {
                 let card = self
                     .cards
@@ -126,7 +131,7 @@ impl Worker {
                     approval,
                     user,
                     result,
-                    ended_ms: now_ms(),
+                    ended_ms: at_ms,
                 }));
             }
         }

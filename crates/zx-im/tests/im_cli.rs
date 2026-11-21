@@ -220,11 +220,17 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
         .await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "i1"}));
 
-    // The card shows who allowed it, and the status message becomes the answer.
+    // The card shows who allowed it; the answer follows the card, and the status message says
+    // so.
     let updates = slack.wait_for("chat.update", 2).await;
     let texts: Vec<&Value> = updates.iter().map(|call| &call.body["text"]).collect();
     assert!(texts.contains(&&json!("Allowed (<@U2>)")), "{texts:?}");
-    assert!(texts.contains(&&json!("done")), "{texts:?}");
+    assert!(texts.contains(&&json!("Done; the answer is below.")), "{texts:?}");
+    let posts = slack.wait_for("chat.postMessage", 3).await;
+    assert_eq!(
+        (&posts[2].body["text"], &posts[2].body["thread_ts"]),
+        (&json!("done"), &json!("1700000001.000100"))
+    );
 
     // The command ran without the tokens, and a token it read was redacted.
     model.wait_for_requests(2).await;
