@@ -121,6 +121,11 @@ pub enum ServerEvent {
     Approval(ApprovalRecord),
     /// An idle conversation released its session; the next message opens it again.
     Released { key: SessionKey },
+    /// A message meant for the bot came from a chat the server does not serve and got
+    /// [`Replies::unauthorized`]: where it came from and who wrote it, the IDs that adding the
+    /// chat to [`ServerConfig::conversations`] or the person to [`ServerConfig::approvers`]
+    /// takes.
+    Unauthorized { key: SessionKey, user: UserId },
     /// A failure nobody in the chat sees, such as a reply that could not be posted.
     Failed { key: Option<SessionKey>, error: String },
 }

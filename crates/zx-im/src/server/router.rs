@@ -11,10 +11,10 @@ use tokio_util::sync::CancellationToken;
 use super::admission::{InputBudget, Limit};
 use super::received::Receipts;
 use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
-use super::{SessionKey, Shared};
+use super::{ServerEvent, SessionKey, Shared};
 use crate::{
     Addressee, Backlog, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, MessageId,
-    MessageKey, MessageRef, Post, ThreadId,
+    MessageKey, MessageRef, Post, ThreadId, UserId,
 };
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
@@ -315,7 +315,7 @@ impl Router {
                 } else if addressee == Addressee::Bot {
                     // Only a message meant for the bot hears why it gets no answer; the
                     // rest of a group's talk is none of its business.
-                    self.refuse(channel, key.destination());
+                    self.refuse(channel, key, sender);
                 }
             }
             Inbound::Decision {
@@ -413,9 +413,11 @@ impl Router {
         }
     }
 
-    /// Answer a chat the server does not serve, without holding up the router.
-    fn refuse(&mut self, channel: Arc<dyn ImChannel>, to: Destination) {
-        self.reply(channel, to, self.shared.replies.unauthorized.clone());
+    /// Answer a chat the server does not serve, without holding up the router, and tell the
+    /// operator where the message came from and who wrote it.
+    fn refuse(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, sender: UserId) {
+        self.reply(channel, key.destination(), self.shared.replies.unauthorized.clone());
+        self.shared.sink.emit(&ServerEvent::Unauthorized { key, user: sender });
     }
 
     /// Refuse a message that met `limit`. The operator hears of every one, and of the limit;
