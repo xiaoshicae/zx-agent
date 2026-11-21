@@ -71,6 +71,33 @@ async fn a_chat_that_is_not_served_gets_a_refusal_and_nothing_else() {
 }
 
 #[tokio::test]
+async fn the_operator_hears_where_a_refused_message_came_from_and_who_wrote_it() {
+    let mut h = start(Setup::default());
+    let refused = |root: &str| Destination {
+        conversation: ConversationId("C2".into()),
+        thread: Some(ThreadId(root.into())),
+    };
+    h.say_in("C2", "m1", None, "hello").await;
+    h.posted(&refused("m1"), text(&h.replies.unauthorized)).await;
+    // Talk between people there is not refused, so the operator hears nothing of it; the
+    // router takes messages in order, so the refusal after it shows that it was passed over.
+    let talk = group_message("C2", "m2", Some("m1"), "U-other", Addressee::Nobody, "lunch?");
+    h.inject.send(talk).await.unwrap();
+    h.say_in("C2", "m3", None, "again").await;
+    h.posted(&refused("m3"), text(&h.replies.unauthorized)).await;
+    let (_, events) = h.stop_and_take().await;
+    let unauthorized = |root: &str| ServerEvent::Unauthorized {
+        key: SessionKey {
+            platform: PLATFORM.into(),
+            conversation: ConversationId("C2".into()),
+            thread: Some(ThreadId(root.into())),
+        },
+        user: UserId(ASKER.into()),
+    };
+    assert_eq!(events, [unauthorized("m1"), unauthorized("m3")]);
+}
+
+#[tokio::test]
 async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],

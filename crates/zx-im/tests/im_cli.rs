@@ -272,6 +272,50 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_mention_in_a_channel_not_on_the_list_is_refused_and_logged_with_its_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(Vec::new()).await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_im_config(
+        dir.path(),
+        &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
+    );
+    let child = im(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut socket = slack.socket().await;
+    let mut elsewhere = mention("e1", "1700000001.000100", "hello");
+    elsewhere["payload"]["event"]["channel"] = json!("C9");
+    socket.send(elsewhere).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let posts = slack.wait_for("chat.postMessage", 1).await;
+    assert_eq!(
+        (&posts[0].body["channel"], &posts[0].body["text"]),
+        (
+            &json!("C9"),
+            &json!("Not authorized: this chat is not on the service's list.")
+        )
+    );
+
+    zx_testing::signal(&child, "-TERM").await;
+    let output = program::ended_output(child).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log: Vec<Value> = json_lines(&stdout(&output));
+    let line = log
+        .iter()
+        .find(|line| line["type"] == "unauthorized")
+        .unwrap_or_else(|| panic!("no unauthorized line in {log:?}"));
+    assert_eq!(
+        (&line["platform"], &line["conversation"], &line["thread"], &line["user"]),
+        (&json!("slack"), &json!("C9"), &json!("1700000001.000100"), &json!("U1"))
+    );
+    assert!(model.requests().is_empty());
+}
+
+#[tokio::test]
 async fn im_tells_the_model_how_the_conversation_reaches_people() {
     let dir = tempfile::tempdir().unwrap();
     let model = MockServer::start(vec![Reply::text("done")]).await;
