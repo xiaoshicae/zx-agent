@@ -340,8 +340,10 @@ working = "处理中…"
 allowed = "已批准"
 ```
 
+名单要写的 ID 可以从日志取：不在名单里的聊天发来要机器人回答的消息被拒绝（不调用模型），日志的 `unauthorized` 行写明平台、聊天与发送人（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“日志”）。要加一个群，请人在群里 @ 机器人一次；要加一个人（如审批人），请他从不在名单里的聊天（如私聊）给机器人发一句。⚑ D:5/CHINA FLAG: 飞书的 open_id（`ou_…`）按应用区分，要用本应用收到的。
+
 `[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
 ---
 
-CONFIGURATION.md · v0.37 · 2026年11月
+CONFIGURATION.md · v0.38 · 2026年11月
