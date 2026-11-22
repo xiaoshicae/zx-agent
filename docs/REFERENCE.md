@@ -88,7 +88,7 @@
 
 ## IM 服务
 
-IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.toml` 见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)。
+IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.toml` 见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)，接入一个平台的步骤见 [IM_SETUP.md](IM_SETUP.md)。
 
 | 项 | 说明 |
 |---|---|
