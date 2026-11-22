@@ -1,5 +1,5 @@
 //! A channel under test, running until the test stops it, a backlog that cannot keep
-//! anything, and where a message is.
+//! anything, where a message is, and a message read from a thread or a chat.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zx_im::{
-    Backlog, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog, MessageKey, ThreadId,
+    Addressee, Backlog, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, Kept, MemoryBacklog,
+    MessageId, MessageKey, Said, ThreadId, UserId,
 };
 
 /// A running channel: what it passes on, and how to stop it.
@@ -94,5 +95,15 @@ pub(crate) fn at(conversation: &str, root: Option<&str>) -> Destination {
     Destination {
         conversation: ConversationId(conversation.into()),
         thread: root.map(|root| ThreadId(root.into())),
+    }
+}
+
+/// A message `sender` posted earlier, meant for `addressee`, as a thread or a chat is read.
+pub(crate) fn earlier(id: &str, sender: &str, text: &str, addressee: Addressee) -> Said {
+    Said {
+        id: MessageId(id.into()),
+        sender: UserId(sender.into()),
+        text: text.into(),
+        addressee,
     }
 }

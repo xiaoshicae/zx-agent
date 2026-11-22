@@ -33,9 +33,10 @@ use crate::backlog::{self, Backlog, Kept};
 ///   so that the backlog keeps small records;
 /// - it queues its sends to stay within the platform's rate limits.
 ///
-/// [`thread_history`](Self::thread_history), [`display_name`](Self::display_name),
-/// [`acknowledge`](Self::acknowledge) and [`image`](Self::image) have defaults that do
-/// nothing, for a platform, or an app without the permissions, that cannot.
+/// [`thread_history`](Self::thread_history), [`chat_history`](Self::chat_history),
+/// [`display_name`](Self::display_name), [`acknowledge`](Self::acknowledge) and
+/// [`image`](Self::image) have defaults that do nothing, for a platform, or an app without
+/// the permissions, that cannot.
 #[async_trait]
 pub trait ImChannel: Send + Sync {
     /// Name used in configuration and logs, in the labels of the sessions of its
@@ -64,6 +65,15 @@ pub trait ImChannel: Send + Sync {
     /// at most the `limit` latest messages, without the bot's own. Read when the bot is first
     /// mentioned in a thread someone else started. The default reads nothing.
     async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
+        Ok(Vec::new())
+    }
+
+    /// What was said in the chat of `mention` itself before it, not in the chat's threads,
+    /// other bots' messages included, oldest first: at most the `limit` latest messages,
+    /// without the bot's own. `mention` is a mention of the bot posted in the chat itself,
+    /// read when it starts a conversation; the server keeps what came after the latest
+    /// message meant for the bot among them ([`Said::addressee`]). The default reads nothing.
+    async fn chat_history(&self, _mention: &MessageRef, _limit: usize) -> Result<Vec<Said>, ImError> {
         Ok(Vec::new())
     }
 
@@ -218,12 +228,16 @@ pub enum Addressee {
     Nobody,
 }
 
-/// A message someone posted earlier, as [`ImChannel::thread_history`] reads it.
+/// A message someone posted earlier, as [`ImChannel::thread_history`] and
+/// [`ImChannel::chat_history`] read it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Said {
     pub id: MessageId,
     pub sender: UserId,
     pub text: String,
+    /// Whom it was meant for, as its mentions tell; never the bot for another bot's message,
+    /// which starts no conversation.
+    pub addressee: Addressee,
 }
 
 /// An image attached to a message, by what the platform calls it: the server asks the

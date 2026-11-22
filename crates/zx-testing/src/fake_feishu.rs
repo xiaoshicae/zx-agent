@@ -1,5 +1,5 @@
-//! A fake Feishu open platform: the token, long-connection endpoint and message APIs, the
-//! images of messages, and long connections the test drives frame by frame. Frames are encoded here independently
+//! A fake Feishu open platform: the token, long-connection endpoint, message and bot APIs,
+//! the images of messages, and long connections the test drives frame by frame. Frames are encoded here independently
 //! of the channel's own codec, so that a mistake mirrored in both cannot go unnoticed.
 
 use std::collections::{HashMap, VecDeque};
@@ -19,7 +19,8 @@ use crate::http::{read_request, response, response_bytes};
 /// One API call.
 #[derive(Clone, Debug)]
 pub struct Call {
-    /// Which API: token, endpoint, create, reply, edit, patch or resource.
+    /// Which API: token, endpoint, create, reply, edit, patch, resource, get (one message),
+    /// list (the messages of a chat or topic) or bot (the bot's information).
     pub route: &'static str,
     /// Path and query.
     pub path: String,
@@ -34,6 +35,8 @@ pub struct Call {
 /// A scripted answer to one call of a route.
 #[derive(Clone, Debug)]
 pub enum Answer {
+    /// Status 200 with this body.
+    Json(Value),
     /// Status 200 with this non-zero code.
     Code(i64),
     /// This HTTP status, with this code in the body.
@@ -377,6 +380,9 @@ fn route(method: &str, path: &str) -> &'static str {
         ("PUT", _) => "edit",
         ("PATCH", _) => "patch",
         ("GET", path) if path.contains("/resources/") => "resource",
+        ("GET", path) if path.starts_with("/open-apis/im/v1/messages?") => "list",
+        ("GET", path) if path.starts_with("/open-apis/im/v1/messages/") => "get",
+        ("GET", "/open-apis/bot/v3/info") => "bot",
         _ => "unknown",
     }
 }
@@ -411,6 +417,7 @@ impl Answering {
             .get_mut(route)
             .and_then(VecDeque::pop_front);
         let reply = match scripted {
+            Some(Answer::Json(body)) => response("200 OK", &[], &body.to_string()).into_bytes(),
             Some(Answer::Code(code)) => {
                 response("200 OK", &[], &json!({"code": code, "msg": "refused"}).to_string()).into_bytes()
             }
@@ -467,6 +474,14 @@ fn normal(route: &str, settings: &Settings, posted: &Mutex<u64>) -> Value {
             json!({"code": 0, "msg": "success", "data": {"message_id": format!("om_out{count}")}})
         }
         "edit" | "patch" => json!({"code": 0, "msg": "success", "data": {}}),
+        // A message of nobody's with nothing in it, sent at the start of time.
+        "get" => json!({"code": 0, "msg": "success", "data": {"items": [{
+            "message_id": "om_0", "create_time": "0", "msg_type": "text",
+            "body": {"content": json!({"text": ""}).to_string()},
+            "sender": {"id": "ou_0", "id_type": "open_id", "sender_type": "user"},
+        }]}}),
+        "list" => json!({"code": 0, "msg": "success", "data": {"has_more": false, "items": []}}),
+        "bot" => json!({"code": 0, "msg": "ok", "bot": {"activate_status": 2, "app_name": "zx", "open_id": "ou_bot"}}),
         other => json!({"code": 404, "msg": format!("unknown route {other}")}),
     }
 }

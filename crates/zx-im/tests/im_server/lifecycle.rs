@@ -288,6 +288,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             refused_post: None,
             history: Vec::new(),
             history_gate: None,
+            chat: Vec::new(),
             names: HashMap::new(),
             images: HashMap::new(),
         })

@@ -18,7 +18,7 @@ use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use zx_testing::http::silent_listener;
 
-use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
+use self::common::im::{FullBacklog, at, earlier, run_channel, run_channel_with};
 
 fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
@@ -727,5 +727,232 @@ async fn an_image_feishu_refuses_or_one_too_large_is_an_error() {
     assert_eq!(
         large.to_string(),
         "feishu /open-apis/im/v1/messages/om_1/resources/img_1?type=image: the file is larger than 99 bytes"
+    );
+}
+
+/// A message as the message APIs give it: `id`, sent at `sent_ms` by `sender`, of `kind` with
+/// `content`, mentioning `mentions`.
+fn listed(id: &str, sent_ms: &str, sender: Value, kind: &str, content: &Value, mentions: Value) -> Value {
+    let mut item = json!({
+        "message_id": id, "create_time": sent_ms, "msg_type": kind, "chat_id": "oc_1", "deleted": false,
+        "body": {"content": content.to_string()},
+    });
+    item["sender"] = sender;
+    item["mentions"] = mentions;
+    item
+}
+
+/// [`listed`] for a text message.
+fn listed_text(id: &str, sent_ms: &str, sender: Value, text: &str, mentions: Value) -> Value {
+    listed(id, sent_ms, sender, "text", &json!({"text": text}), mentions)
+}
+
+/// A person as the sender of a message, by open_id.
+fn person(open_id: &str) -> Value {
+    json!({"id": open_id, "id_type": "open_id", "sender_type": "user", "tenant_key": "t1"})
+}
+
+/// An app as the sender of a message, by App ID.
+fn app(app_id: &str) -> Value {
+    json!({"id": app_id, "id_type": "app_id", "sender_type": "app", "tenant_key": "t1"})
+}
+
+/// A mention of the bot as the message APIs give it: by its open_id, with no type.
+fn listed_bot_mention() -> Value {
+    json!([{"key": "@_user_1", "id": "ou_bot", "id_type": "open_id", "name": "zx", "tenant_key": "t1"}])
+}
+
+/// An answer of the message APIs with these messages.
+fn messages(items: Vec<Value>) -> Answer {
+    let mut answer = json!({"code": 0, "msg": "success", "data": {"has_more": false}});
+    answer["data"]["items"] = Value::Array(items);
+    Answer::Json(answer)
+}
+
+/// The mention of the bot `id` posted in the group oc_1 itself.
+fn group_mention(id: &str) -> MessageRef {
+    MessageRef {
+        at: at("oc_1", None),
+        id: MessageId(id.into()),
+    }
+}
+
+#[tokio::test]
+async fn a_group_is_read_before_a_mention_up_to_its_time() {
+    let fake = FakeFeishu::start(120).await;
+    let mention = listed_text(
+        "om_m",
+        "1700000000500",
+        person("ou_u1"),
+        "@_user_1 why?",
+        listed_bot_mention(),
+    );
+    fake.script("get", vec![messages(vec![mention.clone()])]);
+    let recalled = json!({
+        "message_id": "om_gone", "create_time": "1700000000300", "msg_type": "text", "deleted": true,
+        "body": {"content": "This message was recalled"}, "sender": person("ou_u2"), "mentions": [],
+    });
+    let rich = json!({"title": "", "content": [[{"tag": "text", "text": "deploy failed"}]]});
+    fake.script(
+        "list",
+        vec![messages(vec![
+            // The latest first, as asked.
+            listed_text("om_after", "1700000000900", person("ou_u2"), "just after", json!([])),
+            mention,
+            listed_text(
+                "om_own",
+                "1700000000400",
+                app("cli_test"),
+                "an earlier answer",
+                json!([]),
+            ),
+            recalled,
+            listed(
+                "om_img",
+                "1700000000200",
+                person("ou_u2"),
+                "image",
+                &json!({"image_key": "img_1"}),
+                json!([]),
+            ),
+            listed("om_post", "1700000000100", person("ou_u3"), "post", &rich, json!([])),
+            listed_text(
+                "om_asked",
+                "1700000000050",
+                person("ou_u1"),
+                "@_user_1 done?",
+                listed_bot_mention(),
+            ),
+            listed_text("om_alert", "1700000000010", app("cli_other"), "disk full", json!([])),
+        ])],
+    );
+    let read = channel(&fake).chat_history(&group_mention("om_m"), 50).await.unwrap();
+    // What came after the mention within its second, the mention, this app's own answer, the
+    // recalled message and the image are left out; another app's message is never for the bot.
+    assert_eq!(
+        read,
+        [
+            earlier("om_alert", "cli_other", "disk full", Addressee::Others),
+            earlier("om_asked", "ou_u1", "@zx done?", Addressee::Bot),
+            earlier("om_post", "ou_u3", "deploy failed", Addressee::Nobody),
+        ]
+    );
+    assert_eq!(fake.calls("get")[0].path, "/open-apis/im/v1/messages/om_m");
+    let list = &fake.calls("list")[0];
+    assert_eq!(
+        list.path,
+        "/open-apis/im/v1/messages?sort_type=ByCreateTimeDesc&page_size=50&container_id_type=chat&container_id=oc_1&end_time=1700000001"
+    );
+    assert_eq!((list.authorization.as_str(), &list.body), ("Bearer t-1", &Value::Null));
+    assert_eq!(fake.calls("bot").len(), 1);
+}
+
+#[tokio::test]
+async fn a_group_read_before_a_mention_gives_its_latest_messages_up_to_the_limit() {
+    let fake = FakeFeishu::start(120).await;
+    fake.script(
+        "list",
+        vec![messages(vec![
+            listed_text("om_3", "0", person("ou_u1"), "third", json!([])),
+            listed_text("om_2", "0", person("ou_u1"), "second", json!([])),
+            listed_text("om_1", "0", person("ou_u1"), "first", json!([])),
+        ])],
+    );
+    // The fake gives the mention as sent at 0.
+    let read = channel(&fake).chat_history(&group_mention("om_0"), 2).await.unwrap();
+    let ids: Vec<&str> = read.iter().map(|said| said.id.0.as_str()).collect();
+    assert_eq!(ids, ["om_2", "om_3"]);
+}
+
+#[tokio::test]
+async fn a_topic_is_read_from_its_root_oldest_first() {
+    let fake = FakeFeishu::start(120).await;
+    let mut root = listed_text("om_r", "1700000000000", person("ou_u2"), "the deploy failed", json!([]));
+    root["thread_id"] = json!("omt_1");
+    fake.script("get", vec![messages(vec![root.clone()])]);
+    fake.script(
+        "list",
+        vec![messages(vec![
+            listed_text(
+                "om_3",
+                "1700000000300",
+                person("ou_u1"),
+                "@_user_1 why?",
+                listed_bot_mention(),
+            ),
+            listed_text("om_2", "1700000000200", app("cli_test"), "an earlier answer", json!([])),
+            listed_text("om_1", "1700000000100", person("ou_u3"), "me too", json!([])),
+            // Read by itself, the root is not read twice.
+            root,
+        ])],
+    );
+    let read = channel(&fake)
+        .thread_history(&at("oc_1", Some("om_r")), 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        read,
+        [
+            earlier("om_r", "ou_u2", "the deploy failed", Addressee::Nobody),
+            earlier("om_1", "ou_u3", "me too", Addressee::Nobody),
+            earlier("om_3", "ou_u1", "@zx why?", Addressee::Bot),
+        ]
+    );
+    assert_eq!(fake.calls("get")[0].path, "/open-apis/im/v1/messages/om_r");
+    assert_eq!(
+        fake.calls("list")[0].path,
+        "/open-apis/im/v1/messages?sort_type=ByCreateTimeDesc&page_size=50&container_id_type=thread&container_id=omt_1"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_outside_topics_reads_only_its_root() {
+    let fake = FakeFeishu::start(120).await;
+    let root = listed_text("om_r", "1700000000000", person("ou_u2"), "the deploy failed", json!([]));
+    fake.script("get", vec![messages(vec![root])]);
+    let read = channel(&fake)
+        .thread_history(&at("oc_1", Some("om_r")), 50)
+        .await
+        .unwrap();
+    assert_eq!(read, [earlier("om_r", "ou_u2", "the deploy failed", Addressee::Nobody)]);
+    assert!(fake.calls("list").is_empty());
+}
+
+#[tokio::test]
+async fn a_group_feishu_refuses_to_list_is_an_error_with_its_code() {
+    let fake = FakeFeishu::start(120).await;
+    // As without the permission to read every group message.
+    fake.script("list", vec![Answer::Code(230_027)]);
+    let refused = channel(&fake)
+        .chat_history(&group_mention("om_0"), 50)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "feishu /open-apis/im/v1/messages: HTTP 200 OK, code 230027: refused"
+    );
+}
+
+#[tokio::test]
+async fn without_the_bots_open_id_no_message_read_is_taken_as_meant_for_it() {
+    let fake = FakeFeishu::start(120).await;
+    fake.script("bot", vec![Answer::Code(99_991_663)]);
+    fake.script(
+        "list",
+        vec![messages(vec![listed_text(
+            "om_1",
+            "0",
+            person("ou_u1"),
+            "@_user_1 done?",
+            listed_bot_mention(),
+        )])],
+    );
+    let (channel, mut reports) = reporting_channel(&fake);
+    let read = channel.chat_history(&group_mention("om_0"), 50).await.unwrap();
+    assert_eq!(read, [earlier("om_1", "ou_u1", "@zx done?", Addressee::Others)]);
+    let report = reports.try_recv().unwrap();
+    assert!(
+        report.contains("/open-apis/bot/v3/info") && report.contains("99991663"),
+        "{report}"
     );
 }

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use reqwest::{Method, StatusCode};
+use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
@@ -118,17 +118,33 @@ impl FeishuChannel {
             .map_err(|error| ImError::Transport(format!("feishu {path}: {error}")))
     }
 
-    /// Call an open API method. A frequency limit is waited out and retried.
-    pub(super) async fn api(&self, method: Method, path: &str, body: &Value) -> Result<Value, CallError> {
-        let url = format!("{}{path}", self.config.api_base.trim_end_matches('/'));
+    /// Call an open API method, with `args` added to the query and a JSON `body` if any. A
+    /// frequency limit is waited out and retried.
+    pub(super) async fn api(
+        &self,
+        method: Method,
+        path: &str,
+        args: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> Result<Value, CallError> {
+        let base = self.config.api_base.trim_end_matches('/');
+        let mut url = Url::parse(&format!("{base}{path}")).map_err(|error| {
+            CallError::Failed(ImError::Config(format!(
+                "feishu {path}: invalid API base {base}: {error}"
+            )))
+        })?;
+        if !args.is_empty() {
+            url.query_pairs_mut().extend_pairs(args);
+        }
         let mut retries = 0;
         loop {
             let token = self.token().await.map_err(CallError::Failed)?;
-            let response = self
-                .http
-                .request(method.clone(), &url)
-                .bearer_auth(&token)
-                .json(body)
+            let request = self.http.request(method.clone(), url.clone()).bearer_auth(&token);
+            let request = match body {
+                Some(body) => request.json(body),
+                None => request,
+            };
+            let response = request
                 .send()
                 .await
                 .map_err(|error| CallError::Failed(ImError::Transport(format!("feishu {path}: {error}"))))?;

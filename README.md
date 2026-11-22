@@ -104,7 +104,7 @@ export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
-内置的 assistant 不限模型请求数与时间，所以示例给每次运行加了上限，否则一次不收敛的运行会一直占着运行名额（`maxRunning`）；等待审批的时间也计入时间上限。`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置与服务的行为见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md#im-服务)。
+内置的 assistant 不限模型请求数与时间，所以示例给每次运行加了上限，否则一次不收敛的运行会一直占着运行名额（`maxRunning`）；等待审批的时间也计入时间上限。接入一个平台的步骤（建应用、开哪些权限与事件、取得名单里的 ID）见 [IM 接入指南](docs/IM_SETUP.md)，`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置与服务的行为见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md#im-服务)。
 
 ### MCP 工具
 
@@ -145,6 +145,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 | 文档 | 内容 |
 |---|---|
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.toml`、agent 文件与 `im.toml` 的键，内置 agent |
+| [docs/IM_SETUP.md](docs/IM_SETUP.md) | IM 接入指南：Slack 与 ⚑ D:5/CHINA FLAG: 飞书的应用设置、权限、名单里的 ID 与常见问题 |
 | [docs/REFERENCE.md](docs/REFERENCE.md) | 命令行参数、退出码，chat、ACP 与 IM 的行为，循环语义与 pi 的差异，事件、追踪与会话文件的格式 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全模型与容器执行 |
 | [docs/LIBRARY.md](docs/LIBRARY.md) | 作为库使用 |

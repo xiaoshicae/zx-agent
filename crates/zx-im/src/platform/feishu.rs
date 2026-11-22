@@ -10,14 +10,16 @@
 //! - `connection`: the long connection
 //! - `frame`: the frames of the long connection
 //! - `events`: what arrives over it, and the text and cards the channel posts
+//! - `history`: what was said before the bot's first answer, read by the message APIs
 
 mod api;
 mod connection;
 mod events;
 mod frame;
+mod history;
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -36,7 +38,8 @@ use super::{
     PlatformInput, http_client, pause, report, secret, split_text,
 };
 use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post, Replacement,
+    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post,
+    Replacement, Said,
 };
 
 /// Where the open API lives.
@@ -149,6 +152,11 @@ impl PlatformFactory for Feishu {
 /// chosen for events and callbacks, the `im.message.receive_v1` event, the
 /// `card.action.trigger` callback, and permission to send messages; for groups, only the
 /// permission to read messages that mention the bot.
+///
+/// Optional: the permission to read every group message (`im:message.group_msg`) brings
+/// replies in a topic that do not mention the bot, and lets it read a topic it is first
+/// mentioned in and a group since it was last mentioned there. Without it those readings
+/// fail, which the server reports, and the bot answers without what came before.
 pub struct FeishuChannel {
     config: FeishuConfig,
     http: reqwest::Client,
@@ -158,6 +166,8 @@ pub struct FeishuChannel {
     posts: Pacer,
     /// Direct chats seen so far: replies there do not open a topic.
     direct: Mutex<HashSet<String>>,
+    /// The bot's open_id, once asked for: what a mention of it names.
+    me: OnceLock<String>,
 }
 
 impl FeishuChannel {
@@ -169,6 +179,7 @@ impl FeishuChannel {
             config,
             token: tokio::sync::Mutex::new(None),
             direct: Mutex::default(),
+            me: OnceLock::new(),
         })
     }
 
@@ -181,11 +192,12 @@ impl FeishuChannel {
                 let direct = lock(&self.direct).contains(&to.conversation.0);
                 let body = json!({"msg_type": msg_type, "content": content, "reply_in_thread": !direct});
                 let path = format!("/open-apis/im/v1/messages/{}/reply", root.0);
-                self.api(Method::POST, &path, &body).await?
+                self.api(Method::POST, &path, &[], Some(&body)).await?
             }
             None => {
                 let body = json!({"receive_id": to.conversation.0, "msg_type": msg_type, "content": content});
-                self.api(Method::POST, "/open-apis/im/v1/messages?receive_id_type=chat_id", &body)
+                let path = "/open-apis/im/v1/messages";
+                self.api(Method::POST, path, &[("receive_id_type", "chat_id")], Some(&body))
                     .await?
             }
         };
@@ -287,7 +299,7 @@ impl ImChannel for FeishuChannel {
                 let thread = posted.thread();
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
                 let body = json!({"msg_type": "text", "content": text_content(&first)});
-                match self.api(Method::PUT, &path, &body).await {
+                match self.api(Method::PUT, &path, &[], Some(&body)).await {
                     Ok(_) => {}
                     // Feishu refused the edit (a message allows 20 edits, within a time the
                     // tenant's admin sets): post the text instead of losing it.
@@ -313,12 +325,23 @@ impl ImChannel for FeishuChannel {
                     markdown(&resolution(labels, user.as_ref(), *result)),
                 ];
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
-                self.api(Method::PATCH, &path, &json!({"content": card(&elements)}))
+                let body = json!({"content": card(&elements)});
+                self.api(Method::PATCH, &path, &[], Some(&body))
                     .await
                     .map(drop)
                     .map_err(ImError::from)
             }
         }
+    }
+
+    /// The topic's root and latest messages, by the message APIs (`history`).
+    async fn thread_history(&self, at: &Destination, limit: usize) -> Result<Vec<Said>, ImError> {
+        self.topic_history(at, limit).await
+    }
+
+    /// The group's latest messages before `mention`, by the message APIs (`history`).
+    async fn chat_history(&self, mention: &MessageRef, limit: usize) -> Result<Vec<Said>, ImError> {
+        self.group_history(mention, limit).await
     }
 
     /// The image `image` of `message`, by the message resource API, which needs one of the

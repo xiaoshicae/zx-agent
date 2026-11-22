@@ -18,7 +18,7 @@ use zx_testing::WAIT;
 use zx_testing::fake_slack::{Answer, BOT_TOKEN, FakeSlack};
 use zx_testing::http::silent_listener;
 
-use self::common::im::{FullBacklog, at, run_channel, run_channel_with};
+use self::common::im::{FullBacklog, at, earlier, run_channel, run_channel_with};
 
 const APP_TOKEN: &str = "xapp-test";
 
@@ -766,14 +766,12 @@ async fn a_thread_is_read_without_the_messages_of_bots_or_edits() {
         .thread_history(&at("C1", Some("8.0")), 50)
         .await
         .unwrap();
-    let earlier = |ts: &str, sender: &str, text: &str| Said {
-        id: MessageId(ts.into()),
-        sender: UserId(sender.into()),
-        text: text.into(),
-    };
     assert_eq!(
         read,
-        [earlier("8.0", "U1", "root & all"), earlier("8.3", "U2", "me too")]
+        [
+            earlier("8.0", "U1", "root & all", Addressee::Nobody),
+            earlier("8.3", "U2", "me too", Addressee::Nobody)
+        ]
     );
     let calls = slack.calls("conversations.replies");
     assert_eq!(calls.len(), 1, "an answer without a cursor is the thread's last page");
@@ -811,24 +809,83 @@ async fn a_thread_is_read_with_what_other_bots_said_once_the_bot_knows_itself() 
 
     let read = channel.thread_history(&at("C1", Some("8.0")), 50).await.unwrap();
 
-    let earlier = |ts: &str, sender: &str, text: &str| Said {
-        id: MessageId(ts.into()),
-        sender: UserId(sender.into()),
-        text: text.into(),
-    };
     assert_eq!(
         read,
         [
             earlier(
                 "8.0",
                 "B9",
-                "[FIRING:1] DiskFull\nnode-3 at 97% & rising\nsilence it at http://alerts/silence"
+                "[FIRING:1] DiskFull\nnode-3 at 97% & rising\nsilence it at http://alerts/silence",
+                Addressee::Others
             ),
-            earlier("8.3", "UB7", "deploy 42 finished"),
-            earlier("8.4", "U2", "what is this?"),
+            earlier("8.3", "UB7", "deploy 42 finished", Addressee::Others),
+            earlier("8.4", "U2", "what is this?", Addressee::Nobody),
         ]
     );
     running.stop().await.unwrap();
+}
+
+/// The mention of the bot posted in C1 itself at `ts`.
+fn mention_at(ts: &str) -> MessageRef {
+    MessageRef {
+        at: at("C1", None),
+        id: MessageId(ts.into()),
+    }
+}
+
+#[tokio::test]
+async fn a_channel_is_read_before_a_mention_oldest_first_with_whom_each_message_was_for() {
+    let mut slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.history",
+        vec![Answer::Json(json!({"ok": true, "messages": [
+            // The latest first, as Slack returns a channel.
+            {"type": "message", "user": "U2", "text": "me &amp; too", "ts": "9.4"},
+            {"type": "message", "user": "UBOT", "bot_id": "BBOT", "text": "an earlier answer", "ts": "9.3"},
+            {"type": "message", "subtype": "channel_join", "user": "U3", "text": "joined", "ts": "9.2"},
+            {"type": "message", "user": "U1", "text": "<@UBOT> is it done?", "ts": "9.1", "thread_ts": "9.1"},
+            {"type": "message", "user": "UB7", "bot_id": "B7", "text": "<@UBOT> deploy 42 finished", "ts": "9.0"},
+        ]}))],
+    );
+    let channel = channel(&slack);
+    // Connected, the channel has asked Slack who it is.
+    let running = run_channel(channel.clone(), WAIT);
+    let _socket = slack.socket().await;
+
+    let read = channel.chat_history(&mention_at("9.5"), 50).await.unwrap();
+
+    // Another bot's mention starts nothing; the bot's own answer and the join are left out.
+    assert_eq!(
+        read,
+        [
+            earlier("9.0", "UB7", "<@UBOT> deploy 42 finished", Addressee::Others),
+            earlier("9.1", "U1", "<@UBOT> is it done?", Addressee::Bot),
+            earlier("9.4", "U2", "me & too", Addressee::Nobody),
+        ]
+    );
+    let calls = slack.calls("conversations.history");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        (calls[0].arg("channel"), calls[0].arg("latest"), calls[0].arg("limit")),
+        (Some("C1"), Some("9.5"), Some("200"))
+    );
+    assert_eq!(calls[0].authorization, format!("Bearer {BOT_TOKEN}"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_channel_read_before_a_mention_gives_its_latest_messages_up_to_the_limit() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.history",
+        vec![Answer::Json(json!({"ok": true, "has_more": true, "messages": [
+            {"type": "message", "user": "U1", "text": "third", "ts": "9.2"},
+            {"type": "message", "user": "U1", "text": "second", "ts": "9.1"},
+            {"type": "message", "user": "U1", "text": "first", "ts": "9.0"},
+        ]}))],
+    );
+    let read = channel(&slack).chat_history(&mention_at("9.5"), 2).await.unwrap();
+    assert_eq!(timestamps(&read), ["9.1", "9.2"]);
 }
 
 /// One page of `conversations.replies`: messages of U1 with these timestamps, oldest first

@@ -165,9 +165,9 @@ fn addressee(text: &str, bot: Option<&str>) -> Addressee {
     }
 }
 
-/// What was said in a `conversations.replies` answer, oldest first, other bots' messages
-/// among it: the bot's own posts, edits and joins, and messages without a sender or text,
-/// left out.
+/// What was said in a `conversations.replies` or `conversations.history` answer, in the
+/// answer's order, other bots' messages among it: the bot's own posts, edits and joins, and
+/// messages without a sender or text, left out.
 pub(super) fn history(answer: &Value, me: &Me) -> Vec<Said> {
     let Some(messages) = answer["messages"].as_array() else {
         return Vec::new();
@@ -176,10 +176,18 @@ pub(super) fn history(answer: &Value, me: &Me) -> Vec<Said> {
         .iter()
         .filter(|message| me.hears(message))
         .filter_map(|message| {
+            let raw = text_of(message)?;
+            // As when it arrives: a bot's message starts nothing, whatever it mentions.
+            let addressee = if message.get("bot_id").is_some() {
+                Addressee::Others
+            } else {
+                addressee(&raw, me.user.as_deref())
+            };
             Some(Said {
                 id: MessageId(message["ts"].as_str()?.into()),
                 sender: UserId(speaker(message)?.into()),
-                text: unescape(text_of(message)?.trim()),
+                text: unescape(raw.trim()),
+                addressee,
             })
         })
         .collect()
