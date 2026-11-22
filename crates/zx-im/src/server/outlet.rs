@@ -17,10 +17,11 @@ use zx_app::shutdown::next_event;
 use super::progress::{RunEvents, RunUpdate};
 use super::render::Ending;
 use super::{Replies, SessionKey, Shared, timed};
-use crate::{Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, UserId};
+use crate::{Addressee, Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, Said, UserId};
 
-/// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
-/// few enough not to crowd the context.
+/// Messages read before the first answer of a conversation, from a thread the bot is first
+/// mentioned in or from a chat it is mentioned in: enough to follow a discussion, few enough
+/// not to crowd the context.
 const HISTORY_MESSAGES: usize = 50;
 /// The kind of the custom messages that record what people said without the bot answering.
 const SAID_TYPE: &str = "im_message";
@@ -208,10 +209,10 @@ impl Outlet {
     }
 
     /// Open the conversation's session, or create its first one. Only that first session,
-    /// created for `trigger`, a mention of the bot in a thread someone else started, records
-    /// what was said there before, which is read before the session is made: a session either
-    /// starts with the thread or is not made. A session the conversation has already, such as
-    /// one `/new` started, is opened as it is, however little it holds.
+    /// created for `trigger`, records what was said before it ([`Self::said_before`]), which
+    /// is read before the session is made: a session either starts with what came before or
+    /// is not made. A session the conversation has already, such as one `/new` started, is
+    /// opened as it is, however little it holds.
     ///
     /// A session the storage no longer has, such as one whose file was removed, is reported
     /// and replaced as if the conversation were new; any other failure is the caller's to
@@ -453,35 +454,33 @@ impl Outlet {
             .await;
     }
 
-    /// What was said in the thread before `trigger`, the mention of the bot that starts the
-    /// conversation's first session, as the model reads it: the first answer then knows the
-    /// talk it joins. Nothing in a direct chat or a thread that `trigger` starts, and nothing
-    /// when the platform cannot give it, which is reported. The thread is read up to now,
-    /// which can be well after `trigger` when the session waited for a run slot; what came
-    /// after it is cut off, as it reaches the session as messages of its own. When `trigger`
-    /// is not among the messages read, all of them are kept.
+    /// What was said before `trigger`, the mention of the bot that starts the conversation's
+    /// first session, as the model reads it: the first answer then knows the talk it joins.
+    /// In a thread someone else started, the thread; for a mention posted in the chat itself,
+    /// which starts its thread, what was said in the chat since the bot was last mentioned
+    /// there, by the messages the platform keeps, not by a mark of the server's own. Nothing
+    /// in a direct chat, and nothing when the platform cannot give it, which is reported.
+    ///
+    /// A thread is read up to now, which can be well after `trigger` when the session waited
+    /// for a run slot; what came after it is cut off, as it reaches the session as messages
+    /// of its own. When `trigger` is not among the messages read, all of them are kept.
     async fn said_before(&self, trigger: &MessageRef) -> Vec<String> {
         let Some(thread) = &self.key.thread else {
             return Vec::new();
         };
-        if thread.0 == trigger.id.0 {
-            return Vec::new();
-        }
-        let history = self
-            .shared
-            .bounded(
-                Some(&self.key),
-                "read the thread",
-                self.channel.thread_history(&self.to, HISTORY_MESSAGES),
-            )
-            .await;
+        let history = if thread.0 == trigger.id.0 {
+            let read = self.channel.chat_history(trigger, HISTORY_MESSAGES);
+            let history = self.shared.bounded(Some(&self.key), "read the chat", read).await;
+            history.map(|history| since_last_mention(before(history, trigger)))
+        } else {
+            let read = self.channel.thread_history(&self.to, HISTORY_MESSAGES);
+            let history = self.shared.bounded(Some(&self.key), "read the thread", read).await;
+            history.map(|history| before(history, trigger))
+        };
         // A failure was reported; the conversation goes on without the earlier messages.
-        let Some(mut history) = history else {
+        let Some(history) = history else {
             return Vec::new();
         };
-        if let Some(position) = history.iter().position(|said| said.id == trigger.id) {
-            history.truncate(position);
-        }
         let mut earlier = Vec::new();
         for message in history {
             earlier.push(self.attributed(&message.sender, &message.text).await);
@@ -492,6 +491,24 @@ impl Outlet {
     pub(super) fn replies(&self) -> &Replies {
         &self.shared.replies
     }
+}
+
+/// The messages of `history` before `trigger`; all of them when `trigger` is not among them.
+fn before(mut history: Vec<Said>, trigger: &MessageRef) -> Vec<Said> {
+    if let Some(position) = history.iter().position(|said| said.id == trigger.id) {
+        history.truncate(position);
+    }
+    history
+}
+
+/// The messages of `history` after the latest one meant for the bot: what was said since the
+/// bot was last mentioned, which that mention's conversation has not read. All of them when
+/// none is meant for the bot.
+fn since_last_mention(mut history: Vec<Said>) -> Vec<Said> {
+    if let Some(last) = history.iter().rposition(|said| said.addressee == Addressee::Bot) {
+        history.drain(..=last);
+    }
+    history
 }
 
 /// What someone said without the bot answering, as the session records it: the model reads

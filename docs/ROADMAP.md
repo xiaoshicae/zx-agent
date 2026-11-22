@@ -30,7 +30,7 @@
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `zx-im` 与 SDK |
 | D15 | 只读写当前会话格式（`SESSION_VERSION`），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
-| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
+| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；在频道里直接 @ 机器人时，先读入频道里上次 @ 它之后的消息（至多 50 条）再回答，“上次”以平台上的消息为准，不另存游标；不加开关（2026-11-22 用户决定，原为不读频道历史）。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要：摘要每次读取原始记录，上限见 [CONFIGURATION.md](CONFIGURATION.md#上下文管理) |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs` 一个设置；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
@@ -41,7 +41,7 @@
 | D24 | 库与接入方式分开：SDK `zx-agent` 只把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic` 与 `zx-builtin` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行 `zx-cli`（可执行文件仍叫 `zx-agent`）、IM 服务 `zx-im` 与新的接入方式（如 Web 服务）是建在库上的独立 crate，要共用 `config.toml`、agent 文件、追踪导出与收尾的经应用层 `zx-app`，它不依赖命令行解析、ACP 与 IM。没有业务含义的共用小工具在 `zx-util`，不属于 API；两个 provider 共用的 HTTP 部分（设置检查、发请求、读事件流、请求失败）在 `zx-ai-http`，也不属于 API，协议的写法与失败的归类留在各 provider；测试设施在只作测试依赖的 `zx-testing`，测试替身经 feature 打开、不进生产 API（见 [TESTS.md](TESTS.md)）。各 crate 的职责见 [README](../README.md#架构) |
 | D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具按路径排队修改（边界见 [SECURITY.md](SECURITY.md#工具)），队列由宿主传入，一个进程的所有会话共用一个；取消调用不提前让出 |
 | D26 | 预算与计数按整次运行累计，重试与溢出恢复共用；续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
-| D27 | IM 的路由只分派消息；运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话留给下一次运行；第一次为线程建会话前先读线程历史。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
+| D27 | IM 的路由只分派消息；运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话留给下一次运行；第一次为对话建会话前先读它之前的消息：别人发起的线程读线程，在频道里直接 @ 读频道（D16）。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D28 | 宿主自己的会话索引从会话头部建立（`SessionStorage::headers`），JSONL 存储不缓存；IM 服务启动时这样建立对话到会话的索引，此后只由本进程维护。宿主的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
 | D29 | 内核只留机制：内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，会话文件（JSONL）的存储在 zx-builtin；只有一个程序或一种存储用的代码也不在内核（如按会话 ID 前缀找会话在 chat）；内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键；只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法。应用层 `zx-app` 只放各程序都要的配置装配与收尾，不打印，要说的作为返回值交给宿主，措辞不提子命令与命令行参数；只有一个程序用的行为留在那个程序里。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
 | D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停；随上下文窗口的 token 阈值按会话当时的模型取窗口（同 pi 的 `shouldCompact`）。IM 的每个平台是 `zx-im` 的 `platform` 下的同层模块，互不引用，带着自己的 `im.toml` 段与由段建 channel 的 `PlatformFactory`（D34）；⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后（关掉时见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)） |
@@ -58,7 +58,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 - P6 执行环境、P7 扩展与 MCP、P8 `acp`：已实现，待真实集群、MCP 服务器与 ACP 客户端（Zed 或 Wisp）上的验收，见第 5 节。
 - P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
-- P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：补上后会读取该平台上的话题历史与用户名称] Subject to Legal/Export Compliance approval。
+- P15 IM 对话模型（D16）：Slack 实现了读线程与频道、查名字与回执；⚑ D:5/CHINA FLAG: 飞书读话题与群（2026-11-22），名字与回执沿用默认（用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取该平台上话题与群的历史消息；补上名字后还会读取用户名称] Subject to Legal/Export Compliance approval。
 
 ## 5. 待办与已知缺口
 
@@ -66,7 +66,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 真实 MCP 服务器验收：对一个 Streamable HTTP 服务器跑通列出、调用与审批；HTTPS 未测。
 - ACP 客户端实测：只用手写客户端与 SDK 示例客户端验证过。顺带确认客户端是否发 `session/close`（不发时会话留到进程退出，见 [REFERENCE.md](REFERENCE.md#acp)），再考虑像 `zx-im` 一样空闲释放。会话自行关闭之后，`session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要自动重开，得记下客户端认为打开着的会话编号，未做。
 - 单进程是部署边界：IM 的 backlog（D33）、对话索引与状态记录都只在本进程的会话目录里，对话索引只由本进程更新，随机器人参与过的对话增长，不淘汰。多副本之前要换成共享的实现，并定义会话所有权与接管。
-- ⚑ D:5/CHINA FLAG: 飞书群聊中 @ 任意机器人都算 @ 本机器人：事件不指出被 @ 的机器人是否属于本应用，能否取得本机器人的 ID 未核实。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块的消息路由（软件/代码）] Subject to Legal/Export Compliance approval。
+- ⚑ D:5/CHINA FLAG: 飞书群聊中 @ 任意机器人都算 @ 本机器人：事件不指出被 @ 的机器人是否属于本应用。读群的历史时已按本机器人的 open_id（经 `/open-apis/bot/v3/info` 取得）认出 @ 它的消息；事件里 `mentions` 的 `id.open_id` 能否同样比较，未核实。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块的消息路由（软件/代码）] Subject to Legal/Export Compliance approval。
 - 输入被钩子改写时，原始输入与替换它的 `context_edit` 分两次追加，其间崩溃时原始输入会留在投影中。
 - 会话写入只 `flush`、不 `fsync`，断电时已写入的记录可能没有落盘。
 - 模型请求失败的文本照录 reqwest 的错误与服务端的回应：传输失败带请求的完整 URL，HTTP 错误带服务端原文，都不经脱敏写入会话与事件；`baseUrl` 不能带查询串，写在它的路径里的密钥仍会被记录。
@@ -86,9 +86,10 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - IM 平台的连接刚建立就被断开时立即重连，退避每次重置，反复如此时重连的节奏只靠平台的限频；断开现在会记一条日志，是否计入退避未定。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（IM 服务丢消息已由 D33 的 backlog 解决）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
 - 对照 pi 的 Discord 接入（待评估）：消息附件的进出、停机期间漏掉的 @ 的补读（按对话的游标读平台历史；backlog 只管已送达的消息）、`/status`。Slack 线程里其他机器人的消息已能听到（见 [REFERENCE.md](REFERENCE.md#im-服务)），其形态依据 Slack 文档，只读 `text` 与附件的文字、不读 `blocks`，没有在真实工作区验证。
+- 读频道与话题的历史（D16，2026-11-22）只对模拟服务测试过：Slack 的 `conversations.history`，⚑ D:5/CHINA FLAG: 飞书的取消息、列消息与机器人信息接口。飞书待真实租户核实四点：历史消息里 @ 机器人的 `mentions[].id` 是否就是 `/bot/v3/info` 给的 `open_id`（不是时认不出上次 @，读满 50 条）；富文本在列消息接口里的内容结构是否与事件相同；话题的根消息是否在 `thread` 容器的结果里（现在另取根消息、按 ID 去重）；`end_time` 是否包含边界那一秒（现在多取一秒，再按毫秒去掉 @ 之后的）。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取群与话题的历史消息（数据）] Subject to Legal/Export Compliance approval。
 - 应用层 `zx-app` 尚无真实 Web 宿主验收。
 - 图片（D36）：经 `openai` provider 在 ⚑ D:5/CHINA FLAG: DeepSeek 上验证过（2026-11-20，第 6 节），Anthropic provider 收发图片没有在真实 API 上验证；尺寸与大小都在上限内的 GIF 原样发送：⚑ D:5/CHINA FLAG: DeepSeek 接受，动图答的是第一帧（2026-11-20），其他服务没有验证；每张图片按约 1200 token 估算上下文，不按尺寸。会话里的图片每次请求都重发：图片多时请求体可能超出服务的上限（Anthropic 以 413 `request_too_large` 拒绝），provider 把它归为上下文过长，开启自动摘要时摘要一次再试（摘要不保留图片），没开时运行失败；没有按请求只发最近几张的做法。
-- IM 的图片（D36）：读入的线程历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；⚑ D:5/CHINA FLAG: 飞书只开 `im:message` 时下载消息里的图片、富文本消息里 @ 机器人并附图片，都在真实租户验证过（2026-11-21，第 6 节）；文档列出的另两种权限（`im:message:readonly`、`im:message.history:readonly`）没有试。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
+- IM 的图片（D36）：读入的线程与频道历史不带图片；图片不计入 `maxPendingBytes`，只受每条至多 4 张、每个文件至多 20 MiB 的限制；⚑ D:5/CHINA FLAG: 飞书只开 `im:message` 时下载消息里的图片、富文本消息里 @ 机器人并附图片，都在真实租户验证过（2026-11-21，第 6 节）；文档列出的另两种权限（`im:message:readonly`、`im:message.history:readonly`）没有试。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval。
 - 音频与视频不收：MCP 结果与 ACP 提问里的音频照旧略去。需要时再定：加一种输入只发给声明能收的模型，或由宿主先转成文字；视频交给工具抽帧。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。
 - 集成测试还没有全放进被测的 crate（规则 06）：`crates/zx-cli/tests/` 的 `container.rs`（44 个测试中 33 个）与 `crash_recovery.rs`（14 个中 12 个）有只用库的测试，与运行程序的测试同在一个文件；`container.rs` 的两种测试共用假 docker，CI 用 `--test container` 跑真实 Docker，拆分要先把假 docker 移进 `zx-testing`。
@@ -135,4 +136,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.64 · 2026年11月
+ROADMAP.md · v0.65 · 2026年11月

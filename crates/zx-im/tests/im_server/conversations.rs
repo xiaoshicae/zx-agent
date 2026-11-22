@@ -301,12 +301,22 @@ async fn talk_where_the_bot_never_took_part_is_left_alone() {
     h.stop().await.unwrap();
 }
 
-/// A message that `sender` posted in a thread before the bot was mentioned there.
+/// A message that `sender` posted before the bot was mentioned, meant for nobody in
+/// particular.
 fn earlier(id: &str, sender: &str, text: &str) -> Said {
     Said {
         id: MessageId(id.into()),
         sender: UserId(sender.into()),
         text: text.into(),
+        addressee: Addressee::Nobody,
+    }
+}
+
+/// [`earlier`], meant for `addressee`.
+fn earlier_to(addressee: Addressee, id: &str, sender: &str, text: &str) -> Said {
+    Said {
+        addressee,
+        ..earlier(id, sender, text)
     }
 }
 
@@ -343,6 +353,69 @@ async fn the_first_mention_in_a_thread_reads_only_what_was_said_before_it() {
     let status = h.posted(&thread("t1"), text(&h.replies.working)).await;
     h.updated(&status, text("one")).await;
     assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_mention_in_the_chat_reads_what_was_said_there_since_the_bot_was_last_mentioned() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        chat: vec![
+            earlier("c1", OTHER, "lunch?"),
+            earlier_to(Addressee::Bot, "c2", ASKER, "is the deploy done?"),
+            earlier("c3", OTHER, "the deploy failed"),
+            earlier_to(Addressee::Others, "c4", OTHER, "@Wang can you look?"),
+        ],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    h.say("m5", None, "why?").await;
+    let status = h.posted(&thread("m5"), text(&h.replies.working)).await;
+    h.updated(&status, text("one")).await;
+    // The earlier mention, and what its conversation read, are left out.
+    assert_eq!(
+        h.requests()[0],
+        [
+            "user:Li: the deploy failed",
+            "user:Li: @Wang can you look?",
+            "user:U-asker: why?"
+        ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_mention_in_a_chat_the_bot_was_never_mentioned_in_reads_all_that_the_platform_gives() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        chat: vec![
+            earlier("c1", OTHER, "lunch?"),
+            earlier("c2", OTHER, "the deploy failed"),
+        ],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    h.say("m3", None, "why?").await;
+    let status = h.posted(&thread("m3"), text(&h.replies.working)).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(
+        h.requests()[0],
+        ["user:Li: lunch?", "user:Li: the deploy failed", "user:U-asker: why?"]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_direct_message_reads_nothing_said_before_it() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        chat: vec![earlier("c1", OTHER, "the deploy failed")],
+        ..Setup::default()
+    });
+    h.say_directly("m2", "why?").await;
+    let status = h.posted(&direct(), text(&h.replies.working)).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.requests()[0], ["user:why?"]);
     h.stop().await.unwrap();
 }
 

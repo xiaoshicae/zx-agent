@@ -112,6 +112,23 @@ impl SlackChannel {
             .map_err(ImError::from)
     }
 
+    /// The page of the chat of `mention` that ends just before it: the messages posted in the
+    /// chat itself, the latest first, at most [`HISTORY_PAGE_MESSAGES`]. A rate limit is waited
+    /// out.
+    pub(super) async fn history_page(&self, mention: &MessageRef) -> Result<Value, ImError> {
+        let page_size = HISTORY_PAGE_MESSAGES.to_string();
+        // `latest` leaves the mention out: "If a message has the same timestamp as oldest or
+        // latest it will not be included in the list".
+        let args = [
+            ("channel", mention.at.conversation.0.as_str()),
+            ("latest", mention.id.0.as_str()),
+            ("limit", page_size.as_str()),
+        ];
+        self.call("conversations.history", &self.config.bot_token, &args, None)
+            .await
+            .map_err(ImError::from)
+    }
+
     pub(super) async fn post(
         &self,
         to: &Destination,

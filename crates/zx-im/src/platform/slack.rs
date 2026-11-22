@@ -50,8 +50,9 @@ const DENY_ACTION: &str = "zx_deny";
 const MAX_SECTION_CHARS: usize = 3000;
 /// The reaction that acknowledges a message steered into a run: "seen".
 const ACK_REACTION: &str = "eyes";
-/// Messages asked for in one `conversations.replies` call: the most Slack recommends
-/// (conversations.replies, "Pagination": "We recommend no more than 200 results at a time").
+/// Messages asked for in one `conversations.replies` or `conversations.history` call: the
+/// most Slack recommends (both methods, "Pagination": "We recommend no more than 200 results
+/// at a time").
 const HISTORY_PAGE_MESSAGES: usize = 200;
 /// Pages read of one thread at most, from its start: as many messages as Slack returns of a
 /// thread without pagination (conversations.replies, "Pagination by time": "up to 1000
@@ -163,7 +164,8 @@ impl PlatformFactory for Slack {
 ///
 /// Optional, each for one more part of the conversation: the `message.channels` and
 /// `message.groups` events (scopes `channels:history`, `groups:history`) bring replies in a
-/// thread that do not mention the bot, and let it read a thread it is first mentioned in;
+/// thread that do not mention the bot, and let it read a thread it is first mentioned in and
+/// a channel since it was last mentioned there;
 /// `users:read` gives senders' names; `reactions:write` acknowledges steering. Without them
 /// the bot answers mentions only and shows user IDs.
 ///
@@ -359,6 +361,22 @@ impl ImChannel for SlackChannel {
         }
         let longer = format!("it has more than {MAX_HISTORY_PAGES} pages of {HISTORY_PAGE_MESSAGES} messages");
         report(self.config.on_error.as_ref(), &read_in_part(at, thread, &longer));
+        Ok(latest)
+    }
+
+    /// `conversations.history` up to `mention` (needs `channels:history` or
+    /// `groups:history`): one page, which Slack returns the latest first ("The most recent
+    /// messages in the time range are returned first"), and which holds `limit` messages
+    /// unless most of it is left out, such as joins. The method leaves threads to
+    /// `conversations.replies` ("To retrieve a message from a thread, check out
+    /// conversations.replies").
+    async fn chat_history(&self, mention: &MessageRef, limit: usize) -> Result<Vec<Said>, ImError> {
+        let unknown = Me::default();
+        let me = self.me.get().unwrap_or(&unknown);
+        let answer = self.history_page(mention).await?;
+        let mut latest = history(&answer, me);
+        latest.truncate(limit);
+        latest.reverse();
         Ok(latest)
     }
 

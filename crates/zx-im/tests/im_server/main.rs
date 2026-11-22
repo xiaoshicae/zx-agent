@@ -116,6 +116,8 @@ struct FakeChannel {
     history: Vec<Said>,
     /// Holds each reading of a thread's history, when there is one.
     history_gate: Option<Arc<Gate>>,
+    /// What the chat itself holds before every mention posted there.
+    chat: Vec<Said>,
     /// Users' names; the others have none.
     names: HashMap<String, String>,
     /// The images the platform keeps, by key, or why it cannot give one.
@@ -140,6 +142,10 @@ impl ImChannel for FakeChannel {
             gate.pass().await;
         }
         Ok(self.history.clone())
+    }
+
+    async fn chat_history(&self, _mention: &MessageRef, _limit: usize) -> Result<Vec<Said>, ImError> {
+        Ok(self.chat.clone())
     }
 
     async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
@@ -520,6 +526,7 @@ struct Setup {
     /// A text the channel refuses to post.
     refused_post: Option<String>,
     history: Vec<Said>,
+    chat: Vec<Said>,
     names: HashMap<String, String>,
     /// The images the channel gives, by key.
     images: HashMap<String, Result<Vec<u8>, String>>,
@@ -558,6 +565,7 @@ impl Default for Setup {
             updates: Updates::default(),
             refused_post: None,
             history: Vec::new(),
+            chat: Vec::new(),
             names: HashMap::new(),
             images: HashMap::new(),
             keep_recent_bytes: None,
@@ -618,6 +626,7 @@ fn start(setup: Setup) -> Harness {
         refused_post: setup.refused_post,
         history: setup.history,
         history_gate: setup.history_gate,
+        chat: setup.chat,
         names: setup.names,
         images: setup.images,
     });

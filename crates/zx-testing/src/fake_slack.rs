@@ -291,7 +291,7 @@ fn normal(call: &ApiCall, socket_url: &str, posted: &Mutex<u64>) -> Value {
             json!({"ok": true, "channel": call.body["channel"], "ts": format!("1700000000.{:06}", *count)})
         }
         "chat.update" => json!({"ok": true, "channel": call.body["channel"], "ts": call.body["ts"]}),
-        "conversations.replies" => json!({"ok": true, "messages": []}),
+        "conversations.replies" | "conversations.history" => json!({"ok": true, "messages": []}),
         "users.info" => json!({"ok": true, "user": {"id": call.arg("user"), "profile": {"display_name": ""}}}),
         "reactions.add" => json!({"ok": true}),
         other => json!({"ok": false, "error": format!("unknown_method {other}")}),

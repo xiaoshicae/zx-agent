@@ -60,9 +60,6 @@ fn message(event: &Value) -> Option<Inbound> {
     }
     let message = &event["message"];
     let kind = message["message_type"].as_str()?;
-    if !["text", "image", "post"].contains(&kind) {
-        return None;
-    }
     let chat = match message["chat_type"].as_str()? {
         "p2p" => ChatKind::Direct,
         "group" => ChatKind::Group,
@@ -87,14 +84,7 @@ fn message(event: &Value) -> Option<Inbound> {
     if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
         return None;
     }
-    // The content of a message is a JSON object as a string: `text` of a text message,
-    // `image_key` of an image, `title` and `content` of rich text.
-    let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    let (text, images) = match kind {
-        "image" => (String::new(), vec![image(content["image_key"].as_str()?)]),
-        "post" => rich_text(&content, mentions)?,
-        _ => (readable(content["text"].as_str()?, mentions), Vec::new()),
-    };
+    let (text, images) = text_and_images(kind, message["content"].as_str()?, mentions)?;
     Some(Inbound::Message {
         id: MessageId(message["message_id"].as_str()?.into()),
         at: Destination {
@@ -107,6 +97,20 @@ fn message(event: &Value) -> Option<Inbound> {
         text,
         images,
     })
+}
+
+/// The text and images of a message of type `kind`, text, image or rich text (`post`), whose
+/// content is `content`, a JSON object as a string: `text` of a text message, `image_key` of
+/// an image, `title` and `content` of rich text. `None` for another type, or content without
+/// what its type has.
+pub(super) fn text_and_images(kind: &str, content: &str, mentions: &[Value]) -> Option<(String, Vec<ImageRef>)> {
+    let content: Value = serde_json::from_str(content).ok()?;
+    match kind {
+        "text" => Some((readable(content["text"].as_str()?, mentions), Vec::new())),
+        "image" => Some((String::new(), vec![image(content["image_key"].as_str()?)])),
+        "post" => rich_text(&content, mentions),
+        _ => None,
+    }
 }
 
 /// An image of a message, by its key; Feishu gives it no other name.
