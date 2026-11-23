@@ -19,7 +19,6 @@ use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Context;
 use futures::{SinkExt, StreamExt};
 use reqwest::header::{AsHeaderName, HeaderMap};
 use tokio::net::TcpStream;
@@ -27,7 +26,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
-use zx_util::env::env_value;
+use zx_app::config::{Credentials, Holds, expand_table};
 use zx_util::registry::Registry;
 use zx_util::sync::lock;
 
@@ -64,9 +63,9 @@ pub struct PlatformInput<'a> {
 pub struct BuiltChannel {
     /// It goes by the name its platform is registered under ([`ImChannel::platform`]).
     pub channel: Arc<dyn ImChannel>,
-    /// The variables that hold the platform's credentials: commands do not see them, and
-    /// their values are redacted from tool output.
-    pub hidden_env: Vec<String>,
+    /// The platform's credentials, as its section gave them ([`expand_table`]): commands do
+    /// not see their variables, and their values are redacted from tool output.
+    pub credentials: Credentials,
 }
 
 /// The platforms every program has: Slack, and Feishu, which a build without it refuses.
@@ -158,10 +157,28 @@ fn report(on_error: Option<&ErrorReport>, error: &ImError) {
     }
 }
 
-/// The value of the variable `name`, which holds a platform's credential (`what`, for the
-/// error): set and not empty, or an error.
-fn secret(name: &str, what: &str) -> anyhow::Result<String> {
-    env_value(name).with_context(|| format!("{name} must hold {what}"))
+/// A platform's `section` of im.toml with its placeholders replaced, and the credentials it
+/// holds: those of the keys `credentials`. Each key of `defaults` the section does not write
+/// names its variable: `("appToken", "SLACK_APP_TOKEN")` stands for
+/// `appToken = "${SLACK_APP_TOKEN}"`. Fails for a malformed placeholder and for a variable
+/// without a value; the error names the key.
+fn expanded_section(
+    section: &toml::Table,
+    defaults: &[(&str, &str)],
+    credentials: &[&str],
+) -> anyhow::Result<(toml::Table, Credentials)> {
+    let mut section = section.clone();
+    for (key, variable) in defaults {
+        section
+            .entry(*key)
+            .or_insert_with(|| toml::Value::String(format!("${{{variable}}}")));
+    }
+    let holds = |keys: &[&str]| match keys {
+        [key] if credentials.contains(key) => Holds::Credential,
+        _ => Holds::Text,
+    };
+    let found = expand_table(&mut section, &holds)?;
+    Ok((section, found))
 }
 
 /// Text in parts of at most `max` characters: the first part, which may be empty, and the
@@ -525,6 +542,30 @@ mod tests {
 
     use super::*;
     use crate::{Addressee, ChatKind, ConversationId, Destination, MemoryBacklog, MessageId, UserId};
+
+    #[test]
+    fn a_platforms_section_names_its_default_variables_and_keeps_its_credentials_apart() {
+        // A variable every environment has, so that no test sets one.
+        let path = std::env::var("PATH").unwrap();
+        let section: toml::Table = toml::from_str("secret = 'literal'\napiBase = 'http://${PATH}'").unwrap();
+        let defaults = [("id", "PATH"), ("secret", "ZX_IM_TEST_UNSET_SECRET")];
+        let (expanded, credentials) = expanded_section(&section, &defaults, &["secret"]).unwrap();
+        // The default stands in only for a key the section leaves out.
+        assert_eq!(expanded["id"].as_str(), Some(path.as_str()));
+        assert_eq!(expanded["secret"].as_str(), Some("literal"));
+        assert_eq!(expanded["apiBase"].as_str(), Some(format!("http://{path}").as_str()));
+        assert_eq!(
+            credentials,
+            Credentials {
+                variables: Vec::new(),
+                values: vec!["literal".into()]
+            }
+        );
+        let error = expanded_section(&toml::Table::new(), &defaults, &["secret"])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "secret: names ${ZX_IM_TEST_UNSET_SECRET}, which is not set");
+    }
 
     #[test]
     fn the_first_part_is_there_even_for_empty_text() {

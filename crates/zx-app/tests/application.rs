@@ -40,7 +40,7 @@ fn configured() -> Config {
         .provider
         .options
         .insert("baseUrl".into(), "http://127.0.0.1:1/v1".into());
-    config.provider.api_key_env = Some("ZX_APPLICATION_TEST_UNUSED_KEY".into());
+    config.provider.api_key = Some("${ZX_APPLICATION_TEST_UNUSED_KEY}".into());
     config
 }
 

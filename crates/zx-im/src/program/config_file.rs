@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use zx_app::config::read_text;
+use zx_app::config::{Credentials, Holds, expand_table, read_text};
 
 use crate::{CardLabels, ConversationId, DailyLimit, Replies, ServerConfig, Trigger, UserId};
 
@@ -50,9 +50,13 @@ pub(super) struct ConfigFile {
     /// Chats with an agent, approvers or a daily limit of their own, `[[chats]]`.
     #[serde(default)]
     pub(super) chats: Vec<ChatSection>,
-    /// The section of each platform, by its name: what is left of the file but the server's.
+    /// The section of each platform, by its name: what is left of the file but the server's,
+    /// its placeholders not replaced, which the platform does.
     #[serde(skip)]
     pub(super) platforms: Vec<(String, toml::Table)>,
+    /// The credentials of the server's sections: the connection string of Postgres.
+    #[serde(skip)]
+    pub(super) credentials: Credentials,
 }
 
 /// The server's sections of a file, checked against the configured platforms.
@@ -83,8 +87,8 @@ impl ConfigFile {
         })
     }
 
-    /// The file `text` holds: its server's sections, checked, and the others, which only the
-    /// platforms they name can check.
+    /// The file `text` holds: its server's sections, checked, their placeholders replaced, and
+    /// the others, which only the platforms they name can check.
     pub(super) fn parse(text: &str) -> Result<Self> {
         let mut server = toml::Table::new();
         let mut platforms = Vec::new();
@@ -98,9 +102,20 @@ impl ConfigFile {
             };
             platforms.push((key, section));
         }
+        let credentials = expand_table(&mut server, &holds)?;
         let mut file: Self = toml::Value::Table(server).try_into()?;
         file.platforms = platforms;
+        file.credentials = credentials;
         Ok(file)
+    }
+}
+
+/// What each string of the server's sections holds: the connection string of Postgres is a
+/// credential, with the password it may hold.
+fn holds(keys: &[&str]) -> Holds {
+    match keys {
+        ["sessions", "postgresUrl"] => Holds::Credential,
+        _ => Holds::Text,
     }
 }
 
@@ -136,15 +151,15 @@ impl LimitsSection {
     }
 }
 
-/// Where the sessions and the program's stores are kept: `dir` or `postgresUrlEnv`.
+/// Where the sessions and the program's stores are kept: `dir` or `postgresUrl`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct SessionsSection {
     /// A directory of files, on a disk of the process's own or a persistent volume.
     dir: Option<PathBuf>,
-    /// The environment variable that holds the connection string of Postgres, which the
-    /// replicas of a deployment share.
-    postgres_url_env: Option<String>,
+    /// The connection string of Postgres, which the replicas of a deployment share, its
+    /// placeholders replaced: a credential.
+    postgres_url: Option<String>,
 }
 
 /// Where the sessions and the program's stores are kept, as `[sessions]` says.
@@ -152,22 +167,20 @@ pub(super) struct SessionsSection {
 pub(super) enum SessionsIn {
     /// Files in this directory.
     Dir(PathBuf),
-    /// Postgres, at the connection string the variable `url_env` holds.
-    Postgres { url_env: String },
+    /// Postgres, at the connection string `url`, which may hold a password.
+    Postgres { url: String },
 }
 
 impl SessionsSection {
     /// Where the section keeps the sessions: a directory or Postgres, one of them.
     fn sessions_in(&self) -> Result<SessionsIn> {
-        match (&self.dir, &self.postgres_url_env) {
+        match (&self.dir, &self.postgres_url) {
             (Some(dir), None) => Ok(SessionsIn::Dir(dir.clone())),
-            (None, Some(url_env)) => {
-                ensure!(!url_env.trim().is_empty(), "sessions.postgresUrlEnv is empty");
-                Ok(SessionsIn::Postgres {
-                    url_env: url_env.clone(),
-                })
+            (None, Some(url)) => {
+                ensure!(!url.trim().is_empty(), "sessions.postgresUrl is empty");
+                Ok(SessionsIn::Postgres { url: url.clone() })
             }
-            _ => bail!("sessions: give dir or postgresUrlEnv, one of them"),
+            _ => bail!("sessions: give dir or postgresUrl, one of them"),
         }
     }
 }
@@ -625,28 +638,47 @@ mod tests {
 
     #[test]
     fn the_sessions_are_kept_in_a_directory_or_in_postgres_one_of_them() {
-        let sessions = |section: &str| {
-            let file = ConfigFile::parse(&format!("[access]\nconversations = []\n[sessions]\n{section}"))?;
-            file.sessions.sessions_in()
-        };
+        let file = |section: &str| ConfigFile::parse(&format!("[access]\nconversations = []\n[sessions]\n{section}"));
+        let sessions = |section: &str| file(section)?.sessions.sessions_in();
+        let url = "postgres://zx:secret@db.internal:5432/zx";
         assert_eq!(
-            sessions("postgresUrlEnv = \"ZX_IM_POSTGRES_URL\"\n").unwrap(),
-            SessionsIn::Postgres {
-                url_env: "ZX_IM_POSTGRES_URL".into()
-            }
+            sessions(&format!("postgresUrl = \"{url}\"\n")).unwrap(),
+            SessionsIn::Postgres { url: url.into() }
         );
+        // Written as it is, the connection string is a credential all the same.
+        let written = file(&format!("postgresUrl = \"{url}\"\n")).unwrap();
+        assert_eq!(written.credentials.values, [url]);
         for (section, expected) in [
-            ("", "give dir or postgresUrlEnv, one of them"),
+            ("", "give dir or postgresUrl, one of them"),
             (
-                "dir = \"d\"\npostgresUrlEnv = \"URL\"\n",
-                "give dir or postgresUrlEnv, one of them",
+                "dir = \"d\"\npostgresUrl = \"postgres://\"\n",
+                "give dir or postgresUrl, one of them",
             ),
-            ("postgresUrlEnv = \" \"\n", "sessions.postgresUrlEnv is empty"),
-            ("postgresUrl = \"postgres://\"\n", "unknown field `postgresUrl`"),
+            ("postgresUrl = \" \"\n", "sessions.postgresUrl is empty"),
+            ("postgresUrlEnv = \"URL\"\n", "unknown field `postgresUrlEnv`"),
+            (
+                "postgresUrl = \"${ZX_IM_TEST_UNSET_URL}\"\n",
+                "sessions.postgresUrl: names ${ZX_IM_TEST_UNSET_URL}, which is not set",
+            ),
         ] {
             let error = format!("{:#}", sessions(section).unwrap_err());
             assert!(error.contains(expected), "{section}: expected {expected:?} in {error}");
         }
+    }
+
+    #[test]
+    fn the_strings_of_the_servers_sections_name_variables_and_only_the_url_is_a_credential() {
+        let path = std::env::var("PATH").unwrap();
+        let file = ConfigFile::parse(
+            "[access]\nconversations = []\n[sessions]\ndir = \"${PATH}/sessions\"\n[replies]\nworking = \"$5 or $$5\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            file.sessions.sessions_in().unwrap(),
+            SessionsIn::Dir(format!("{path}/sessions").into())
+        );
+        assert_eq!(file.replies.working, "$5 or $5");
+        assert_eq!(file.credentials, Credentials::default());
     }
 
     #[test]

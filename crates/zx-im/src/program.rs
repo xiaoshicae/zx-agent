@@ -31,7 +31,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
-use zx_app::config::Builtin;
+use zx_app::config::{Builtin, Credentials};
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
@@ -152,7 +152,11 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     } = program;
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
-    let BuiltChannels { channels, hidden_env } = build_channels(&file, &registered, &path)?;
+    let BuiltChannels {
+        channels,
+        mut credentials,
+    } = build_channels(&file, &registered, &path)?;
+    credentials.extend(file.credentials.clone());
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let ServerSections {
         conversations,
@@ -177,16 +181,13 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 backlog,
                 usage,
                 shown,
-                hidden_env: connection_env,
                 leadership,
             } = stores::open(&sessions).await?;
-            let mut hidden_env = hidden_env;
-            hidden_env.extend(connection_env);
             // Once for the process: every conversation's session shares the connections.
             let app = assemble(
                 connect(overrides).await?,
                 customizations,
-                &hidden_env,
+                &credentials,
                 telemetry.map(Telemetry::hook),
                 &channels,
             );
@@ -235,20 +236,25 @@ async fn connect(overrides: Overrides) -> Result<Application> {
 }
 
 /// `app` with the host's parts, given by `customizations` in order, then the program's own: the
-/// platforms' `credentials`, hidden beside the variables the host hides, the `traces` export,
-/// the prompt section on how answers reach people, and `send_file` in each session, which
-/// posts on its conversation's channel among `channels`.
+/// `credentials` of the platforms and of im.toml, hidden and redacted beside those of the host,
+/// the `traces` export, the prompt section on how answers reach people, and `send_file` in each
+/// session, which posts on its conversation's channel among `channels`.
 fn assemble(
     app: Application,
     customizations: Vec<Customization>,
-    credentials: &[String],
+    credentials: &Credentials,
     traces: Option<TraceHook>,
     channels: &[Arc<dyn ImChannel>],
 ) -> Application {
     let app = customizations.into_iter().fold(app, |app, customize| customize(app));
-    credentials
+    let app = credentials
+        .variables
         .iter()
-        .fold(app, |app, name| app.add_hidden_env(name))
+        .fold(app, |app, name| app.add_hidden_env(name));
+    credentials
+        .values
+        .iter()
+        .fold(app, |app, value| app.add_secret(value))
         .set_traces(traces)
         .add_prompt_section(CONVERSATION_SECTION, CONVERSATION)
         .add_session_tools(Arc::new(SendFiles::new(channels)))
@@ -447,19 +453,19 @@ async fn serve_turn(
     }
 }
 
-/// The channels of the configured IM platforms, and the environment variables that hold
-/// their secrets, which commands must not see.
+/// The channels of the configured IM platforms, and their credentials, whose variables commands
+/// must not see.
 #[derive(Default)]
 struct BuiltChannels {
     channels: Vec<Arc<dyn ImChannel>>,
-    hidden_env: Vec<String>,
+    credentials: Credentials,
 }
 
 impl BuiltChannels {
-    /// Add a platform's channel and the variables holding its secrets.
+    /// Add a platform's channel and its credentials.
     fn add(&mut self, built: BuiltChannel) {
         self.channels.push(built.channel);
-        self.hidden_env.extend(built.hidden_env);
+        self.credentials.extend(built.credentials);
     }
 }
 
@@ -546,7 +552,10 @@ mod tests {
             let name = input.section.get("goesBy").and_then(toml::Value::as_str);
             Ok(BuiltChannel {
                 channel: Arc::new(Named(name.unwrap_or("teams").into())),
-                hidden_env: vec!["TEAMS_TOKEN".into()],
+                credentials: Credentials {
+                    variables: vec!["TEAMS_TOKEN".into()],
+                    values: Vec::new(),
+                },
             })
         }
     }
@@ -571,7 +580,7 @@ mod tests {
         let built = build_channels(&file, &with_teams(), Path::new("im.toml")).unwrap();
         let names: Vec<&str> = built.channels.iter().map(|channel| channel.platform()).collect();
         assert_eq!(names, ["teams"]);
-        assert_eq!(built.hidden_env, ["TEAMS_TOKEN"]);
+        assert_eq!(built.credentials.variables, ["TEAMS_TOKEN"]);
     }
 
     #[test]

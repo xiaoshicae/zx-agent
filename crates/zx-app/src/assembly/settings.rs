@@ -157,7 +157,7 @@ mod tests {
         };
         let provider = &mut config.provider;
         provider.options = toml::from_str("baseUrl = 'http://file/v1'\nsystemUpdates = 'inline'").unwrap();
-        provider.api_key_env = Some("FILE_KEY".into());
+        provider.api_key = Some("${FILE_KEY}".into());
         provider.retry.max_retries = 0;
         config
     }
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(settings.model, "file-model");
         let provider = &settings.config.provider;
         assert_eq!(provider.options["baseUrl"].as_str(), Some("http://file/v1"));
-        assert_eq!(provider.api_key_env.as_deref(), Some("FILE_KEY"));
+        assert_eq!(provider.api_key.as_deref(), Some("${FILE_KEY}"));
         assert_eq!(settings.config.reasoning, Some(Reasoning::Low));
         assert_eq!(settings.config.max_tokens, Some(512));
         assert_eq!(settings.tool_timeout, Duration::from_secs(30));
@@ -190,7 +190,7 @@ mod tests {
         let settings = Settings::over(Some("m".into()), None, Config::default(), None).unwrap();
         let provider = &settings.config.provider;
         assert_eq!(provider.api, OPENAI);
-        assert!(provider.options.is_empty() && provider.api_key_env.is_none());
+        assert!(provider.options.is_empty() && provider.api_key.is_none());
         assert_eq!(settings.config.reasoning, None);
         assert_eq!(settings.config.max_tokens, None);
         assert_eq!(settings.tool_timeout, Duration::from_secs(120));

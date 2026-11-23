@@ -16,12 +16,15 @@
 //! - `context`: the project context: `AGENTS.md` files from the Git root down to the working
 //!   directory
 //! - `skills`: an agent's skills: their catalog, whose bodies a tool reads on demand
+//! - `placeholders`: the `${NAME}` placeholders of config.toml and of a host's own files, and
+//!   the credentials among the strings
 
 mod agent_file;
 mod context;
 mod definition;
 mod environment;
 mod permissions;
+mod placeholders;
 mod provider;
 mod skills;
 
@@ -37,6 +40,7 @@ pub use self::definition::Builtin;
 pub(crate) use self::definition::{AgentDefinition, HostTools, known_tool};
 pub use self::environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
 pub(crate) use self::permissions::Permissions;
+pub use self::placeholders::{Credentials, Holds, expand_table};
 pub use self::provider::{ANTHROPIC, OPENAI, ProviderSettings};
 pub(crate) use self::provider::{anthropic_config, openai_config};
 pub(crate) use self::skills::{READ_SKILL, Skill};

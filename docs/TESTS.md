@@ -64,8 +64,8 @@
 | `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
-| `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
-| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），配置的请求头随每个请求发送，`tokenEnv` 与 `headerEnv` 的变量对命令隐藏、值被脱敏，服务器用不了时启动失败 |
+| `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏（`apiKey` 引用变量或直接写在 config.toml 里都一样）与钩子失败输出 |
+| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），配置的请求头随每个请求发送，`token` 与引用了变量的请求头的变量对命令隐藏、值被脱敏，引用的变量没有值、服务器用不了时启动失败 |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
 | `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放；被取消的运行为整批调用写下结果 |
 
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.37 · 2026年11月
+TESTS.md · v0.38 · 2026年11月

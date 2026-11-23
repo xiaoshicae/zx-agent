@@ -80,7 +80,7 @@
 6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落（`crates/zx-ai/src/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`crates/zx-core/src/runner/failure.rs`）。
 7. **会话写入失败时立即停止运行**（审计要求）：循环不再执行后续步骤，运行以 `Failed` 结束，即使同时被取消。
 8. **工具输出必须截断**（`crates/zx-builtin/src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`；文件写入一旦开始就写完，调用被丢弃也一样（`Executor::write_file`）。
-9. **认证用的 API key 不主动写入会话文件、事件或日志。** `zx-app` 的装配只从环境变量读取它，把这个变量从本机执行的 bash 与搜索子进程中删除（`LocalExecutor::hidden_env`），并用 `RedactSecrets` 在工具输出持久化前过滤 key 的完整字面值；库的使用者也可以直接给出 key（`ApiKey::Fixed`、`ApiKey::Dynamic`）。边界见 `docs/SECURITY.md`。
+9. **认证用的 API key 不主动写入会话文件、事件或日志。** `zx-app` 的装配从 config.toml 的 `provider.apiKey` 取得它（通常是 `${变量}`，也可以直接写，D45），把它引用的变量从本机执行的 bash 与搜索子进程中删除（`LocalExecutor::hidden_env`），并用 `RedactSecrets` 在工具输出持久化前过滤 key 的完整字面值；其他凭据（MCP 的 token、IM 平台的凭据等）同样处理。库的使用者也可以直接给出 key（`ApiKey::Fixed`、`ApiKey::Dynamic`）。边界见 `docs/SECURITY.md`。
 10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`crates/zx-core/src/runner/step_loop/tools.rs`）。每次运行开始时（以及空闲时经 `Session::append_custom_message` 追加消息之前），为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行（开始记录在已离开的分支上也算）；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行（`crates/zx-core/src/transcript/recovery.rs`、`crates/zx-core/src/runner/interrupted.rs`）。
 
 ## 新增功能放在哪里

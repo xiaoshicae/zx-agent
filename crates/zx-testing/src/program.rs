@@ -63,7 +63,7 @@ pub fn fake_model_config(key_env: &str, top: &str, rest: &str) -> String {
 
 /// [`fake_model_config`], with `retries` retries of a failure that may pass.
 pub fn retrying_fake_model_config(key_env: &str, retries: u32, top: &str, rest: &str) -> String {
-    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = {retries}\n{rest}\n")
+    format!("{top}\n[provider]\napiKey = \"${{{key_env}}}\"\nmaxRetries = {retries}\n{rest}\n")
 }
 
 /// A zx-agent home directory of its own, for `ZX_AGENT_HOME`: a `config.toml` and the

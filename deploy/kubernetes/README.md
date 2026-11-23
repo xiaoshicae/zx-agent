@@ -101,7 +101,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 1. 准备一个 Postgres 库，和一个能在其默认 schema 中建表、建函数的账号，如库的所有者。zx-im 启动时自己建表。测试用的是 Postgres 16。
 2. 第 1 步的 Secret 里多加一个键 `postgres-url`，值是连接串，跨网络时带 `sslmode=require`。例如加上 `--from-literal=postgres-url='postgres://<账号>:<密码>@<主机>:5432/<库>?sslmode=require'`，已有的 Secret 用 `--dry-run=client -o yaml | kubectl apply -f -` 更新。
-3. `im.toml` 的 `[sessions]` 去掉 `dir`，改为 `postgresUrlEnv = "ZX_IM_POSTGRES_URL"`，再更新 ConfigMap。
+3. `im.toml` 的 `[sessions]` 去掉 `dir`，改为 `postgresUrl = "${ZX_IM_POSTGRES_URL}"`，再更新 ConfigMap。
 4. 在 `kustomization.yaml` 的 `components:` 中再取消 `- im-replicas` 的注释，`apply -k`。
 
 这个组件对 Deployment 的改动：
@@ -155,4 +155,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-deploy/kubernetes/README.md · v0.12 · 2026年11月
+deploy/kubernetes/README.md · v0.13 · 2026年11月

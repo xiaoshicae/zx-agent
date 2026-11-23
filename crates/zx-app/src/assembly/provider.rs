@@ -16,7 +16,7 @@ use crate::config::{ANTHROPIC, OPENAI, anthropic_config, openai_config};
 
 /// Builds the provider config.toml names in `provider.api`.
 pub trait ProviderFactory: Send + Sync {
-    /// The variable that holds the API key unless `provider.apiKeyEnv` names another.
+    /// The variable that holds the API key when config.toml writes no `provider.apiKey`.
     fn api_key_env(&self) -> &str;
 
     /// The provider `input` describes. Fails on settings it cannot use; the error names the
@@ -26,8 +26,8 @@ pub trait ProviderFactory: Send + Sync {
 
 /// What a factory builds a provider from.
 pub struct ProviderInput<'a> {
-    /// The provider's own keys of the `[provider]` table: all but `api`, `apiKeyEnv` and
-    /// `maxRetries`.
+    /// The provider's own keys of the `[provider]` table, their placeholders replaced: all but
+    /// `api`, `apiKey` and `maxRetries`.
     pub options: &'a toml::Table,
     /// The key the variable holds, when it holds one.
     pub api_key: Option<String>,
@@ -44,11 +44,11 @@ pub struct BuiltProvider {
     pub session_cache_key: bool,
 }
 
-/// The variable that holds the API key of the OpenAI-compatible provider unless
-/// `provider.apiKeyEnv` names another.
+/// The variable that holds the API key of the OpenAI-compatible provider when config.toml
+/// writes no `provider.apiKey`.
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
-/// The variable that holds the API key of the Anthropic provider unless `provider.apiKeyEnv`
-/// names another.
+/// The variable that holds the API key of the Anthropic provider when config.toml writes no
+/// `provider.apiKey`.
 const DEFAULT_ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// The providers every application has, by name.

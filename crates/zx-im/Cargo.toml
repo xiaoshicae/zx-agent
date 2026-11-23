@@ -23,7 +23,7 @@ default = ["feishu", "postgres"]
 # without it refuses that section by name.
 feishu = []
 # The sessions and the server's records kept in Postgres (`postgres`), for several replicas
-# (D44). A build without it refuses `postgresUrlEnv` in im.toml.
+# (D44). A build without it refuses `postgresUrl` in im.toml.
 postgres = ["dep:rustls", "dep:rustls-platform-verifier", "dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 
 [dependencies]

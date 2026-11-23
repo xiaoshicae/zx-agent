@@ -1,5 +1,5 @@
 //! The `[provider]` table: which provider reaches the model, `api`, and its settings. zx-app
-//! reads `api`, `apiKeyEnv` and `maxRetries` itself; every other key is the provider's. The
+//! reads `api`, `apiKey` and `maxRetries` itself; every other key is the provider's. The
 //! keys of the built-in providers are checked when the file is read, with the request fields
 //! that the reasoning level would conflict with; those of a provider a host registers are
 //! checked when its agent is built.
@@ -7,13 +7,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::anthropic::{AnthropicConfig, ApiKeyHeader};
 use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
+use zx_util::env::variables;
 
 use super::parsed;
 
@@ -31,10 +32,12 @@ pub struct ProviderSettings {
     /// host registers ([`Application::register_provider`](crate::Application::register_provider)).
     pub api: String,
     /// The provider's own keys, as config.toml writes them: everything in the table but
-    /// `api`, `apiKeyEnv` and `maxRetries`.
+    /// `api`, `apiKey` and `maxRetries`.
     pub options: toml::Table,
-    /// The variable holding the API key; `None` uses the provider's own.
-    pub api_key_env: Option<String>,
+    /// The API key as written, its placeholders not replaced, such as `${OPENAI_API_KEY}`, or
+    /// the key itself; `None` names the provider's own variable. A variable it names without
+    /// a value means no key, as local model servers need none.
+    pub api_key: Option<String>,
     /// How transient provider errors are retried; the file sets only the count.
     pub retry: RetryPolicy,
 }
@@ -44,7 +47,7 @@ impl Default for ProviderSettings {
         Self {
             api: OPENAI.to_string(),
             options: toml::Table::new(),
-            api_key_env: None,
+            api_key: None,
             retry: RetryPolicy::default(),
         }
     }
@@ -57,7 +60,7 @@ impl ProviderSettings {
         if let Some(api) = take_text(&mut table, "api")? {
             settings.api = api;
         }
-        settings.api_key_env = take_text(&mut table, "apiKeyEnv")?;
+        settings.api_key = take_text(&mut table, "apiKey")?;
         if let Some(retries) = table.remove("maxRetries") {
             settings.retry.max_retries = retries
                 .try_into()
@@ -71,10 +74,11 @@ impl ProviderSettings {
     /// `reasoning` level of config.toml.
     pub(super) fn validate(&self, reasoning: Option<Reasoning>) -> Result<()> {
         ensure!(!self.api.trim().is_empty(), "provider.api must not be empty");
-        ensure!(
-            self.api_key_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
-            "provider.apiKeyEnv must not be empty"
-        );
+        if let Some(key) = &self.api_key {
+            ensure!(!key.trim().is_empty(), "provider.apiKey must not be empty");
+            // Its variables are read when the provider is built; what it names is checked here.
+            variables(key).map_err(|error| anyhow!("provider.apiKey: {error}"))?;
+        }
         match self.api.as_str() {
             OPENAI => openai_config(&self.options, reasoning).map(drop),
             ANTHROPIC => anthropic_config(&self.options, reasoning).map(drop),
@@ -141,7 +145,7 @@ impl BuiltInKeys {
         for name in self.headers.keys() {
             ensure!(
                 !name.trim().eq_ignore_ascii_case(key_header),
-                "provider.headers: {key_header} comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
+                "provider.headers: {key_header} comes from the API key (provider.apiKey); it cannot be set as a header"
             );
         }
         Ok(())
@@ -280,15 +284,25 @@ mod tests {
     #[test]
     fn the_common_keys_are_read_out_and_the_rest_left_to_the_provider() {
         let settings = ProviderSettings::from_table(table(
-            "api = 'anthropic'\napiKeyEnv = 'KEY'\nmaxRetries = 0\nbaseUrl = 'http://x'",
+            "api = 'anthropic'\napiKey = '${KEY}'\nmaxRetries = 0\nbaseUrl = 'http://x'",
         ))
         .unwrap();
         assert_eq!(settings.api, ANTHROPIC);
-        assert_eq!(settings.api_key_env.as_deref(), Some("KEY"));
+        assert_eq!(settings.api_key.as_deref(), Some("${KEY}"));
         assert_eq!(settings.retry.max_retries, 0);
         assert_eq!(settings.options, table("baseUrl = 'http://x'"));
         let defaults = ProviderSettings::default();
-        assert_eq!((defaults.api.as_str(), defaults.api_key_env), (OPENAI, None));
+        assert_eq!((defaults.api.as_str(), defaults.api_key), (OPENAI, None));
+    }
+
+    #[test]
+    fn an_api_key_that_names_no_variable_as_it_should_is_refused() {
+        let broken = ProviderSettings::from_table(table("apiKey = '${KEY'")).unwrap();
+        let error = format!("{:#}", broken.validate(None).unwrap_err());
+        assert!(error.starts_with("provider.apiKey: ${KEY is no placeholder"), "{error}");
+        // Written as it is, the key is taken as it is.
+        let literal = ProviderSettings::from_table(table("apiKey = 'sk-1'")).unwrap();
+        assert!(literal.validate(None).is_ok());
     }
 
     #[test]

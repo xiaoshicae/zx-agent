@@ -47,7 +47,7 @@ pub use self::place::SessionPlace;
 pub use self::provider::{BuiltProvider, ProviderFactory, ProviderInput};
 pub use self::settings::NoModel;
 use self::settings::{Settings, checked_secret_files, secret_files};
-use crate::config::{Builtin, Config, cost_budget};
+use crate::config::{Builtin, Config, Credentials, cost_budget};
 use crate::otel::TraceHook;
 
 /// What the agents of a process share, read and connected once: the settings with what the
@@ -74,9 +74,9 @@ pub struct Application {
     secret_files: Vec<PathBuf>,
     /// What startup has to say, for the host to show: the MCP servers and short secrets.
     notices: Vec<String>,
-    /// Variables that hold credentials besides the API key, such as an IM service's tokens:
-    /// commands do not inherit them, and their values are redacted like the key's.
-    hidden_env: Vec<String>,
+    /// Credentials besides those of config.toml, such as an IM service's tokens: commands do
+    /// not inherit their variables, and their values are redacted like the key's.
+    credentials: Credentials,
     /// The hook that exports every session's runs as traces, when the host exports them.
     traces: Option<TraceHook>,
     /// The prompt sections the host adds to every session, as `(name, content)`.
@@ -159,7 +159,7 @@ impl Application {
             mcp,
             secret_files,
             notices,
-            hidden_env: Vec::new(),
+            credentials: Credentials::default(),
             traces: None,
             host_sections: Vec::new(),
             tools: Vec::new(),
@@ -192,7 +192,20 @@ impl Application {
     /// Hide the variable `name` from commands and redact its value, beside the API key's: a
     /// credential such as a token of an IM service's platform.
     pub fn add_hidden_env(mut self, name: &str) -> Self {
-        self.hidden_env.push(name.to_string());
+        self.credentials.extend(Credentials {
+            variables: vec![name.to_string()],
+            values: Vec::new(),
+        });
+        self
+    }
+
+    /// Redact `value` from tool output, beside the API key: a credential that a configuration
+    /// file of the host's writes as it is, rather than naming its variable.
+    pub fn add_secret(mut self, value: &str) -> Self {
+        self.credentials.extend(Credentials {
+            variables: Vec::new(),
+            values: vec![value.to_string()],
+        });
         self
     }
 

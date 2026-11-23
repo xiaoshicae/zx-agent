@@ -37,7 +37,7 @@ model = "<模型 ID>"
 
 [provider]
 baseUrl = "https://api.openai.com/v1"
-apiKeyEnv = "OPENAI_API_KEY"
+apiKey = "${OPENAI_API_KEY}"          # 读环境变量；字符串值都可以这样引用
 ```
 
 ### 终端对话

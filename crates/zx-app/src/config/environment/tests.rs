@@ -24,7 +24,7 @@ fn a_missing_file_is_an_empty_one() {
     assert_eq!(config.path.as_deref(), Some(path.as_path()));
     assert_eq!(config.model, None);
     assert_eq!(config.provider.api, OPENAI);
-    assert_eq!(config.provider.api_key_env, None);
+    assert_eq!(config.provider.api_key, None);
     assert_eq!(config.provider.retry.max_retries, 3);
     assert_eq!(config.execution, LOCAL);
     assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
@@ -38,7 +38,7 @@ fn the_model_and_its_provider_are_read_from_the_file() {
     let config = load_text(
         "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\napprovalTimeoutSecs = 60\n\
          [provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
-         apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
+         apiKey = '${LOCAL_KEY}'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
          maxTokensField = 'max_completion_tokens'\n\
          fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
          requestFields = { metadata = { user_id = 'u' }, top_k = 5 }\n\
@@ -54,7 +54,8 @@ fn the_model_and_its_provider_are_read_from_the_file() {
     let provider = &config.provider;
     let openai = openai_config(&provider.options, config.reasoning).unwrap();
     assert_eq!(openai.base_url, "http://localhost:8000/v1");
-    assert_eq!(provider.api_key_env.as_deref(), Some("LOCAL_KEY"));
+    // Kept as written: the assembly expands it, and its variable may have no value.
+    assert_eq!(provider.api_key.as_deref(), Some("${LOCAL_KEY}"));
     assert_eq!(openai.body.system_updates, SystemUpdates::Inline);
     assert_eq!(openai.body.reasoning_format, ReasoningFormat::Thinking);
     assert_eq!(openai.body.max_tokens_field, MaxTokensField::MaxCompletionTokens);
@@ -118,7 +119,8 @@ fn an_invalid_value_is_an_error_that_names_its_key() {
 fn unknown_keys_and_invalid_values_are_errors_that_name_the_file() {
     for (text, expected) in [
         ("typo = true", "unknown field `typo`"),
-        ("[provider]\napiKey = 'sk'", "unknown field `apiKey`"),
+        // The key is written in `apiKey`, as it is or as a placeholder.
+        ("[provider]\napiKeyEnv = 'KEY'", "unknown field `apiKeyEnv`"),
         ("model = ' '", "model must not be empty"),
         ("reasoning = 'hard'", "unknown reasoning level"),
         ("[provider]\nsystemUpdates = 'merge'", "provider.systemUpdates"),
@@ -308,7 +310,7 @@ fn a_model_takes_images_only_when_its_input_says_so() {
     }
 }
 
-const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
+const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntoken = 'prom-token'\n\
                     tools = ['query', 'range']\ntimeoutSecs = 30\n";
 
 #[test]
@@ -319,36 +321,52 @@ fn mcp_servers_are_read_from_the_file() {
         [McpServer {
             name: "prom".into(),
             url: "https://prom.example/mcp".into(),
-            token_env: Some("PROM_TOKEN".into()),
+            token: Some("prom-token".into()),
             headers: BTreeMap::new(),
-            header_env: BTreeMap::new(),
             tools: vec!["query".into(), "range".into()],
             trust_read_only: false,
             timeout_secs: Some(30),
         }]
     );
     assert_eq!(config.mcp_tool_names().unwrap(), ["prom__query", "prom__range"]);
+    // A token written as it is, is a credential all the same.
+    assert_eq!(config.credentials.values, ["prom-token"]);
 }
 
 #[test]
 fn an_mcp_server_sends_its_headers_and_trusts_its_read_only_tools_when_told() {
+    // A variable every environment has, so that no test sets one.
+    let path = std::env::var("PATH").unwrap();
     let text = format!(
-        "{PROM}headers = {{ X-Scope-OrgID = 'tenant-a' }}\nheaderEnv = {{ X-Api-Key = 'PROM_KEY' }}\ntrustReadOnly = true\n"
+        "{PROM}headers = {{ X-Scope-OrgID = 'tenant-a', X-Api-Key = 'Key ${{PATH}}' }}\ntrustReadOnly = true\n"
     );
     let config = load_text(&text).unwrap();
     let server = &config.mcp[0];
     assert!(server.trust_read_only);
-    // Written values first, then those of the variables, read when connecting.
-    let sent = server
-        .sent_headers(|header, variable| Ok(format!("{header} from {variable}")))
-        .unwrap();
+    assert_eq!(server.headers["X-Api-Key"], format!("Key {path}"));
+    // The header that names a variable is a credential; the one written as it is, is not.
+    assert_eq!(config.credentials.variables, ["PATH"]);
     assert_eq!(
-        sent,
-        [
-            ("X-Scope-OrgID".to_string(), "tenant-a".to_string()),
-            ("X-Api-Key".to_string(), "X-Api-Key from PROM_KEY".to_string()),
-        ]
+        config.credentials.values,
+        // In the order of the keys: `headers` before `token`.
+        [format!("Key {path}"), "prom-token".to_string()]
     );
+}
+
+#[test]
+fn every_string_of_the_file_may_name_a_variable_but_the_api_key_waits_for_the_assembly() {
+    let path = std::env::var("PATH").unwrap();
+    let config = load_text("model = 'm-${PATH}-$$'\n[provider]\napiKey = '${ZX_APP_TEST_UNSET_KEY}'\n").unwrap();
+    assert_eq!(config.model, Some(format!("m-{path}-$")));
+    assert_eq!(config.provider.api_key.as_deref(), Some("${ZX_APP_TEST_UNSET_KEY}"));
+    assert!(config.credentials.variables.is_empty());
+    let unset = error("model = '${ZX_APP_TEST_UNSET_MODEL}'");
+    assert!(
+        unset.contains("model: names ${ZX_APP_TEST_UNSET_MODEL}, which is not set"),
+        "{unset}"
+    );
+    // A placeholder only stands for text: a number is written as a number.
+    assert!(error("maxTokens = '${PATH}'").contains("invalid type"));
 }
 
 #[test]
@@ -368,10 +386,7 @@ fn malformed_mcp_settings_are_refused() {
             server("tools = ['query']\nmaxTimeoutSecs = 600"),
             "unknown field `maxTimeoutSecs`",
         ),
-        (
-            server("tools = ['query']\ntokenEnv = ' '"),
-            "tokenEnv must not be empty",
-        ),
+        (server("tools = ['query']\ntokenEnv = 'T'"), "unknown field `tokenEnv`"),
         (server("tools = ['a.b', 'a_b']"), "like another of its tools"),
         (server(&format!("tools = ['{}']", "x".repeat(64))), "longer than 64"),
         (
@@ -387,20 +402,20 @@ fn malformed_mcp_settings_are_refused() {
             "header \"Accept\" is set by the transport",
         ),
         (
-            server("tools = ['query']\ntokenEnv = 'T'\nheaderEnv = { Authorization = 'A' }"),
+            server("tools = ['query']\ntoken = 't'\nheaders = { Authorization = 'A' }"),
             "header \"Authorization\" is set by the token",
         ),
         (
-            server("tools = ['query']\nheaders = { X-A = '1' }\nheaderEnv = { x-a = 'A' }"),
-            "header \"x-a\" is given more than once",
+            server("tools = ['query']\nheaders = { X-A = '1', x-a = '2' }"),
+            "is given more than once",
         ),
         (
             server("tools = ['query']\nheaders = { 'X A' = '1' }"),
             "header \"X A\" is not a valid header name",
         ),
         (
-            server("tools = ['query']\nheaderEnv = { X-Api-Key = ' ' }"),
-            "headerEnv.X-Api-Key must not be empty",
+            server("tools = ['query']\nheaders = { X-Api-Key = '${ZX_APP_TEST_UNSET_KEY}' }"),
+            "mcp[0].headers.X-Api-Key: names ${ZX_APP_TEST_UNSET_KEY}, which is not set",
         ),
         (server("tools = ['query']\ntrustReadOnly = 'yes'"), "invalid type"),
     ] {

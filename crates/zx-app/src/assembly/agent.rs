@@ -20,7 +20,7 @@ use zx_agent::hooks::HookChain;
 use zx_agent::policy::{ApprovalMode, PolicyChain, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
-use zx_util::env::env_value;
+use zx_util::env::{Unexpandable, env_value, expand, variables};
 
 use super::execution::ExecutorFactory;
 use super::provider::{BuiltProvider, ProviderInput};
@@ -28,7 +28,7 @@ use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Overrides, SessionPlace, resolve_cwd};
 use crate::config::{
-    AgentDefinition, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
+    AgentDefinition, Credentials, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
 };
 use crate::otel;
 
@@ -108,10 +108,10 @@ impl ConfiguredAgent {
         );
         let models = config.models.clone();
         let executor_factory = executor_factory(app, &permissions)?;
-        let (built, key_env) = provider(app)?;
-        let hidden_env = hidden_env(app, key_env);
+        let (built, key) = provider(app)?;
+        let credentials = credentials(app, key);
         let (policies, approvals) = policies(app, &permissions, &host, approvals);
-        let hooks = hooks(app, continue_on_length, &hidden_env);
+        let hooks = hooks(app, continue_on_length, &credentials);
         let skills = skills_tool(skills, &enabled);
         // The host's tools that the agent enables, as it enables the built-in ones.
         let tools = app
@@ -141,7 +141,7 @@ impl ConfiguredAgent {
                 context,
                 skills,
                 executor_factory,
-                hidden_env,
+                hidden_env: credentials.variables,
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
@@ -299,21 +299,34 @@ fn executor_factory(app: &Application, permissions: &Permissions) -> Result<Arc<
 }
 
 /// The provider of config.toml, built by the factory registered for its `provider.api`, and
-/// the variable that holds its API key.
-fn provider(app: &Application) -> Result<(BuiltProvider, &str)> {
+/// the credential of its API key: `provider.apiKey`, or else the provider's own variable.
+fn provider(app: &Application) -> Result<(BuiltProvider, Credentials)> {
     let config = &app.settings.config;
     let factory = app
         .providers
         .get(&config.provider.api)
         .map_err(|error| anyhow::anyhow!("provider.api: {error}"))?;
-    let key_env = config.provider.api_key_env.as_deref().unwrap_or(factory.api_key_env());
+    let written = match &config.provider.api_key {
+        Some(key) => key.clone(),
+        None => format!("${{{}}}", factory.api_key_env()),
+    };
+    let named = variables(&written).map_err(|error| anyhow::anyhow!("provider.apiKey: {error}"))?;
+    let api_key = match expand(&written) {
+        Ok(expanded) => Some(expanded.value),
+        // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
+        Err(Unexpandable::Unset(_)) => None,
+        Err(error) => anyhow::bail!("provider.apiKey: {error}"),
+    };
+    let key = Credentials {
+        variables: named,
+        values: api_key.iter().cloned().collect(),
+    };
     let built = factory.build(ProviderInput {
         options: &config.provider.options,
-        // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
-        api_key: env_value(key_env),
+        api_key,
         reasoning: config.reasoning,
     })?;
-    Ok((built, key_env))
+    Ok((built, key))
 }
 
 /// The agent `name`, with the host's tools and budgets over it, validated: explicit values
@@ -412,18 +425,19 @@ fn policies(
 }
 
 /// The hooks every session of the agent shares: continuation of up to `continue_on_length`
-/// cut responses, redaction of the values of the `hidden` variables and of the secret files,
-/// the trace export, and the host's own.
+/// cut responses, redaction of the `credentials`, their variables' values and the secret
+/// files, the trace export, and the host's own.
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
 /// `[hook]` lines show, is no extension's: [`check_names`] refuses one named so.
-fn hooks(app: &Application, continue_on_length: u32, hidden: &[String]) -> HookChain {
+fn hooks(app: &Application, continue_on_length: u32, credentials: &Credentials) -> HookChain {
     let mut hooks = HookChain::new();
     hooks.push(CONTINUE_ON_LENGTH, Arc::new(ContinueOnLength::new(continue_on_length)));
     // An unset or empty variable holds nothing to redact. The hook reads the secret files
     // again before every use.
-    let values = hidden.iter().map(String::as_str).filter_map(env_value);
+    let named = credentials.variables.iter().map(String::as_str).filter_map(env_value);
+    let values = named.chain(credentials.values.iter().cloned());
     let redaction = RedactSecrets::new(values).with_secret_files(app.secret_files.clone());
     hooks.push(REDACT_SECRETS, Arc::new(redaction));
     // Observes every run of every session, whoever reads its events.
@@ -436,15 +450,19 @@ fn hooks(app: &Application, continue_on_length: u32, hidden: &[String]) -> HookC
     hooks
 }
 
-/// Variables commands must not inherit, whose values are redacted: the API key's `key_env`,
-/// the other credentials and the headers that authenticate to a trace collector. `env` would
-/// put them into the session file and the context.
-fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
-    std::iter::once(key_env.to_string())
-        .chain(app.hidden_env.iter().cloned())
-        .chain(app.mcp.secret_env.iter().cloned())
-        .chain(otel::HEADER_ENVS.iter().map(std::string::ToString::to_string))
-        .collect()
+/// The credentials of every session, whose variables commands must not inherit and whose
+/// values are redacted: the API `key`'s, those of config.toml and of the host, and the
+/// variables of the headers that authenticate to a trace collector. `env` would put them into
+/// the session file and the context.
+fn credentials(app: &Application, key: Credentials) -> Credentials {
+    let mut credentials = key;
+    credentials.extend(app.settings.config.credentials.clone());
+    credentials.extend(app.credentials.clone());
+    credentials.extend(Credentials {
+        variables: otel::HEADER_ENVS.iter().map(ToString::to_string).collect(),
+        values: Vec::new(),
+    });
+    credentials
 }
 
 /// The tools of `names`, those of MCP servers and of the host's extensions, that ask a person:
