@@ -31,11 +31,11 @@
 - 同一进程中各会话的 `edit_file` 与 `write_file` 对同一个文件逐个修改，不协调其他进程或经 bash 的写入。
 - 输出都有界：`read_file` 单文件至多 10 MiB，每次至多 2000 行或 50 KiB；搜索工具有条数与 60 秒超时上限。
 - `read_output` 只读落盘目录中以输出 ID 命名的普通文件，不跟随符号链接；落盘目录在工作目录之下时，从工作目录到它的每一级都不能是符号链接，否则既不读也不写。落盘目录默认在工作目录下，容器中的命令也能写它，而 `read_output` 在本机读取。
-- MCP 服务器与工具都由使用者显式列出；工具描述与结果来自外部服务，可能含注入内容。工具一律按有副作用处理；交给模型的结果有上限，响应体本身没有（SSE 每个事件至多 16 MiB）。
+- MCP 服务器与工具都由使用者显式列出；工具描述与结果来自外部服务，可能含注入内容。工具按有副作用处理，除非 `[[mcp]]` 的 `trustReadOnly` 信任该服务器的只读标注：这等于让服务器决定它的哪些工具不经审批执行，只对自己掌控的服务器打开。交给模型的结果有上限，响应体本身没有（SSE 每个事件至多 16 MiB）。调用失败的错误里，服务器地址只写到端口，路径与查询（可能含凭据）不进会话。
 
 ## 密钥
 
-- 以下凭据只从环境变量读取：API key（`provider.apiKeyEnv`）、MCP 的 `tokenEnv`、zx-im 的平台凭据（Slack 的两个 token，⚑ D:5/CHINA FLAG: 飞书的 App Secret）与 OpenTelemetry 的请求头变量（`OTEL_EXPORTER_OTLP_HEADERS` 等）。在本机执行的命令看不到这些变量；工具输出在写入会话、事件和回传模型之前，把它们的完整字面值替换为 `[REDACTED]`。这两项由 `zx-app` 的装配设置；作为库使用时要宿主自己设置（`LocalExecutor::hidden_env` 与 `RedactSecrets`，见 [LIBRARY.md](LIBRARY.md)）。宿主注册的执行环境经 `ExecutorSession::hidden_env` 得到这些变量名，命令看不到它们由该执行环境负责；宿主自己的 zx-im 程序加的平台，其凭据变量经 `BuiltChannel::hidden_env` 交给装配，与内置平台的同样处理。
+- 以下凭据只从环境变量读取：API key（`provider.apiKeyEnv`）、MCP 的 `tokenEnv` 与 `headerEnv`、zx-im 的平台凭据（Slack 的两个 token，⚑ D:5/CHINA FLAG: 飞书的 App Secret）与 OpenTelemetry 的请求头变量（`OTEL_EXPORTER_OTLP_HEADERS` 等）。在本机执行的命令看不到这些变量；工具输出在写入会话、事件和回传模型之前，把它们的完整字面值替换为 `[REDACTED]`。这两项由 `zx-app` 的装配设置；作为库使用时要宿主自己设置（`LocalExecutor::hidden_env` 与 `RedactSecrets`，见 [LIBRARY.md](LIBRARY.md)）。宿主注册的执行环境经 `ExecutorSession::hidden_env` 得到这些变量名，命令看不到它们由该执行环境负责；宿主自己的 zx-im 程序加的平台，其凭据变量经 `BuiltChannel::hidden_env` 交给装配，与内置平台的同样处理。
 - 其他凭据文件用 `config.toml` 的 `secretFiles` 或 `ZX_SECRET_FILES` 登记（如 Kubernetes ServiceAccount 的 token），程序本身不预设路径。文件每次过滤前重新读取，轮换下来的旧值保留最近 32 个继续过滤。短于 8 个字符的值照常过滤，但所有相同的文本都会被替换，启动时在 stderr 以 `[secret] <文件>: …` 提示。过滤器出错时丢弃原始输出，返回错误结果。
 - 过滤不识别未知、编码或拆分后的密钥，也不处理用户输入、模型输出、工具参数、项目上下文与说明，也不处理图片：截图里的密钥会原样进入模型请求与会话文件。这些内容仍可能进入模型请求、会话和事件，需要控制会话文件的访问权限；chat 默认把会话写到主目录下，不想留下记录时用 `--no-session`。
 - 本机执行时，工具与 agent 是同一系统用户，仍可经其他途径读到凭据（如 Linux 的 `/proc/<pid>/environ`）；其他环境变量（如云厂商凭证）bash 仍能读到，需要时在启动前清理。隔离要靠容器执行或不同账号。
@@ -55,4 +55,4 @@
 
 ---
 
-SECURITY.md · v0.11 · 2026年11月
+SECURITY.md · v0.12 · 2026年11月

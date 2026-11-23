@@ -252,7 +252,10 @@ shortFlags = ["A"]
 name = "prom"
 url = "https://prom-mcp.monitoring.svc/mcp"
 tokenEnv = "PROM_MCP_TOKEN"
+headers = { X-Scope-OrgID = "team-a" }
+headerEnv = { X-Api-Key = "PROM_MCP_KEY" }
 tools = ["query", "query_range"]
+trustReadOnly = true
 ```
 
 | 键 | 语义 |
@@ -260,11 +263,15 @@ tools = ["query", "query_range"]
 | `name` | 服务器名，小写 ASCII 字母、数字与 `-`，不能重复。模型看到的工具名是 `<name>__<工具名>`（其他字符换成 `_`，全名至多 64 个字符） |
 | `url` | `http://` 或 `https://` 端点 |
 | `tokenEnv` | 可选，存放 token 的环境变量，以 `Authorization: Bearer` 发送；设置后必须有值 |
+| `headers` | 可选，每个请求另带的请求头，值直接写在这里，不要放凭据 |
+| `headerEnv` | 可选，每个请求另带的请求头，值取自所写的环境变量，设置后必须有值；与 `tokenEnv` 一样对命令隐藏、在输出中脱敏。两处的头名不分大小写，不能重复，也不能是传输自己用的 `Accept`、`Content-Type`、`Mcp-Session-Id`、`MCP-Protocol-Version`、`Last-Event-ID`；设了 `tokenEnv` 时不能再设 `Authorization` |
 | `tools` | 交给模型的工具，至少一个，其余不暴露；服务器缺少其中的工具时启动失败 |
+| `trustReadOnly` | 可选，默认 `false`。为 `true` 时信任服务器的 `readOnlyHint`：标为只读的工具不经审批直接执行（agent 的 `permissions.ask` 列出的仍要审批，`deny` 列出的仍拒绝），中断时也不按“可能已改动”报告。只对自己掌控的服务器打开 |
 | `timeoutSecs` | 可选，大于零：一次调用多久没有应答也没有进度通知就超时，默认同 `toolTimeoutSecs`；每条进度通知重新计时 |
 
-- 只有列出的工具交给模型；agent 的 `permissions.allow` 列出的直接执行，其余每次都要审批（run 中因此拒绝）。服务器给出的 annotations 不影响放行。
-- 每个进程启动时连接一次；连不上、token 变量没有值、服务器缺少列出的工具时以退出码 2 报错。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址去掉路径的部分>`，经 `http://` 发送 token 时另加 `; the token is sent unencrypted`。
+- 只有列出的工具交给模型；agent 的 `permissions.allow` 列出的直接执行，`trustReadOnly` 的服务器标为只读的也直接执行，其余每次都要审批（run 中因此拒绝）。没有 `trustReadOnly` 时，服务器给出的 annotations 不影响放行。
+- 每个进程启动时连接一次，列出工具；服务器之后更新了工具的说明或参数，重启后才生效。连不上、`tokenEnv` 或 `headerEnv` 的变量没有值、服务器缺少列出的工具时以退出码 2 报错。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址去掉路径的部分>`，`trustReadOnly` 认作只读的工具后面标 `(read-only)`；经 `http://` 发送 `tokenEnv` 或 `headerEnv` 的值时另加 `; credentials are sent unencrypted`。
+- 服务器在运行中停机或重启后，不必重启 zx-agent 或 zx-im：停机期间的调用失败，错误作为工具结果交给模型，恢复后照常调用；服务器回 404 表示会话已失效时，自动重新握手并重发这次请求。错误中的地址只写到端口，不带路径与查询。
 - 先用 `server/discover` 握手，旧服务器回退到 `initialize`。结果中的文本原样交给模型，图片、音频与二进制资源只写一行说明，最多 2000 行或 50 KiB；进度通知作为工具进度显示。
 
 ## 项目上下文
@@ -354,4 +361,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.39 · 2026年11月
+CONFIGURATION.md · v0.40 · 2026年11月

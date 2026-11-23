@@ -1,6 +1,7 @@
 //! The MCP client against a fake MCP server (`zx_testing::fake_mcp`): both
 //! protocol eras, tool selection and naming, calls and their results, errors, timeouts and
-//! cancellation.
+//! cancellation; calls once a server that was down or restarted answers again; configured
+//! headers; trusted read-only annotations.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
 use zx_agent::events::RunOutcome;
 use zx_agent::extensions::Extension;
-use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
 use zx_testing::{RunnerSetup, config, run_prompt, summarize, tool_context};
 
@@ -504,4 +505,156 @@ async fn progress_notifications_reach_the_tool_context_and_re_arm_the_timeout() 
             call.params
         );
     }
+}
+
+/// The JSON-RPC method and session of each POST the server received, in order.
+fn posts(fake: &FakeMcp) -> Vec<(String, Option<String>)> {
+    fake.received()
+        .into_iter()
+        .filter(|request| request.http_method == "POST")
+        .map(|request| (request.method, request.session))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_call_after_an_older_server_restarted_is_sent_again_in_a_new_session() {
+    let fake = FakeMcp::start(Era::Legacy, three_tools()).await;
+    let server = connect(&fake, &["query"]).await;
+    call(&server, "prom__query", json!({"q": "before"})).await.unwrap();
+    fake.restart();
+
+    let output = call(&server, "prom__query", json!({"q": "after"})).await.unwrap();
+
+    assert_eq!(output.content, r#"query: {"q":"after"}"#);
+    let session = |name: &str| Some(name.to_string());
+    let after_listing = posts(&fake).split_off(6);
+    assert_eq!(
+        after_listing,
+        [
+            ("tools/call".to_string(), session(SESSION)),
+            // Refused with 404 for the lost session: a new one, and the call again.
+            ("tools/call".to_string(), session(SESSION)),
+            ("initialize".to_string(), None),
+            ("notifications/initialized".to_string(), session("session-2")),
+            ("tools/call".to_string(), session("session-2")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_call_while_the_server_is_down_fails_and_calls_succeed_once_it_is_back() {
+    for era in [Era::Modern, Era::Legacy] {
+        let fake = FakeMcp::start(era, three_tools()).await;
+        let server = connect(&fake, &["query"]).await;
+        fake.go_down();
+
+        let error = call(&server, "prom__query", json!({})).await.unwrap_err();
+        fake.come_back();
+        let output = call(&server, "prom__query", json!({"q": "up"})).await.unwrap();
+
+        // The transport's own words, with the URL shown as its origin and none of rmcp's types.
+        let origin = fake.url.trim_end_matches("/mcp");
+        assert!(
+            error.starts_with("MCP server prom: query failed: ") && error.contains(&format!("({origin})")),
+            "{era:?}: {error}"
+        );
+        assert!(!error.contains("/mcp") && !error.contains("rmcp::"), "{era:?}: {error}");
+        assert_eq!(output.content, r#"query: {"q":"up"}"#, "{era:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_older_server_that_restarted_while_down_gets_a_new_session_once_back() {
+    let fake = FakeMcp::start(Era::Legacy, three_tools()).await;
+    let server = connect(&fake, &["query"]).await;
+    fake.go_down();
+    call(&server, "prom__query", json!({})).await.unwrap_err();
+    fake.restart();
+    fake.come_back();
+
+    for q in ["back", "again"] {
+        let output = call(&server, "prom__query", json!({"q": q})).await.unwrap();
+        assert_eq!(output.content, format!(r#"query: {{"q":"{q}"}}"#));
+    }
+
+    let calls = fake.requests("tools/call");
+    let last: Vec<Option<&str>> = calls.iter().rev().take(2).map(|call| call.session.as_deref()).collect();
+    assert_eq!(last, [Some("session-2"), Some("session-2")]);
+    assert_eq!(fake.requests("initialize").len(), 2);
+}
+
+#[tokio::test]
+async fn every_request_carries_the_configured_headers() {
+    for era in [Era::Modern, Era::Legacy] {
+        let fake = FakeMcp::start(era, three_tools()).await;
+        let server = Server::connect(ServerConfig {
+            headers: vec![
+                ("X-Scope-OrgID".to_string(), "tenant-a".to_string()),
+                ("X-Api-Key".to_string(), "key-1".to_string()),
+            ],
+            ..settings(&fake, &["query"])
+        })
+        .await
+        .unwrap();
+        call(&server, "prom__query", json!({})).await.unwrap();
+        let posts: Vec<_> = fake
+            .received()
+            .into_iter()
+            .filter(|request| request.http_method == "POST")
+            .collect();
+        assert!(posts.len() >= 4, "{era:?}: {posts:?}");
+        for request in posts {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .filter(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(header("x-scope-orgid"), ["tenant-a"], "{era:?} {}", request.method);
+            assert_eq!(header("x-api-key"), ["key-1"], "{era:?} {}", request.method);
+            // Beside the token, not instead of it.
+            assert_eq!(header("authorization"), [format!("Bearer {TOKEN}").as_str()]);
+        }
+    }
+}
+
+/// `tools` with the `readOnlyHint` given for each, by name.
+fn annotated(hints: &[(&str, Option<bool>)]) -> Vec<serde_json::Value> {
+    hints
+        .iter()
+        .map(|(name, hint)| {
+            let mut described = tool(name, "");
+            if let Some(hint) = hint {
+                described["annotations"] = json!({"readOnlyHint": hint});
+            }
+            described
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_tool_is_read_only_only_when_its_server_is_trusted_and_says_so() {
+    let fake = FakeMcp::start(
+        Era::Modern,
+        annotated(&[("query", Some(true)), ("range", Some(false)), ("admin", None)]),
+    )
+    .await;
+    let tools = ["query", "range", "admin"];
+    let effects = |server: &Server| server.tools().iter().map(|tool| tool.effects()).collect::<Vec<_>>();
+
+    let trusted = Server::connect(ServerConfig {
+        trust_read_only: true,
+        ..settings(&fake, &tools)
+    })
+    .await
+    .unwrap();
+    let untrusted = connect(&fake, &tools).await;
+
+    assert_eq!(
+        effects(&trusted),
+        [Effects::ReadOnly, Effects::SideEffects, Effects::SideEffects]
+    );
+    assert_eq!(effects(&untrusted), [Effects::SideEffects; 3]);
 }

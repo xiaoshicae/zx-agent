@@ -353,8 +353,9 @@ fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>,
 
 /// The policies every session of the agent asks, in this order: the command policy, the
 /// policy of the agent's `permissions` with the tools of MCP servers and of the `host`'s
-/// extensions that they do not allow, the host's own, and, where a person answers, the one
-/// that asks before bash commands. With them, who answers.
+/// extensions that they do not allow (but the MCP tools a trusted server says only read), the
+/// host's own, and, where a person answers, the one that asks before bash commands. With
+/// them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest decision of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
@@ -368,7 +369,15 @@ fn policies(
     let commands = CommandPolicy::new().deny_also(permissions.denied_commands());
     policies.push(COMMAND_POLICY, Arc::new(commands));
     let auto_approve = permissions.auto_approval();
-    let extension_tools: Vec<String> = app.mcp.names.iter().chain(&host.extensions).cloned().collect();
+    // A server trusted to say which of its tools only read lets those run like built-in tools.
+    let extension_tools: Vec<String> = app
+        .mcp
+        .names
+        .iter()
+        .filter(|name| !app.mcp.read_only.contains(name))
+        .chain(&host.extensions)
+        .cloned()
+        .collect();
     let asking = asking_tools(permissions, &extension_tools);
     if let Some(rules) = rules_policy(permissions, &asking, auto_approve.clone()) {
         policies.push(AGENT_PERMISSIONS, Arc::new(rules));
@@ -428,7 +437,7 @@ fn hooks(app: &Application, continue_on_length: u32, hidden: &[String]) -> HookC
 fn hidden_env(app: &Application, key_env: &str) -> Vec<String> {
     std::iter::once(key_env.to_string())
         .chain(app.hidden_env.iter().cloned())
-        .chain(app.mcp.token_env.iter().cloned())
+        .chain(app.mcp.secret_env.iter().cloned())
         .chain(otel::HEADER_ENVS.iter().map(std::string::ToString::to_string))
         .collect()
 }
@@ -455,7 +464,8 @@ fn rules_policy(permissions: &Permissions, extension_ask: &[String], auto_approv
         matcher: RuleMatcher::Tool(tool.clone()),
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });
-    // An MCP server's tools ask unless permissions.allow lists them: annotations are hints.
+    // An MCP server's tools ask unless permissions.allow lists them: annotations are hints,
+    // except the read-only ones of a server the configuration trusts.
     // So do those of the host's extensions, which are treated as MCP servers are.
     let extension = extension_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),

@@ -2,8 +2,10 @@
 //! rmcp, so the client is checked against the protocol and not against itself. It speaks the
 //! 2026-07-28 protocol (`server/discover`, no sessions) or the 2025-11-25 one (`initialize`
 //! and `Mcp-Session-Id`). It lists one tool per page, so a client must follow `nextCursor`.
+//! It can restart, losing its session, and go down for a while.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +17,8 @@ use tokio::sync::Notify;
 use crate::WAIT;
 use crate::http::{read_request, response};
 
-/// The session the 2025-11-25 server assigns.
+/// The session the 2025-11-25 server assigns first; after each restart it assigns the next,
+/// `session-2` and so on.
 pub const SESSION: &str = "session-1";
 
 /// Which version of the protocol the server speaks.
@@ -64,6 +67,8 @@ pub struct Received {
     pub protocol_version: Option<String>,
     /// The `Mcp-Session-Id` header.
     pub session: Option<String>,
+    /// The headers, by lowercase name, in the order received.
+    pub headers: Vec<(String, String)>,
 }
 
 /// A tool as `tools/list` describes it, with one string argument `q`.
@@ -82,7 +87,18 @@ struct State {
     replies: Mutex<HashMap<String, VecDeque<Reply>>>,
     /// Calls left unanswered that the client gave up on by closing the connection.
     abandoned: Mutex<usize>,
+    /// How many times the server restarted: its session is `session-<restarts + 1>`.
+    restarts: AtomicUsize,
+    /// Whether connections are closed without an answer.
+    down: AtomicBool,
     changed: Notify,
+}
+
+impl State {
+    /// The session the 2025-11-25 server gives and accepts now.
+    fn session(&self) -> String {
+        format!("session-{}", self.restarts.load(Ordering::SeqCst) + 1)
+    }
 }
 
 /// A running fake MCP server, on a local port.
@@ -103,6 +119,8 @@ impl FakeMcp {
             received: Mutex::new(Vec::new()),
             replies: Mutex::new(HashMap::new()),
             abandoned: Mutex::new(0),
+            restarts: AtomicUsize::new(0),
+            down: AtomicBool::new(false),
             changed: Notify::new(),
         });
         let serving = state.clone();
@@ -123,6 +141,23 @@ impl FakeMcp {
             .entry(tool.to_string())
             .or_default()
             .extend(replies);
+    }
+
+    /// Lose the session, as a server that keeps it in memory does when it restarts: a request
+    /// carrying the old one gets 404 Not Found, and the next `initialize` starts a new one.
+    pub fn restart(&self) {
+        self.state.restarts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Close every connection without an answer, as a server that is down does, until
+    /// [`come_back`](Self::come_back). Requests are not recorded meanwhile.
+    pub fn go_down(&self) {
+        self.state.down.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer again after [`go_down`](Self::go_down).
+    pub fn come_back(&self) {
+        self.state.down.store(false, Ordering::SeqCst);
     }
 
     /// Every request received so far, in order.
@@ -171,20 +206,34 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
     let Some(request) = read_request(&mut stream).await else {
         return;
     };
+    if state.down.load(Ordering::SeqCst) {
+        // Dropping the stream closes the connection without an answer.
+        return;
+    }
     let body = request.json();
+    let session = request.header("mcp-session-id").map(String::from);
     state.received.lock().unwrap().push(Received {
         http_method: request.method.clone(),
         method: body["method"].as_str().unwrap_or_default().to_string(),
         params: body["params"].clone(),
         authorization: request.header("authorization").map(String::from),
         protocol_version: request.header("mcp-protocol-version").map(String::from),
-        session: request.header("mcp-session-id").map(String::from),
+        session: session.clone(),
+        headers: request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+            .collect(),
     });
     state.changed.notify_waiters();
+    // A session the server no longer has: "the server MUST respond to requests containing
+    // that session ID with HTTP 404 Not Found" (Streamable HTTP, session management).
+    let lost = session.is_some_and(|session| session != state.session());
     let answer = match request.method.as_str() {
         // No server-initiated stream: the spec lets a server refuse it.
         "GET" => Some(Answer::Whole(response("405 Method Not Allowed", &[], ""))),
         "DELETE" => Some(Answer::Whole(response("200 OK", &[], ""))),
+        _ if lost => Some(Answer::Whole(response("404 Not Found", &[], ""))),
         _ => answer(&state, &body),
     };
     match answer {
@@ -303,7 +352,7 @@ fn answer_whole(state: &State, body: &Value) -> Option<String> {
                 "serverInfo": {"name": "fake", "version": "1"},
             });
             let text = json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
-            return Some(response("200 OK", &[("mcp-session-id", SESSION.to_string())], &text));
+            return Some(response("200 OK", &[("mcp-session-id", state.session())], &text));
         }
         ("tools/list", _) => {
             let index: usize = body["params"]["cursor"]

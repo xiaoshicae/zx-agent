@@ -2,7 +2,7 @@
 //! it is: what it leaves out keeps the built-in default. What a host and the environment
 //! variables say over it is laid on by the assembly (`crate::assembly`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -52,7 +52,7 @@ pub struct ContainerSettings {
 
 /// An external MCP server whose listed tools the model may call, connected when the host
 /// starts. Its tools ask a person, and are refused where no one can answer, unless the
-/// agent's `permissions.allow` lists them.
+/// agent's `permissions.allow` lists them, or the server is trusted to say which only read.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServer {
@@ -63,12 +63,44 @@ pub struct McpServer {
     /// The variable holding the token sent as `Authorization: Bearer`; unset sends none.
     /// Commands do not see the variable, and its value is redacted from tool output.
     pub token_env: Option<String>,
+    /// Headers sent with every request, by name, with their values as written: not for
+    /// credentials, which `headerEnv` reads from variables.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Headers sent with every request, by name, each with the value of a variable, which
+    /// commands do not see and which is redacted from tool output, as with `tokenEnv`.
+    #[serde(default)]
+    pub header_env: BTreeMap<String, String>,
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
+    /// Whether the server's `readOnlyHint` is trusted: a tool it annotates as read-only runs
+    /// without asking, unless the agent's `permissions.ask` lists it, and is treated as having
+    /// no side effects.
+    #[serde(default)]
+    pub trust_read_only: bool,
     /// Longest a call may go without an answer or a progress notification, in seconds;
     /// unset uses `toolTimeoutSecs`. A call that keeps reporting progress is bounded by the
     /// run's timeout and cancellation.
     pub timeout_secs: Option<u64>,
+}
+
+impl McpServer {
+    /// The headers to send: those of `headers` as written, then those of `headerEnv`, each
+    /// with the value `value_of` gives for its header and variable.
+    pub(crate) fn sent_headers(
+        &self,
+        value_of: impl Fn(&str, &str) -> Result<String>,
+    ) -> Result<Vec<(String, String)>> {
+        let written = self
+            .headers
+            .iter()
+            .map(|(header, value)| Ok((header.clone(), value.clone())));
+        let read = self
+            .header_env
+            .iter()
+            .map(|(header, variable)| Ok((header.clone(), value_of(header, variable)?)));
+        written.chain(read).collect()
+    }
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
@@ -199,20 +231,31 @@ impl Config {
     }
 
     /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries:
-    /// their `name`, `url` and `tools` as [`ServerConfig::validate`] does, whose errors name
-    /// the server and those fields, and the keys that only config.toml has.
+    /// their `name`, `url`, headers and `tools` as [`ServerConfig::validate`] does, whose
+    /// errors name the server and those fields, and the keys that only config.toml has.
     pub(crate) fn mcp_tool_names(&self) -> Result<Vec<String>> {
         let mut servers = HashSet::new();
         let mut names = Vec::new();
         for server in &self.mcp {
-            let config = ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone());
-            names.extend(config.validate().map_err(anyhow::Error::msg)?);
             let name = server.name.as_str();
-            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
             ensure!(
                 server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
                 "MCP server {name}: tokenEnv must not be empty"
             );
+            for (header, variable) in &server.header_env {
+                ensure!(
+                    !variable.trim().is_empty(),
+                    "MCP server {name}: headerEnv.{header} must not be empty"
+                );
+            }
+            // The variables are read when connecting, and their values checked then.
+            let config = ServerConfig {
+                token: server.token_env.as_ref().map(|_| String::new()),
+                headers: server.sent_headers(|_, _| Ok(String::new()))?,
+                ..ServerConfig::new(name, server.url.as_str(), server.tools.clone())
+            };
+            names.extend(config.validate().map_err(anyhow::Error::msg)?);
+            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
             ensure!(
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
