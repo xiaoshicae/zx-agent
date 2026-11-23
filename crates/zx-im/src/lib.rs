@@ -2,8 +2,8 @@
 //! conversation on a chat platform, a direct chat or a thread, with its own session of the
 //! agent that `zx-app` configures from config.toml and the agent files, as for the command
 //! line; im.toml says which platforms, who may use them, which chats have an agent or
-//! approvers of their own, and how much runs at once. The program itself (`src/main.rs`) only
-//! calls [`main`].
+//! approvers of their own, and how much runs at once and in a day. The program itself
+//! (`src/main.rs`) only calls [`main`].
 //!
 //! A channel only moves messages; the server owns routing, sessions, the run limit and
 //! approvals. Supporting another platform means implementing the methods of [`ImChannel`] in
@@ -44,8 +44,8 @@ pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChan
 pub use self::platform::{FeishuChannel, FeishuConfig};
 pub use self::program::Program;
 pub use self::server::{
-    ApprovalRecord, ChatConfig, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
-    Trigger, Triggers,
+    ApprovalRecord, ChatConfig, DailyLimit, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    StatusStore, Trigger, Triggers,
 };
 
 /// Run the program with its built-in platforms ([`Program::run`]).

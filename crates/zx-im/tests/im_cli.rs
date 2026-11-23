@@ -393,14 +393,29 @@ async fn a_chat_with_an_agent_of_its_own_is_answered_by_that_agent() {
 }
 
 #[tokio::test]
-async fn a_chat_naming_an_agent_the_home_does_not_have_stops_the_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = write_im_config(dir.path(), &with_prod_chat("http://127.0.0.1:9/api"));
-    let output = im(dir.path(), &config, "http://127.0.0.1:9/v1").output().await.unwrap();
-    let stderr = stderr(&output);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("chats \"slack:C2\": agent \"prod\": "), "{stderr}");
-    assert!(stderr.contains("prod.md does not exist"), "{stderr}");
+async fn settings_the_zx_agent_home_cannot_serve_stop_the_start() {
+    let cases = [
+        // No agents/prod.md.
+        (
+            with_prod_chat("http://127.0.0.1:9/api"),
+            ["chats \"slack:C2\": agent \"prod\": ", "prod.md does not exist"],
+        ),
+        // No prices for the model in config.toml.
+        (
+            VALID.replace("[sessions]", "[limits]\ndailyCost = 1.0\n\n[sessions]"),
+            ["dailyCost needs the prices of the model \"mock\"", "[[models]]"],
+        ),
+    ];
+    for (config, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_im_config(dir.path(), &config);
+        let output = im(dir.path(), &path, "http://127.0.0.1:9/v1").output().await.unwrap();
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{config}: {stderr}");
+        for part in expected {
+            assert!(stderr.contains(part), "{config}: expected {part:?} in {stderr}");
+        }
+    }
 }
 
 #[tokio::test]

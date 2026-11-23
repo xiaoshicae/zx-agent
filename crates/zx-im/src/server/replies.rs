@@ -44,6 +44,9 @@ pub struct Replies {
     pub nothing_to_compact: String,
     /// The answer to `/compact` while a task runs or waits, or no run slot is free.
     pub busy: String,
+    /// The answer to a message or `/compact` that would start work once the day's usage is
+    /// used up ([`ServerConfig::daily`](super::ServerConfig::daily)).
+    pub daily_limit: String,
     /// A run that completed without text.
     pub no_answer: String,
     /// Appended to an answer cut off at the output limit.
@@ -84,6 +87,7 @@ impl Default for Replies {
             compacted: "Summarized the earlier part of the conversation; the summary now stands in for it.".into(),
             nothing_to_compact: "Nothing to summarize yet.".into(),
             busy: "A task is running; send this again once it has ended.".into(),
+            daily_limit: "Today's usage limit is reached; please ask again after 00:00 UTC.".into(),
             no_answer: "(no answer)".into(),
             truncated: "(the answer reached the output limit and was cut off)".into(),
             model_request_limit: "(the model request limit was reached; the task is not finished)".into(),

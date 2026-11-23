@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zx_agent::ai::Image;
+use zx_agent::ai::{Image, Usage};
 use zx_agent::builtin::images::fit;
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
@@ -139,6 +139,14 @@ impl Finished {
             Self::Compaction(report) => report.outcome == compaction::Outcome::Cancelled,
         }
     }
+
+    /// What its responses used, those of failed attempts and summaries included.
+    pub(super) fn usage(&self) -> &Usage {
+        match self {
+            Self::Run(report) => &report.usage,
+            Self::Compaction(report) => &report.usage,
+        }
+    }
 }
 
 /// The message that says that the conversation's work goes on ([`Replies::working`]), which
@@ -184,6 +192,23 @@ impl Outlet {
         self.shared
             .bounded(Some(&self.key), "post", self.channel.send(&self.to, message))
             .await
+    }
+
+    /// Whether the day's usage, of all chats or of this conversation's, leaves no room for
+    /// new work here; the conversation is then told so ([`Replies::daily_limit`]).
+    pub(super) async fn daily_limit_refuses(&self) -> bool {
+        let reached = self
+            .shared
+            .daily_limit_reached(&self.key.platform, &self.key.conversation);
+        if reached {
+            self.post(self.replies().daily_limit.clone()).await;
+        }
+        reached
+    }
+
+    /// Count `usage`, what work of this conversation used, as the day's.
+    pub(super) fn spend(&self, usage: &Usage) {
+        self.shared.spend(&self.key.platform, &self.key.conversation, usage);
     }
 
     /// Post that the work goes on ([`Replies::working`]), kept before the work goes on:

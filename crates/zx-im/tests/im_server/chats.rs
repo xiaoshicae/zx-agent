@@ -22,6 +22,7 @@ fn own_settings(chat: &str, agent: Option<Agent>, approver: Option<&str>) -> Cha
         chat: ConversationId(chat.into()),
         agent,
         approvers: approver.map(|user| vec![UserId(user.into())]),
+        daily: DailyLimit::default(),
     }
 }
 

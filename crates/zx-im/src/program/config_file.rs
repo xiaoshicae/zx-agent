@@ -2,7 +2,7 @@
 //! for each platform, which only that platform can check.
 
 use std::collections::HashSet;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use zx_app::config::read_text;
 
-use crate::{CardLabels, ConversationId, Replies, ServerConfig, Trigger, UserId};
+use crate::{CardLabels, ConversationId, DailyLimit, Replies, ServerConfig, Trigger, UserId};
 
 /// The sections of im.toml that are the server's; each of the others configures the platform
 /// registered under its name.
@@ -47,7 +47,7 @@ pub(super) struct ConfigFile {
     /// Conversations the server starts at fixed intervals, `[[schedules]]`.
     #[serde(default)]
     pub(super) schedules: Vec<ScheduleSection>,
-    /// Chats with an agent or approvers of their own, `[[chats]]`.
+    /// Chats with an agent, approvers or a daily limit of their own, `[[chats]]`.
     #[serde(default)]
     pub(super) chats: Vec<ChatSection>,
     /// The section of each platform, by its name: what is left of the file but the server's.
@@ -95,6 +95,16 @@ pub(super) struct LimitsSection {
     max_pending_messages: Option<NonZeroUsize>,
     max_pending_bytes: Option<NonZeroUsize>,
     idle_secs: Option<u64>,
+    /// What the work of all chats may use in a day: tokens, input plus output, and cost.
+    daily_tokens: Option<NonZeroU64>,
+    daily_cost: Option<f64>,
+}
+
+impl LimitsSection {
+    /// What the work of all chats may use in a day, checked.
+    pub(super) fn daily(&self) -> Result<DailyLimit> {
+        daily_limit(self.daily_tokens, self.daily_cost, "limits")
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,6 +140,9 @@ pub(super) struct ChatSection {
     /// Who may approve in it, as `platform:id` on its platform, in place of
     /// `access.approvers`.
     approvers: Option<Vec<String>>,
+    /// What its work may use in a day: tokens, input plus output, and cost.
+    daily_tokens: Option<NonZeroU64>,
+    daily_cost: Option<f64>,
 }
 
 /// A chat of `[[chats]]`, checked: what it has of its own, its agent by name.
@@ -139,11 +152,12 @@ pub(super) struct OwnChat {
     pub(super) chat: ConversationId,
     pub(super) agent: Option<String>,
     pub(super) approvers: Option<Vec<UserId>>,
+    pub(super) daily: DailyLimit,
 }
 
 /// The chats of the file with settings of their own, checked: each names a chat among
-/// `conversations`, on one of `platforms`, once, and gives an agent or approvers, those on
-/// the chat's platform. Whether the agent exists is known once it is built.
+/// `conversations`, on one of `platforms`, once, and gives an agent, approvers, those on the
+/// chat's platform, or a daily limit. Whether the agent exists is known once it is built.
 pub(super) fn chats(
     sections: &[ChatSection],
     conversations: &Conversations,
@@ -158,9 +172,10 @@ pub(super) fn chats(
             given.insert((platform.clone(), chat.clone())),
             "{field}: the chat is given more than once"
         );
+        let daily = daily_limit(section.daily_tokens, section.daily_cost, &field)?;
         ensure!(
-            section.agent.is_some() || section.approvers.is_some(),
-            "{field}: give agent, approvers or both"
+            section.agent.is_some() || section.approvers.is_some() || daily != DailyLimit::default(),
+            "{field}: give agent, approvers, dailyTokens or dailyCost"
         );
         let approvers = match &section.approvers {
             Some(listed) => Some(approvers_on(
@@ -176,9 +191,24 @@ pub(super) fn chats(
             chat,
             agent: section.agent.clone(),
             approvers,
+            daily,
         });
     }
     Ok(chats)
+}
+
+/// What work may use in a day for `field`: `tokens`, and `cost`, a positive amount.
+fn daily_limit(tokens: Option<NonZeroU64>, cost: Option<f64>, field: &str) -> Result<DailyLimit> {
+    if let Some(cost) = cost {
+        ensure!(
+            cost.is_finite() && cost > 0.0,
+            "{field}.dailyCost: a positive amount, not {cost}"
+        );
+    }
+    Ok(DailyLimit {
+        tokens: tokens.map(NonZeroU64::get),
+        cost,
+    })
 }
 
 /// The users of the `platform:id` entries `listed` for `field`, each on `platform`.
@@ -438,6 +468,7 @@ mod tests {
             chat: ConversationId("C1".into()),
             agent: Some("prod".into()),
             approvers: Some(vec![UserId("U9".into())]),
+            daily: DailyLimit::default(),
         };
         assert_eq!(checked_chats(PROD).unwrap(), [prod]);
         // Either is enough: the chat keeps the server's other.
@@ -462,7 +493,7 @@ mod tests {
             ),
             (
                 "[[chats]]\nchat = \"slack:C1\"\n".to_string(),
-                "chats \"slack:C1\": give agent, approvers or both",
+                "chats \"slack:C1\": give agent, approvers, dailyTokens or dailyCost",
             ),
             (
                 PROD.replace("slack:U9", "feishu:ou_9"),
@@ -474,6 +505,45 @@ mod tests {
             let error = format!("{:#}", checked_chats(&chats).unwrap_err());
             assert!(error.contains(expected), "{chats}: expected {expected:?} in {error}");
         }
+    }
+
+    #[test]
+    fn daily_limits_are_read_for_all_chats_and_for_one() {
+        let file = ConfigFile::parse(&format!("{SERVER}[limits]\ndailyTokens = 1000\ndailyCost = 2.5\n")).unwrap();
+        assert_eq!(
+            file.limits.daily().unwrap(),
+            DailyLimit {
+                tokens: Some(1000),
+                cost: Some(2.5)
+            }
+        );
+        let one = checked_chats("[[chats]]\nchat = \"slack:C1\"\ndailyTokens = 10\n").unwrap();
+        assert_eq!(
+            (one[0].daily, one[0].agent.as_deref()),
+            (
+                DailyLimit {
+                    tokens: Some(10),
+                    cost: None
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn a_daily_limit_of_nothing_or_of_no_amount_is_refused() {
+        for cost in ["0.0", "-1.0", "nan", "inf"] {
+            let file = ConfigFile::parse(&format!("{SERVER}[limits]\ndailyCost = {cost}\n")).unwrap();
+            let error = format!("{:#}", file.limits.daily().unwrap_err());
+            assert!(error.contains("limits.dailyCost: a positive amount"), "{cost}: {error}");
+            let chat = format!("[[chats]]\nchat = \"slack:C1\"\ndailyCost = {cost}\n");
+            let error = format!("{:#}", checked_chats(&chat).unwrap_err());
+            assert!(
+                error.contains("chats \"slack:C1\".dailyCost: a positive amount"),
+                "{cost}: {error}"
+            );
+        }
+        assert!(ConfigFile::parse(&format!("{SERVER}[limits]\ndailyTokens = 0\n")).is_err());
     }
 
     #[test]

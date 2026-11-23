@@ -280,6 +280,16 @@ impl Application {
         &self.settings.model
     }
 
+    /// Whether `[[models]]` of config.toml gives the prices of `model`, without which nothing
+    /// could count what it costs.
+    pub fn has_prices(&self, model: &str) -> bool {
+        self.settings
+            .config
+            .models
+            .get(model)
+            .is_some_and(|meta| meta.cost.is_some())
+    }
+
     /// The reasoning level config.toml sets; `None` when it sets none.
     pub fn reasoning(&self) -> Option<Reasoning> {
         self.settings.config.reasoning

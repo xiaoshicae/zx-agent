@@ -101,12 +101,12 @@ impl ConfiguredAgent {
             skills,
             compaction,
         } = load_agent(app, name, &host)?;
-        let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
-            limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
+            limits.cost_budget.is_none() || app.has_prices(model),
             "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
         );
+        let models = config.models.clone();
         let executor_factory = executor_factory(app, &permissions)?;
         let (built, key_env) = provider(app)?;
         let hidden_env = hidden_env(app, key_env);

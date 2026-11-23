@@ -435,7 +435,8 @@ impl Router {
     /// Start `trigger`'s conversation without holding up the router: post its title in its
     /// chat, and once that is posted ([`Self::opened`]) ask its prompt in the thread the post
     /// opens. A trigger for a platform no channel serves, for a chat the server does not
-    /// serve, or beyond `max_conversations`, is reported, and nothing is posted.
+    /// serve, beyond `max_conversations`, or once the day's usage there is used up, is
+    /// reported, and nothing is posted.
     fn trigger(&mut self, trigger: Trigger) {
         let source = &trigger.source;
         let Some(index) = self
@@ -460,6 +461,10 @@ impl Router {
         // Each opening becomes a conversation.
         if self.tasks.len() + self.openings.len() >= self.shared.max_conversations.get() {
             let error = format!("a trigger of {source} was not started: max_conversations conversations are served");
+            return self.shared.failed(None, error);
+        }
+        if self.shared.daily_limit_reached(&trigger.platform, &trigger.chat) {
+            let error = format!("a trigger of {source} was not started: the day's usage limit is reached");
             return self.shared.failed(None, error);
         }
         let channel = Arc::clone(&self.channels[index]);

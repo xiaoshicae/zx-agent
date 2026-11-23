@@ -38,7 +38,7 @@ use self::log::{Log, failure_log};
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
-use crate::{ChatConfig, ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
+use crate::{ChatConfig, DailyLimit, ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
 /// asked, a platform failed while serving, or the configuration or the credentials were
@@ -154,6 +154,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &names)?;
     let chats = chats(&file.chats, &conversations, &names)?;
+    let daily = file.limits.daily()?;
     let unprompted = Unprompted {
         schedules: schedules(&file.schedules, &conversations, &names)?,
         sources: trigger_sources,
@@ -172,6 +173,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 &hidden_env,
                 telemetry.map(Telemetry::hook),
             );
+            priced_for_daily_cost(&app, daily, &chats)?;
             // A conversation's sessions are those in the directory that carry its labels.
             let (agent, chats) = conversations_agents(&app, &SessionPlace::directory(&dir), chats).await?;
             let config = ServerConfig {
@@ -179,6 +181,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 statuses: Some(Arc::new(statuses)),
                 backlog: Arc::new(backlog),
                 chats,
+                daily,
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
             Ok(serve(config, &agent, channels, &dir, unprompted).await)
@@ -233,6 +236,18 @@ fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+/// Refuse a daily cost, of all chats or of one, where the model has no prices: nothing could
+/// count against it. Every agent asks the model of `app`.
+fn priced_for_daily_cost(app: &Application, daily: DailyLimit, chats: &[OwnChat]) -> Result<()> {
+    let costs = daily.cost.is_some() || chats.iter().any(|chat| chat.daily.cost.is_some());
+    ensure!(
+        !costs || app.has_prices(app.model()),
+        "dailyCost needs the prices of the model {:?}: add them to [[models]] in config.toml",
+        app.model()
+    );
+    Ok(())
+}
+
 /// The agent of the conversations in every chat without one of its own, and what `chats` have
 /// of their own, each with the agent it names. Every agent keeps its sessions in `place`, and
 /// is built once, after a session with its settings could be prepared.
@@ -249,6 +264,7 @@ async fn conversations_agents(
         chat,
         agent,
         approvers,
+        daily,
     } in chats
     {
         let agent = match agent {
@@ -263,6 +279,7 @@ async fn conversations_agents(
             chat,
             agent,
             approvers,
+            daily,
         });
     }
     Ok((server, configs))
