@@ -71,15 +71,17 @@ pub struct ConfiguredAgent {
 }
 
 impl ConfiguredAgent {
-    /// The agent of `app` that asks `model` and keeps its sessions in `place`, sharing what
-    /// `app` read and connected. Startup reads; no session exists yet.
+    /// The agent `name` of `app` that asks `model` and keeps its sessions in `place`, sharing
+    /// what `app` read and connected. Startup reads; no session exists yet.
     ///
-    /// Configuration errors are reported here: an agent file or a tool setting that cannot
-    /// be used, a cost budget without prices, invalid provider settings, a provider or an
-    /// executor that no factory is registered for, approving every call where commands run
-    /// on this machine, and a part of the host's whose name another part goes by.
+    /// Configuration errors are reported here: an agent that cannot be found, an agent file or
+    /// a tool setting that cannot be used, a cost budget without prices, invalid provider
+    /// settings, a provider or an executor that no factory is registered for, approving every
+    /// call where commands run on this machine, and a part of the host's whose name another
+    /// part goes by.
     pub(super) fn build(
         app: &Application,
+        name: &str,
         model: &str,
         place: &SessionPlace,
         approvals: Approvals<'_>,
@@ -98,7 +100,7 @@ impl ConfiguredAgent {
             context,
             skills,
             compaction,
-        } = load_agent(app, &host)?;
+        } = load_agent(app, name, &host)?;
         let models = config.models.clone();
         // Without prices every response costs nothing, and the budget would never stop a run.
         anyhow::ensure!(
@@ -311,11 +313,11 @@ fn provider(app: &Application) -> Result<(BuiltProvider, &str)> {
     Ok((built, key_env))
 }
 
-/// The agent `app` runs, with the host's tools and budgets over it, validated: explicit
-/// values replace the agent's, and its tools may be the `host`'s.
-fn load_agent(app: &Application, host: &HostTools) -> Result<AgentDefinition> {
+/// The agent `name`, with the host's tools and budgets over it, validated: explicit values
+/// replace the agent's, and its tools may be the `host`'s.
+fn load_agent(app: &Application, name: &str, host: &HostTools) -> Result<AgentDefinition> {
     let config = &app.settings.config;
-    let mut agent = AgentDefinition::load(app.builtin, app.settings.home.as_deref(), config, host)?;
+    let mut agent = AgentDefinition::load(name, app.settings.home.as_deref(), config, host)?;
     if let Some(tools) = &app.overrides.tools {
         agent.tools = tools
             .iter()

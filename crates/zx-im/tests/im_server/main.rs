@@ -10,8 +10,10 @@
 //! - `statuses`: the statuses of running work kept for a restart
 //! - `images`: the images of messages, fetched for the messages the bot answers
 //! - `triggers`: conversations the server starts without a message
+//! - `chats`: what a chat has of its own: an agent, approvers
 
 mod approvals;
+mod chats;
 mod commands;
 mod conversations;
 mod images;
@@ -46,9 +48,9 @@ use zx_agent::transcript::{
     SessionStorage, SummaryFact, Transcript,
 };
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, Backlog, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError,
-    ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server,
-    ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, Trigger, Triggers, UserId,
+    Addressee, ApprovalCard, ApprovalId, Backlog, ChatConfig, ChatKind, Choice, ConversationId, Destination, ImChannel,
+    ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said,
+    Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, Trigger, Triggers, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 

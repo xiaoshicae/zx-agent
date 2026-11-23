@@ -64,7 +64,8 @@ pub struct Application {
     settings: Settings,
     /// What the host says over the agent: the working directory, the tools and the budgets.
     overrides: Overrides,
-    /// The built-in agent every session runs, or the user's file that replaces it.
+    /// The agent [`build`](Self::build) assembles: a built-in one, or the user's file that
+    /// replaces it.
     builtin: Builtin,
     mcp: McpTools,
     /// The files whose contents are redacted from tool output.
@@ -253,7 +254,24 @@ impl Application {
     /// prices, invalid provider settings, a provider or an executor that no factory is
     /// registered for, and a part of the host's whose name another part goes by already.
     pub fn build(&self, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
-        ConfiguredAgent::build(self, model, place, approvals)
+        self.build_named(self.builtin.name(), model, place, approvals)
+    }
+
+    /// Assemble the agent `name` as [`build`](Self::build) assembles the built-in one: the
+    /// user's `agents/<name>.md` in the zx-agent home, or, without that file, the built-in
+    /// agent of that name. A host chooses it from its own configuration, as zx-im does for a
+    /// chat; no project content can.
+    ///
+    /// Fails as `build` does, on a name of other characters than letters, digits, `-` and
+    /// `_`, and on one that is no built-in agent's and has no file.
+    pub fn build_named(
+        &self,
+        name: &str,
+        model: &str,
+        place: &SessionPlace,
+        approvals: Approvals<'_>,
+    ) -> Result<ConfiguredAgent> {
+        ConfiguredAgent::build(self, name, model, place, approvals)
     }
 
     /// The model ID: the host's, else `ZX_MODEL`'s where the environment is read, else

@@ -31,7 +31,7 @@ mod status;
 mod trigger;
 mod worker;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -163,9 +163,13 @@ pub struct ServerConfig {
     /// Chats the server answers in, per platform. A message from another chat gets
     /// [`Replies::unauthorized`] and nothing else.
     pub conversations: Vec<(String, ConversationId)>,
-    /// Users whose clicks decide approvals, per platform. A click by anyone else gets
+    /// Users whose clicks decide approvals, per platform, in the chats without approvers of
+    /// their own ([`chats`](Self::chats)). A click by anyone else gets
     /// [`Replies::not_approver`] and decides nothing.
     pub approvers: Vec<(String, UserId)>,
+    /// Chats among [`conversations`](Self::conversations) with an agent or approvers of their
+    /// own. One that is not served, or that is given twice, is a configuration error.
+    pub chats: Vec<ChatConfig>,
     /// Conversations that may run at once; the others wait in arrival order.
     pub max_running: NonZeroUsize,
     /// Conversations served at once: running, waiting for a run slot, or idle until their
@@ -205,6 +209,7 @@ impl Default for ServerConfig {
             cwd: PathBuf::from("."),
             conversations: Vec::new(),
             approvers: Vec::new(),
+            chats: Vec::new(),
             max_running: DEFAULT_MAX_RUNNING,
             max_conversations: DEFAULT_MAX_CONVERSATIONS,
             max_pending_messages: DEFAULT_PENDING_MESSAGES,
@@ -218,9 +223,25 @@ impl Default for ServerConfig {
     }
 }
 
+/// What a chat the server serves has of its own, in place of what [`ServerConfig`] gives
+/// every chat: such as an agent that only reads, with fewer approvers, in a chat about
+/// production.
+pub struct ChatConfig {
+    pub platform: String,
+    pub chat: ConversationId,
+    /// The agent whose sessions the chat's conversations are, in place of the server's. It
+    /// keeps them in the storage of the server's agent, where the server looks for the
+    /// session of each conversation as it starts.
+    pub agent: Option<Agent>,
+    /// The users whose clicks decide approvals in the chat, on its platform, in place of
+    /// [`ServerConfig::approvers`].
+    pub approvers: Option<Vec<UserId>>,
+}
+
 /// Answers chat messages, one session per conversation, as a person in the chat would.
 ///
-/// The sessions are the agent's: it chooses the model, tools, policies and limits, and keeps
+/// The sessions are the agent's, or in a chat with an agent of its own, that agent's
+/// ([`ServerConfig::chats`]): it chooses the model, tools, policies and limits, and keeps
 /// the sessions in its storage, where [`SessionKey::labels`] marks those of a conversation.
 /// Their approvals must wait for the host
 /// ([`ApprovalMode::Wait`](zx_agent::policy::ApprovalMode::Wait)): the server posts a card for
@@ -258,8 +279,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// A server for `config` whose conversations are sessions of `agent`, and which reports
-    /// to `sink`.
+    /// A server for `config` whose conversations are sessions of `agent`, but in the chats
+    /// with an agent of their own, and which reports to `sink`.
     pub fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let (triggers, triggered) = Triggers::channel();
         Self {
@@ -284,7 +305,8 @@ impl Server {
     /// [`Replies::stopped`] for a cancelled run. A message not handled by then, waiting for a
     /// run slot, steered into a run that did not take it in, or received during the stop,
     /// stays pending in the [`backlog`](ServerConfig::backlog). A channel's error is then
-    /// returned. Two channels with the same platform name are a configuration error.
+    /// returned. Two channels with the same platform name are a configuration error, and so
+    /// are settings of a chat's own that [`ServerConfig::chats`] refuses.
     ///
     /// As the server starts, it handles what the backlog holds pending, in the order kept,
     /// before anything new. With [`ServerConfig::statuses`], the statuses an earlier process
@@ -303,6 +325,7 @@ impl Server {
         } = self;
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
+        served_once(&config.chats, &allowed)?;
         let backlog = Arc::clone(&config.backlog);
         let timeout = config.outbound_timeout;
         let shared = Arc::new(Shared::new(config, agent, Arc::clone(&sink)));
@@ -341,6 +364,24 @@ impl Server {
         }
         result
     }
+}
+
+/// An error when a chat of `chats` is not among those `served`, or is given more than once.
+fn served_once(chats: &[ChatConfig], served: &HashMap<String, HashSet<ConversationId>>) -> Result<(), ImError> {
+    let mut seen = HashSet::new();
+    for ChatConfig { platform, chat, .. } in chats {
+        if !served.get(platform).is_some_and(|served| served.contains(chat)) {
+            return Err(ImError::Config(format!(
+                "the chat {platform}:{chat} has settings of its own but is not served"
+            )));
+        }
+        if !seen.insert((platform, chat)) {
+            return Err(ImError::Config(format!(
+                "the chat {platform}:{chat} has settings of its own more than once"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// An error when two of `channels` have the same platform name.

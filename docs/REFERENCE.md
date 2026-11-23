@@ -101,7 +101,7 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 容量 | 达到 `[limits]` 的上限时，消息不被接纳并记一条 `failed` 日志，写明碰到的是哪一个（以 `ServerConfig` 的字段名，如 `max_pending_messages`，即 `maxPendingMessages`；收件箱满另说明）；机器人要回答的消息另回复 `replies.overloaded`（在路由处被拒的只认 @ 机器人的消息），只记进会话的话不回复。一条消息从被接纳到处理完都计入它所在会话的数量与字节配额，补入发送者名称后再检查一次字节。`/cancel`、`/new`、`/compact` 与审批点击不占文本配额，达到上限时仍可处理，但每个会话的收件箱另有 32 条的上限。只有插入运行、或在运行被 `/cancel`、`/new` 取消期间留给下一次运行的消息才发送接收回执。打开会话（排队中的新会话，或为写入闲聊重新打开的会话）都在取得 `maxRunning` 的名额后进行；`/new` 仍立即创建新会话 |
 | 主动发起 | 不等人发消息也能开始对话。`im.toml` 的 `[[schedules]]` 每隔 `everySecs` 秒（至少 60，第一次在启动后一个间隔）在 `chat` 发一条 `title` 开出线程，在线程里以 `schedule:<名字>` 的身份问 `prompt`；宿主自己的程序经 `Program::on_triggers` 给出的触发（直接用库时是 `Server::triggers`）同样处理。此后回答、审批卡片与接话都与 @ 开始的对话相同：模型看到的提问前加来源的名字，来源不是平台的用户，不查名字；在线程里接着问要 @ 机器人。触发只能用于名单里的频道或群，否则什么也不发，只记一条 `failed`；开线程的消息发不出时同样只记 `failed`。触发计入 `maxConversations`，不进 backlog：停机时还没开出线程的会丢掉，停机期间到点的不补 |
 | 数据范围 | 会话只保存授权聊天里机器人参与的对话（私聊，或它被 @ 过的线程）中的消息，其余在路由处丢弃。平台送来的每条消息在路由之前都先写入 backlog（见“崩溃与重启”），丢弃或处理完即删除，只留下 24 小时内以消息 ID 为名的空标记文件；进程恰在这期间崩溃时，记录留到下次启动处理完为止。线程中任何人的话都会进入模型的上下文（Slack 上也包括其他机器人发的消息），写操作仍要审批 |
-| 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
+| 审批 | 使用 assistant agent，`im.toml` 的 `[[chats]]` 给某个聊天指定了 agent 时用那个：自动放行的只读命令直接执行，其余发审批卡片，只有审批人点击才生效（聊天在 `[[chats]]` 有自己的 `approvers` 时是他们，否则是 `access.approvers`）；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | Slack 与 ⚑ D:5/CHINA FLAG: 飞书的 token 与 secret 只从环境变量读取；这些变量，连同宿主自己的程序加的平台给出的变量（`BuiltChannel::hidden_env`），在命令的环境中删除，输出中出现其值时脱敏 |
 | 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。服务启动时读取会话头部，记下每个对话最近创建的会话，续接时打开它；存储里已没有这个会话时（如文件被删除），记一条 `failed` 日志并像首次一样新建会话；`/new` 用同样的标签立即再建一个，此后续接新的，之前的保留 |
 | 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、审批结束的时间）、`released`、`unauthorized`（不在名单里的聊天发来要机器人回答的消息，已回复 `replies.unauthorized`：平台、聊天、线程与发送人，名单要写的 ID 可以从这里取）、`triggered`（触发开出了线程：平台、聊天、线程与来源）、`failed`。平台继续运行时遇到的问题也是带 `platform` 的 `failed`：连接失败后的重试、连接中途断开（写明原因；平台自己关闭或要求换连接的不记）或静默（两倍 ping 间隔加余量收不到任何帧）后重新打开、读不了的帧。对话内容在会话文件中 |
@@ -237,4 +237,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.28 · 2026年11月
+REFERENCE.md · v0.29 · 2026年11月

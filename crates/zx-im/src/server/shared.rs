@@ -1,5 +1,6 @@
-//! What every conversation shares: the settings, the agent and the sessions it keeps open, the
-//! run slots, the statuses, the names of users, and the outbound timeout with its report.
+//! What every conversation shares: the settings, the agents and the sessions they keep open,
+//! what chats have of their own, the run slots, the statuses, the names of users, and the
+//! outbound timeout with its report.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -15,18 +16,21 @@ use zx_agent::Agent;
 use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
-use super::{Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
-use crate::{ImChannel, ImError, MessageRef, UserId};
+use super::{ChatConfig, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
+use crate::{ConversationId, ImChannel, ImError, MessageRef, UserId};
 
 /// Settings and resources every conversation reads.
 pub(super) struct Shared {
-    /// Makes the session of each conversation, and keeps it open while the conversation
-    /// holds it.
-    pub(super) agent: Agent,
+    /// Makes the session of each conversation in a chat without an agent of its own, and
+    /// keeps it open while the conversation holds it; finds the session of every
+    /// conversation, which every agent keeps in its storage.
+    agent: Agent,
     /// Where new sessions work.
     pub(super) cwd: PathBuf,
     pub(super) sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
+    /// What chats have of their own, by platform and chat.
+    chats: HashMap<String, HashMap<ConversationId, OwnSettings>>,
     pub(super) replies: Replies,
     pub(super) max_conversations: NonZeroUsize,
     pub(super) max_pending_messages: NonZeroUsize,
@@ -47,6 +51,12 @@ pub(super) struct Shared {
     sessions: Mutex<HashMap<SessionKey, String>>,
 }
 
+/// What a chat has of its own ([`ChatConfig`]), as conversations look it up.
+struct OwnSettings {
+    agent: Option<Agent>,
+    approvers: Option<HashSet<UserId>>,
+}
+
 impl Shared {
     /// What the conversations share, from everything in `config` but the chats served and the
     /// backlog.
@@ -56,6 +66,7 @@ impl Shared {
             // Taken by the router before.
             conversations: _,
             approvers,
+            chats,
             max_running,
             max_conversations,
             max_pending_messages,
@@ -72,6 +83,7 @@ impl Shared {
             cwd,
             sink,
             approvers: group(approvers),
+            chats: own_settings(chats),
             replies,
             idle,
             outbound_timeout,
@@ -137,8 +149,30 @@ impl Shared {
         lock(&self.names).insert((platform.to_string(), user.clone()), name.to_string());
     }
 
-    pub(super) fn is_approver(&self, platform: &str, user: &UserId) -> bool {
-        self.approvers.get(platform).is_some_and(|users| users.contains(user))
+    /// The agent whose sessions the conversation `key` is: its chat's own, else the server's.
+    pub(super) fn agent_of(&self, key: &SessionKey) -> &Agent {
+        match self.own(key).and_then(|own| own.agent.as_ref()) {
+            Some(agent) => agent,
+            None => &self.agent,
+        }
+    }
+
+    /// Whether a click by `user` decides approvals in the conversation `key`: whether the
+    /// user is among the approvers of its chat, or, for a chat without approvers of its own,
+    /// among the server's on its platform.
+    pub(super) fn is_approver(&self, key: &SessionKey, user: &UserId) -> bool {
+        match self.own(key).and_then(|own| own.approvers.as_ref()) {
+            Some(approvers) => approvers.contains(user),
+            None => self
+                .approvers
+                .get(&key.platform)
+                .is_some_and(|users| users.contains(user)),
+        }
+    }
+
+    /// What the chat of the conversation `key` has of its own, if anything.
+    fn own(&self, key: &SessionKey) -> Option<&OwnSettings> {
+        self.chats.get(&key.platform)?.get(&key.conversation)
     }
 
     pub(super) fn failed(&self, key: Option<&SessionKey>, error: String) {
@@ -198,6 +232,26 @@ pub(super) async fn timed<T, E: Display>(
         Ok(Err(error)) => Err(format!("cannot {act}: {error}")),
         Err(_) => Err(format!("cannot {act}: took longer than {timeout:?}")),
     }
+}
+
+/// The settings of `chats` by platform and chat, which the server checked to be given once
+/// each.
+fn own_settings(chats: Vec<ChatConfig>) -> HashMap<String, HashMap<ConversationId, OwnSettings>> {
+    let mut grouped: HashMap<String, HashMap<ConversationId, OwnSettings>> = HashMap::new();
+    for ChatConfig {
+        platform,
+        chat,
+        agent,
+        approvers,
+    } in chats
+    {
+        let own = OwnSettings {
+            agent,
+            approvers: approvers.map(HashSet::from_iter),
+        };
+        grouped.entry(platform).or_default().insert(chat, own);
+    }
+    grouped
 }
 
 /// `pairs` by platform.
