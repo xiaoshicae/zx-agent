@@ -82,6 +82,49 @@ async fn a_trigger_for_a_chat_not_served_posts_nothing_and_is_reported() {
 }
 
 #[tokio::test]
+async fn a_trigger_for_a_platform_no_channel_serves_posts_nothing_and_is_reported() {
+    let mut h = start(Setup::default());
+    let elsewhere = Trigger {
+        platform: "other".into(),
+        ..hourly()
+    };
+    h.triggers.start(elsewhere).await;
+    match h.event().await {
+        ServerEvent::Failed { key: None, error } => assert!(error.contains("no channel serves"), "{error}"),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    let (sent, _) = h.stop_and_take().await;
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
+#[tokio::test]
+async fn a_trigger_beyond_the_conversation_limit_opens_no_thread_and_is_reported() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_conversations: NonZeroUsize::new(1).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say("m1", None, "run").await;
+    h.posted(&thread("m1"), text(&h.replies.working)).await;
+    h.triggers.start(hourly()).await;
+    match h.event().await {
+        ServerEvent::Failed { key: None, error } => assert!(error.contains("max_conversations"), "{error}"),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    let (sent, _) = h.stop_and_take().await;
+    let title = text("Hourly check");
+    assert!(
+        !sent
+            .iter()
+            .any(|sent| matches!(sent, Sent::Post { message, .. } if *message == title)),
+        "{sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_trigger_whose_title_cannot_be_posted_is_reported_and_dropped() {
     let mut h = start(Setup {
         refused_post: Some("Hourly check".into()),
