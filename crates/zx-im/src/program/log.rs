@@ -1,5 +1,5 @@
-//! The operator log: the server's events, and what the channels go on after, as JSON lines on
-//! stdout, for the operator's log collection.
+//! The operator log: the server's events, what the channels go on after, and the program's
+//! reloads of im.toml, as JSON lines on stdout, for the operator's log collection.
 
 use std::sync::Arc;
 
@@ -17,6 +17,18 @@ pub(super) fn failure_log(platform: &str) -> ErrorReport {
         let line = json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()});
         print_line(&line.to_string());
     })
+}
+
+/// Log that a reload of im.toml replaced the lists: with how many chats and approvers.
+pub(super) fn reloaded(conversations: usize, approvers: usize) {
+    let line = json!({"type": "reloaded", "conversations": conversations, "approvers": approvers, "timeMs": now_ms()});
+    print_line(&line.to_string());
+}
+
+/// Log a failure of the program's own, of no platform and no conversation.
+pub(super) fn failed(error: &str) {
+    let line = json!({"type": "failed", "error": error, "timeMs": now_ms()});
+    print_line(&line.to_string());
 }
 
 /// The thread of `key` in a log line: `null` for a direct chat.

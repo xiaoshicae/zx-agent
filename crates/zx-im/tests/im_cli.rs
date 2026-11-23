@@ -392,6 +392,82 @@ async fn a_chat_with_an_agent_of_its_own_is_answered_by_that_agent() {
     child.kill().await.unwrap();
 }
 
+/// The next line of the operator log `log` whose `type` is `kind`.
+#[cfg(unix)]
+async fn next_log_line(log: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>, kind: &str) -> Value {
+    let found = tokio::time::timeout(START_WAIT, async {
+        while let Some(line) = log.next_line().await.unwrap() {
+            let line: Value = serde_json::from_str(&line).unwrap();
+            if line["type"] == kind {
+                return Some(line);
+            }
+        }
+        None
+    });
+    match found.await {
+        Ok(Some(line)) => line,
+        Ok(None) => panic!("the log ended without a {kind} line"),
+        Err(_) => panic!("no {kind} line in time"),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sighup_reads_the_lists_again_and_a_broken_file_keeps_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::text("hello from C2")]).await;
+    let mut slack = FakeSlack::start().await;
+    let served = VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base));
+    let config = write_im_config(dir.path(), &served);
+    let mut child = im(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut log = BufReader::new(child.stdout.take().unwrap()).lines();
+    // Connected once serving: the signal is listened for by then.
+    let mut socket = slack.socket().await;
+    let in_c2 = |envelope: &str, ts: &str| {
+        let mut mention = mention(envelope, ts, "hello");
+        mention["payload"]["event"]["channel"] = json!("C2");
+        mention
+    };
+    socket.send(in_c2("e1", "1700000001.000100")).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let refused = slack.wait_for("chat.postMessage", 1).await;
+    assert_eq!(
+        refused[0].body["text"],
+        json!("Not authorized: this chat is not on the service's list.")
+    );
+
+    std::fs::write(&config, "[access\n").unwrap();
+    zx_testing::signal(&child, "-HUP").await;
+    let failed = next_log_line(&mut log, "failed").await;
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("the lists stay as they were"),
+        "{failed}"
+    );
+
+    std::fs::write(
+        &config,
+        served.replace("[\"slack:C1\"]", "[\"slack:C1\", \"slack:C2\"]"),
+    )
+    .unwrap();
+    zx_testing::signal(&child, "-HUP").await;
+    let reloaded = next_log_line(&mut log, "reloaded").await;
+    assert_eq!(
+        (&reloaded["conversations"], &reloaded["approvers"]),
+        (&json!(2), &json!(1))
+    );
+    socket.send(in_c2("e2", "1700000002.000100")).await;
+    model.wait_for_requests(1).await;
+    child.kill().await.unwrap();
+}
+
 #[tokio::test]
 async fn settings_the_zx_agent_home_cannot_serve_stop_the_start() {
     let cases = [

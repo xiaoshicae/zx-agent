@@ -2,7 +2,7 @@
 //! the conversations that triggers start, the messages an earlier process left pending, and
 //! the stop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -15,8 +15,8 @@ use super::trigger::Trigger;
 use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{ServerEvent, SessionKey, Shared};
 use crate::{
-    Addressee, Backlog, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, Inlet, MessageId,
-    MessageKey, MessageRef, Post, ThreadId, UserId,
+    Addressee, Backlog, ChatKind, Destination, ImChannel, ImError, Inbound, Inlet, MessageId, MessageKey, MessageRef,
+    Post, ThreadId, UserId,
 };
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
@@ -137,8 +137,6 @@ struct Opening {
 /// What a router is made of.
 pub(super) struct RouterSetup {
     pub(super) channels: Vec<Arc<dyn ImChannel>>,
-    /// The chats served, by platform.
-    pub(super) allowed: HashMap<String, HashSet<ConversationId>>,
     pub(super) shared: Arc<Shared>,
     pub(super) stop: CancellationToken,
     /// Replaces the statuses an earlier process left behind.
@@ -154,7 +152,6 @@ pub(super) struct RouterSetup {
 /// Passes what the channels receive to the conversations' workers, and ends them.
 pub(super) struct Router {
     channels: Vec<Arc<dyn ImChannel>>,
-    allowed: HashMap<String, HashSet<ConversationId>>,
     shared: Arc<Shared>,
     stop: CancellationToken,
     /// What the channels receive, tagged with the channel's index.
@@ -183,7 +180,6 @@ impl Router {
     pub(super) fn new(setup: RouterSetup) -> Self {
         let RouterSetup {
             channels,
-            allowed,
             shared,
             stop,
             replacing,
@@ -205,7 +201,6 @@ impl Router {
         let (retire_to, retired) = mpsc::channel(RETIRE_CAPACITY);
         Self {
             channels,
-            allowed,
             shared,
             stop,
             inbound,
@@ -316,11 +311,7 @@ impl Router {
                 let Some(key) = conversation(platform, chat, addressee, &id, &at) else {
                     return;
                 };
-                let served = self
-                    .allowed
-                    .get(&key.platform)
-                    .is_some_and(|chats| chats.contains(&key.conversation));
-                if served {
+                if self.shared.serves(&key.platform, &key.conversation) {
                     let incoming = Incoming {
                         message: MessageRef { at, id },
                         sender,
@@ -450,11 +441,7 @@ impl Router {
             );
             return self.shared.failed(None, error);
         };
-        let served = self
-            .allowed
-            .get(&trigger.platform)
-            .is_some_and(|chats| chats.contains(&trigger.chat));
-        if !served {
+        if !self.shared.serves(&trigger.platform, &trigger.chat) {
             let error = format!("a trigger of {source} names chat {}, which is not served", trigger.chat);
             return self.shared.failed(None, error);
         }
