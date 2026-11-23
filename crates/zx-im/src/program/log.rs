@@ -57,6 +57,14 @@ impl ServerSink for Log {
                 "user": user.0,
                 "timeMs": now_ms(),
             }),
+            ServerEvent::Triggered { key, source } => json!({
+                "type": "triggered",
+                "platform": key.platform,
+                "conversation": key.conversation.0,
+                "thread": thread(key),
+                "source": source,
+                "timeMs": now_ms(),
+            }),
             ServerEvent::Failed { key, error } => {
                 let mut line = json!({"type": "failed", "error": error, "timeMs": now_ms()});
                 if let (Some(key), Value::Object(fields)) = (key, &mut line) {

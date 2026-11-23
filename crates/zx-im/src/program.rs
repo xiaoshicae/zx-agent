@@ -7,15 +7,18 @@
 //! - `args`: the command line
 //! - `config_file`: im.toml
 //! - `log`: the operator log on stdout
+//! - `scheduler`: the schedules of im.toml, each asking the server for its conversation
 
 mod args;
 mod config_file;
 mod log;
+mod scheduler;
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -29,12 +32,12 @@ use zx_util::registry::Registry;
 use zx_util::stdio::eprint_line;
 
 pub(crate) use self::args::Args;
-use self::config_file::{ConfigFile, access, read_file, server_config};
+use self::config_file::{ConfigFile, access, read_file, schedules, server_config};
 use self::log::{Log, failure_log};
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
-use crate::{ImChannel, ImError, Server, ServerConfig};
+use crate::{ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
 /// asked, a platform failed while serving, or the configuration or the credentials were
@@ -53,12 +56,24 @@ const BACKLOG_DIR: &str = ".backlog";
 /// What a host gives the application of the program ([`Program::customize`]).
 type Customization = Box<dyn FnOnce(Application) -> Application + Send>;
 
-/// The program `zx-im` with what a host adds: platforms besides Slack and Feishu, and its own
-/// parts of the application the agent is built with. A program of the host's own runs it from
-/// its `main`, as `zx-im` does through [`main`](crate::main).
+/// A host's own source of conversations without a message ([`Program::on_triggers`]).
+type TriggerSource = Box<dyn FnOnce(Triggers) + Send>;
+
+/// What starts conversations without a message: the schedules of im.toml, each trigger with
+/// its interval, and the host's sources.
+struct Unprompted {
+    schedules: Vec<(Duration, Trigger)>,
+    sources: Vec<TriggerSource>,
+}
+
+/// The program `zx-im` with what a host adds: platforms besides Slack and Feishu, its own
+/// parts of the application the agent is built with, and its own sources of conversations
+/// without a message. A program of the host's own runs it from its `main`, as `zx-im` does
+/// through [`main`](crate::main).
 pub struct Program {
     platforms: Registry<dyn PlatformFactory>,
     customizations: Vec<Customization>,
+    trigger_sources: Vec<TriggerSource>,
 }
 
 impl Default for Program {
@@ -73,7 +88,17 @@ impl Program {
         Self {
             platforms: platform::built_in(),
             customizations: Vec::new(),
+            trigger_sources: Vec::new(),
         }
+    }
+
+    /// Hand `source` the server's [`Triggers`] as serving starts: a source of the host's own
+    /// asks through them for conversations without a message, besides the schedules of
+    /// im.toml, such as one for each alert that an endpoint of the host's receives. Each call
+    /// adds one more.
+    pub fn on_triggers(mut self, source: impl FnOnce(Triggers) + Send + 'static) -> Self {
+        self.trigger_sources.push(Box::new(source));
+        self
     }
 
     /// Register `factory` under `name`, the im.toml section that configures it; its channel
@@ -118,12 +143,17 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     let Program {
         platforms: registered,
         customizations,
+        trigger_sources,
     } = program;
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
     let BuiltChannels { channels, hidden_env } = build_channels(&file, &registered, &path)?;
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &names)?;
+    let unprompted = Unprompted {
+        schedules: schedules(&file.schedules, &conversations, &names)?,
+        sources: trigger_sources,
+    };
     let (code, end) =
         shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| -> Result<u8> {
             if telemetry.is_some() {
@@ -145,7 +175,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 backlog: Arc::new(backlog),
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
-            Ok(serve(config, &agent, channels, &dir).await)
+            Ok(serve(config, &agent, channels, &dir, unprompted).await)
         })
         .await?;
     for notice in end.notices() {
@@ -217,25 +247,38 @@ fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgen
     app.build(app.model(), place, approvals)
 }
 
-/// Serve `channels` as `config` says, with the sessions of `agent`, kept under `dir`, until a
-/// signal or a platform's failure; the exit code says which.
-async fn serve(config: ServerConfig, agent: &ConfiguredAgent, channels: Vec<Arc<dyn ImChannel>>, dir: &Path) -> u8 {
+/// Serve `channels` as `config` says, with the sessions of `agent`, kept under `dir`, and the
+/// conversations that `unprompted` starts without a message, until a signal or a platform's
+/// failure; the exit code says which.
+async fn serve(
+    config: ServerConfig,
+    agent: &ConfiguredAgent,
+    channels: Vec<Arc<dyn ImChannel>>,
+    dir: &Path,
+    unprompted: Unprompted,
+) -> u8 {
     let names: Vec<&str> = channels.iter().map(|channel| channel.platform()).collect();
     eprint_line(&format!(
-        "[im] platforms={}; sessions in {}",
+        "[im] platforms={}; sessions in {}; schedules: {}",
         names.join(","),
-        dir.display()
+        dir.display(),
+        unprompted.schedules.len()
     ));
     let cancel = CancellationToken::new();
     // Without the listeners serving goes on, each run still bounded by its own limits.
     if let Err(error) = spawn_signal_handler(cancel.clone()) {
         eprint_line(&format!("zx-im: cannot listen for shutdown signals: {error}"));
     }
-    // The session file is the record of each conversation; the operator log holds approvals
-    // and failures (Log), and traces, when exported, the timeline.
-    let served = Server::new(config, agent.agent().clone(), Arc::new(Log))
-        .run(channels, &cancel)
-        .await;
+    // The session file is the record of each conversation; the operator log holds approvals,
+    // triggers and failures (Log), and traces, when exported, the timeline.
+    let server = Server::new(config, agent.agent().clone(), Arc::new(Log));
+    for source in unprompted.sources {
+        source(server.triggers());
+    }
+    let scheduling = tokio::spawn(scheduler::run(unprompted.schedules, server.triggers(), cancel.clone()));
+    let served = server.run(channels, &cancel).await;
+    // The server is gone, also after a platform's failure, which cancels nothing.
+    scheduling.abort();
     serve_exit_code(served)
 }
 

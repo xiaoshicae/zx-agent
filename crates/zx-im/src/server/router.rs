@@ -1,5 +1,6 @@
 //! The router: access control, one worker per conversation, replies to chats not served,
-//! the messages an earlier process left pending, and the stop.
+//! the conversations that triggers start, the messages an earlier process left pending, and
+//! the stop.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::admission::{InputBudget, Limit};
 use super::received::Receipts;
+use super::trigger::Trigger;
 use super::worker::{self, Command, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{ServerEvent, SessionKey, Shared};
 use crate::{
@@ -125,6 +127,13 @@ enum Forward {
     Ended(Box<WorkerInput>),
 }
 
+/// The post that opened the thread of a trigger's conversation, on the channel at `index`.
+struct Opening {
+    index: usize,
+    trigger: Trigger,
+    root: MessageRef,
+}
+
 /// What a router is made of.
 pub(super) struct RouterSetup {
     pub(super) channels: Vec<Arc<dyn ImChannel>>,
@@ -138,6 +147,8 @@ pub(super) struct RouterSetup {
     pub(super) receipts: Receipts,
     /// Where the channels keep their messages.
     pub(super) backlog: Arc<dyn Backlog>,
+    /// The triggers a host asks for.
+    pub(super) triggered: mpsc::Receiver<Trigger>,
 }
 
 /// Passes what the channels receive to the conversations' workers, and ends them.
@@ -161,6 +172,9 @@ pub(super) struct Router {
     replacing: JoinHandle<()>,
     /// Makes the receipt each message carries until it is handled.
     receipts: Receipts,
+    triggered: mpsc::Receiver<Trigger>,
+    /// The posts that open the threads of triggers' conversations.
+    openings: JoinSet<Option<Opening>>,
 }
 
 impl Router {
@@ -175,6 +189,7 @@ impl Router {
             replacing,
             receipts,
             backlog,
+            triggered,
         } = setup;
         let (tagged, inbound) = mpsc::channel(INBOUND_CAPACITY);
         let mut channel_tasks = JoinSet::new();
@@ -203,6 +218,8 @@ impl Router {
             refusals: JoinSet::new(),
             replacing,
             receipts,
+            triggered,
+            openings: JoinSet::new(),
         }
     }
 
@@ -233,6 +250,8 @@ impl Router {
             tokio::select! {
                 () = self.stop.cancelled() => return Ok(()),
                 Some((index, event)) = self.inbound.recv() => self.route(index, event),
+                Some(trigger) = self.triggered.recv() => self.trigger(trigger),
+                Some(opened) = self.openings.join_next() => self.opened(opened),
                 Some(retire) = self.retired.recv() => self.retire(&retire),
                 Some(ended) = self.channel_tasks.join_next() => self.channel_ended(ended)?,
                 Some(ended) = self.tasks.join_next_with_id() => self.note_ended("conversation", ended),
@@ -413,6 +432,92 @@ impl Router {
         }
     }
 
+    /// Start `trigger`'s conversation without holding up the router: post its title in its
+    /// chat, and once that is posted ([`Self::opened`]) ask its prompt in the thread the post
+    /// opens. A trigger for a platform no channel serves, for a chat the server does not
+    /// serve, or beyond `max_conversations`, is reported, and nothing is posted.
+    fn trigger(&mut self, trigger: Trigger) {
+        let source = &trigger.source;
+        let Some(index) = self
+            .channels
+            .iter()
+            .position(|channel| channel.platform() == trigger.platform)
+        else {
+            let error = format!(
+                "a trigger of {source} names {:?}, which no channel serves",
+                trigger.platform
+            );
+            return self.shared.failed(None, error);
+        };
+        let served = self
+            .allowed
+            .get(&trigger.platform)
+            .is_some_and(|chats| chats.contains(&trigger.chat));
+        if !served {
+            let error = format!("a trigger of {source} names chat {}, which is not served", trigger.chat);
+            return self.shared.failed(None, error);
+        }
+        // Each opening becomes a conversation.
+        if self.tasks.len() + self.openings.len() >= self.shared.max_conversations.get() {
+            let error = format!("a trigger of {source} was not started: max_conversations conversations are served");
+            return self.shared.failed(None, error);
+        }
+        let channel = Arc::clone(&self.channels[index]);
+        let shared = Arc::clone(&self.shared);
+        self.openings.spawn(async move {
+            let to = Destination {
+                conversation: trigger.chat.clone(),
+                thread: None,
+            };
+            let act = format!("open a thread in {} for {}", trigger.chat, trigger.source);
+            let title = Post::Text(trigger.title.clone());
+            // A failure was reported; the trigger is dropped.
+            let root = shared.bounded(None, &act, channel.send(&to, &title)).await?;
+            Some(Opening { index, trigger, root })
+        });
+    }
+
+    /// Ask the prompt of a trigger in the thread its post opened, as a mention of the bot
+    /// there by its source: from now on a conversation like any other. A post that failed was
+    /// reported.
+    fn opened(&mut self, opened: Result<Option<Opening>, JoinError>) {
+        let Opening { index, trigger, root } = match opened {
+            Ok(Some(opening)) => opening,
+            Ok(None) => return,
+            Err(error) => {
+                return self
+                    .shared
+                    .failed(None, format!("opening the thread of a trigger failed: {error}"));
+            }
+        };
+        let channel = Arc::clone(&self.channels[index]);
+        let key = SessionKey {
+            platform: trigger.platform,
+            conversation: trigger.chat,
+            thread: Some(ThreadId(root.id.0.clone())),
+        };
+        let source = UserId(trigger.source.clone());
+        self.shared.name_is(&key.platform, &source, &trigger.source);
+        self.shared.sink.emit(&ServerEvent::Triggered {
+            key: key.clone(),
+            source: trigger.source,
+        });
+        let incoming = Incoming {
+            // No message of the platform's: none is acknowledged, and none has images.
+            message: MessageRef {
+                at: key.destination(),
+                id: MessageId(format!("{}:trigger", root.id)),
+            },
+            sender: source,
+            addressee: Addressee::Bot,
+            text: trigger.prompt,
+            images: Vec::new(),
+            permit: None,
+            receipt: self.receipts.unkept(),
+        };
+        self.message(channel, key, incoming);
+    }
+
     /// Answer a chat the server does not serve, without holding up the router, and tell the
     /// operator where the message came from and who wrote it.
     fn refuse(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, sender: UserId) {
@@ -457,6 +562,10 @@ impl Router {
 
     async fn shutdown(mut self) {
         self.stop.cancel();
+        // A trigger not started yet is lost with the stop: the host's next ones fail at once,
+        // and a thread being opened is given up.
+        self.triggered.close();
+        self.openings.shutdown().await;
         // A closed receiver makes waiting senders fail at once, so no worker can hold up the
         // stop. The channels are read to the end instead.
         self.retired.close();

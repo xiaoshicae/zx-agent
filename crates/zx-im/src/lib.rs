@@ -43,7 +43,7 @@ pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChan
 pub use self::platform::{FeishuChannel, FeishuConfig};
 pub use self::program::Program;
 pub use self::server::{
-    ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
+    ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, Trigger, Triggers,
 };
 
 /// Run the program with its built-in platforms ([`Program::run`]).

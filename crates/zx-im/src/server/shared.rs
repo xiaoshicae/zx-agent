@@ -131,6 +131,12 @@ impl Shared {
         name
     }
 
+    /// Take `name` as the name of `user` on `platform`, which is then never looked up: the
+    /// source of a trigger, which is no user of the platform.
+    pub(super) fn name_is(&self, platform: &str, user: &UserId, name: &str) {
+        lock(&self.names).insert((platform.to_string(), user.clone()), name.to_string());
+    }
+
     pub(super) fn is_approver(&self, platform: &str, user: &UserId) -> bool {
         self.approvers.get(platform).is_some_and(|users| users.contains(user))
     }

@@ -304,7 +304,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]`、`[[schedules]]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]
@@ -333,6 +333,14 @@ idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文�
 [sessions]
 dir = "/data/sessions"       # 会话文件在 <dir>/--<工作目录>--/ 下；<dir>/.running 与 <dir>/.backlog 是服务自己的记录
 
+# 可选：定时开始对话，可以写多个（行为见 REFERENCE.md 的“主动发起”）
+[[schedules]]
+name = "hourly"                    # 不能重复；对话的来源记为 schedule:hourly
+chat = "slack:C0123456789"         # 须在 access.conversations 里
+everySecs = 3600                   # 至少 60；第一次在启动后一个间隔
+prompt = "检查集群：未就绪的 Pod 与最近一小时的 Warning 事件，有问题再展开。"
+# title = "定时巡检"                 # 开出线程的那条消息，默认为 name
+
 # 可选：替换默认的英文文案，全部字段与中文译文见仓库的 deploy/kubernetes/im/im.example.toml
 [replies]
 working = "处理中…"
@@ -346,4 +354,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.38 · 2026年11月
+CONFIGURATION.md · v0.39 · 2026年11月

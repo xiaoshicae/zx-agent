@@ -51,6 +51,16 @@ impl Receipts {
             stop: self.stop.clone(),
         }
     }
+
+    /// The receipt of input that the backlog does not keep, such as a trigger's prompt:
+    /// dropping it completes nothing.
+    pub(super) fn unkept(&self) -> Receipt {
+        Receipt {
+            key: None,
+            handled: self.handled.clone(),
+            stop: self.stop.clone(),
+        }
+    }
 }
 
 /// Start the task that completes in `backlog` each message whose receipt is dropped, and
