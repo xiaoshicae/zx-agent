@@ -194,6 +194,8 @@ struct Running {
     /// What was asked once `/cancel` or `/new` stopped the run, which takes no more input: it
     /// runs next, as `after` says.
     asked: Vec<Asked>,
+    /// When the work started, for the record of its run.
+    started: Instant,
 }
 
 /// What follows a run once it has ended, as the input during the run asked.
@@ -435,6 +437,7 @@ impl Worker {
             open,
             after: AfterRun::Continue,
             asked: Vec::new(),
+            started: Instant::now(),
         });
     }
 
@@ -488,11 +491,16 @@ impl Worker {
             open,
             after,
             asked,
+            started,
             ..
         } = running;
         drop(slot);
         if let Ok(finished) = &ended {
             self.out.spend(finished.usage());
+            // Beyond u64 milliseconds, more than 500 million years, it stays at the most.
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let record = finished.record(&self.out.key, duration_ms);
+            self.out.shared.sink.emit(&ServerEvent::Ran(record));
         }
         let cancelled = matches!(&ended, Ok(finished) if finished.cancelled());
         let ending = if cancelled && self.lifecycle.closing() {

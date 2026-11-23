@@ -43,7 +43,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason, Usage};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
-use zx_agent::events::{ApprovalResult, Event, EventKind};
+use zx_agent::events::{ApprovalResult, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
@@ -54,8 +54,8 @@ use zx_agent::transcript::{
 use zx_im::{
     Access, Addressee, ApprovalCard, ApprovalId, Backlog, ChatConfig, ChatKind, Choice, ConversationId, DailyLimit,
     Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post,
-    Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId,
-    Trigger, Triggers, UserId,
+    Replacement, Replies, RunEnd, RunRecord, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    StatusStore, ThreadId, Trigger, Triggers, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 
@@ -497,12 +497,19 @@ impl SessionStorage for Sessions {
     }
 }
 
-struct Events(mpsc::UnboundedSender<ServerEvent>);
+/// The server's events for the test: the records of runs apart, since every run has one.
+struct Events {
+    events: mpsc::UnboundedSender<ServerEvent>,
+    ran: mpsc::UnboundedSender<RunRecord>,
+}
 
 impl ServerSink for Events {
     fn emit(&self, event: &ServerEvent) {
         // The test may have stopped reading.
-        self.0.send(event.clone()).ok();
+        match event {
+            ServerEvent::Ran(record) => self.ran.send(record.clone()).ok(),
+            other => self.events.send(other.clone()).ok(),
+        };
     }
 }
 
@@ -588,6 +595,8 @@ struct Harness {
     inject: mpsc::Sender<Inbound>,
     sent: mpsc::UnboundedReceiver<Sent>,
     events: mpsc::UnboundedReceiver<ServerEvent>,
+    /// The records of the runs that ended, apart from the other events.
+    ran: mpsc::UnboundedReceiver<RunRecord>,
     cancel: CancellationToken,
     server: JoinHandle<Result<(), ImError>>,
     sessions: Arc<Sessions>,
@@ -644,6 +653,7 @@ fn start(setup: Setup) -> Harness {
         images: setup.images,
     });
     let (events_to, events) = mpsc::unbounded_channel();
+    let (ran_to, ran) = mpsc::unbounded_channel();
     let mut config = setup.config;
     if let Some(statuses) = &statuses {
         let store: Arc<dyn StatusStore> = statuses.clone();
@@ -652,7 +662,11 @@ fn start(setup: Setup) -> Harness {
     let backlog = setup.backlog;
     config.backlog = backlog.clone();
     let replies = config.replies.clone();
-    let server = Server::new(config, agent.clone(), Arc::new(Events(events_to)));
+    let sink = Events {
+        events: events_to,
+        ran: ran_to,
+    };
+    let server = Server::new(config, agent.clone(), Arc::new(sink));
     let triggers = server.triggers();
     let access = server.access();
     let cancel = CancellationToken::new();
@@ -662,6 +676,7 @@ fn start(setup: Setup) -> Harness {
         inject,
         sent,
         events,
+        ran,
         cancel,
         server,
         sessions,
@@ -837,6 +852,14 @@ impl Harness {
             }
             other => panic!("expected an approval card, got {other:?}"),
         }
+    }
+
+    /// The record of the next run that ends.
+    async fn ran(&mut self) -> RunRecord {
+        tokio::time::timeout(WAIT, self.ran.recv())
+            .await
+            .expect("no run ended in time")
+            .expect("the sink is alive")
     }
 
     async fn event(&mut self) -> ServerEvent {

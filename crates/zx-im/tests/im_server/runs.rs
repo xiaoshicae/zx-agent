@@ -1,7 +1,31 @@
-//! What a run waits for and takes in: the run and conversation limits, steering, and the
-//! bounds on what waits and what is steered.
+//! What a run waits for and takes in: the run and conversation limits, steering, the bounds on
+//! what waits and what is steered, and the record of each run that ends.
 
 use super::*;
+
+#[tokio::test]
+async fn each_run_that_ends_is_recorded_with_what_it_used() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    h.updated(&status, text("answer")).await;
+    let record = h.ran().await;
+    // One answer of the scripted model: 10 input and 5 output tokens.
+    assert_eq!(
+        (
+            record.key,
+            record.end,
+            record.model_requests,
+            record.usage.input,
+            record.usage.output
+        ),
+        (key("m1"), RunEnd::Prompt(RunOutcome::Completed), 1, 10, 5)
+    );
+    h.stop().await.unwrap();
+}
 
 #[tokio::test]
 async fn the_run_limit_makes_other_threads_wait_their_turn() {

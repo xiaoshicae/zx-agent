@@ -16,7 +16,7 @@ use zx_app::shutdown::next_event;
 
 use super::progress::{RunEvents, RunUpdate};
 use super::render::Ending;
-use super::{Replies, SessionKey, Shared, timed};
+use super::{Replies, RunEnd, RunRecord, SessionKey, Shared, timed};
 use crate::{Addressee, Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, Said, UserId};
 
 /// Messages read before the first answer of a conversation, from a thread the bot is first
@@ -145,6 +145,22 @@ impl Finished {
         match self {
             Self::Run(report) => &report.usage,
             Self::Compaction(report) => &report.usage,
+        }
+    }
+
+    /// What the operator's metrics count of it, a run of the conversation `key` that took
+    /// `duration_ms`.
+    pub(super) fn record(&self, key: &SessionKey, duration_ms: u64) -> RunRecord {
+        let (end, model_requests) = match self {
+            Self::Run(report) => (RunEnd::Prompt(report.outcome), report.model_requests),
+            Self::Compaction(report) => (RunEnd::Compaction(report.outcome), report.requests),
+        };
+        RunRecord {
+            key: key.clone(),
+            end,
+            model_requests,
+            usage: self.usage().clone(),
+            duration_ms,
         }
     }
 }

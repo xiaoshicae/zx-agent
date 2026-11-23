@@ -79,6 +79,13 @@ fn only_session(sessions: &Path) -> String {
     std::fs::read_to_string(&files[0]).unwrap()
 }
 
+/// The first line of the operator log `log` whose `type` is `kind`.
+fn logged<'a>(log: &'a [Value], kind: &str) -> &'a Value {
+    log.iter()
+        .find(|line| line["type"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} line in {log:?}"))
+}
+
 fn write_im_config(dir: &Path, text: &str) -> PathBuf {
     let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
@@ -255,10 +262,7 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let log: Vec<Value> = json_lines(&stdout(&output));
-    let approval_line = log
-        .iter()
-        .find(|line| line["type"] == "approval")
-        .unwrap_or_else(|| panic!("no approval line in {log:?}"));
+    let approval_line = logged(&log, "approval");
     assert_eq!(
         (
             &approval_line["user"],
@@ -266,6 +270,11 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
             &approval_line["thread"]
         ),
         (&json!("U2"), &json!("allow_once"), &json!("1700000001.000100"))
+    );
+    let run_line = logged(&log, "run");
+    assert_eq!(
+        (&run_line["work"], &run_line["outcome"], &run_line["modelRequests"]),
+        (&json!("prompt"), &json!("completed"), &json!(2))
     );
     assert!(!stdout(&output).contains(BOT_TOKEN));
     assert!(!stderr.contains(BOT_TOKEN) && !stderr.contains(APP_TOKEN));
@@ -305,10 +314,7 @@ async fn a_mention_in_a_channel_not_on_the_list_is_refused_and_logged_with_its_s
     let output = program::ended_output(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log: Vec<Value> = json_lines(&stdout(&output));
-    let line = log
-        .iter()
-        .find(|line| line["type"] == "unauthorized")
-        .unwrap_or_else(|| panic!("no unauthorized line in {log:?}"));
+    let line = logged(&log, "unauthorized");
     assert_eq!(
         (&line["platform"], &line["conversation"], &line["thread"], &line["user"]),
         (&json!("slack"), &json!("C9"), &json!("1700000001.000100"), &json!("U1"))

@@ -44,8 +44,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zx_agent::Agent;
-use zx_agent::events::ApprovalResult;
+use zx_agent::ai::Usage;
+use zx_agent::events::{ApprovalResult, RunOutcome};
+use zx_agent::{Agent, compaction};
 
 pub use self::access::Access;
 use self::received::{complete_handled, left_pending};
@@ -142,6 +143,30 @@ pub enum ServerEvent {
     Triggered { key: SessionKey, source: String },
     /// A failure nobody in the chat sees, such as a reply that could not be posted.
     Failed { key: Option<SessionKey>, error: String },
+    /// A run of a conversation ended: what the operator's metrics count.
+    Ran(RunRecord),
+}
+
+/// One ended run of a conversation, a prompt's or `/compact`'s, with what it used.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunRecord {
+    pub key: SessionKey,
+    pub end: RunEnd,
+    /// Model requests made, summary requests and failed attempts included.
+    pub model_requests: u32,
+    /// What its responses used, those of failed attempts and summaries included.
+    pub usage: Usage,
+    /// From its start, once it had a run slot, to its end, in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// What a run of a conversation was, and how it ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RunEnd {
+    /// A run that answered what people asked, as its report states its end.
+    Prompt(RunOutcome),
+    /// The summary that `/compact` asked for.
+    Compaction(compaction::Outcome),
 }
 
 /// One ended approval.
