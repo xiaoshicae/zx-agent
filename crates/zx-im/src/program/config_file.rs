@@ -120,6 +120,8 @@ pub(super) struct LimitsSection {
     max_pending_messages: Option<NonZeroUsize>,
     max_pending_bytes: Option<NonZeroUsize>,
     idle_secs: Option<u64>,
+    /// Characters beyond which an answer is posted as a file.
+    long_answer_chars: Option<NonZeroUsize>,
     /// What the work of all chats may use in a day: tokens, input plus output, and cost.
     daily_tokens: Option<NonZeroU64>,
     daily_cost: Option<f64>,
@@ -329,6 +331,9 @@ pub(super) fn server_config(
     }
     if let Some(secs) = limits.idle_secs {
         config.idle = Duration::from_secs(secs);
+    }
+    if let Some(chars) = limits.long_answer_chars {
+        config.long_answer_chars = chars;
     }
     config
 }
@@ -597,6 +602,7 @@ mod tests {
             "maxConversations",
             "maxPendingMessages",
             "maxPendingBytes",
+            "longAnswerChars",
         ] {
             assert!(ConfigFile::parse(&format!("{SERVER}[limits]\n{name} = 0\n")).is_err());
         }

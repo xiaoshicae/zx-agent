@@ -336,6 +336,7 @@ maxConversations = 128       # 同时服务的会话数：运行的、排队的�
 maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
 maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
 idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文件），默认 1800
+longAnswerChars = 8000       # 比这更长的回答作为 Markdown 文件 answer.md 发出，默认 8000 字符
 # dailyTokens = 2000000      # 整个服务每天（UTC）的输入加输出 token，默认不限
 # dailyCost = 5.0            # 整个服务每天的花费，按 [[models]] 的单价，默认不限
 
@@ -368,7 +369,9 @@ allowed = "已批准"
 
 改了 `[access]` 不必重启：`zx-im` 收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `conversations` 与 `approvers` 立即生效，日志记一条 `reloaded`；读不了或检查不过时保留原名单，记一条 `failed`。其他段（含 `[[chats]]` 与 `[[schedules]]`）的改动重启后才生效，一起检查是为了重启时不失败。只在 Unix 上。
 
-`[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
+`[limits]` 中的四个上限与 `longAnswerChars` 须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
+
+发文件要平台应用有相应权限（Slack 的 `files:write`，⚑ D:5/CHINA FLAG: 飞书的 `im:resource` 或 `im:resource:upload`，见 [IM_SETUP.md](IM_SETUP.md)）：比 `longAnswerChars` 更长的回答作为文件发出，状态换成 `replies.answerAttached`；发不出时照旧分段发文字。每个 IM 会话还有工具 `send_file`，不由 agent 的 `tools` 启用：agent 可以把自己写的内容，或工作目录里的一个文件（至多 20 MiB），作为附件发进对话。后者不经脱敏，见 [SECURITY.md](SECURITY.md#工具)；要审批或禁用它，在 agent 的 `permissions.ask` 或 `deny` 中写 `send_file`。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：zx-im 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 
 `dailyTokens` 须为正整数，`dailyCost` 须为正数；写了 `dailyCost`（`[limits]` 或任一 `[[chats]]`）时，模型要在 `config.toml` 的 `[[models]]` 中有单价，否则启动时以退出码 2 报错。当天的用量用完后，提问与 `/compact` 只回复 `replies.dailyLimit`，触发不开线程；正在进行的运行照常结束，所以一天的用量可能超出上限，要硬上限时给 agent 设单次的 `limits.tokenBudget` 或 `limits.costBudget`。用量只在内存中计数，重启后当天从零计。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“每天的用量”。
 
@@ -376,4 +379,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.43 · 2026年11月
+CONFIGURATION.md · v0.44 · 2026年11月

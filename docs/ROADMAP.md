@@ -57,6 +57,7 @@
 | D40 | zx-im 按天的用量上限（2026-11-23，P19 ④）：`im.toml` 的 `[limits]` 给整个服务、`[[chats]]` 给一个聊天设每天（UTC）的 `dailyTokens`（输入加输出 token，以服务返回的为准）与 `dailyCost`（按 `[[models]]` 的单价，模型须有单价）。当天的用量用完后，新的工作（提问、触发与 `/compact`）不再开始：提问与 `/compact` 回一句 `replies.dailyLimit`，触发只记日志；正在进行的运行照常结束，所以一天可能超出正在进行的几次运行的用量，要硬上限时给 agent 设单次预算（`limits.tokenBudget`、`limits.costBudget`）。用量在每次运行结束时按运行报告计入，失败的尝试与摘要请求都算。只在内存中计数，重启后当天从零计；持久化与多副本共享随 ⑧ 与 backlog 一起做。不在内核里加跨运行的预算：天的边界、按聊天计与回复都属于 IM 服务，单次运行已有内核的预算 |
 | D41 | zx-im 不重启就换名单（2026-11-23，P19 ⑤）：收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `[access]` 的 `conversations` 与 `approvers` 立即生效，记一条 `reloaded`；其他段（含 `[[chats]]`）的改动重启后才生效，检查它们是为了重启时不失败。读不了或检查不过时保留原名单，记一条 `failed`。移出名单的聊天，进行中的运行照常结束，之后的消息按名单外处理；移出的审批人此后点击无效。只在 Unix 上。用信号而不轮询文件：何时生效由运维决定，不会读到改了一半的文件。库：`Server::access` 给出的 `Access::replace` |
 | D42 | zx-im 的运行指标（2026-11-23，P19 ⑦）：每次运行（提问的，或 `/compact` 的摘要）结束时，服务报一个 `ServerEvent::Ran`（`RunRecord`：对话、怎样结束、模型请求数、用量与耗时），程序把它写成操作日志的一行 `run`；运行次数、失败、耗时、token 与花费由日志系统统计。不加依赖，也不开指标端口：zx-im 仍不监听端口（D37）；OpenTelemetry 指标等需要时再加，追踪照旧经 OTLP 导出 |
+| D43 | zx-im 发文件（2026-11-23，P19 ⑥，用户选定方案 B）：平台接口 `ImChannel::send_file` 把文件作为附件发进对话，默认实现说这个平台不能发。Slack 经 `files.getUploadURLExternal` 与 `files.completeUploadExternal`，要 `files:write`；⚑ D:5/CHINA FLAG: 飞书先上传到 `im/v1/files` 再发 `file` 消息，要 `im:resource` 或 `im:resource:upload`，单个文件至多 30 MB，图片也作为文件发（⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块向该平台上传文件（数据）] Subject to Legal/Export Compliance approval）。用到它的有两处：比 `[limits]` 的 `longAnswerChars`（默认 8000 字符，约两条消息）更长的回答作为 Markdown 文件发出，状态换成 `replies.answerAttached`，发不出时照旧分段发文字；工具 `send_file` 发模型写的内容（`content`），或会话工作目录里的一个文件（`path`，至多 20 MiB）。后者不经脱敏，文件里的密钥会原样发进聊天，用户知情后选定。工具要知道发到哪个对话：zx-app 新增 `Application::add_session_tools`，宿主按会话的头部（含标签）给每个会话它自己的工具，这些工具在每个会话里都提供，不由 agent 的 `tools` 启用，`permissions.ask` 与 `deny` 照常约束；zx-im 用它给每个 IM 会话一个 `send_file` |
 
 ## 4. 当前阶段
 
@@ -66,13 +67,14 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
 - P15 IM 对话模型（D16）：Slack 实现了读线程与频道、查名字与回执；⚑ D:5/CHINA FLAG: 飞书读话题与群（2026-11-22），名字与回执沿用默认（用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取该平台上话题与群的历史消息；补上名字后还会读取用户名称] Subject to Legal/Export Compliance approval。
 
-- P19 常驻 agent 的核心能力（2026-11-22 用户决定，按顺序做）：① 主动发起对话（D37，已实现）；② MCP 客户端的常驻能力（D38，已实现）：断线与会话失效后照常调用、自定义请求头、按服务器信任只读标注；③ 按聊天选 agent 与权限（D39，已实现）：权限随 agent 文件，另可指定审批人；④ 按天的用量上限（D40，已实现）：整个服务与单个聊天；⑤ 名单热加载（D41，已实现）：SIGHUP 时重读 `[access]`；⑥ IM 发文件；⑦ 运行指标（D42，已实现）：每次运行一行 `run` 日志；⑧ 多副本（要选数据库，新增依赖须另行批准）。观测、数据库等场景能力由外部实现（D8、D10）。
+- P19 常驻 agent 的核心能力（2026-11-22 用户决定，按顺序做）：① 主动发起对话（D37，已实现）；② MCP 客户端的常驻能力（D38，已实现）：断线与会话失效后照常调用、自定义请求头、按服务器信任只读标注；③ 按聊天选 agent 与权限（D39，已实现）：权限随 agent 文件，另可指定审批人；④ 按天的用量上限（D40，已实现）：整个服务与单个聊天；⑤ 名单热加载（D41，已实现）：SIGHUP 时重读 `[access]`；⑥ IM 发文件（D43，已实现）：长回答转文件与工具 `send_file`；⑦ 运行指标（D42，已实现）：每次运行一行 `run` 日志；⑧ 多副本（要选数据库，新增依赖须另行批准）。观测、数据库等场景能力由外部实现（D8、D10）。
 
 ## 5. 待办与已知缺口
 
 - 真实集群验收：常驻 Pod 部署包与多集群配置没有在真实集群上执行过；只读规则只看命令字面。
 - 真实 MCP 服务器验收：对一个 Streamable HTTP 服务器跑通列出、调用与审批；HTTPS 未测。请求头、停机后恢复与会话失效后重新握手（D38）只对假服务器测过。
 - zx-im 每天的用量只在内存中计数（D40）：重启后当天从零计，多副本时各算各的；随 ⑧ 换成共享的存储。
+- zx-im 发文件（D43）只对假的平台测过：Slack 的三步上传与 ⚑ D:5/CHINA FLAG: 飞书的 multipart 上传按官方文档写成，没有在真实平台上跑过；⚑ D:5/CHINA FLAG: 飞书的图片作为文件发出，不走图片消息。
 - ACP 客户端实测：只用手写客户端与 SDK 示例客户端验证过。顺带确认客户端是否发 `session/close`（不发时会话留到进程退出，见 [REFERENCE.md](REFERENCE.md#acp)），再考虑像 `zx-im` 一样空闲释放。会话自行关闭之后，`session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要自动重开，得记下客户端认为打开着的会话编号，未做。
 - 单进程是部署边界：IM 的 backlog（D33）、对话索引与状态记录都只在本进程的会话目录里，对话索引只由本进程更新，随机器人参与过的对话增长，不淘汰。多副本之前要换成共享的实现，并定义会话所有权与接管。
 - ⚑ D:5/CHINA FLAG: 飞书群聊中 @ 任意机器人都算 @ 本机器人：事件不指出被 @ 的机器人是否属于本应用。读群的历史时已按本机器人的 open_id（经 `/open-apis/bot/v3/info` 取得）认出 @ 它的消息；事件里 `mentions` 的 `id.open_id` 能否同样比较，未核实。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块的消息路由（软件/代码）] Subject to Legal/Export Compliance approval。
@@ -146,4 +148,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.71 · 2026年11月
+ROADMAP.md · v0.72 · 2026年11月

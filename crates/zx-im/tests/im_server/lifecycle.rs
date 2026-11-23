@@ -286,6 +286,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             fail: None,
             updates: Updates::default(),
             refused_post: None,
+            refused_file: None,
             history: Vec::new(),
             history_gate: None,
             chat: Vec::new(),

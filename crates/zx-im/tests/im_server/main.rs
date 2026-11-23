@@ -13,6 +13,7 @@
 //! - `chats`: what a chat has of its own: an agent, approvers
 //! - `daily`: what the work of a day may use, in all chats and in one
 //! - `access`: the chats served and the approvers, replaced while the server runs
+//! - `files`: files the server posts: a long answer as a file
 
 mod access;
 mod approvals;
@@ -20,6 +21,7 @@ mod chats;
 mod commands;
 mod conversations;
 mod daily;
+mod files;
 mod images;
 mod lifecycle;
 mod runs;
@@ -52,9 +54,9 @@ use zx_agent::transcript::{
     SessionStorage, SummaryFact, Transcript,
 };
 use zx_im::{
-    Access, Addressee, ApprovalCard, ApprovalId, Backlog, ChatConfig, ChatKind, Choice, ConversationId, DailyLimit,
-    Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post,
-    Replacement, Replies, RunEnd, RunRecord, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    Access, Addressee, ApprovalCard, ApprovalId, Attachment, Backlog, ChatConfig, ChatKind, Choice, ConversationId,
+    DailyLimit, Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef,
+    Post, Replacement, Replies, RunEnd, RunRecord, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
     StatusStore, ThreadId, Trigger, Triggers, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
@@ -85,6 +87,11 @@ enum Sent {
     Forgot(MessageRef),
     /// A message acknowledged as taken in.
     Acknowledged(MessageRef),
+    /// A file posted.
+    File {
+        to: Destination,
+        file: Attachment,
+    },
 }
 
 /// How the platform answers an update; it records the update either way.
@@ -121,6 +128,8 @@ struct FakeChannel {
     updates: Updates,
     /// A text the platform refuses to post; it records the post either way.
     refused_post: Option<String>,
+    /// The name of a file the platform refuses to post; it records the post either way.
+    refused_file: Option<String>,
     /// What every thread holds before the bot is mentioned there.
     history: Vec<Said>,
     /// Holds each reading of a thread's history, when there is one.
@@ -230,6 +239,19 @@ impl ImChannel for FakeChannel {
                 Ok(())
             }
         }
+    }
+
+    async fn send_file(&self, to: &Destination, file: &Attachment) -> Result<(), ImError> {
+        self.sent
+            .send(Sent::File {
+                to: to.clone(),
+                file: file.clone(),
+            })
+            .unwrap();
+        if self.refused_file.as_ref() == Some(&file.name) {
+            return Err(ImError::Transport("file refused".into()));
+        }
+        Ok(())
     }
 }
 
@@ -541,6 +563,8 @@ struct Setup {
     updates: Updates,
     /// A text the channel refuses to post.
     refused_post: Option<String>,
+    /// The name of a file the channel refuses to post.
+    refused_file: Option<String>,
     history: Vec<Said>,
     chat: Vec<Said>,
     names: HashMap<String, String>,
@@ -580,6 +604,7 @@ impl Default for Setup {
             broken: None,
             updates: Updates::default(),
             refused_post: None,
+            refused_file: None,
             history: Vec::new(),
             chat: Vec::new(),
             names: HashMap::new(),
@@ -646,6 +671,7 @@ fn start(setup: Setup) -> Harness {
         fail: setup.fail_channel,
         updates: setup.updates,
         refused_post: setup.refused_post,
+        refused_file: setup.refused_file,
         history: setup.history,
         history_gate: setup.history_gate,
         chat: setup.chat,

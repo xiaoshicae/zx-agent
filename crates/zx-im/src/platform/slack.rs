@@ -27,8 +27,8 @@ use super::{
     PlatformInput, RATE_LIMIT_RETRIES, SLACK, body_within, content_type_is, http_client, report, secret,
 };
 use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageRef, Post, Replacement, Said,
-    ThreadId, UserId,
+    Attachment, CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageRef, Post,
+    Replacement, Said, ThreadId, UserId,
 };
 
 /// Where the Web API lives.
@@ -317,6 +317,11 @@ impl ImChannel for SlackChannel {
                 self.edit(posted, &result, Some(blocks)).await.map_err(ImError::from)
             }
         }
+    }
+
+    /// An external upload (needs `files:write`).
+    async fn send_file(&self, to: &Destination, file: &Attachment) -> Result<(), ImError> {
+        self.upload(to, file).await
     }
 
     /// `conversations.replies`, page by page to the thread's end (needs `channels:history` or

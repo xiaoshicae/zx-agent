@@ -102,6 +102,7 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 每天的用量 | `[limits]` 的 `dailyTokens`、`dailyCost` 限整个服务，`[[chats]]` 的同名键限一个聊天，按 UTC 的一天计。每次运行与 `/compact` 结束时，按它报告的用量计入当天，失败的尝试与摘要请求都算。用完后，要开始新工作的提问与 `/compact` 只回复 `replies.dailyLimit`，不调用模型，提问随之丢弃；插进进行中运行的消息照常处理；触发不开线程，只记一条 `failed`。正在进行的运行照常结束，所以一天的用量可能超出上限，超出的部分受 agent 单次预算的约束。用量只在内存中计数，重启后当天从零计 |
 | 主动发起 | 不等人发消息也能开始对话。`im.toml` 的 `[[schedules]]` 每隔 `everySecs` 秒（至少 60，第一次在启动后一个间隔）在 `chat` 发一条 `title` 开出线程，在线程里以 `schedule:<名字>` 的身份问 `prompt`；宿主自己的程序经 `Program::on_triggers` 给出的触发（直接用库时是 `Server::triggers`）同样处理。此后回答、审批卡片与接话都与 @ 开始的对话相同：模型看到的提问前加来源的名字，来源不是平台的用户，不查名字；在线程里接着问要 @ 机器人。触发只能用于名单里的频道或群，否则什么也不发，只记一条 `failed`；开线程的消息发不出时同样只记 `failed`。触发计入 `maxConversations`，不进 backlog：停机时还没开出线程的会丢掉，停机期间到点的不补 |
 | 数据范围 | 会话只保存授权聊天里机器人参与的对话（私聊，或它被 @ 过的线程）中的消息，其余在路由处丢弃。平台送来的每条消息在路由之前都先写入 backlog（见“崩溃与重启”），丢弃或处理完即删除，只留下 24 小时内以消息 ID 为名的空标记文件；进程恰在这期间崩溃时，记录留到下次启动处理完为止。线程中任何人的话都会进入模型的上下文（Slack 上也包括其他机器人发的消息），写操作仍要审批 |
+| 发文件 | 比 `[limits]` 的 `longAnswerChars` 更长的回答作为 Markdown 文件 `answer.md` 发出，状态换成 `replies.answerAttached`；平台发不出时（如应用缺发文件的权限）照旧分段发文字，并记一条 `failed`。每个会话有工具 `send_file`，不由 agent 的 `tools` 启用：发模型写的内容（`content`，须给 `name`），或工作目录下的一个文件（`path`，至多 20 MiB，原样发出、不经脱敏）；发不出时工具结果写明原因。⚑ D:5/CHINA FLAG: 飞书的图片也作为文件发出 |
 | 审批 | 使用 assistant agent，`im.toml` 的 `[[chats]]` 给某个聊天指定了 agent 时用那个：自动放行的只读命令直接执行，其余发审批卡片，只有审批人点击才生效（聊天在 `[[chats]]` 有自己的 `approvers` 时是他们，否则是 `access.approvers`）；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | Slack 与 ⚑ D:5/CHINA FLAG: 飞书的 token 与 secret 只从环境变量读取；这些变量，连同宿主自己的程序加的平台给出的变量（`BuiltChannel::hidden_env`），在命令的环境中删除，输出中出现其值时脱敏 |
 | 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。服务启动时读取会话头部，记下每个对话最近创建的会话，续接时打开它；存储里已没有这个会话时（如文件被删除），记一条 `failed` 日志并像首次一样新建会话；`/new` 用同样的标签立即再建一个，此后续接新的，之前的保留 |
@@ -238,4 +239,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.32 · 2026年11月
+REFERENCE.md · v0.33 · 2026年11月

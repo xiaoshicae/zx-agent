@@ -122,7 +122,7 @@ pub fn executor_tools(
 }
 
 /// `args` as a tool's argument type; the error tells the model what was wrong. Public, not
-/// part of the API: zx-app's read_skill uses it.
+/// part of the API: zx-app's read_skill and zx-im's send_file use it.
 #[doc(hidden)]
 pub fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
     T::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))
@@ -169,7 +169,7 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 pub const READ_CANCELLED: &str = "the read was cancelled";
 
 /// `operation`, unless the call is cancelled first. Public, not part of the API: zx-app's
-/// read_skill uses it.
+/// read_skill and zx-im's send_file use it.
 #[doc(hidden)]
 pub async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
     tokio::select! {

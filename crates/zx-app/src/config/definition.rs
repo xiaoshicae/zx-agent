@@ -58,12 +58,15 @@ impl Builtin {
 
 /// The tools a host registers besides the built-in ones, by name, which an agent may name:
 /// `own`, which the agent's `tools` enables and which run unless `permissions.ask` names them,
-/// as the built-in tools do; and those of its `extensions`, offered to every agent, which ask
-/// unless `permissions.allow` names them, as the tools of MCP servers do.
+/// as the built-in tools do; those of its `extensions`, offered to every agent, which ask
+/// unless `permissions.allow` names them, as the tools of MCP servers do; and the `session`
+/// tools it gives each session of its own, offered in every session, which run unless
+/// `permissions.ask` names them.
 #[derive(Default)]
 pub(crate) struct HostTools {
     pub(crate) own: Vec<String>,
     pub(crate) extensions: Vec<String>,
+    pub(crate) session: Vec<String>,
 }
 
 /// A resolved agent: its file over the built-in agent it extends. The assembly lays what a
@@ -199,12 +202,18 @@ impl AgentDefinition {
     /// approved is the executor's to say, which the assembly checks.
     pub(crate) fn validate(&self, config: &Config, host: &HostTools) -> Result<()> {
         let known = |name: &str| known_tool(name) || host.own.iter().any(|own| own == name);
+        let session = |name: &str| host.session.iter().any(|session| session == name);
         for name in &self.tools {
+            ensure!(
+                !session(name),
+                "tools: the host offers {name:?} in every session; it is not enabled here"
+            );
             ensure!(known(name), "tools: unknown tool {name:?}");
         }
         let mut asking = config.mcp_tool_names()?;
         asking.extend(host.extensions.iter().cloned());
-        self.permissions.validate(known, &asking)?;
+        self.permissions
+            .validate(|name| known(name) || session(name), &asking)?;
         self.compaction.validate().map_err(|error| compaction_error(&error))?;
         validate_skills(&self.skills)
     }

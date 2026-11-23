@@ -147,6 +147,7 @@ impl ConfiguredAgent {
                 place: place.clone(),
                 file_queue: Arc::clone(&app.file_queue),
                 host_sections: app.host_sections.clone(),
+                host_tools: app.session_tools.clone(),
             })),
             ..AgentConfig::new(Arc::clone(&built.provider), model)
         };
@@ -213,7 +214,8 @@ impl ConfiguredAgent {
     }
 }
 
-/// The names of the host's own tools and of its extensions' tools, which the agent may name.
+/// The names of the host's own tools, of its extensions' tools and of the tools it gives each
+/// session, which the agent may name.
 fn host_tools(app: &Application) -> HostTools {
     HostTools {
         own: app.tools.iter().map(|tool| tool.name().to_string()).collect(),
@@ -223,6 +225,7 @@ fn host_tools(app: &Application) -> HostTools {
             .flat_map(|extension| extension.tools())
             .map(|tool| tool.name().to_string())
             .collect(),
+        session: app.session_tools.iter().flat_map(|tools| tools.names()).collect(),
     }
 }
 
@@ -239,7 +242,7 @@ fn host_tools(app: &Application) -> HostTools {
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
     app.providers.check_names().map_err(anyhow::Error::msg)?;
     app.executors.check_names().map_err(anyhow::Error::msg)?;
-    for name in host.own.iter().chain(&host.extensions) {
+    for name in host.own.iter().chain(&host.extensions).chain(&host.session) {
         anyhow::ensure!(
             !known_tool(name),
             "the host's tool {name:?} has the name of a built-in tool"

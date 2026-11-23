@@ -41,6 +41,7 @@ pub(super) struct Shared {
     pub(super) max_pending_messages: NonZeroUsize,
     pub(super) max_pending_bytes: NonZeroUsize,
     pub(super) idle: Duration,
+    pub(super) long_answer_chars: NonZeroUsize,
     pub(super) outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
@@ -81,6 +82,7 @@ impl Shared {
             max_pending_messages,
             max_pending_bytes,
             idle,
+            long_answer_chars,
             daily,
             outbound_timeout,
             replies,
@@ -96,6 +98,7 @@ impl Shared {
             chats: own_settings(chats),
             replies,
             idle,
+            long_answer_chars,
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
             daily,

@@ -37,6 +37,7 @@ use zx_agent::extensions::Extension;
 use zx_agent::hooks::Hook;
 use zx_agent::policy::ToolPolicy;
 use zx_agent::tools::Tool;
+use zx_agent::transcript::SessionHeader;
 use zx_util::registry::Registry;
 
 pub use self::agent::{Approvals, ConfiguredAgent};
@@ -56,7 +57,8 @@ use crate::otel::TraceHook;
 /// session is opened at startup.
 ///
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
-/// (tools, hooks, policies, extensions, prompt sections, hidden variables), `set_*` replaces
+/// (tools, each session's own tools, hooks, policies, extensions, prompt sections, hidden
+/// variables), `set_*` replaces
 /// the one there is (the summarizer, the trace export), and `register_*` names one
 /// that config.toml chooses by its name (providers, executors). They are treated as the built-in ones
 /// are, and a name that another part goes by already fails [`build`](Self::build).
@@ -81,6 +83,8 @@ pub struct Application {
     host_sections: Vec<(String, String)>,
     /// The host's own tools, offered where the agent enables them, as the built-in ones are.
     tools: Vec<Arc<dyn Tool>>,
+    /// What makes the host's tools of each session, offered in every session.
+    session_tools: Vec<Arc<dyn SessionTools>>,
     /// The host's own hooks and policies, by name, after the assembly's.
     hooks: Vec<(String, Arc<dyn Hook>)>,
     policies: Vec<(String, Arc<dyn ToolPolicy>)>,
@@ -159,6 +163,7 @@ impl Application {
             traces: None,
             host_sections: Vec::new(),
             tools: Vec::new(),
+            session_tools: Vec::new(),
             hooks: Vec::new(),
             policies: Vec::new(),
             extensions: Vec::new(),
@@ -205,6 +210,16 @@ impl Application {
     /// so does the store of long results where the agent enables read_output.
     pub fn add_tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.push(tool);
+        self
+    }
+
+    /// Give each session the tools that `tools` makes for it from the session's header: the
+    /// host's tools that act on what the session is about, such as the conversation its
+    /// labels name. They are offered in every session, whatever the agent's `tools` enables,
+    /// and run unless its `permissions.ask` names them; `permissions.deny` refuses them. Like a
+    /// built-in tool, each bounds its own output and stops when its call is cancelled.
+    pub fn add_session_tools(mut self, tools: Arc<dyn SessionTools>) -> Self {
+        self.session_tools.push(tools);
         self
     }
 
@@ -306,6 +321,18 @@ impl Application {
     pub fn notices(&self) -> &[String] {
         &self.notices
     }
+}
+
+/// The tools a host gives each session of its own ([`Application::add_session_tools`]), made
+/// from what the session is about, such as one that posts in the conversation its labels name.
+pub trait SessionTools: Send + Sync {
+    /// The names of the tools [`tools`](Self::tools) makes, which the agent's permissions may
+    /// name.
+    fn names(&self) -> Vec<String>;
+
+    /// The tools of the session `header` describes: some of those [`names`](Self::names)
+    /// names, or none.
+    fn tools(&self, header: &SessionHeader) -> Vec<Arc<dyn Tool>>;
 }
 
 /// What a host says over config.toml and the agent when it starts, such as a program's

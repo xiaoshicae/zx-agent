@@ -20,7 +20,8 @@ use crate::http::{read_request, response, response_bytes};
 #[derive(Clone, Debug)]
 pub struct Call {
     /// Which API: token, endpoint, create, reply, edit, patch, resource, get (one message),
-    /// list (the messages of a chat or topic) or bot (the bot's information).
+    /// list (the messages of a chat or topic), bot (the bot's information) or upload (a file
+    /// for a file message).
     pub route: &'static str,
     /// Path and query.
     pub path: String,
@@ -28,8 +29,12 @@ pub struct Call {
     pub authorization: String,
     /// The `Locale` header.
     pub locale: Option<String>,
-    /// The JSON body; `Null` when the body was empty.
+    /// The `Content-Type` header.
+    pub content_type: Option<String>,
+    /// The JSON body; `Null` when the body was empty or is not JSON.
     pub body: Value,
+    /// The body as sent, such as the form of an upload.
+    pub bytes: Vec<u8>,
 }
 
 /// A scripted answer to one call of a route.
@@ -375,6 +380,7 @@ fn route(method: &str, path: &str) -> &'static str {
     match (method, path) {
         ("POST", "/oauth/v3/token") => "token",
         ("POST", "/callback/ws/endpoint") => "endpoint",
+        ("POST", "/open-apis/im/v1/files") => "upload",
         ("POST", path) if path.starts_with("/open-apis/im/v1/messages?") => "create",
         ("POST", path) if path.ends_with("/reply") => "reply",
         ("PUT", _) => "edit",
@@ -408,7 +414,9 @@ impl Answering {
             path: request.path.clone(),
             authorization: request.header("authorization").unwrap_or_default().to_string(),
             locale: request.header("locale").map(String::from),
-            body: request.json(),
+            content_type: request.header("content-type").map(String::from),
+            body: if route == "upload" { Value::Null } else { request.json() },
+            bytes: request.body.clone(),
         };
         let scripted = self
             .scripted
@@ -474,6 +482,7 @@ fn normal(route: &str, settings: &Settings, posted: &Mutex<u64>) -> Value {
             json!({"code": 0, "msg": "success", "data": {"message_id": format!("om_out{count}")}})
         }
         "edit" | "patch" => json!({"code": 0, "msg": "success", "data": {}}),
+        "upload" => json!({"code": 0, "msg": "success", "data": {"file_key": "file_v2_1"}}),
         // A message of nobody's with nothing in it, sent at the start of time.
         "get" => json!({"code": 0, "msg": "success", "data": {"items": [{
             "message_id": "om_0", "create_time": "0", "msg_type": "text",
