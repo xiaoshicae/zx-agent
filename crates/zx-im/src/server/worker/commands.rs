@@ -78,8 +78,12 @@ impl Worker {
     /// holds a run slot, shows its status, and that `/cancel`, `/new` and the stop end like a
     /// run. Only while the conversation is idle and a slot is free: otherwise it says that it
     /// is busy, and the command is to be sent again. A conversation without a session has
-    /// nothing to summarize, and none is made for the command.
+    /// nothing to summarize, and none is made for the command. Once the day's usage is used
+    /// up, nothing is summarized.
     pub(super) async fn compact(&mut self) {
+        if self.out.daily_limit_refuses().await {
+            return;
+        }
         let free = match self.phase.take() {
             Phase::Idle { open, .. } => {
                 if open.is_none() && self.out.shared.session_of(&self.out.key).is_none() {

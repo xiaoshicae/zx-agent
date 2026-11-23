@@ -336,6 +336,8 @@ maxConversations = 128       # 同时服务的会话数：运行的、排队的�
 maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
 maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
 idleSecs = 1800              # 会话空闲多少秒后释放（关闭会话文件），默认 1800
+# dailyTokens = 2000000      # 整个服务每天（UTC）的输入加输出 token，默认不限
+# dailyCost = 5.0            # 整个服务每天的花费，按 [[models]] 的单价，默认不限
 
 [sessions]
 dir = "/data/sessions"       # 会话文件在 <dir>/--<工作目录>--/ 下；<dir>/.running 与 <dir>/.backlog 是服务自己的记录
@@ -348,11 +350,12 @@ everySecs = 3600                   # 至少 60；第一次在启动后一个间�
 prompt = "检查集群：未就绪的 Pod 与最近一小时的 Warning 事件，有问题再展开。"
 # title = "定时巡检"                 # 开出线程的那条消息，默认为 name
 
-# 可选：某个聊天用自己的 agent 或审批人，可以写多个
+# 可选：某个聊天用自己的 agent、审批人或每天的上限，可以写多个
 [[chats]]
 chat = "slack:C0987654321"         # 须在 access.conversations 里，不能重复
 agent = "prod-readonly"            # 主目录的 agents/prod-readonly.md；不写时用 assistant
 approvers = ["slack:U0123456789"]  # 替换 access.approvers，只能是这个聊天所在平台的用户
+# dailyCost = 1.0                  # 这个聊天每天的花费，在 [limits] 的上限之内另算
 
 # 可选：替换默认的英文文案，全部字段与中文译文见仓库的 deploy/kubernetes/im/im.example.toml
 [replies]
@@ -365,8 +368,10 @@ allowed = "已批准"
 
 `[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
-`[[chats]]` 让一个进程服务的聊天各有自己的角色，例如生产群用只读的 agent、只让值班的人审批。每项至少写 `agent` 与 `approvers` 之一，没写的那一项用默认的。工具、权限、上限与说明都随 agent 文件（见上文 [agent](#agent)）；每个 agent 启动时各装配一次、试开一个会话，文件不存在或设置有误时以退出码 2 结束。MCP 连接、会话目录与 `[limits]` 由所有聊天共用。聊天换了 agent 后，已有的对话在原来的会话里继续，按新 agent 的设置。
+`dailyTokens` 须为正整数，`dailyCost` 须为正数；写了 `dailyCost`（`[limits]` 或任一 `[[chats]]`）时，模型要在 `config.toml` 的 `[[models]]` 中有单价，否则启动时以退出码 2 报错。当天的用量用完后，提问与 `/compact` 只回复 `replies.dailyLimit`，触发不开线程；正在进行的运行照常结束，所以一天的用量可能超出上限，要硬上限时给 agent 设单次的 `limits.tokenBudget` 或 `limits.costBudget`。用量只在内存中计数，重启后当天从零计。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“每天的用量”。
+
+`[[chats]]` 让一个进程服务的聊天各有自己的角色，例如生产群用只读的 agent、只让值班的人审批。每项至少写 `agent`、`approvers`、`dailyTokens`、`dailyCost` 之一，没写的用默认的。工具、权限、上限与说明都随 agent 文件（见上文 [agent](#agent)）；每个 agent 启动时各装配一次、试开一个会话，文件不存在或设置有误时以退出码 2 结束。MCP 连接、会话目录与 `[limits]` 由所有聊天共用。聊天换了 agent 后，已有的对话在原来的会话里继续，按新 agent 的设置。
 
 ---
 
-CONFIGURATION.md · v0.41 · 2026年11月
+CONFIGURATION.md · v0.42 · 2026年11月

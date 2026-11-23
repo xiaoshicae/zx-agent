@@ -1,6 +1,6 @@
 //! What every conversation shares: the settings, the agents and the sessions they keep open,
-//! what chats have of their own, the run slots, the statuses, the names of users, and the
-//! outbound timeout with its report.
+//! what chats have of their own, the run slots, the day's usage, the statuses, the names of
+//! users, and the outbound timeout with its report.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -13,10 +13,12 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use zx_agent::Agent;
+use zx_agent::ai::Usage;
 use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
-use super::{ChatConfig, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
+use super::usage::{DayUsage, today};
+use super::{ChatConfig, DailyLimit, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
 use crate::{ConversationId, ImChannel, ImError, MessageRef, UserId};
 
 /// Settings and resources every conversation reads.
@@ -40,6 +42,9 @@ pub(super) struct Shared {
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
     pub(super) permits: Arc<Semaphore>,
+    /// What the work of all chats may use in a day, and what the work of the day used.
+    daily: DailyLimit,
+    used: Mutex<DayUsage>,
     statuses: Option<Arc<dyn StatusStore>>,
     /// The names of users looked up so far, by platform; a user's ID stands for a name the
     /// platform did not give. As many as there are people writing to the bot.
@@ -55,6 +60,7 @@ pub(super) struct Shared {
 struct OwnSettings {
     agent: Option<Agent>,
     approvers: Option<HashSet<UserId>>,
+    daily: DailyLimit,
 }
 
 impl Shared {
@@ -72,6 +78,7 @@ impl Shared {
             max_pending_messages,
             max_pending_bytes,
             idle,
+            daily,
             outbound_timeout,
             replies,
             statuses,
@@ -88,6 +95,8 @@ impl Shared {
             idle,
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
+            daily,
+            used: Mutex::default(),
             max_conversations,
             max_pending_messages,
             max_pending_bytes,
@@ -172,7 +181,25 @@ impl Shared {
 
     /// What the chat of the conversation `key` has of its own, if anything.
     fn own(&self, key: &SessionKey) -> Option<&OwnSettings> {
-        self.chats.get(&key.platform)?.get(&key.conversation)
+        self.own_chat(&key.platform, &key.conversation)
+    }
+
+    /// What the chat `chat` on `platform` has of its own, if anything.
+    fn own_chat(&self, platform: &str, chat: &ConversationId) -> Option<&OwnSettings> {
+        self.chats.get(platform)?.get(chat)
+    }
+
+    /// Whether the work of today used up what the work of all chats, or of the chat `chat` on
+    /// `platform`, may use in a day: then no work starts there.
+    pub(super) fn daily_limit_reached(&self, platform: &str, chat: &ConversationId) -> bool {
+        let (all, in_chat) = lock(&self.used).used(today(), platform, chat);
+        let own = self.own_chat(platform, chat).map(|own| own.daily);
+        self.daily.reached_by(all) || own.is_some_and(|daily| daily.reached_by(in_chat))
+    }
+
+    /// Count `usage`, what work in the chat `chat` on `platform` used, as the day's.
+    pub(super) fn spend(&self, platform: &str, chat: &ConversationId, usage: &Usage) {
+        lock(&self.used).add(today(), platform, chat, usage);
     }
 
     pub(super) fn failed(&self, key: Option<&SessionKey>, error: String) {
@@ -243,11 +270,13 @@ fn own_settings(chats: Vec<ChatConfig>) -> HashMap<String, HashMap<ConversationI
         chat,
         agent,
         approvers,
+        daily,
     } in chats
     {
         let own = OwnSettings {
             agent,
             approvers: approvers.map(HashSet::from_iter),
+            daily,
         };
         grouped.entry(platform).or_default().insert(chat, own);
     }

@@ -17,6 +17,7 @@
 //!   left pending in the backlog
 //! - `trigger`: conversations the server starts without a message, and the handle that asks
 //!   for them
+//! - `usage`: what the work of a day may use, in all and in each chat, and what it used
 
 mod admission;
 mod approval;
@@ -29,6 +30,7 @@ mod router;
 mod shared;
 mod status;
 mod trigger;
+mod usage;
 mod worker;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -52,6 +54,7 @@ pub(crate) use self::status::StatusFiles;
 pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
 pub use self::trigger::{Trigger, Triggers};
+pub use self::usage::DailyLimit;
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
@@ -185,6 +188,10 @@ pub struct ServerConfig {
     pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
+    /// What the work of all chats may use in a day. Once it is used up, a message or `/compact`
+    /// that would start work gets [`Replies::daily_limit`], and a trigger is reported instead
+    /// of opening a thread. The day's usage is counted in memory: a restart starts it over.
+    pub daily: DailyLimit,
     /// Limit for each call to a channel but [`ImChannel::run`], and for each call to
     /// [`statuses`](Self::statuses) and to the [`backlog`](Self::backlog) but
     /// [`Backlog::keep`]; a call that takes longer counts as failed.
@@ -215,6 +222,7 @@ impl Default for ServerConfig {
             max_pending_messages: DEFAULT_PENDING_MESSAGES,
             max_pending_bytes: DEFAULT_PENDING_BYTES,
             idle: DEFAULT_IDLE,
+            daily: DailyLimit::default(),
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
             statuses: None,
@@ -236,6 +244,8 @@ pub struct ChatConfig {
     /// The users whose clicks decide approvals in the chat, on its platform, in place of
     /// [`ServerConfig::approvers`].
     pub approvers: Option<Vec<UserId>>,
+    /// What the work of the chat may use in a day, within [`ServerConfig::daily`].
+    pub daily: DailyLimit,
 }
 
 /// Answers chat messages, one session per conversation, as a person in the chat would.
@@ -269,6 +279,9 @@ pub struct ChatConfig {
 ///   in a chat the server serves opens a thread, where its prompt is asked. It counts toward
 ///   [`ServerConfig::max_conversations`] like a mention, and is not kept in the backlog: one
 ///   not started before the stop is lost.
+/// - Once the day's usage of all chats or of a chat is used up ([`ServerConfig::daily`],
+///   [`ChatConfig::daily`]), no work starts there: a message or `/compact` gets
+///   [`Replies::daily_limit`], and a trigger is reported. Work in progress finishes.
 pub struct Server {
     config: ServerConfig,
     agent: Agent,

@@ -361,7 +361,8 @@ impl Worker {
     }
 
     /// Open the session unless `open` holds it and write what was heard into it, then run
-    /// what was `asked` there; with nothing asked, the slot served only to record, and goes.
+    /// what was `asked` there; with nothing asked, or once the day's usage is used up, the
+    /// slot served only to record, and goes.
     async fn open_and_start(
         &mut self,
         open: Option<Opened>,
@@ -369,6 +370,17 @@ impl Worker {
         slot: OwnedSemaphorePermit,
         trigger: Option<&MessageRef>,
     ) {
+        // Once the day's usage is used up, what was asked goes, as after `/cancel`; what was
+        // heard is still written.
+        let asked = if !asked.is_empty() && self.out.daily_limit_refuses().await {
+            if self.heard.is_empty() {
+                self.phase = Phase::idle(open);
+                return;
+            }
+            Vec::new()
+        } else {
+            asked
+        };
         let open = match self.opened(open, trigger).await {
             Ok(open) => open,
             Err(OpenFailure::Stopped) => return,
@@ -479,6 +491,9 @@ impl Worker {
             ..
         } = running;
         drop(slot);
+        if let Ok(finished) = &ended {
+            self.out.spend(finished.usage());
+        }
         let cancelled = matches!(&ended, Ok(finished) if finished.cancelled());
         let ending = if cancelled && self.lifecycle.closing() {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends

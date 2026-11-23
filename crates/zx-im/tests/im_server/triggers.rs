@@ -98,6 +98,29 @@ async fn a_trigger_for_a_platform_no_channel_serves_posts_nothing_and_is_reporte
 }
 
 #[tokio::test]
+async fn a_trigger_once_the_day_s_usage_is_used_up_opens_no_thread_and_is_reported() {
+    let mut setup = Setup {
+        steps: vec![FauxStep::text("first")],
+        ..Setup::default()
+    };
+    setup.config.daily = DailyLimit {
+        tokens: Some(1),
+        cost: None,
+    };
+    let mut h = start(setup);
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    h.updated(&status, text("first")).await;
+    h.triggers.start(hourly()).await;
+    match h.event().await {
+        ServerEvent::Failed { key: None, error } => assert!(error.contains("the day's usage limit"), "{error}"),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    let (sent, _) = h.stop_and_take().await;
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
+#[tokio::test]
 async fn a_trigger_beyond_the_conversation_limit_opens_no_thread_and_is_reported() {
     let mut h = start(Setup {
         steps: vec![FauxStep::Hang],
