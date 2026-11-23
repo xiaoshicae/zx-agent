@@ -55,7 +55,32 @@ pub(super) struct ConfigFile {
     pub(super) platforms: Vec<(String, toml::Table)>,
 }
 
+/// The server's sections of a file, checked against the configured platforms.
+pub(super) struct ServerSections {
+    pub(super) conversations: Conversations,
+    pub(super) approvers: Approvers,
+    pub(super) chats: Vec<OwnChat>,
+    pub(super) daily: DailyLimit,
+    pub(super) schedules: Vec<(Duration, Trigger)>,
+}
+
 impl ConfigFile {
+    /// Its server's sections, checked as a start checks them, with `platforms` the configured
+    /// ones: a reload checks a file as the start would, so that a restart does not fail.
+    pub(super) fn server_sections(&self, platforms: &HashSet<&str>) -> Result<ServerSections> {
+        let (conversations, approvers) = access(&self.access, platforms)?;
+        let chats = chats(&self.chats, &conversations, platforms)?;
+        let daily = self.limits.daily()?;
+        let schedules = schedules(&self.schedules, &conversations, platforms)?;
+        Ok(ServerSections {
+            conversations,
+            approvers,
+            chats,
+            daily,
+            schedules,
+        })
+    }
+
     /// The file `text` holds: its server's sections, checked, and the others, which only the
     /// platforms they name can check.
     pub(super) fn parse(text: &str) -> Result<Self> {
@@ -102,7 +127,7 @@ pub(super) struct LimitsSection {
 
 impl LimitsSection {
     /// What the work of all chats may use in a day, checked.
-    pub(super) fn daily(&self) -> Result<DailyLimit> {
+    fn daily(&self) -> Result<DailyLimit> {
         daily_limit(self.daily_tokens, self.daily_cost, "limits")
     }
 }
@@ -158,11 +183,7 @@ pub(super) struct OwnChat {
 /// The chats of the file with settings of their own, checked: each names a chat among
 /// `conversations`, on one of `platforms`, once, and gives an agent, approvers, those on the
 /// chat's platform, or a daily limit. Whether the agent exists is known once it is built.
-pub(super) fn chats(
-    sections: &[ChatSection],
-    conversations: &Conversations,
-    platforms: &HashSet<&str>,
-) -> Result<Vec<OwnChat>> {
+fn chats(sections: &[ChatSection], conversations: &Conversations, platforms: &HashSet<&str>) -> Result<Vec<OwnChat>> {
     let mut given = HashSet::new();
     let mut chats = Vec::with_capacity(sections.len());
     for section in sections {
@@ -227,7 +248,7 @@ fn approvers_on(listed: &[String], platform: &str, platforms: &HashSet<&str>, fi
 /// The schedules of the file, checked: each with its interval and the trigger it asks for.
 /// Each names a chat among `conversations`, on one of `platforms`, and has a unique name, a
 /// prompt and an interval of at least a minute.
-pub(super) fn schedules(
+fn schedules(
     sections: &[ScheduleSection],
     conversations: &Conversations,
     platforms: &HashSet<&str>,
@@ -261,14 +282,14 @@ pub(super) fn schedules(
 }
 
 /// The IM service configuration file at `path`, read as config.toml is: a regular UTF-8 file
-/// within a size limit. A startup read; nothing runs concurrently yet.
+/// within a size limit. Read at the start and on each reload: one small, bounded read.
 pub(super) fn read_file(path: &Path) -> Result<ConfigFile> {
     let text = read_text(path)?;
     ConfigFile::parse(&text).with_context(|| format!("invalid IM service configuration {}", path.display()))
 }
 
 /// The chats the bot answers in and the users who may approve, each on a configured platform.
-pub(super) fn access(section: &AccessSection, platforms: &HashSet<&str>) -> Result<(Conversations, Approvers)> {
+fn access(section: &AccessSection, platforms: &HashSet<&str>) -> Result<(Conversations, Approvers)> {
     let conversations = entries(&section.conversations, platforms, "access.conversations")?
         .into_iter()
         .map(|(platform, id)| (platform, ConversationId(id)))

@@ -366,6 +366,8 @@ allowed = "已批准"
 
 名单要写的 ID 可以从日志取：不在名单里的聊天发来要机器人回答的消息被拒绝（不调用模型），日志的 `unauthorized` 行写明平台、聊天与发送人（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“日志”）。要加一个群，请人在群里 @ 机器人一次；要加一个人（如审批人），请他从不在名单里的聊天（如私聊）给机器人发一句。⚑ D:5/CHINA FLAG: 飞书的 open_id（`ou_…`）按应用区分，要用本应用收到的。
 
+改了 `[access]` 不必重启：`zx-im` 收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `conversations` 与 `approvers` 立即生效，日志记一条 `reloaded`；读不了或检查不过时保留原名单，记一条 `failed`。其他段（含 `[[chats]]` 与 `[[schedules]]`）的改动重启后才生效，一起检查是为了重启时不失败。只在 Unix 上。
+
 `[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
 `dailyTokens` 须为正整数，`dailyCost` 须为正数；写了 `dailyCost`（`[limits]` 或任一 `[[chats]]`）时，模型要在 `config.toml` 的 `[[models]]` 中有单价，否则启动时以退出码 2 报错。当天的用量用完后，提问与 `/compact` 只回复 `replies.dailyLimit`，触发不开线程；正在进行的运行照常结束，所以一天的用量可能超出上限，要硬上限时给 agent 设单次的 `limits.tokenBudget` 或 `limits.costBudget`。用量只在内存中计数，重启后当天从零计。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“每天的用量”。
@@ -374,4 +376,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.42 · 2026年11月
+CONFIGURATION.md · v0.43 · 2026年11月

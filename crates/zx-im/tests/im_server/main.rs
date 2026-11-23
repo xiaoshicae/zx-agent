@@ -12,7 +12,9 @@
 //! - `triggers`: conversations the server starts without a message
 //! - `chats`: what a chat has of its own: an agent, approvers
 //! - `daily`: what the work of a day may use, in all chats and in one
+//! - `access`: the chats served and the approvers, replaced while the server runs
 
+mod access;
 mod approvals;
 mod chats;
 mod commands;
@@ -50,7 +52,7 @@ use zx_agent::transcript::{
     SessionStorage, SummaryFact, Transcript,
 };
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, Backlog, ChatConfig, ChatKind, Choice, ConversationId, DailyLimit,
+    Access, Addressee, ApprovalCard, ApprovalId, Backlog, ChatConfig, ChatKind, Choice, ConversationId, DailyLimit,
     Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post,
     Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId,
     Trigger, Triggers, UserId,
@@ -595,6 +597,8 @@ struct Harness {
     backlog: Arc<MemoryBacklog>,
     /// Where the test asks the server for conversations without a message.
     triggers: Triggers,
+    /// Where the test replaces the chats served and the approvers.
+    access: Access,
 }
 
 fn start(setup: Setup) -> Harness {
@@ -650,6 +654,7 @@ fn start(setup: Setup) -> Harness {
     let replies = config.replies.clone();
     let server = Server::new(config, agent.clone(), Arc::new(Events(events_to)));
     let triggers = server.triggers();
+    let access = server.access();
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let server = tokio::spawn(async move { server.run(vec![channel], &stop).await });
@@ -665,6 +670,7 @@ fn start(setup: Setup) -> Harness {
         statuses,
         backlog,
         triggers,
+        access,
     }
 }
 

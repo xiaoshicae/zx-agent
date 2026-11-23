@@ -1,6 +1,6 @@
-//! What every conversation shares: the settings, the agents and the sessions they keep open,
-//! what chats have of their own, the run slots, the day's usage, the statuses, the names of
-//! users, and the outbound timeout with its report.
+//! What every conversation shares: the settings, who may use the server, the agents and the
+//! sessions they keep open, what chats have of their own, the run slots, the day's usage, the
+//! statuses, the names of users, and the outbound timeout with its report.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -17,6 +17,7 @@ use zx_agent::ai::Usage;
 use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
+use super::access::Access;
 use super::usage::{DayUsage, today};
 use super::{ChatConfig, DailyLimit, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
 use crate::{ConversationId, ImChannel, ImError, MessageRef, UserId};
@@ -30,7 +31,9 @@ pub(super) struct Shared {
     /// Where new sessions work.
     pub(super) cwd: PathBuf,
     pub(super) sink: Arc<dyn ServerSink>,
-    approvers: HashMap<String, HashSet<UserId>>,
+    /// The chats served and the approvers of the chats without their own, which the host may
+    /// replace while the server runs.
+    access: Access,
     /// What chats have of their own, by platform and chat.
     chats: HashMap<String, HashMap<ConversationId, OwnSettings>>,
     pub(super) replies: Replies,
@@ -64,14 +67,14 @@ struct OwnSettings {
 }
 
 impl Shared {
-    /// What the conversations share, from everything in `config` but the chats served and the
-    /// backlog.
-    pub(super) fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+    /// What the conversations share, from everything in `config` but the lists, which `access`
+    /// holds, and the backlog.
+    pub(super) fn new(config: ServerConfig, agent: Agent, access: Access, sink: Arc<dyn ServerSink>) -> Self {
         let ServerConfig {
             cwd,
-            // Taken by the router before.
+            // Taken into `access` before.
             conversations: _,
-            approvers,
+            approvers: _,
             chats,
             max_running,
             max_conversations,
@@ -89,7 +92,7 @@ impl Shared {
             agent,
             cwd,
             sink,
-            approvers: group(approvers),
+            access,
             chats: own_settings(chats),
             replies,
             idle,
@@ -172,11 +175,13 @@ impl Shared {
     pub(super) fn is_approver(&self, key: &SessionKey, user: &UserId) -> bool {
         match self.own(key).and_then(|own| own.approvers.as_ref()) {
             Some(approvers) => approvers.contains(user),
-            None => self
-                .approvers
-                .get(&key.platform)
-                .is_some_and(|users| users.contains(user)),
+            None => self.access.approves(&key.platform, user),
         }
+    }
+
+    /// Whether the server answers in the chat `chat` on `platform`.
+    pub(super) fn serves(&self, platform: &str, chat: &ConversationId) -> bool {
+        self.access.serves(platform, chat)
     }
 
     /// What the chat of the conversation `key` has of its own, if anything.

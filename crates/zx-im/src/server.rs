@@ -2,6 +2,7 @@
 //! configuration, and the server itself.
 //!
 //! - `replies`: the texts the server posts besides the model's answers
+//! - `access`: who may use the server, which the host may replace while it runs
 //! - `shared`: what every conversation shares: settings, the agent, the run slots and the
 //!   outbound timeout
 //! - `router`: takes each platform event and hands it to its conversation's worker
@@ -19,6 +20,7 @@
 //!   for them
 //! - `usage`: what the work of a day may use, in all and in each chat, and what it used
 
+mod access;
 mod admission;
 mod approval;
 mod outlet;
@@ -33,7 +35,7 @@ mod trigger;
 mod usage;
 mod worker;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -45,11 +47,12 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
 use zx_agent::events::ApprovalResult;
 
+pub use self::access::Access;
 use self::received::{complete_handled, left_pending};
 pub use self::replies::Replies;
 pub(crate) use self::replies::{CONVERSATION, CONVERSATION_SECTION};
 use self::router::{Router, RouterSetup};
-use self::shared::{Shared, group, timed};
+use self::shared::{Shared, timed};
 pub(crate) use self::status::StatusFiles;
 pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
@@ -164,7 +167,8 @@ pub struct ServerConfig {
     /// opened again; the current directory by default.
     pub cwd: PathBuf,
     /// Chats the server answers in, per platform. A message from another chat gets
-    /// [`Replies::unauthorized`] and nothing else.
+    /// [`Replies::unauthorized`] and nothing else. [`Server::access`] replaces this list and
+    /// [`approvers`](Self::approvers) while the server runs.
     pub conversations: Vec<(String, ConversationId)>,
     /// Users whose clicks decide approvals, per platform, in the chats without approvers of
     /// their own ([`chats`](Self::chats)). A click by anyone else gets
@@ -289,19 +293,26 @@ pub struct Server {
     /// The handle [`triggers`](Self::triggers) hands out clones of, and what they send.
     triggers: Triggers,
     triggered: mpsc::Receiver<Trigger>,
+    /// The lists of `config`, which [`access`](Self::access) hands out to replace.
+    access: Access,
 }
 
 impl Server {
     /// A server for `config` whose conversations are sessions of `agent`, but in the chats
     /// with an agent of their own, and which reports to `sink`.
-    pub fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+    pub fn new(mut config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let (triggers, triggered) = Triggers::channel();
+        let access = Access::new(
+            std::mem::take(&mut config.conversations),
+            std::mem::take(&mut config.approvers),
+        );
         Self {
             config,
             agent,
             sink,
             triggers,
             triggered,
+            access,
         }
     }
 
@@ -310,6 +321,13 @@ impl Server {
     /// wait for it; once the server has stopped, [`Triggers::start`] returns false.
     pub fn triggers(&self) -> Triggers {
         self.triggers.clone()
+    }
+
+    /// Where the host replaces, while the server runs, the chats it answers in and the users
+    /// whose clicks decide approvals ([`Access::replace`]), such as when its configuration
+    /// changes.
+    pub fn access(&self) -> Access {
+        self.access.clone()
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails.
@@ -330,18 +348,17 @@ impl Server {
         distinct_platforms(&channels)?;
         // The server's own handle goes, so that triggers fail once the router is gone.
         let Server {
-            mut config,
+            config,
             agent,
             sink,
             triggers: _,
             triggered,
+            access,
         } = self;
-        // The chats served are the router's; the rest of the configuration is shared.
-        let allowed = group(std::mem::take(&mut config.conversations));
-        served_once(&config.chats, &allowed)?;
+        served_once(&config.chats, &access)?;
         let backlog = Arc::clone(&config.backlog);
         let timeout = config.outbound_timeout;
-        let shared = Arc::new(Shared::new(config, agent, Arc::clone(&sink)));
+        let shared = Arc::new(Shared::new(config, agent, access, Arc::clone(&sink)));
         shared.index_sessions().await?;
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
@@ -357,7 +374,6 @@ impl Server {
         let (receipts, completing) = complete_handled(Arc::clone(&backlog), Arc::clone(&sink), timeout, stop.clone());
         let mut router = Router::new(RouterSetup {
             channels,
-            allowed,
             shared,
             stop,
             replacing,
@@ -380,10 +396,10 @@ impl Server {
 }
 
 /// An error when a chat of `chats` is not among those `served`, or is given more than once.
-fn served_once(chats: &[ChatConfig], served: &HashMap<String, HashSet<ConversationId>>) -> Result<(), ImError> {
+fn served_once(chats: &[ChatConfig], served: &Access) -> Result<(), ImError> {
     let mut seen = HashSet::new();
     for ChatConfig { platform, chat, .. } in chats {
-        if !served.get(platform).is_some_and(|served| served.contains(chat)) {
+        if !served.serves(platform, chat) {
             return Err(ImError::Config(format!(
                 "the chat {platform}:{chat} has settings of its own but is not served"
             )));

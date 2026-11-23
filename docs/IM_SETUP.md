@@ -77,7 +77,7 @@ approvers = ["slack:U0123456789"]       # 能批准或拒绝的人；为空时�
 dir = "/data/sessions"
 ```
 
-第一次接入还不知道 ID 时，可以先写 `conversations = []` 启动：此时每条要机器人回答的消息都被拒绝，日志里正好留下要填的 ID（见下一节），填好后重启。
+第一次接入还不知道 ID 时，可以先写 `conversations = []` 启动：此时每条要机器人回答的消息都被拒绝，日志里正好留下要填的 ID（见下一节），填好后让它重读名单（见本节末尾）。
 
 凭据只放在环境变量（Kubernetes 中为 Secret）里，不写进 `im.toml`；`zx-im` 执行的命令看不到存放密钥的变量（⚑ D:5/CHINA FLAG: 飞书的 App ID 不是密钥，不隐藏）。启动：
 
@@ -87,7 +87,7 @@ export SLACK_BOT_TOKEN=xoxb-...
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
-`im.toml` 只在启动时读取，改了名单要重启；Kubernetes 中的做法见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
+改了 `[access]`（`conversations` 与 `approvers`）不必重启：向 `zx-im` 进程发 SIGHUP（如 `kill -HUP "$(pidof zx-im)"`），它重读 `im.toml`，日志记一条 `reloaded`；文件有错时保留原名单，日志记一条 `failed` 写明原因。其他段（含 `[[chats]]`）的改动要重启才生效。Kubernetes 中的做法见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
 
 ## 取得 ID
 
@@ -133,10 +133,10 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 
 | 现象 | 原因与处理 |
 |---|---|
-| 机器人回复 “Not authorized…” | 聊天不在 `conversations` 中：从 `unauthorized` 日志行取 ID 加入，再重启 |
+| 机器人回复 “Not authorized…” | 聊天不在 `conversations` 中：从 `unauthorized` 日志行取 ID 加入，再发 SIGHUP 或重启 |
 | 点审批按钮后提示只有名单里的人能批 | 点的人不在 `approvers` 中 |
 | 审批卡片一直没人能点 | `approvers` 为空时审批只能超时 |
 
 ---
 
-IM_SETUP.md · v0.1 · 2026年11月
+IM_SETUP.md · v0.2 · 2026年11月

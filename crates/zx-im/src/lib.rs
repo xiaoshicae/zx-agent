@@ -44,7 +44,7 @@ pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChan
 pub use self::platform::{FeishuChannel, FeishuConfig};
 pub use self::program::Program;
 pub use self::server::{
-    ApprovalRecord, ChatConfig, DailyLimit, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    Access, ApprovalRecord, ChatConfig, DailyLimit, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
     StatusStore, Trigger, Triggers,
 };
 

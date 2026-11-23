@@ -7,11 +7,14 @@
 //! - `args`: the command line
 //! - `config_file`: im.toml
 //! - `log`: the operator log on stdout
+//! - `reload`: on SIGHUP, the lists of im.toml read again (Unix only)
 //! - `scheduler`: the schedules of im.toml, each asking the server for its conversation
 
 mod args;
 mod config_file;
 mod log;
+#[cfg(unix)]
+mod reload;
 mod scheduler;
 
 use std::collections::{HashMap, HashSet};
@@ -33,7 +36,7 @@ use zx_util::registry::Registry;
 use zx_util::stdio::eprint_line;
 
 pub(crate) use self::args::Args;
-use self::config_file::{ConfigFile, OwnChat, access, chats, read_file, schedules, server_config};
+use self::config_file::{ConfigFile, OwnChat, ServerSections, read_file, server_config};
 use self::log::{Log, failure_log};
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
@@ -152,11 +155,15 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     let file = read_file(&path)?;
     let BuiltChannels { channels, hidden_env } = build_channels(&file, &registered, &path)?;
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
-    let (conversations, approvers) = access(&file.access, &names)?;
-    let chats = chats(&file.chats, &conversations, &names)?;
-    let daily = file.limits.daily()?;
+    let ServerSections {
+        conversations,
+        approvers,
+        chats,
+        daily,
+        schedules,
+    } = file.server_sections(&names)?;
     let unprompted = Unprompted {
-        schedules: schedules(&file.schedules, &conversations, &names)?,
+        schedules,
         sources: trigger_sources,
     };
     let (code, end) =
@@ -184,7 +191,11 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 daily,
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
-            Ok(serve(config, &agent, channels, &dir, unprompted).await)
+            let files = Files {
+                im_toml: &path,
+                sessions: &dir,
+            };
+            Ok(serve(config, &agent, channels, files, unprompted).await)
         })
         .await?;
     for notice in end.notices() {
@@ -319,21 +330,27 @@ fn build_agent(app: &Application, name: &str, place: &SessionPlace) -> Result<Co
     app.build_named(name, app.model(), place, approvals)
 }
 
-/// Serve `channels` as `config` says, with the sessions of `agent`, kept under `dir`, and the
-/// conversations that `unprompted` starts without a message, until a signal or a platform's
-/// failure; the exit code says which.
+/// Where the program's files are: im.toml, which a SIGHUP reads again, and the sessions.
+struct Files<'a> {
+    im_toml: &'a Path,
+    sessions: &'a Path,
+}
+
+/// Serve `channels` as `config` says, with the sessions of `agent`, kept where `files` says,
+/// and the conversations that `unprompted` starts without a message, until a signal or a
+/// platform's failure; the exit code says which.
 async fn serve(
     config: ServerConfig,
     agent: &ConfiguredAgent,
     channels: Vec<Arc<dyn ImChannel>>,
-    dir: &Path,
+    files: Files<'_>,
     unprompted: Unprompted,
 ) -> u8 {
-    let names: Vec<&str> = channels.iter().map(|channel| channel.platform()).collect();
+    let names: Vec<String> = channels.iter().map(|channel| channel.platform().to_string()).collect();
     eprint_line(&format!(
         "[im] platforms={}; sessions in {}; schedules: {}",
         names.join(","),
-        dir.display(),
+        files.sessions.display(),
         unprompted.schedules.len()
     ));
     let cancel = CancellationToken::new();
@@ -348,7 +365,13 @@ async fn serve(
         source(server.triggers());
     }
     let scheduling = tokio::spawn(scheduler::run(unprompted.schedules, server.triggers(), cancel.clone()));
+    #[cfg(unix)]
+    let reloading = reload::on_hangup(files.im_toml.to_path_buf(), names, server.access(), cancel.clone());
     let served = server.run(channels, &cancel).await;
+    #[cfg(unix)]
+    if let Some(reloading) = reloading {
+        reloading.abort();
+    }
     // The server is gone, also after a platform's failure, which cancels nothing.
     scheduling.abort();
     serve_exit_code(served)
