@@ -1,14 +1,14 @@
 //! The Web API: calls with a token, rate limits waited out, and Slack's refusals told apart
 //! from calls that got no answer.
 
-use reqwest::header::RETRY_AFTER;
+use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{StatusCode, Url};
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{HISTORY_PAGE_MESSAGES, SETUP_ERRORS, SlackChannel};
 use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
-use crate::{Destination, ImError, MessageId, MessageRef, ThreadId};
+use crate::{Attachment, Destination, ImError, MessageId, MessageRef, ThreadId};
 
 impl SlackChannel {
     /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON
@@ -160,6 +160,44 @@ impl SlackChannel {
             at: to.clone(),
             id: MessageId(ts.into()),
         })
+    }
+
+    /// Post `file` to `to` in the three steps of an external upload: an address to upload
+    /// to, the bytes sent there, then the file shared in the chat, in its thread when `to`
+    /// names one.
+    pub(super) async fn upload(&self, to: &Destination, file: &Attachment) -> Result<(), ImError> {
+        let token = &self.config.bot_token;
+        let length = file.bytes.len().to_string();
+        let args = [("filename", file.name.as_str()), ("length", length.as_str())];
+        let ticket = self.call("files.getUploadURLExternal", token, &args, None).await?;
+        let (Some(upload_url), Some(file_id)) = (ticket["upload_url"].as_str(), ticket["file_id"].as_str()) else {
+            return Err(ImError::Transport(
+                "slack files.getUploadURLExternal: no upload_url or file_id in the answer".into(),
+            ));
+        };
+        // The address authorizes the upload: Slack's examples send no token with it.
+        let sent = self
+            .http
+            .post(upload_url)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(file.bytes.clone())
+            .send()
+            .await
+            .map_err(|error| ImError::Transport(format!("slack file upload: {error}")))?;
+        // "a non-200 response indicates a failure" (files.getUploadURLExternal).
+        if sent.status() != StatusCode::OK {
+            return Err(ImError::Transport(format!("slack file upload: HTTP {}", sent.status())));
+        }
+        let mut body = Map::new();
+        body.insert("files".into(), json!([{"id": file_id, "title": file.name}]));
+        body.insert("channel_id".into(), json!(to.conversation.0));
+        if let Some(thread) = &to.thread {
+            body.insert("thread_ts".into(), json!(thread.0));
+        }
+        let body = Value::Object(body);
+        self.call("files.completeUploadExternal", token, &[], Some(&body))
+            .await?;
+        Ok(())
     }
 
     /// Replace a posted message. Without `blocks`, Slack removes the message's blocks and

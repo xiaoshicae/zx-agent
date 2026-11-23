@@ -34,9 +34,9 @@ use crate::backlog::{self, Backlog, Kept};
 /// - it queues its sends to stay within the platform's rate limits.
 ///
 /// [`thread_history`](Self::thread_history), [`chat_history`](Self::chat_history),
-/// [`display_name`](Self::display_name), [`acknowledge`](Self::acknowledge) and
-/// [`image`](Self::image) have defaults that do nothing, for a platform, or an app without
-/// the permissions, that cannot.
+/// [`display_name`](Self::display_name), [`acknowledge`](Self::acknowledge),
+/// [`image`](Self::image) and [`send_file`](Self::send_file) have defaults that do nothing,
+/// for a platform, or an app without the permissions, that cannot.
 #[async_trait]
 pub trait ImChannel: Send + Sync {
     /// Name used in configuration and logs, in the labels of the sessions of its
@@ -60,6 +60,17 @@ pub trait ImChannel: Send + Sync {
     /// with the first part and posts the rest as replies. Text the platform refuses to put in
     /// place, as for a message deleted since, is posted as a reply instead of lost.
     async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError>;
+
+    /// Post `file` to `to` as an attachment people can open or download, as a reply in
+    /// `to.thread` when it is set. The default posts nothing and says that the platform
+    /// cannot: the server then posts a long answer as text.
+    async fn send_file(&self, _to: &Destination, file: &Attachment) -> Result<(), ImError> {
+        Err(ImError::Transport(format!(
+            "cannot post {}: {} posts no files",
+            file.name,
+            self.platform()
+        )))
+    }
 
     /// What was said in the thread `at` so far, other bots' messages included, oldest first:
     /// at most the `limit` latest messages, without the bot's own. Read when the bot is first
@@ -274,6 +285,14 @@ pub enum Inbound {
         approval: ApprovalId,
         choice: Choice,
     },
+}
+
+/// A file the server posts in a conversation ([`ImChannel::send_file`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    /// The file's name as people see it, with its extension, such as `report.md`.
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// What the server posts ([`ImChannel::send`]).

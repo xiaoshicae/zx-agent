@@ -1,6 +1,7 @@
 //! The Feishu channel against a fake open platform: the long connection (pings, pongs,
 //! acknowledgements, fragments, redeliveries, reconnection), messages and card clicks,
-//! tokens, replies in topics, edits, cards, rate limits, the images of messages and the stop.
+//! tokens, replies in topics, edits, cards, rate limits, the images of messages, files posted
+//! and the stop.
 
 mod common;
 
@@ -11,8 +12,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig, ImChannel,
-    ImError, ImageRef, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
+    Addressee, ApprovalCard, ApprovalId, Attachment, ChatKind, Choice, Destination, FeishuChannel, FeishuConfig,
+    ImChannel, ImError, ImageRef, Inbound, MessageId, MessageRef, Post, Replacement, UserId,
 };
 use zx_testing::WAIT;
 use zx_testing::fake_feishu::{Answer, FakeFeishu, TestFrame};
@@ -955,4 +956,54 @@ async fn without_the_bots_open_id_no_message_read_is_taken_as_meant_for_it() {
         report.contains("/open-apis/bot/v3/info") && report.contains("99991663"),
         "{report}"
     );
+}
+
+/// A Markdown file named in Chinese, as people name theirs.
+fn report() -> Attachment {
+    Attachment {
+        name: "报告.md".into(),
+        bytes: b"# Report".to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn a_file_is_uploaded_then_posted_as_a_file_message_in_its_topic() {
+    let fake = FakeFeishu::start(120).await;
+    channel(&fake)
+        .send_file(&at("oc_1", Some("om_root")), &report())
+        .await
+        .unwrap();
+    let upload = &fake.calls("upload")[0];
+    let content_type = upload.content_type.clone().unwrap();
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+    let form = String::from_utf8(upload.bytes.clone()).unwrap();
+    for part in [
+        "name=\"file_type\"\r\n\r\nstream\r\n",
+        "name=\"file_name\"\r\n\r\n报告.md\r\n",
+        "name=\"file\"; filename=\"报告.md\"",
+        "\r\n\r\n# Report\r\n",
+    ] {
+        assert!(form.contains(part), "{part:?} in {form}");
+    }
+    let reply = &fake.calls("reply")[0];
+    assert_eq!(reply.path, "/open-apis/im/v1/messages/om_root/reply");
+    assert_eq!(
+        reply.body,
+        json!({"msg_type": "file", "content": "{\"file_key\":\"file_v2_1\"}", "reply_in_thread": true})
+    );
+}
+
+#[tokio::test]
+async fn a_file_feishu_refuses_to_take_fails_with_its_code_and_posts_nothing() {
+    let fake = FakeFeishu::start(120).await;
+    fake.script("upload", vec![Answer::Code(230_027)]);
+    let error = channel(&fake)
+        .send_file(&at("oc_1", None), &report())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("code 230027"), "{error}");
+    assert!(fake.calls("create").is_empty() && fake.calls("reply").is_empty());
 }

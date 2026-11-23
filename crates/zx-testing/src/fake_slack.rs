@@ -1,5 +1,6 @@
 //! A fake Slack: the Web API methods the Slack channel calls, the private URLs of the files
-//! it keeps, and Socket Mode connections the test drives frame by frame.
+//! it keeps, the address files are uploaded to, and Socket Mode connections the test drives
+//! frame by frame.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -17,22 +18,28 @@ use crate::http::{read_request, response, response_bytes};
 
 /// Where the fake keeps files, as Slack's private URLs name them.
 const FILES: &str = "/files-pri/T1-F1/";
+/// Where files are uploaded to, as `files.getUploadURLExternal` names it, and the ID it
+/// gives the file.
+const UPLOADS: &str = "/upload/v1/";
+const UPLOADED_FILE_ID: &str = "F1";
 
 /// The bot token the fake gives files to, the one the Slack tests use.
 pub const BOT_TOKEN: &str = "xoxb-test";
 
-/// One Web API call, or one fetch of a kept file.
+/// One Web API call, one fetch of a kept file, or one upload.
 #[derive(Clone, Debug)]
 pub struct ApiCall {
-    /// The Web API method, such as `chat.postMessage`, or the path of a file fetched, such as
-    /// `/files-pri/T1-F1/shot.png`.
+    /// The Web API method, such as `chat.postMessage`, or the path of a file fetched or
+    /// uploaded to, such as `/files-pri/T1-F1/shot.png` or `/upload/v1/F1`.
     pub method: String,
     /// The `Authorization` header; empty without one.
     pub authorization: String,
     /// The arguments in the query, decoded, in order.
     pub args: Vec<(String, String)>,
-    /// The JSON body; `Null` when the body was empty.
+    /// The JSON body; `Null` when the body was empty or is not JSON.
     pub body: Value,
+    /// The body as sent, such as the bytes of an upload.
+    pub bytes: Vec<u8>,
 }
 
 impl ApiCall {
@@ -85,12 +92,14 @@ impl FakeSlack {
         let scripted: Arc<Mutex<HashMap<String, VecDeque<Answer>>>> = Arc::default();
         let files = Files::default();
         let (log, notify, script, kept) = (calls.clone(), called.clone(), scripted.clone(), files.clone());
-        let api_base = format!("http://{}/api", api.local_addr().unwrap());
+        let base = format!("http://{}", api.local_addr().unwrap());
+        let api_base = format!("{base}/api");
         tokio::spawn(async move {
             let posted = Arc::new(Mutex::new(0u64));
             loop {
                 let (stream, _) = api.accept().await.unwrap();
                 let fake = Answering {
+                    base: base.clone(),
                     socket_url: socket_url.clone(),
                     log: log.clone(),
                     called: notify.clone(),
@@ -213,6 +222,8 @@ impl Socket {
 
 /// What answers one connection to the Web API.
 struct Answering {
+    /// The address of the Web API's server, such as `http://127.0.0.1:1234`.
+    base: String,
     socket_url: String,
     log: Arc<Mutex<Vec<ApiCall>>>,
     called: Arc<Notify>,
@@ -227,15 +238,13 @@ impl Answering {
             return;
         };
         let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
+        let is_file = path.starts_with(FILES) || path.starts_with(UPLOADS);
         let call = ApiCall {
             method: path.trim_start_matches("/api/").to_string(),
             authorization: request.header("authorization").unwrap_or_default().to_string(),
             args: query_args(query),
-            body: if path.starts_with(FILES) {
-                Value::Null
-            } else {
-                request.json()
-            },
+            body: if is_file { Value::Null } else { request.json() },
+            bytes: request.body.clone(),
         };
         let scripted = self
             .scripted
@@ -255,12 +264,15 @@ impl Answering {
             }
             Some(Answer::Json(body)) => response("200 OK", &[], &body.to_string()).into_bytes(),
             None if path.starts_with(FILES) => self.file(path, &call.authorization),
-            None => response(
-                "200 OK",
-                &[],
-                &normal(&call, &self.socket_url, &self.posted).to_string(),
-            )
-            .into_bytes(),
+            // As Slack answers an upload: "OK - <bytes>".
+            None if path.starts_with(UPLOADS) => {
+                response_bytes("200 OK", "text/plain", format!("OK - {}", call.bytes.len()).as_bytes())
+            }
+            None => {
+                let upload_url = format!("{}{UPLOADS}{UPLOADED_FILE_ID}", self.base);
+                let answer = normal(&call, &self.socket_url, &upload_url, &self.posted);
+                response("200 OK", &[], &answer.to_string()).into_bytes()
+            }
         };
         self.log.lock().unwrap().push(call);
         self.called.notify_waiters();
@@ -280,9 +292,14 @@ impl Answering {
     }
 }
 
-/// What Slack answers when the call succeeds.
-fn normal(call: &ApiCall, socket_url: &str, posted: &Mutex<u64>) -> Value {
+/// What Slack answers when the call succeeds: `files.getUploadURLExternal` names
+/// `upload_url`.
+fn normal(call: &ApiCall, socket_url: &str, upload_url: &str, posted: &Mutex<u64>) -> Value {
     match call.method.as_str() {
+        "files.getUploadURLExternal" => {
+            json!({"ok": true, "upload_url": upload_url, "file_id": UPLOADED_FILE_ID})
+        }
+        "files.completeUploadExternal" => json!({"ok": true, "files": call.body["files"]}),
         "apps.connections.open" => json!({"ok": true, "url": socket_url}),
         "auth.test" => json!({"ok": true, "user_id": "UBOT", "bot_id": "BBOT", "user": "zx-agent"}),
         "chat.postMessage" => {

@@ -1,6 +1,7 @@
 //! What the assembly sets up for each session: where its commands run, the tools that work
 //! there, the store of long tool results in its working directory, and the prompt sections
-//! that describe the machine, the project and the skills, with the host's own after them.
+//! that describe the machine, the project and the skills, with the host's own tools and
+//! sections after them.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,8 +16,8 @@ use zx_agent::hooks::HookChain;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 
-use super::SessionPlace;
 use super::execution::{ExecutorFactory, ExecutorSession};
+use super::{SessionPlace, SessionTools};
 use crate::config::{ProjectContext, READ_SKILL};
 
 /// What each session of an agent gets for itself, made when the session is created or opened
@@ -45,6 +46,8 @@ pub(super) struct PerSession {
     pub(super) file_queue: Arc<FileMutationQueue>,
     /// The sections the host adds after the assembly's own, as `(name, content)`.
     pub(super) host_sections: Vec<(String, String)>,
+    /// What makes the host's own tools of each session, after the assembly's.
+    pub(super) host_tools: Vec<Arc<dyn SessionTools>>,
 }
 
 /// The prompt sections a session gets: where commands run, the project's instructions such
@@ -117,6 +120,7 @@ impl SessionSetup for PerSession {
             .collect();
         let mut tools = tools::executor_tools(&on_executor, self.tool_timeout, &executor, &self.file_queue)?;
         tools.extend(on_this_machine);
+        tools.extend(self.host_tools.iter().flat_map(|host| host.tools(header)));
         let mut prompt_sections = vec![
             (ENVIRONMENT.to_string(), environment),
             (PROJECT_CONTEXT.to_string(), context),

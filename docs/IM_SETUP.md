@@ -33,6 +33,7 @@
    | `users:read` | 否 | 模型看到发言人的名字，没有时看到用户 ID |
    | `reactions:write` | 否 | 插话得到 👀 回执 |
    | `files:read` | 否 | 模型看到消息里的图片 |
+   | `files:write` | 否 | 发文件：太长的回答作为文件发出，agent 用工具 `send_file` 发报告或图片；没有时长回答照旧分段发文字，工具报错 |
 
 5. **事件。** 在 Event Subscriptions 中打开事件，订阅 bot 事件 `app_mention` 与 `message.im`；要线程里不 @ 的回复，再订阅 `message.channels`、`message.groups`（配合上表的 `channels:history`、`groups:history`）。
 6. **私聊。** 在 App Home 的 Show Tabs 中打开 Messages Tab：Slack 文档说明，用户经这个页签与应用对话，它需要 `chat:write`、`im:history` 与事件 `message.im`。
@@ -51,8 +52,11 @@
    | `im:message.p2p_msg:readonly` | 是 | 收到私聊 |
    | `im:message.group_msg` | 否 | 话题里不 @ 的回复也送来；读机器人第一次被 @ 的话题，以及群里上次 @ 它之后的消息（官方文档写明以应用身份读群消息要这项权限）。开通后应用能读到所在群的全部消息 |
    | `im:chat.members:read` | 否 | `zx-im` 不用；只为管理员列出群成员的 open_id（见下文“取得 ID”） |
+   | `im:resource` 或 `im:resource:upload` | 否 | 发文件（单个至多 30 MB）：太长的回答作为文件发出，agent 用工具 `send_file` 发报告或图片；没有时长回答照旧分段发文字，工具报错 |
 
    ⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：`im:message.group_msg` 读取群内全部消息与历史消息] Subject to Legal/Export Compliance approval.
+
+   ⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：`im:resource` 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 3. **凭据。** 在凭证与基础信息中取得 App ID 与 App Secret，即 `FEISHU_APP_ID` 与 `FEISHU_APP_SECRET`。
 4. **先启动 `zx-im`。** 按下文“im.toml 与启动”写好 `[feishu]` 段并启动。官方文档要求保存长连接设置时长连接在线，所以这一步要在下一步之前。
 5. **事件与回调。** 在事件与回调中：
@@ -119,6 +123,7 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 | 频道里 @ 机器人没反应 | 机器人不在频道里：`/invite @应用名` |
 | 线程里不 @ 机器人的回复没有回应 | 缺事件 `message.channels`、`message.groups`，或缺权限 `channels:history`、`groups:history` |
 | 模型看不到图片，日志有下载失败 | 缺 `files:read`；添加后重新安装应用 |
+| 长回答分成多条文字发出，日志的 `failed` 行说发不出 `answer.md` | Slack 缺 `files:write`（错误为 `missing_scope`）、⚑ D:5/CHINA FLAG: 飞书缺 `im:resource`；添加后（Slack 要重新安装应用）就作为文件发出 |
 
 ### ⚑ D:5/CHINA FLAG: 飞书
 
@@ -139,4 +144,4 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 
 ---
 
-IM_SETUP.md · v0.2 · 2026年11月
+IM_SETUP.md · v0.3 · 2026年11月

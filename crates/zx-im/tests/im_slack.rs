@@ -1,6 +1,6 @@
 //! The Slack channel against a fake Slack: Socket Mode messages and clicks, acknowledgement,
 //! deduplication, reconnection, credential errors, posting, cards, rate limits, the images of
-//! messages and the stop.
+//! messages, files posted and the stop.
 
 mod common;
 
@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, Destination, ImChannel, ImError, ImageRef, Inbound,
-    MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
+    Addressee, ApprovalCard, ApprovalId, Attachment, ChatKind, Choice, Destination, ImChannel, ImError, ImageRef,
+    Inbound, MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
 };
 use zx_testing::WAIT;
 use zx_testing::fake_slack::{Answer, BOT_TOKEN, FakeSlack};
@@ -1125,4 +1125,53 @@ async fn a_sign_in_page_in_place_of_the_file_points_at_the_missing_scope() {
         error.to_string().contains("the bot token may lack files:read"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_file_is_uploaded_then_shared_in_its_thread() {
+    let slack = FakeSlack::start().await;
+    let file = Attachment {
+        name: "report.md".into(),
+        bytes: b"# Report".to_vec(),
+    };
+    channel(&slack)
+        .send_file(&at("C1", Some("1700000001.000100")), &file)
+        .await
+        .unwrap();
+    let ticket = &slack.calls("files.getUploadURLExternal")[0];
+    assert_eq!(
+        (
+            ticket.arg("filename"),
+            ticket.arg("length"),
+            ticket.authorization.as_str()
+        ),
+        (Some("report.md"), Some("8"), format!("Bearer {BOT_TOKEN}").as_str())
+    );
+    // The bytes go to the address Slack gave, without the token.
+    let upload = &slack.calls("/upload/v1/F1")[0];
+    assert_eq!(
+        (upload.bytes.as_slice(), upload.authorization.as_str()),
+        (&b"# Report"[..], "")
+    );
+    let shared = &slack.calls("files.completeUploadExternal")[0];
+    assert_eq!(
+        shared.body,
+        json!({"files": [{"id": "F1", "title": "report.md"}], "channel_id": "C1", "thread_ts": "1700000001.000100"})
+    );
+}
+
+#[tokio::test]
+async fn a_file_slack_refuses_fails_with_the_refusal_and_is_not_shared() {
+    let slack = FakeSlack::start().await;
+    slack.script("files.getUploadURLExternal", vec![Answer::Error("missing_scope")]);
+    let file = Attachment {
+        name: "report.md".into(),
+        bytes: b"# Report".to_vec(),
+    };
+    let error = channel(&slack).send_file(&at("C1", None), &file).await.unwrap_err();
+    assert!(
+        error.to_string().contains("files.getUploadURLExternal: missing_scope"),
+        "{error}"
+    );
+    assert!(slack.calls("files.completeUploadExternal").is_empty());
 }

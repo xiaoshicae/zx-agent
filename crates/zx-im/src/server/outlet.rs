@@ -17,7 +17,7 @@ use zx_app::shutdown::next_event;
 use super::progress::{RunEvents, RunUpdate};
 use super::render::Ending;
 use super::{Replies, RunEnd, RunRecord, SessionKey, Shared, timed};
-use crate::{Addressee, Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, Said, UserId};
+use crate::{Addressee, Attachment, Destination, ImChannel, ImageRef, MessageRef, Post, Replacement, Said, UserId};
 
 /// Messages read before the first answer of a conversation, from a thread the bot is first
 /// mentioned in or from a chat it is mentioned in: enough to follow a discussion, few enough
@@ -25,6 +25,8 @@ use crate::{Addressee, Destination, ImChannel, ImageRef, MessageRef, Post, Repla
 const HISTORY_MESSAGES: usize = 50;
 /// The kind of the custom messages that record what people said without the bot answering.
 const SAID_TYPE: &str = "im_message";
+/// The file an answer too long to read as messages is posted as.
+const ANSWER_FILE: &str = "answer.md";
 /// The most images of one message the model sees: a few screenshots, while the requests
 /// that carry them, each image up to 4.5 MiB, stay well within what the model APIs take.
 const MAX_IMAGES: usize = 4;
@@ -395,6 +397,12 @@ impl Outlet {
     /// Put `ending` where the status was, or, for an answer once a card covers the status,
     /// below the card; post it on its own when no status was posted.
     pub(super) async fn end(&self, ending: Ending, status: Status) {
+        let ending = match ending {
+            Ending::Answer(answer) if answer.chars().count() > self.shared.long_answer_chars.get() => {
+                self.attach(answer).await
+            }
+            ending => ending,
+        };
         match (ending, status) {
             (Ending::Answer(answer), Status::Covered(posted)) => self.answer_below(answer, posted).await,
             (Ending::Answer(text) | Ending::Notice(text), Status::Latest(posted) | Status::Covered(posted)) => {
@@ -403,6 +411,22 @@ impl Outlet {
             (Ending::Answer(text) | Ending::Notice(text), Status::Missing) => {
                 self.post(text).await;
             }
+        }
+    }
+
+    /// Post `answer`, too long to read as messages, as a Markdown file: what ends the work is
+    /// then a note that says so, or the answer itself when the file could not be posted, which
+    /// is reported to the operator.
+    async fn attach(&self, answer: String) -> Ending {
+        let file = Attachment {
+            name: ANSWER_FILE.into(),
+            bytes: answer.into_bytes(),
+        };
+        let act = format!("post the answer as {ANSWER_FILE}");
+        let sent = self.channel.send_file(&self.to, &file);
+        match self.shared.bounded(Some(&self.key), &act, sent).await {
+            Some(()) => Ending::Notice(self.replies().answer_attached.clone()),
+            None => Ending::Answer(String::from_utf8(file.bytes).expect("the bytes of a String are UTF-8")),
         }
     }
 

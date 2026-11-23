@@ -24,6 +24,9 @@ pub struct Replies {
     /// Replaces [`working`](Self::working) when an approval card was posted after it: the
     /// answer is then posted below the card, where it is read last.
     pub answer_below: String,
+    /// Stands in for an answer too long to read as messages, which is posted as a file
+    /// ([`ServerConfig::long_answer_chars`](super::ServerConfig::long_answer_chars)).
+    pub answer_attached: String,
     /// Posted when a conversation waits for a free run slot.
     pub queued: String,
     /// The server or conversation has no capacity for this message; it was not accepted.
@@ -75,6 +78,7 @@ impl Default for Replies {
         Self {
             working: "Working…".into(),
             answer_below: "Done; the answer is below.".into(),
+            answer_attached: "The answer is long, so it is posted as a file.".into(),
             queued: "Queued: as many tasks as allowed are running; this one starts when one ends.".into(),
             overloaded:
                 "Too many pending messages or conversations; this message was not accepted. Please try again later."

@@ -36,8 +36,9 @@ use std::process::ExitCode;
 
 pub use self::backlog::{Backlog, Kept, MemoryBacklog, MessageKey};
 pub use self::channel::{
-    Addressee, ApprovalCard, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ErrorReport,
-    ImChannel, ImError, ImageRef, Inbound, Inlet, MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, Attachment, CardLabels, ChatKind, Choice, ConversationId, Destination,
+    ErrorReport, ImChannel, ImError, ImageRef, Inbound, Inlet, MessageId, MessageRef, Post, Replacement, Said,
+    ThreadId, UserId,
 };
 pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChannel, SlackConfig};
 #[cfg(feature = "feishu")]

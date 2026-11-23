@@ -9,6 +9,7 @@
 //! - `log`: the operator log on stdout
 //! - `reload`: on SIGHUP, the lists of im.toml read again (Unix only)
 //! - `scheduler`: the schedules of im.toml, each asking the server for its conversation
+//! - `send_file`: the tool of each session that posts a file in its conversation
 
 mod args;
 mod config_file;
@@ -16,6 +17,7 @@ mod log;
 #[cfg(unix)]
 mod reload;
 mod scheduler;
+mod send_file;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -38,6 +40,7 @@ use zx_util::stdio::eprint_line;
 pub(crate) use self::args::Args;
 use self::config_file::{ConfigFile, OwnChat, ServerSections, read_file, server_config};
 use self::log::{Log, failure_log};
+use self::send_file::SendFiles;
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
@@ -179,6 +182,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 customizations,
                 &hidden_env,
                 telemetry.map(Telemetry::hook),
+                &channels,
             );
             priced_for_daily_cost(&app, daily, &chats)?;
             // A conversation's sessions are those in the directory that carry its labels.
@@ -220,12 +224,14 @@ async fn connect(overrides: Overrides) -> Result<Application> {
 
 /// `app` with the host's parts, given by `customizations` in order, then the program's own: the
 /// platforms' `credentials`, hidden beside the variables the host hides, the `traces` export,
-/// and the prompt section on how answers reach people.
+/// the prompt section on how answers reach people, and `send_file` in each session, which
+/// posts on its conversation's channel among `channels`.
 fn assemble(
     app: Application,
     customizations: Vec<Customization>,
     credentials: &[String],
     traces: Option<TraceHook>,
+    channels: &[Arc<dyn ImChannel>],
 ) -> Application {
     let app = customizations.into_iter().fold(app, |app, customize| customize(app));
     credentials
@@ -233,6 +239,7 @@ fn assemble(
         .fold(app, |app, name| app.add_hidden_env(name))
         .set_traces(traces)
         .add_prompt_section(CONVERSATION_SECTION, CONVERSATION)
+        .add_session_tools(Arc::new(SendFiles::new(channels)))
 }
 
 /// `error`, or, when no model was given, the ways to give one: `--model`, over `ZX_MODEL`,

@@ -66,6 +66,9 @@ const DEFAULT_MAX_CONVERSATIONS: NonZeroUsize = NonZeroUsize::new(128).expect("1
 const DEFAULT_PENDING_MESSAGES: NonZeroUsize = NonZeroUsize::new(32).expect("32 is not zero");
 const DEFAULT_PENDING_BYTES: NonZeroUsize = NonZeroUsize::new(256 * 1024).expect("256 KiB is not zero");
 const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
+/// Two messages of text (`platform::MAX_TEXT_CHARS` each): a longer answer is read better as
+/// a file than as a run of messages.
+const DEFAULT_LONG_ANSWER_CHARS: NonZeroUsize = NonZeroUsize::new(8000).expect("8000 is not zero");
 /// Long enough for a platform's rate-limit queue, short enough that a platform that stopped
 /// answering does not hold a conversation for minutes.
 const DEFAULT_OUTBOUND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -102,7 +105,7 @@ impl SessionKey {
 
     /// The conversation whose sessions carry `labels`, as [`labels`](Self::labels) gives them;
     /// `None` for a session of something else.
-    fn of_labels(labels: &BTreeMap<String, String>) -> Option<Self> {
+    pub(crate) fn of_labels(labels: &BTreeMap<String, String>) -> Option<Self> {
         let thread = labels.get(THREAD_LABEL)?;
         Some(Self {
             platform: labels.get(PLATFORM_LABEL)?.clone(),
@@ -112,7 +115,7 @@ impl SessionKey {
     }
 
     /// Where the server posts for this conversation: the direct chat, or the thread.
-    fn destination(&self) -> Destination {
+    pub(crate) fn destination(&self) -> Destination {
         Destination {
             conversation: self.conversation.clone(),
             thread: self.thread.clone(),
@@ -217,6 +220,10 @@ pub struct ServerConfig {
     pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
+    /// An answer of more characters than this is posted as a Markdown file, `answer.md`, with
+    /// [`Replies::answer_attached`] in the place of its text; as text when the file cannot be
+    /// posted ([`ImChannel::send_file`]).
+    pub long_answer_chars: NonZeroUsize,
     /// What the work of all chats may use in a day. Once it is used up, a message or `/compact`
     /// that would start work gets [`Replies::daily_limit`], and a trigger is reported instead
     /// of opening a thread. The day's usage is counted in memory: a restart starts it over.
@@ -251,6 +258,7 @@ impl Default for ServerConfig {
             max_pending_messages: DEFAULT_PENDING_MESSAGES,
             max_pending_bytes: DEFAULT_PENDING_BYTES,
             idle: DEFAULT_IDLE,
+            long_answer_chars: DEFAULT_LONG_ANSWER_CHARS,
             daily: DailyLimit::default(),
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),

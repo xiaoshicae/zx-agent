@@ -1,25 +1,27 @@
 //! A non-CLI host uses explicit configuration, owns the assembled sessions, and gives the
 //! agent parts of its own.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::json;
-use zx_agent::ai::ToolCall;
+use serde_json::{Value, json};
+use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::{ToolCall, ToolDef};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::tools::{Tool, ToolOutput};
-use zx_agent::transcript::{SessionName, SessionQuery};
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::{SessionHeader, SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
 use zx_app::{
     Application, Approvals, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
-    SessionPlace,
+    SessionPlace, SessionTools,
 };
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
@@ -393,6 +395,96 @@ async fn the_tools_of_an_extension_of_the_host_ask_as_those_of_mcp_servers_do() 
     // Asked about, with nobody to answer.
     let result = first_result(&requests[1]);
     assert!(result.starts_with("Not executed: approval denied"), "{result}");
+}
+
+/// `probe`, which answers whom its session is for.
+struct SaysWho(String);
+
+#[async_trait]
+impl Tool for SaysWho {
+    fn name(&self) -> &str {
+        "probe"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "probe".into(),
+            description: "Whom the session is for.".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::ok(self.0.clone()))
+    }
+}
+
+/// Gives each session with the label `who` a `probe` that answers with it.
+struct Whom;
+
+impl SessionTools for Whom {
+    fn names(&self) -> Vec<String> {
+        vec!["probe".into()]
+    }
+
+    fn tools(&self, header: &SessionHeader) -> Vec<Arc<dyn Tool>> {
+        let who = header.labels.get("who").into_iter();
+        who.map(|who| Arc::new(SaysWho(who.clone())) as Arc<dyn Tool>).collect()
+    }
+}
+
+/// Ask the agent of `app` once, in a session for `who`, kept in memory, with nobody to
+/// approve.
+async fn ask_for(app: &Application, who: &str, cwd: &Path) {
+    let configured = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .unwrap();
+    let options = SessionOptions {
+        labels: BTreeMap::from([("who".to_string(), who.to_string())]),
+        ..SessionOptions::new(cwd)
+    };
+    let session = configured.agent().create_session(options).await.unwrap();
+    session.send("go").unwrap().wait().await;
+}
+
+#[tokio::test]
+async fn a_tool_the_host_gives_each_session_is_offered_whatever_the_agent_enables() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = calling("probe").await;
+    let app = host(dir.path(), "tools = []", &server)
+        .await
+        .add_session_tools(Arc::new(Whom));
+    ask_for(&app, "ops", dir.path()).await;
+    let requests = server.requests();
+    assert_eq!(offered(&requests[0]), ["probe"]);
+    // Made for its session, it knows whom the session is for.
+    assert_eq!(first_result(&requests[1]), "ops");
+}
+
+#[tokio::test]
+async fn permissions_may_deny_a_tool_of_each_session_and_tools_may_not_enable_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = calling("probe").await;
+    let denied = "tools = []\n[permissions]\ndeny = [\"probe\"]";
+    let app = host(dir.path(), denied, &server)
+        .await
+        .add_session_tools(Arc::new(Whom));
+    ask_for(&app, "ops", dir.path()).await;
+    let result = first_result(&server.requests()[1]);
+    assert!(result.contains("tool denied by the agent"), "{result}");
+
+    let listed = tempfile::tempdir().unwrap();
+    let app = host(listed.path(), "tools = [\"probe\"]", &server)
+        .await
+        .add_session_tools(Arc::new(Whom));
+    let error = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("the host offers \"probe\" in every session"),
+        "{error:#}"
+    );
 }
 
 /// Gives an application parts of the host's.

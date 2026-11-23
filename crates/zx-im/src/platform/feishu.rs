@@ -38,7 +38,7 @@ use super::{
     PlatformInput, http_client, pause, report, secret, split_text,
 };
 use crate::{
-    CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post,
+    Attachment, CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post,
     Replacement, Said,
 };
 
@@ -332,6 +332,15 @@ impl ImChannel for FeishuChannel {
                     .map_err(ImError::from)
             }
         }
+    }
+
+    /// The file uploaded, then posted as a file message: images too, which then show as
+    /// files.
+    async fn send_file(&self, to: &Destination, file: &Attachment) -> Result<(), ImError> {
+        let key = self.upload(file).await?;
+        self.post(to, "file", json!({"file_key": key}).to_string())
+            .await
+            .map(drop)
     }
 
     /// The topic's root and latest messages, by the message APIs (`history`).
