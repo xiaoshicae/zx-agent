@@ -54,10 +54,10 @@ use zx_agent::transcript::{
     SessionStorage, SummaryFact, Transcript,
 };
 use zx_im::{
-    Access, Addressee, ApprovalCard, ApprovalId, Attachment, Backlog, ChatConfig, ChatKind, Choice, ConversationId,
-    DailyLimit, Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef,
-    Post, Replacement, Replies, RunEnd, RunRecord, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
-    StatusStore, ThreadId, Trigger, Triggers, UserId,
+    Access, Addressee, ApprovalCard, ApprovalId, Attachment, Backlog, ChatConfig, ChatKind, ChatUsage, Choice,
+    ConversationId, DailyLimit, Destination, ImChannel, ImError, ImageRef, Inbound, Inlet, Kept, MemoryBacklog,
+    MessageId, MessageRef, Post, Replacement, Replies, RunEnd, RunRecord, Said, Server, ServerConfig, ServerEvent,
+    ServerSink, SessionKey, StatusStore, ThreadId, Trigger, Triggers, UsageStore, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 

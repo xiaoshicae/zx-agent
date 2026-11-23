@@ -58,7 +58,7 @@ pub(crate) use self::status::StatusFiles;
 pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
 pub use self::trigger::{Trigger, Triggers};
-pub use self::usage::DailyLimit;
+pub use self::usage::{ChatUsage, DailyLimit, UsageStore};
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
@@ -226,23 +226,29 @@ pub struct ServerConfig {
     pub long_answer_chars: NonZeroUsize,
     /// What the work of all chats may use in a day. Once it is used up, a message or `/compact`
     /// that would start work gets [`Replies::daily_limit`], and a trigger is reported instead
-    /// of opening a thread. The day's usage is counted in memory: a restart starts it over.
+    /// of opening a thread. The day's usage is counted in memory, and kept in
+    /// [`usage`](Self::usage) when there is one.
     pub daily: DailyLimit,
+    /// Keeps what the work of each day used, so that a restart counts the day on, and so does
+    /// the replica that takes over ([`UsageStore`]); read as the server starts. `None`, the
+    /// default, counts in memory only: a restart starts the day over.
+    pub usage: Option<Arc<dyn UsageStore>>,
     /// Limit for each call to a channel but [`ImChannel::run`], and for each call to
-    /// [`statuses`](Self::statuses) and to the [`backlog`](Self::backlog) but
-    /// [`Backlog::keep`]; a call that takes longer counts as failed.
+    /// [`statuses`](Self::statuses), to [`usage`](Self::usage) and to the
+    /// [`backlog`](Self::backlog) but [`Backlog::keep`]; a call that takes longer counts as
+    /// failed.
     pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
     /// threads saying that the work goes on.
     ///
     /// The next start replaces those statuses with [`Replies::interrupted`]. `None`, the
-    /// default, keeps nothing; the program `zx-im` keeps them in files under its session
-    /// directory.
+    /// default, keeps nothing; the program `zx-im` keeps them where it keeps the sessions:
+    /// in files under its session directory, or in Postgres.
     pub statuses: Option<Arc<dyn StatusStore>>,
     /// Keeps each message from its arrival until it is handled, and knows a message delivered
     /// again ([`Backlog`]). [`MemoryBacklog`] by default, which keeps nothing across a restart;
-    /// the program `zx-im` keeps its backlog in files under its session directory.
+    /// the program `zx-im` keeps its backlog where it keeps the sessions.
     pub backlog: Arc<dyn Backlog>,
 }
 
@@ -260,6 +266,7 @@ impl Default for ServerConfig {
             idle: DEFAULT_IDLE,
             long_answer_chars: DEFAULT_LONG_ANSWER_CHARS,
             daily: DailyLimit::default(),
+            usage: None,
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
             statuses: None,
@@ -393,6 +400,7 @@ impl Server {
         let timeout = config.outbound_timeout;
         let shared = Arc::new(Shared::new(config, agent, access, Arc::clone(&sink)));
         shared.index_sessions().await?;
+        shared.load_usage().await?;
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
         // Read before any channel runs, so that nothing kept by this process is among them.

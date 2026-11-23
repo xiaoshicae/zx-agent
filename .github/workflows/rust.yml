@@ -105,6 +105,22 @@ jobs:
         run: |
           docker pull "$ZX_DOCKER_TEST_IMAGE"
           cargo +stable test --locked --test container
+      # Without ZX_TEST_POSTGRES_URL, the steps above skip the tests of zx-im's Postgres
+      # stores. The database lives as long as the runner and listens on loopback only, so it
+      # asks for no password.
+      - name: Run the Postgres tests of zx-im
+        if: runner.os == 'Linux'
+        env:
+          ZX_TEST_POSTGRES_URL: postgres://zx@127.0.0.1:5432/zx
+        run: |
+          docker run --detach --name postgres --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_USER=zx --env POSTGRES_DB=zx --env POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:16
+          for _ in $(seq 1 30); do
+            docker exec postgres pg_isready --username zx --dbname zx && break
+            sleep 1
+          done
+          cargo +stable test --locked -p zx-im postgres
 
   msrv:
     name: Rust 1.88

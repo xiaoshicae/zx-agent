@@ -41,6 +41,10 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = ["
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+# The TLS of zx-im's Postgres connection (D44): aws-lc-rs only, the one backend of the build
+# (rule 07), and the system's trust store, as reqwest's HTTPS uses.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 serde = { version = "1", features = ["derive"] }
 # JSON objects keep their keys in the order written, in the whole build and in a crate built
 # alone; tests that compare JSON text rely on it.
@@ -49,6 +53,8 @@ tempfile = "3"
 thiserror = "2"
 # tokio has no default features; each crate turns on those its code and its tests use.
 tokio = "1"
+tokio-postgres = "0.7.18"
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["aws-lc-rs"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }

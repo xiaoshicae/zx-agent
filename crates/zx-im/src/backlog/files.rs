@@ -12,16 +12,12 @@ use zx_agent::ai::now_ms;
 use zx_agent::builtin::files::create_private_dir;
 use zx_util::sync::lock;
 
-use super::{Backlog, Kept, MessageKey};
+use super::{Backlog, HANDLED_FOR, Kept, MessageKey};
 use crate::files::{
     RECORD, blocking, create_private_file, read_record, record_paths, remove_record, segment, write_record,
 };
 use crate::{ConversationId, MessageId};
 
-/// How long a handled message stays known, so that a delivery of it again is not handled
-/// twice: Slack retries a delayed event "once per hour for 24 hours" (Events API, "Delayed
-/// events retry"), longer than its other retries and Feishu's.
-const HANDLED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often the marks of messages handled longer ago than that are removed, besides as the
 /// server starts: a mark kept a little longer only keeps its message known longer.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);

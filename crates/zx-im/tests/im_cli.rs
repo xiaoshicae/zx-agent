@@ -730,3 +730,113 @@ async fn im_connects_the_mcp_servers_before_it_serves() {
     assert!(mcp.is_some_and(|index| index < seen.len() - 1), "{seen:?}");
     assert!(fake.requests("tools/list").len() >= 2, "{:?}", fake.received());
 }
+
+/// The variable that names the Postgres of the tests; without it, the tests that need one are
+/// skipped.
+#[cfg(feature = "postgres")]
+const TEST_POSTGRES_VAR: &str = "ZX_TEST_POSTGRES_URL";
+/// The variable that im.toml names for the connection string of Postgres.
+#[cfg(feature = "postgres")]
+const POSTGRES_URL_VAR: &str = "ZX_IM_CLI_TEST_POSTGRES_URL";
+
+/// The connection string of a new schema of its own in the Postgres of the tests; `None`, said
+/// on stderr, when there is none.
+#[cfg(feature = "postgres")]
+async fn postgres_schema() -> Option<String> {
+    let Some(url) = std::env::var(TEST_POSTGRES_VAR).ok().filter(|url| !url.is_empty()) else {
+        eprintln!("{TEST_POSTGRES_VAR} is not set: this test of zx-im with Postgres is skipped");
+        return None;
+    };
+    let schema = format!("zx_cli_{:016x}", zx_util::random::random_u64());
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(connection);
+    client.batch_execute(&format!("CREATE SCHEMA {schema}")).await.unwrap();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    Some(format!("{url}{separator}options=-c%20search_path%3D{schema}"))
+}
+
+#[cfg(all(unix, feature = "postgres"))]
+#[tokio::test]
+async fn a_conversation_kept_in_postgres_goes_on_after_a_restart_and_commands_cannot_see_its_url() {
+    let Some(url) = postgres_schema().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![
+        Reply::bash("c1", &format!("echo url=[${POSTGRES_URL_VAR}]")),
+        Reply::text("first answer"),
+        Reply::text("second answer"),
+    ])
+    .await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_im_config(
+        dir.path(),
+        &VALID
+            .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base))
+            .replace(
+                "dir = \"sessions\"",
+                &format!("postgresUrlEnv = \"{POSTGRES_URL_VAR}\""),
+            ),
+    );
+    let start = || {
+        im(dir.path(), &config, &model.base_url)
+            .env(POSTGRES_URL_VAR, &url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+
+    let first = start();
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "run it")).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let posts = slack.wait_for("chat.postMessage", 2).await;
+    let approval = posts[1].body["blocks"][1]["elements"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    socket
+        .send(json!({
+            "envelope_id": "i1",
+            "type": "interactive",
+            "payload": {
+                "type": "block_actions",
+                "user": {"id": "U2"},
+                "channel": {"id": "C1"},
+                "message": {"ts": "1700000000.000002"},
+                "actions": [{"action_id": "zx_allow_once", "value": approval, "type": "button"}],
+            },
+        }))
+        .await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "i1"}));
+    let posts = slack.wait_for("chat.postMessage", 3).await;
+    assert_eq!(posts[2].body["text"], json!("first answer"));
+    // The command ran without the variable that holds the connection string.
+    let result = model.requests()[1].body["messages"].to_string();
+    assert!(result.contains("url=[]"), "{result}");
+    zx_testing::signal(&first, "-TERM").await;
+    let output = program::ended_output(first).await;
+    let said = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{said}");
+    assert!(said.contains("sessions in Postgres;"), "{said}");
+    assert!(!said.contains(&url), "{said}");
+    assert!(!dir.path().join("sessions").exists());
+
+    // Started again, the server goes on in the conversation's session, which Postgres kept.
+    let second = start();
+    let mut socket = slack.socket().await;
+    let mut reply = mention("e2", "1700000002.000100", "and again");
+    reply["payload"]["event"]["thread_ts"] = json!("1700000001.000100");
+    socket.send(reply).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e2"}));
+    model.wait_for_requests(3).await;
+    let request = model.requests()[2].body["messages"].to_string();
+    assert!(
+        request.contains("run it") && request.contains("first answer"),
+        "{request}"
+    );
+    zx_testing::signal(&second, "-TERM").await;
+    let output = program::ended_output(second).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}

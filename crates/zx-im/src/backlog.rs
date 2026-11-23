@@ -9,6 +9,7 @@ mod files;
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,10 @@ use crate::{Addressee, ChatKind, ConversationId, Destination, ImageRef, Inbound,
 /// again: platforms redeliver only for a short while, and this covers far more messages than
 /// arrive in that time.
 const REMEMBERED: usize = 1024;
+/// How long a backlog that outlives the process knows a handled message, so that a delivery
+/// of it again is not handled twice: Slack retries a delayed event "once per hour for 24
+/// hours" (Events API, "Delayed events retry"), longer than its other retries and Feishu's.
+pub(crate) const HANDLED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A message, as the backlog names it: the platform it arrived on, its chat, and its ID
 /// there.

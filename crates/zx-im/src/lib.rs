@@ -19,6 +19,8 @@
 //! - `platform`: the platforms, Slack and, with the feature `feishu`, Feishu, what they
 //!   share, and the factories that build them from im.toml
 //! - `files`: one record per file, as the program's stores on disk write them
+//! - `postgres`, with the feature `postgres`: the program's stores in Postgres, which the
+//!   replicas of a deployment share
 //! - `program`: the program ([`Program`]): im.toml, its command line, the platforms it
 //!   configures, the operator log and the exit codes
 //! - `test_support`, compiled for tests only: what the unit tests of several modules share
@@ -27,6 +29,8 @@ mod backlog;
 mod channel;
 mod files;
 mod platform;
+#[cfg(feature = "postgres")]
+mod postgres;
 mod program;
 mod server;
 #[cfg(test)]
@@ -45,8 +49,8 @@ pub use self::platform::{BuiltChannel, PlatformFactory, PlatformInput, SlackChan
 pub use self::platform::{FeishuChannel, FeishuConfig};
 pub use self::program::Program;
 pub use self::server::{
-    Access, ApprovalRecord, ChatConfig, DailyLimit, Replies, RunEnd, RunRecord, Server, ServerConfig, ServerEvent,
-    ServerSink, SessionKey, StatusStore, Trigger, Triggers,
+    Access, ApprovalRecord, ChatConfig, ChatUsage, DailyLimit, Replies, RunEnd, RunRecord, Server, ServerConfig,
+    ServerEvent, ServerSink, SessionKey, StatusStore, Trigger, Triggers, UsageStore,
 };
 
 /// Run the program with its built-in platforms ([`Program::run`]).
