@@ -9,6 +9,7 @@
 //!   close or cannot be opened
 //! - `statuses`: the statuses of running work kept for a restart
 //! - `images`: the images of messages, fetched for the messages the bot answers
+//! - `triggers`: conversations the server starts without a message
 
 mod approvals;
 mod commands;
@@ -17,6 +18,7 @@ mod images;
 mod lifecycle;
 mod runs;
 mod statuses;
+mod triggers;
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -46,7 +48,7 @@ use zx_agent::transcript::{
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, Backlog, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError,
     ImageRef, Inbound, Inlet, Kept, MemoryBacklog, MessageId, MessageRef, Post, Replacement, Replies, Said, Server,
-    ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, UserId,
+    ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore, ThreadId, Trigger, Triggers, UserId,
 };
 use zx_testing::{EchoTool, WAIT, config, fast_retry, summarize, test_limits};
 
@@ -586,6 +588,8 @@ struct Harness {
     replies: Replies,
     statuses: Option<Arc<Statuses>>,
     backlog: Arc<MemoryBacklog>,
+    /// Where the test asks the server for conversations without a message.
+    triggers: Triggers,
 }
 
 fn start(setup: Setup) -> Harness {
@@ -640,6 +644,7 @@ fn start(setup: Setup) -> Harness {
     config.backlog = backlog.clone();
     let replies = config.replies.clone();
     let server = Server::new(config, agent.clone(), Arc::new(Events(events_to)));
+    let triggers = server.triggers();
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let server = tokio::spawn(async move { server.run(vec![channel], &stop).await });
@@ -654,6 +659,7 @@ fn start(setup: Setup) -> Harness {
         replies,
         statuses,
         backlog,
+        triggers,
     }
 }
 

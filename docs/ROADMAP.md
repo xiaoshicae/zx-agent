@@ -51,6 +51,7 @@
 | D34 | 宿主经 `zx_app::Application` 给 agent 加自己的部件，只用三个动词：`add_*` 在装配自带的旁边加一个（工具、钩子、策略、扩展、提示词段落、对命令隐藏的变量），`set_*` 换掉唯一的那个（摘要器、追踪导出），`register_*` 登记由配置按名字选用的实现；会话存储是宿主交给 `build` 的 `SessionPlace`，宿主自己的存储用 `SessionPlace::from_storage`。宿主的部件与自带的同等对待：它的工具像内置工具，由 agent 文件的 `tools` 启用、受 `[permissions]` 约束；它的扩展像 MCP 服务器，工具对所有 agent 提供、默认询问；钩子按阶段执行，脱敏总在宿主的钩子之后。名字与内置的或已有的部件重复时 `build` 报错。内置的实现也经 `register_*` 登记：provider 经 `register_provider`，`config.toml` 的 `provider.api` 写它的名字；执行环境经 `register_executor`，`execution` 写它的名字，它声明是否隔离命令，`permissions.approveAll` 只能用于隔离的执行环境；IM 平台经程序 `zx-im` 的库中 `Program::register_platform`，`im.toml` 中服务自己的段以外，每个段配置以段名注册的平台。自建的 zx-im 程序经 `Program::customize` 用同样的动词给 `Application` 加部件，程序自己的部件在其后：平台的凭据与宿主隐藏的变量合并，不替换；追踪导出归程序。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
 | D35 | 被取消的运行为整批工具调用都写下结果：还没开始的记为未执行，执行中被打断的按工具有无副作用说明；只有运行没能写下结果时（崩溃、宿主丢弃 `Run`、会话写入失败）与失败或被取消的回答里的调用，才由下一次运行补写（不变量 10）。被取消打断的钩子回调不算钩子失败，不发 `hook_failed`。行为见 [REFERENCE.md](REFERENCE.md) 的“会话文件” |
 | D36 | 支持图片输入（2026-11-20 用户决定，原先第 7 节的“工具结果中的图片”不做取消）：用户消息与工具结果在文本旁带 `images`（base64 与媒体类型），不像 pi 那样与文本穿插；`[[models]]` 的 `input` 默认只有文本（沿用 pi），没声明 `"image"` 的模型由 provider 按请求把图片换成一句说明，会话里存原图；图片进入会话前由 `zx_agent::builtin::images` 按 pi 的上限适配。入口：`read_file` 与 MCP 的结果、ACP 提问、`run` 的 `@文件`、IM 附件（Slack 与 ⚑ D:5/CHINA FLAG: 飞书。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval）。音频与视频不收（第 5 节）。行为见 [REFERENCE.md](REFERENCE.md#图片) |
+| D37 | zx-im 可以不等人发消息就开始对话（2026-11-22 用户决定，原第 7 节“由 webhook 或告警触发运行”不做取消）：一个触发（`zx_im::Trigger`）在名单里的频道发一条消息开出线程，在线程里问给定的提问，此后回答、审批与接话都照常。来源是 `im.toml` 的 `[[schedules]]`（固定间隔，至少 60 秒，第一次在启动后一个间隔），以及宿主经 `Server::triggers` 或 `Program::on_triggers` 给出的触发。zx-im 仍只需出网，不开监听端口；告警等外部系统按 D10 由宿主的适配器接入。触发计入 `maxConversations`，不进 backlog，停机期间到点的不补。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 
 ## 4. 当前阶段
 
@@ -59,6 +60,8 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - P6 执行环境、P7 扩展与 MCP、P8 `acp`：已实现，待真实集群、MCP 服务器与 ACP 客户端（Zed 或 Wisp）上的验收，见第 5 节。
 - P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
 - P15 IM 对话模型（D16）：Slack 实现了读线程与频道、查名字与回执；⚑ D:5/CHINA FLAG: 飞书读话题与群（2026-11-22），名字与回执沿用默认（用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取该平台上话题与群的历史消息；补上名字后还会读取用户名称] Subject to Legal/Export Compliance approval。
+
+- P19 常驻 agent 的核心能力（2026-11-22 用户决定，按顺序做）：① 主动发起对话（D37，已实现）；② MCP 客户端的常驻能力：断线或会话失效后重连并重新列出工具（新列表从下一次运行生效）、自定义请求头、按服务器信任只读标注；③ 按聊天选 agent 与权限；④ 按天的用量上限；⑤ 名单热加载；⑥ IM 发文件；⑦ 运行指标；⑧ 多副本（要选数据库，新增依赖须另行批准）。观测、数据库等场景能力由外部实现（D8、D10）。
 
 ## 5. 待办与已知缺口
 
@@ -78,7 +81,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - ACP 在运行中不显示扩展要求显示的消息，回放时显示：zx-agent 里没有部件会在运行中发出这种消息，所以没有端到端测试可写；`acp/updates.rs` 的单元测试要能构造 ACP 连接。
 - ACP 不提供 chat 有的三样：扩展注册的斜杠命令（`Session::commands`、`run_command` 只有 chat 调用）、工具的进度更新（`tool_execution_update`），以及扩展记下的状态与恢复时补写的调用结果（`run` 与 chat 各打一行）。扩展点在唯一的界面协议上只通了一部分，做 P7、P8 的验收时一起决定。
 - ACP 的通知队列无界：SDK（agent-client-protocol 5.0.0）的 `send_notification` 不等待，放进无界通道；客户端不读 stdout 时，流式更新积在内存里，而内核的事件通道是有界的。要有界得等 SDK 提供可以等待的发送。
-- 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）。
+- 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）；多 Agent 协作（2026-11-22 由第 7 节的“不做”改为待评估：单次运行的上下文或时长成为排查的瓶颈时再评估，在此之前由一个 agent 依次调用工具）。
 - 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；FauxProvider 响应增量之间的取消；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 待用户决定：`run -` 从 stdin 读提问不设上限（chat 每行至多 1 MiB）；调度器误把大文件接到 stdin 时，会整个读进内存、记入会话再发给模型。上限取多少待定。
@@ -127,13 +130,14 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ## 7. 已决定不做
 
-- `--output-schema`、异步审批、OS 级沙箱、由 webhook 或告警触发运行（D10）
+- `--output-schema`、OS 级沙箱
+- 异步审批（2026-11-22 复核后保留）：审批在运行内等待，计入运行时限；等待跨越运行要把运行的状态存下来，与自动续跑同类
 - rpc 模式（D14）；chat 的便利功能（D13）
-- durable 的自动续跑与重放，工具结果中的 `structuredContent` 与 `runToolCall`（见 REFERENCE“与 pi 的差异”），codemode
-- MCP 的 stdio、OAuth 与运行中更新工具列表（D8）
-- 完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时、A/B 行为评测框架
+- durable 的自动续跑与重放（2026-11-22 复核后保留：重启时 zx-im 已把中断的运行标明，没处理的消息由 backlog 保住，再问一次即在原会话里接着做），工具结果中的 `structuredContent` 与 `runToolCall`（见 REFERENCE“与 pi 的差异”），codemode
+- MCP 的 stdio 与 OAuth（D8，2026-11-22 复核后保留）：外部服务器由宿主实现，可以提供 Streamable HTTP；常驻部署里管理 stdio 子进程、走 OAuth 的浏览器授权都不合适。运行中途换工具列表也不做：P19 的重连只在两次运行之间换
+- 完整 TUI、插件热加载、WASM 插件、云端托管运行时、A/B 行为评测框架
 - 事件 JSON 中预算的名字 `model_request_limit` 不改为与设置同名的 `max_model_requests`：事件是对外格式（`schemaVersion`），改名的收益只是名字对齐
 
 ---
 
-ROADMAP.md · v0.65 · 2026年11月
+ROADMAP.md · v0.66 · 2026年11月

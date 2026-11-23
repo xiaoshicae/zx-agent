@@ -6,15 +6,18 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use zx_app::config::read_text;
 
-use crate::{CardLabels, ConversationId, Replies, ServerConfig, UserId};
+use crate::{CardLabels, ConversationId, Replies, ServerConfig, Trigger, UserId};
 
 /// The sections of im.toml that are the server's; each of the others configures the platform
 /// registered under its name.
-const SERVER_SECTIONS: [&str; 5] = ["access", "limits", "sessions", "replies", "cardLabels"];
+const SERVER_SECTIONS: [&str; 6] = ["access", "limits", "sessions", "replies", "cardLabels", "schedules"];
+/// The shortest interval of a schedule: each time it posts in the chat and runs the model, so
+/// more often than once a minute is noise and cost rather than watch.
+const MIN_SCHEDULE_SECS: u64 = 60;
 
 type Conversations = Vec<(String, ConversationId)>;
 type Approvers = Vec<(String, UserId)>;
@@ -33,6 +36,9 @@ pub(super) struct ConfigFile {
     /// Texts of approval cards on every platform; each field optional, the defaults English.
     #[serde(default)]
     pub(super) card_labels: CardLabels,
+    /// Conversations the server starts at fixed intervals, `[[schedules]]`.
+    #[serde(default)]
+    pub(super) schedules: Vec<ScheduleSection>,
     /// The section of each platform, by its name: what is left of the file but the server's.
     #[serde(skip)]
     pub(super) platforms: Vec<(String, toml::Table)>,
@@ -84,6 +90,64 @@ pub(super) struct LimitsSection {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct SessionsSection {
     pub(super) dir: PathBuf,
+}
+
+/// One of `[[schedules]]`: a conversation started in `chat` every `every_secs`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct ScheduleSection {
+    /// Unique among the schedules: the source of its conversations is `schedule:<name>`.
+    name: String,
+    /// A served chat, as `platform:id`.
+    chat: String,
+    every_secs: u64,
+    /// What the model is asked.
+    prompt: String,
+    /// What the post that opens each thread says; the name by default.
+    title: Option<String>,
+}
+
+/// The schedules of the file, checked: each with its interval and the trigger it asks for.
+/// Each names a chat among `conversations`, on one of `platforms`, and has a unique name, a
+/// prompt and an interval of at least a minute.
+pub(super) fn schedules(
+    sections: &[ScheduleSection],
+    conversations: &Conversations,
+    platforms: &HashSet<&str>,
+) -> Result<Vec<(Duration, Trigger)>> {
+    let mut names = HashSet::new();
+    let mut schedules = Vec::with_capacity(sections.len());
+    for section in sections {
+        let name = section.name.as_str();
+        ensure!(!name.trim().is_empty(), "schedules: a schedule has an empty name");
+        ensure!(
+            names.insert(name),
+            "schedules: more than one schedule is named {name:?}"
+        );
+        let field = format!("schedules {name:?}");
+        let mut split = entries(std::slice::from_ref(&section.chat), platforms, &format!("{field}.chat"))?;
+        let (platform, chat) = split.pop().expect("entries gives one pair for each entry");
+        let chat = ConversationId(chat);
+        ensure!(
+            conversations.contains(&(platform.clone(), chat.clone())),
+            "{field}.chat: {:?} is not in access.conversations",
+            section.chat
+        );
+        ensure!(
+            section.every_secs >= MIN_SCHEDULE_SECS,
+            "{field}.everySecs: at least {MIN_SCHEDULE_SECS}"
+        );
+        ensure!(!section.prompt.trim().is_empty(), "{field}.prompt is empty");
+        let trigger = Trigger {
+            platform,
+            chat,
+            title: section.title.clone().unwrap_or_else(|| name.to_string()),
+            prompt: section.prompt.clone(),
+            source: format!("schedule:{name}"),
+        };
+        schedules.push((Duration::from_secs(section.every_secs), trigger));
+    }
+    Ok(schedules)
 }
 
 /// The IM service configuration file at `path`, read as config.toml is: a regular UTF-8 file
@@ -204,6 +268,56 @@ mod tests {
     fn entries_for_an_unconfigured_platform_are_refused() {
         let error = entries(&["teams:C1".into()], &slack_only(), "access.approvers").unwrap_err();
         assert!(error.to_string().contains("not configured"), "{error}");
+    }
+
+    /// The schedules of a file that serves slack:C1, with `schedules` after its server's
+    /// sections.
+    fn checked_schedules(schedules: &str) -> Result<Vec<(Duration, Trigger)>> {
+        let config = format!("[access]\nconversations = [\"slack:C1\"]\n[sessions]\ndir = \"d\"\n{schedules}");
+        let file = ConfigFile::parse(&config)?;
+        let (conversations, _) = access(&file.access, &slack_only())?;
+        super::schedules(&file.schedules, &conversations, &slack_only())
+    }
+
+    const HOURLY: &str =
+        "[[schedules]]\nname = \"hourly\"\nchat = \"slack:C1\"\neverySecs = 3600\nprompt = \"look around\"\n";
+
+    #[test]
+    fn a_schedule_asks_for_its_prompt_in_its_chat_with_its_name_as_title_and_source() {
+        let schedules = checked_schedules(HOURLY).unwrap();
+        let trigger = Trigger {
+            platform: "slack".into(),
+            chat: ConversationId("C1".into()),
+            title: "hourly".into(),
+            prompt: "look around".into(),
+            source: "schedule:hourly".into(),
+        };
+        assert_eq!(schedules, [(Duration::from_secs(3600), trigger)]);
+        let titled = checked_schedules(&format!("{HOURLY}title = \"Hourly check\"\n")).unwrap();
+        assert_eq!(titled[0].1.title, "Hourly check");
+    }
+
+    #[test]
+    fn a_schedule_that_cannot_run_as_written_is_refused() {
+        let cases = [
+            (HOURLY.replace("slack:C1", "slack:C2"), "is not in access.conversations"),
+            (HOURLY.replace("slack:C1", "teams:C1"), "not configured"),
+            (HOURLY.replace("3600", "59"), "everySecs: at least 60"),
+            (HOURLY.replace("look around", " "), "prompt is empty"),
+            (HOURLY.replace("\"hourly\"", "\"\""), "empty name"),
+            (
+                format!("{HOURLY}{HOURLY}"),
+                "more than one schedule is named \"hourly\"",
+            ),
+            (format!("{HOURLY}cron = \"0 * * * *\"\n"), "unknown field `cron`"),
+        ];
+        for (schedules, expected) in cases {
+            let error = format!("{:#}", checked_schedules(&schedules).unwrap_err());
+            assert!(
+                error.contains(expected),
+                "{schedules}: expected {expected:?} in {error}"
+            );
+        }
     }
 
     #[test]

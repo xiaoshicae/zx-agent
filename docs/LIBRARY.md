@@ -58,8 +58,8 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ## IM 平台
 
-程序 `zx-im` 的库导出 `zx_im::Program`：`zx_im::main` 就是 `Program::new().run()`。宿主要接入别的聊天平台时，实现 `ImChannel` 与从 `im.toml` 的段建出它的 `PlatformFactory`，在自己程序的 `main` 里写 `Program::new().register_platform(名字, factory).run().await`；`im.toml` 中以这个名字为段名的段交给它的 `build`（`PlatformInput` 给出段的内容、审批卡片的文案与报告错误的回调），返回的 `BuiltChannel` 带上存放凭据的变量名，它们对命令隐藏、值被脱敏。channel 的 `platform()` 须与注册的名字相同，名字与内置的 `slack`、⚑ D:5/CHINA FLAG: `feishu` 或别的重复时启动报错。自己的程序还要给 agent 加工具、钩子、策略、扩展、provider 或执行环境时，用 `Program::customize(|app| app.add_tool(..).register_provider(..))`：闭包拿到的是 `Application`，动词与上文相同；程序自己的部件排在其后：平台的凭据经 `add_hidden_env` 加在闭包给出的变量旁边，追踪导出归程序。示例见 `crates/zx-im/examples/host.rs`（`cargo build -p zx-im --example host` 编译它）。
+程序 `zx-im` 的库导出 `zx_im::Program`：`zx_im::main` 就是 `Program::new().run()`。宿主要接入别的聊天平台时，实现 `ImChannel` 与从 `im.toml` 的段建出它的 `PlatformFactory`，在自己程序的 `main` 里写 `Program::new().register_platform(名字, factory).run().await`；`im.toml` 中以这个名字为段名的段交给它的 `build`（`PlatformInput` 给出段的内容、审批卡片的文案与报告错误的回调），返回的 `BuiltChannel` 带上存放凭据的变量名，它们对命令隐藏、值被脱敏。channel 的 `platform()` 须与注册的名字相同，名字与内置的 `slack`、⚑ D:5/CHINA FLAG: `feishu` 或别的重复时启动报错。自己的程序还要给 agent 加工具、钩子、策略、扩展、provider 或执行环境时，用 `Program::customize(|app| app.add_tool(..).register_provider(..))`：闭包拿到的是 `Application`，动词与上文相同；程序自己的部件排在其后：平台的凭据经 `add_hidden_env` 加在闭包给出的变量旁边，追踪导出归程序。示例见 `crates/zx-im/examples/host.rs`（`cargo build -p zx-im --example host` 编译它）。要不等人发消息就开始对话（如宿主自己的告警入口，`zx-im` 不开监听端口），用 `Program::on_triggers(|triggers| ..)` 拿到触发句柄，`triggers.start(Trigger { .. })` 在名单里的频道发一条消息开出线程、在其中问一个提问（行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“主动发起”）；直接用库的 `Server` 时是 `Server::triggers`。
 
 ---
 
-LIBRARY.md · v0.29 · 2026年11月
+LIBRARY.md · v0.30 · 2026年11月

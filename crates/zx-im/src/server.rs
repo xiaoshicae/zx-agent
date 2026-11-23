@@ -15,6 +15,8 @@
 //! - `status`: the status message of each run, kept so that a restart can replace it
 //! - `received`: each message's receipt until it is handled, and what an earlier process
 //!   left pending in the backlog
+//! - `trigger`: conversations the server starts without a message, and the handle that asks
+//!   for them
 
 mod admission;
 mod approval;
@@ -26,6 +28,7 @@ mod replies;
 mod router;
 mod shared;
 mod status;
+mod trigger;
 mod worker;
 
 use std::collections::{BTreeMap, HashSet};
@@ -35,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
 use zx_agent::events::ApprovalResult;
@@ -47,6 +51,7 @@ use self::shared::{Shared, group, timed};
 pub(crate) use self::status::StatusFiles;
 pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
+pub use self::trigger::{Trigger, Triggers};
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
@@ -126,6 +131,9 @@ pub enum ServerEvent {
     /// chat to [`ServerConfig::conversations`] or the person to [`ServerConfig::approvers`]
     /// takes.
     Unauthorized { key: SessionKey, user: UserId },
+    /// A [`Trigger`] of `source` opened the thread of the conversation `key`, which now
+    /// answers its prompt.
+    Triggered { key: SessionKey, source: String },
     /// A failure nobody in the chat sees, such as a reply that could not be posted.
     Failed { key: Option<SessionKey>, error: String },
 }
@@ -236,17 +244,38 @@ impl Default for ServerConfig {
 /// - At most [`ServerConfig::max_running`] conversations run at once.
 /// - Approval requests become cards; a click by an approver decides, and the card shows the
 ///   result however the approval ended.
+/// - A [`Trigger`] starts a conversation without a message ([`Server::triggers`]): its post
+///   in a chat the server serves opens a thread, where its prompt is asked. It counts toward
+///   [`ServerConfig::max_conversations`] like a mention, and is not kept in the backlog: one
+///   not started before the stop is lost.
 pub struct Server {
     config: ServerConfig,
     agent: Agent,
     sink: Arc<dyn ServerSink>,
+    /// The handle [`triggers`](Self::triggers) hands out clones of, and what they send.
+    triggers: Triggers,
+    triggered: mpsc::Receiver<Trigger>,
 }
 
 impl Server {
     /// A server for `config` whose conversations are sessions of `agent`, and which reports
     /// to `sink`.
     pub fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
-        Self { config, agent, sink }
+        let (triggers, triggered) = Triggers::channel();
+        Self {
+            config,
+            agent,
+            sink,
+            triggers,
+            triggered,
+        }
+    }
+
+    /// Where the host asks this server for conversations it starts without a message, such
+    /// as on a timer or for an alert ([`Trigger`]). Those asked for before [`run`](Self::run)
+    /// wait for it; once the server has stopped, [`Triggers::start`] returns false.
+    pub fn triggers(&self) -> Triggers {
+        self.triggers.clone()
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails.
@@ -264,10 +293,13 @@ impl Server {
     /// The stop gives up on the rest, which stay for the next start.
     pub async fn run(self, channels: Vec<Arc<dyn ImChannel>>, cancel: &CancellationToken) -> Result<(), ImError> {
         distinct_platforms(&channels)?;
+        // The server's own handle goes, so that triggers fail once the router is gone.
         let Server {
             mut config,
             agent,
             sink,
+            triggers: _,
+            triggered,
         } = self;
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
@@ -295,6 +327,7 @@ impl Server {
             replacing,
             receipts,
             backlog,
+            triggered,
         });
         router.replay(pending);
         let result = router.run().await;
