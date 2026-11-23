@@ -16,11 +16,13 @@ labels:
   - pairs:
       app.kubernetes.io/part-of: zx-agent
     includeTemplates: true
-# Optional components (README.md, "多集群" and "IM 服务"): create their ConfigMap and Secret
-# first, then uncomment `components:` and the ones wanted.
+# Optional components (README.md, "多集群", "IM 服务" and "IM 服务的多副本"): create their
+# ConfigMap and Secret first, then uncomment `components:` and the ones wanted; im-replicas
+# goes with im.
 # components:
 #   - multicluster
 #   - im
+#   - im-replicas
 # Mounted at /data/.zx-agent/agents, the agents directory of the zx-agent home (HOME is /data),
 # where they replace the built-in agents of the same names.
 configMapGenerator:

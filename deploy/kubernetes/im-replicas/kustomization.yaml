@@ -1,0 +1,15 @@
+# Optional, with `im`: two replicas of the IM service, which keep the sessions in Postgres. One
+# leads and serves; the other waits, and takes over when the leader goes (README.md, "IM 服务
+# 的多副本").
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: deployment-patch.yaml
+  # The resident Pod's ReadWriteOnce volume, which two Pods on two nodes cannot both mount:
+  # the replicas keep nothing of their own.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: zx-agent-data

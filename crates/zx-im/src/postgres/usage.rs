@@ -41,8 +41,9 @@ impl UsageStore for PostgresUsage {
         let write = async {
             let (number, tokens) = (bigint(day, "the day")?, bigint(used.tokens, "the tokens")?);
             self.database
-                .execute(
-                    "INSERT INTO zx_im_usage (day, platform, chat, tokens, cost) VALUES ($1, $2, $3, $4, $5) \
+                .write(
+                    "INSERT INTO zx_im_usage (day, platform, chat, tokens, cost) \
+                     SELECT $1::bigint, $2::text, $3::text, $4::bigint, $5::float8 WHERE zx_im_fence($6) \
                      ON CONFLICT (day, platform, chat) DO UPDATE \
                      SET tokens = zx_im_usage.tokens + EXCLUDED.tokens, cost = zx_im_usage.cost + EXCLUDED.cost",
                     &[&number, &used.platform, &used.chat.0, &tokens, &used.cost],
@@ -69,7 +70,7 @@ fn used(row: &Row) -> Result<ChatUsage, Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::database;
+    use super::super::test_support::leading;
     use super::*;
 
     fn used(chat: &str, tokens: u64, cost: f64) -> ChatUsage {
@@ -83,7 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn what_each_chat_used_is_added_up_per_day() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let store = PostgresUsage::new(database);

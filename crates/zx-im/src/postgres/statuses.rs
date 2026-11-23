@@ -25,10 +25,11 @@ impl StatusStore for PostgresStatuses {
         let thread = key.thread.as_ref().map(|thread| thread.0.as_str());
         let status_thread = status.at.thread.as_ref().map(|thread| thread.0.as_str());
         self.database
-            .execute(
+            .write(
                 "INSERT INTO zx_im_statuses \
                  (platform, status_conversation, status_thread, status_id, conversation, thread) \
-                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                 SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text WHERE zx_im_fence($7) \
+                 ON CONFLICT DO NOTHING",
                 &[
                     &key.platform,
                     &status.at.conversation.0,
@@ -45,8 +46,9 @@ impl StatusStore for PostgresStatuses {
 
     async fn remove(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
         self.database
-            .execute(
-                "DELETE FROM zx_im_statuses WHERE platform = $1 AND status_conversation = $2 AND status_id = $3",
+            .write(
+                "DELETE FROM zx_im_statuses \
+                 WHERE platform = $1 AND status_conversation = $2 AND status_id = $3 AND zx_im_fence($4)",
                 &[&key.platform, &status.at.conversation.0, &status.id.0],
             )
             .await
@@ -90,7 +92,7 @@ fn kept(row: &Row) -> Result<(SessionKey, MessageRef), Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::database;
+    use super::super::test_support::leading;
     use super::*;
 
     /// The status `id` of a run in the conversation `thread` of chat `C1`, posted in that
@@ -116,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn statuses_are_listed_as_kept_until_they_are_removed() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let store = PostgresStatuses::new(database);

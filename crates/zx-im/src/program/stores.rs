@@ -1,22 +1,31 @@
 //! Where the program keeps what outlasts a process, as `[sessions]` says: the sessions, the
 //! statuses of runs in progress, the backlog, and in Postgres what each day used. Files in a
-//! directory serve one process; Postgres, the replicas of a deployment.
+//! directory serve one process; Postgres, the replicas of a deployment, one of which leads
+//! and serves while the others wait (D44).
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 use zx_agent::builtin::files::create_private_dir;
 use zx_app::SessionPlace;
 #[cfg(feature = "postgres")]
 use zx_util::env::env_value;
+#[cfg(feature = "postgres")]
+use zx_util::stdio::eprint_line;
 
 use super::config_file::SessionsIn;
 use crate::backlog::BacklogFiles;
 #[cfg(feature = "postgres")]
-use crate::postgres::{Database, PostgresBacklog, PostgresSessions, PostgresStatuses, PostgresUsage};
+use crate::postgres::{self, Database, Pace, PostgresBacklog, PostgresSessions, PostgresStatuses, PostgresUsage};
 use crate::server::StatusFiles;
 use crate::{Backlog, StatusStore, UsageStore};
+
+/// What loses this process the lead, once it is lost, with why: never, for files.
+pub(super) type LeadLost = Pin<Box<dyn Future<Output = String> + Send>>;
 
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`), and the
 /// messages received and not handled yet (`BacklogFiles`). The leading dot keeps them apart
@@ -38,6 +47,46 @@ pub(super) struct Stores {
     pub(super) shown: String,
     /// The variable that holds the connection string, which commands must not see.
     pub(super) hidden_env: Option<String>,
+    pub(super) leadership: Leadership,
+}
+
+/// When this process may serve: at once, for files, which one process uses; with Postgres,
+/// once it leads.
+pub(super) struct Leadership {
+    #[cfg(feature = "postgres")]
+    database: Option<Arc<Database>>,
+}
+
+impl Leadership {
+    /// Wait for this process's turn to serve, saying on stderr when it waits and when it
+    /// leads: what loses it the lead, or `None` when `cancel` comes first. Fails when the
+    /// database cannot be reached.
+    #[cfg(feature = "postgres")]
+    pub(super) async fn take(&self, cancel: &CancellationToken) -> Result<Option<LeadLost>> {
+        let Some(database) = &self.database else {
+            return Ok(Some(never_lost()));
+        };
+        let waiting = || eprint_line("[im] another replica leads; this one waits to take over");
+        let Some(mut lead) = postgres::lead(database, Pace::default(), cancel, waiting)
+            .await
+            .map_err(anyhow::Error::msg)?
+        else {
+            return Ok(None);
+        };
+        eprint_line(&format!("[im] leading, term {}", lead.term()));
+        Ok(Some(Box::pin(async move { lead.lost().await })))
+    }
+
+    /// Serve at once: files are one process's.
+    #[cfg(not(feature = "postgres"))]
+    pub(super) async fn take(&self, _cancel: &CancellationToken) -> Result<Option<LeadLost>> {
+        Ok(Some(never_lost()))
+    }
+}
+
+/// The lead of a process that keeps files, never lost.
+fn never_lost() -> LeadLost {
+    Box::pin(std::future::pending())
 }
 
 /// Open the stores where `sessions` says. Fails when they cannot be made or reached.
@@ -64,6 +113,10 @@ fn in_directory(dir: &Path) -> Result<Stores> {
         usage: None,
         shown: dir.display().to_string(),
         hidden_env: None,
+        leadership: Leadership {
+            #[cfg(feature = "postgres")]
+            database: None,
+        },
     })
 }
 
@@ -80,9 +133,12 @@ async fn in_postgres(url_env: &str) -> Result<Stores> {
         place: SessionPlace::from_storage(Arc::new(PostgresSessions::new(Arc::clone(&database)))),
         statuses: Arc::new(PostgresStatuses::new(Arc::clone(&database))),
         backlog: Arc::new(PostgresBacklog::new(Arc::clone(&database))),
-        usage: Some(Arc::new(PostgresUsage::new(database))),
+        usage: Some(Arc::new(PostgresUsage::new(Arc::clone(&database)))),
         shown: "Postgres".into(),
         hidden_env: Some(url_env.to_string()),
+        leadership: Leadership {
+            database: Some(database),
+        },
     })
 }
 

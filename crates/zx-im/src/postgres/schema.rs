@@ -2,18 +2,29 @@
 //! holds a lock that other replicas starting at the same time wait for.
 
 use tokio_postgres::Client;
+use zx_util::random::random_u64;
 
 use super::Failure;
 
 /// The version of the tables this program makes and reads.
-const VERSION: i32 = 1;
+const VERSION: i32 = 2;
 /// The advisory lock a start holds while it makes the tables: "zx-im" and 1, a key no other
 /// program is likely to take.
 const MAKING: i64 = 0x7a78_2d69_6d01;
+/// The SQLSTATE of a write that the check made by [`fence`] refuses: a class of its own, so
+/// that no error of Postgres is taken for it.
+pub(super) const FENCED: &str = "ZXI01";
 
-/// The tables of version 1. Texts of JSON are kept as the program wrote them; times are
+/// The tables of version 2. Texts of JSON are kept as the program wrote them; times are
 /// milliseconds since the Unix epoch.
 const TABLES: &str = "
+-- Who leads: the term of the replica that leads, raised as each takes the lead, and the key of
+-- the advisory lock that the replicas of this deployment contend for. One row.
+CREATE TABLE zx_im_leader (
+    one BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (one),
+    term BIGINT NOT NULL,
+    lock_key BIGINT NOT NULL
+);
 CREATE TABLE zx_im_sessions (
     id TEXT PRIMARY KEY,
     -- The header, as JSON.
@@ -66,6 +77,24 @@ CREATE TABLE zx_im_usage (
 );
 ";
 
+/// The check of every write of a store, made with the tables: true while `expected` is the
+/// term, whose row it holds until the write's transaction ends, so that a replica taking the
+/// lead raises the term only once the write is done; an error with the SQLSTATE [`FENCED`]
+/// once another term began.
+fn fence() -> String {
+    format!(
+        "CREATE FUNCTION zx_im_fence(expected BIGINT) RETURNS BOOLEAN LANGUAGE plpgsql AS $fence$
+BEGIN
+    PERFORM 1 FROM zx_im_leader WHERE term = expected FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'another replica leads now' USING ERRCODE = '{FENCED}';
+    END IF;
+    RETURN TRUE;
+END
+$fence$;"
+    )
+}
+
 /// Make the tables that are missing, holding [`MAKING`] meanwhile, which waits for another
 /// replica that holds it. Fails when the database has tables of another version.
 pub(super) async fn make(client: &Client) -> Result<(), Failure> {
@@ -93,8 +122,14 @@ async fn make_while_locked(client: &Client) -> Result<(), Failure> {
             "they are of version {other}, and this zx-im knows version {VERSION}: use the zx-im that made them, or another database"
         ))),
         None => {
+            // The deployment's own lock: any key will do, and 63 random bits fit in an i64.
+            let lock_key = i64::try_from(random_u64() >> 1).expect("63 bits fit in an i64");
             // One transaction: either every table is made, with its version, or none is.
-            let tables = format!("BEGIN; {TABLES} INSERT INTO zx_im_schema (version) VALUES ({VERSION}); COMMIT;");
+            let tables = format!(
+                "BEGIN; {TABLES} {fence} INSERT INTO zx_im_leader (term, lock_key) VALUES (0, {lock_key}); \
+                 INSERT INTO zx_im_schema (version) VALUES ({VERSION}); COMMIT;",
+                fence = fence()
+            );
             Ok(client.batch_execute(&tables).await?)
         }
     }
@@ -120,7 +155,7 @@ mod tests {
             .unwrap();
         let error = super::make(&client).await.unwrap_err().to_string();
         assert!(
-            error.starts_with("they are of version 99, and this zx-im knows version 1"),
+            error.starts_with("they are of version 99, and this zx-im knows version 2"),
             "{error}"
         );
     }

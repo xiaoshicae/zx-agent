@@ -755,6 +755,94 @@ async fn postgres_schema() -> Option<String> {
     Some(format!("{url}{separator}options=-c%20search_path%3D{schema}"))
 }
 
+/// [`VALID`] in `dir`, against the fake Slack at `slack_api`, keeping the sessions in the
+/// Postgres that [`POSTGRES_URL_VAR`] names.
+#[cfg(feature = "postgres")]
+fn postgres_im_config(dir: &Path, slack_api: &str) -> PathBuf {
+    let text = VALID
+        .replace("[slack]\n", &format!("[slack]\napiBase = \"{slack_api}\"\n"))
+        .replace(
+            "dir = \"sessions\"",
+            &format!("postgresUrlEnv = \"{POSTGRES_URL_VAR}\""),
+        );
+    write_im_config(dir, &text)
+}
+
+/// `zx-im` started with `config`, in `dir`, against `model`, with its sessions in the
+/// Postgres at `url`, and stderr piped.
+#[cfg(feature = "postgres")]
+fn im_on_postgres(dir: &Path, config: &Path, model: &str, url: &str) -> tokio::process::Child {
+    im(dir, config, model)
+        .env(POSTGRES_URL_VAR, url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The next line of `said`, a program's stderr, that starts with `start`.
+#[cfg(feature = "postgres")]
+async fn next_said(said: &mut tokio::io::Lines<BufReader<tokio::process::ChildStderr>>, start: &str) -> String {
+    let found = tokio::time::timeout(START_WAIT, async {
+        while let Some(line) = said.next_line().await.unwrap() {
+            if line.starts_with(start) {
+                return Some(line);
+            }
+        }
+        None
+    });
+    match found.await {
+        Ok(Some(line)) => line,
+        Ok(None) => panic!("stderr ended without a line starting with {start:?}"),
+        Err(_) => panic!("no line starting with {start:?} in time"),
+    }
+}
+
+#[cfg(all(unix, feature = "postgres"))]
+#[tokio::test]
+async fn a_standby_sharing_postgres_takes_over_when_the_leader_is_killed_and_goes_on_in_its_sessions() {
+    let Some(url) = postgres_schema().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::text("first answer"), Reply::text("second answer")]).await;
+    let mut slack = FakeSlack::start().await;
+    let config = postgres_im_config(dir.path(), &slack.api_base);
+    let mut leader = im_on_postgres(dir.path(), &config, &model.base_url, &url);
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "hello")).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let updates = slack.wait_for("chat.update", 1).await;
+    assert_eq!(updates[0].body["text"], json!("first answer"));
+
+    // A second replica waits while the first leads, and does not connect to Slack.
+    let mut standby = im_on_postgres(dir.path(), &config, &model.base_url, &url);
+    let mut said = BufReader::new(standby.stderr.take().unwrap()).lines();
+    next_said(&mut said, "[im] another replica leads").await;
+    assert_eq!(slack.calls("apps.connections.open").len(), 1);
+    // A reload of the lists, sent to whichever Pod, reaches the waiting one too, and does not
+    // end it.
+    zx_testing::signal(&standby, "-HUP").await;
+    leader.kill().await.unwrap();
+
+    // It takes over in the next term, and goes on in the conversation's session.
+    assert_eq!(next_said(&mut said, "[im] leading").await, "[im] leading, term 2");
+    let mut socket = slack.socket().await;
+    let mut reply = mention("e2", "1700000002.000100", "and again");
+    reply["payload"]["event"]["thread_ts"] = json!("1700000001.000100");
+    socket.send(reply).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e2"}));
+    model.wait_for_requests(2).await;
+    let request = model.requests()[1].body["messages"].to_string();
+    assert!(
+        request.contains("hello") && request.contains("first answer"),
+        "{request}"
+    );
+    zx_testing::signal(&standby, "-TERM").await;
+    let ended = tokio::time::timeout(START_WAIT, standby.wait()).await.unwrap().unwrap();
+    assert_eq!(ended.code(), Some(0));
+}
+
 #[cfg(all(unix, feature = "postgres"))]
 #[tokio::test]
 async fn a_conversation_kept_in_postgres_goes_on_after_a_restart_and_commands_cannot_see_its_url() {
@@ -769,23 +857,8 @@ async fn a_conversation_kept_in_postgres_goes_on_after_a_restart_and_commands_ca
     ])
     .await;
     let mut slack = FakeSlack::start().await;
-    let config = write_im_config(
-        dir.path(),
-        &VALID
-            .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base))
-            .replace(
-                "dir = \"sessions\"",
-                &format!("postgresUrlEnv = \"{POSTGRES_URL_VAR}\""),
-            ),
-    );
-    let start = || {
-        im(dir.path(), &config, &model.base_url)
-            .env(POSTGRES_URL_VAR, &url)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
+    let config = postgres_im_config(dir.path(), &slack.api_base);
+    let start = || im_on_postgres(dir.path(), &config, &model.base_url, &url);
 
     let first = start();
     let mut socket = slack.socket().await;
@@ -819,6 +892,8 @@ async fn a_conversation_kept_in_postgres_goes_on_after_a_restart_and_commands_ca
     let output = program::ended_output(first).await;
     let said = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{said}");
+    // Alone, it leads at once.
+    assert!(said.contains("[im] leading, term 1\n"), "{said}");
     assert!(said.contains("sessions in Postgres;"), "{said}");
     assert!(!said.contains(&url), "{said}");
     assert!(!dir.path().join("sessions").exists());

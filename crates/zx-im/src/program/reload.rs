@@ -1,5 +1,6 @@
-//! The lists of im.toml, read again while serving: on SIGHUP, its `[access]` replaces the
-//! server's lists, once its server's sections pass the checks of a start.
+//! The lists of im.toml, read again while the program runs: on SIGHUP, its `[access]`
+//! replaces the server's lists, once its server's sections pass the checks of a start. A
+//! replica that waits for its turn to serve reloads too, and serves with what it read.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
