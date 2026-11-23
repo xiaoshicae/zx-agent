@@ -10,6 +10,7 @@
 //! - `reload`: on SIGHUP, the lists of im.toml read again (Unix only)
 //! - `scheduler`: the schedules of im.toml, each asking the server for its conversation
 //! - `send_file`: the tool of each session that posts a file in its conversation
+//! - `stores`: where the sessions and the program's stores are kept, a directory or Postgres
 
 mod args;
 mod config_file;
@@ -18,6 +19,7 @@ mod log;
 mod reload;
 mod scheduler;
 mod send_file;
+mod stores;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -29,7 +31,6 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
-use zx_agent::builtin::files::create_private_dir;
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
@@ -41,9 +42,9 @@ pub(crate) use self::args::Args;
 use self::config_file::{ConfigFile, OwnChat, ServerSections, read_file, server_config};
 use self::log::{Log, failure_log};
 use self::send_file::SendFiles;
-use crate::backlog::BacklogFiles;
+use self::stores::Stores;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
-use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
+use crate::server::{CONVERSATION, CONVERSATION_SECTION};
 use crate::{ChatConfig, DailyLimit, ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
@@ -56,11 +57,6 @@ pub(crate) const EXIT_USAGE: u8 = 2;
 const SERVICE_NAME: &str = "zx-im";
 /// The agent of the conversations in every chat without one of its own.
 const SERVER_AGENT: Builtin = Builtin::Assistant;
-/// Under the session directory: the statuses of runs in progress (`StatusFiles`), and the
-/// messages received and not handled yet (`BacklogFiles`). The leading dot keeps them apart
-/// from the directories of the sessions, whose names start with `--`.
-const RUNNING_DIR: &str = ".running";
-const BACKLOG_DIR: &str = ".backlog";
 
 /// What a host gives the application of the program ([`Program::customize`]).
 type Customization = Box<dyn FnOnce(Application) -> Application + Send>;
@@ -164,6 +160,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
         chats,
         daily,
         schedules,
+        sessions,
     } = file.server_sections(&names)?;
     let unprompted = Unprompted {
         schedules,
@@ -174,8 +171,16 @@ async fn run(args: Args, program: Program) -> Result<u8> {
             if telemetry.is_some() {
                 eprint_line(shutdown::EXPORT_NOTICE);
             }
-            let dir = file.sessions.dir;
-            let (statuses, backlog) = open_stores(&dir)?;
+            let Stores {
+                place,
+                statuses,
+                backlog,
+                usage,
+                shown,
+                hidden_env: connection_env,
+            } = stores::open(&sessions).await?;
+            let mut hidden_env = hidden_env;
+            hidden_env.extend(connection_env);
             // Once for the process: every conversation's session shares the connections.
             let app = assemble(
                 connect(overrides).await?,
@@ -185,19 +190,20 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 &channels,
             );
             priced_for_daily_cost(&app, daily, &chats)?;
-            // A conversation's sessions are those in the directory that carry its labels.
-            let (agent, chats) = conversations_agents(&app, &SessionPlace::directory(&dir), chats).await?;
+            // A conversation's sessions are those in the place that carry its labels.
+            let (agent, chats) = conversations_agents(&app, &place, chats).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
-                statuses: Some(Arc::new(statuses)),
-                backlog: Arc::new(backlog),
+                statuses: Some(statuses),
+                backlog,
+                usage,
                 chats,
                 daily,
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
             let files = Files {
                 im_toml: &path,
-                sessions: &dir,
+                sessions: &shown,
             };
             Ok(serve(config, &agent, channels, files, unprompted).await)
         })
@@ -337,10 +343,11 @@ fn build_agent(app: &Application, name: &str, place: &SessionPlace) -> Result<Co
     app.build_named(name, app.model(), place, approvals)
 }
 
-/// Where the program's files are: im.toml, which a SIGHUP reads again, and the sessions.
+/// Where the program's files are: im.toml, which a SIGHUP reads again, and the sessions, as
+/// the startup line says.
 struct Files<'a> {
     im_toml: &'a Path,
-    sessions: &'a Path,
+    sessions: &'a str,
 }
 
 /// Serve `channels` as `config` says, with the sessions of `agent`, kept where `files` says,
@@ -357,7 +364,7 @@ async fn serve(
     eprint_line(&format!(
         "[im] platforms={}; sessions in {}; schedules: {}",
         names.join(","),
-        files.sessions.display(),
+        files.sessions,
         unprompted.schedules.len()
     ));
     let cancel = CancellationToken::new();
@@ -432,20 +439,6 @@ fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>,
     Ok(channels)
 }
 
-/// The stores under the session directory `dir`: the statuses of runs in progress, kept so
-/// that a crash or a kill cannot leave threads saying the work goes on, and the backlog. The
-/// directories are created readable only by this user, as the session files are. A startup
-/// write; nothing runs concurrently yet.
-fn open_stores(dir: &Path) -> Result<(StatusFiles, BacklogFiles)> {
-    create_private_dir(dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
-    let running = dir.join(RUNNING_DIR);
-    let statuses = StatusFiles::open(&running).with_context(|| format!("cannot create {}", running.display()))?;
-    let backlog_dir = dir.join(BACKLOG_DIR);
-    let backlog = BacklogFiles::open(&backlog_dir)
-        .with_context(|| format!("cannot create the backlog {}", backlog_dir.display()))?;
-    Ok((statuses, backlog))
-}
-
 /// How serving ended, as an exit code; a failure is reported on stderr.
 fn serve_exit_code(served: Result<(), ImError>) -> u8 {
     let Err(error) = served else {
@@ -465,20 +458,6 @@ mod tests {
     use self::config_file::SERVER;
     use super::*;
     use crate::{Destination, Inlet, MessageRef, Post, Replacement};
-
-    #[cfg(unix)]
-    #[test]
-    fn only_the_owner_may_list_the_session_directories() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("sessions");
-        open_stores(&sessions).unwrap();
-        for path in [&sessions, &sessions.join(RUNNING_DIR), &sessions.join(BACKLOG_DIR)] {
-            let mode = std::fs::metadata(path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o700, "{}", path.display());
-        }
-    }
 
     /// A channel that only goes by its platform's name.
     struct Named(String);

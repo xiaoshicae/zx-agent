@@ -18,7 +18,7 @@ use zx_agent::transcript::SessionQuery;
 use zx_util::sync::lock;
 
 use super::access::Access;
-use super::usage::{DayUsage, today};
+use super::usage::{ChatUsage, DayUsage, UsageStore, today};
 use super::{ChatConfig, DailyLimit, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
 use crate::{ConversationId, ImChannel, ImError, MessageRef, UserId};
 
@@ -46,9 +46,11 @@ pub(super) struct Shared {
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
     pub(super) permits: Arc<Semaphore>,
-    /// What the work of all chats may use in a day, and what the work of the day used.
+    /// What the work of all chats may use in a day, what the work of the day used, and where
+    /// that is kept beyond the process, if anywhere.
     daily: DailyLimit,
     used: Mutex<DayUsage>,
+    usage_store: Option<Arc<dyn UsageStore>>,
     statuses: Option<Arc<dyn StatusStore>>,
     /// The names of users looked up so far, by platform; a user's ID stands for a name the
     /// platform did not give. As many as there are people writing to the bot.
@@ -84,6 +86,7 @@ impl Shared {
             idle,
             long_answer_chars,
             daily,
+            usage,
             outbound_timeout,
             replies,
             statuses,
@@ -103,6 +106,7 @@ impl Shared {
             permits: Arc::new(Semaphore::new(max_running.get())),
             daily,
             used: Mutex::default(),
+            usage_store: usage,
             max_conversations,
             max_pending_messages,
             max_pending_bytes,
@@ -205,9 +209,31 @@ impl Shared {
         self.daily.reached_by(all) || own.is_some_and(|daily| daily.reached_by(in_chat))
     }
 
-    /// Count `usage`, what work in the chat `chat` on `platform` used, as the day's.
-    pub(super) fn spend(&self, platform: &str, chat: &ConversationId, usage: &Usage) {
-        lock(&self.used).add(today(), platform, chat, usage);
+    /// Count `usage`, what work of the conversation `key` used, as the day's, and keep it in
+    /// the usage store when there is one. A failure to keep it is reported; the day is counted
+    /// here all the same.
+    pub(super) async fn spend(&self, key: &SessionKey, usage: &Usage) {
+        let day = today();
+        let used = ChatUsage::of(&key.platform, &key.conversation, usage);
+        lock(&self.used).add(day, &used);
+        if let Some(store) = &self.usage_store {
+            self.bounded(Some(key), "keep the day's usage", store.add(day, &used))
+                .await;
+        }
+    }
+
+    /// Count on from what the usage store kept of today, as the server starts. An error when
+    /// the store cannot say.
+    pub(super) async fn load_usage(&self) -> Result<(), ImError> {
+        let Some(store) = &self.usage_store else {
+            return Ok(());
+        };
+        let day = today();
+        let kept = timed(self.outbound_timeout, "read the day's usage", store.day(day))
+            .await
+            .map_err(ImError::Config)?;
+        lock(&self.used).load(day, &kept);
+        Ok(())
     }
 
     pub(super) fn failed(&self, key: Option<&SessionKey>, error: String) {

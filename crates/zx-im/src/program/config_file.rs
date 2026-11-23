@@ -62,6 +62,7 @@ pub(super) struct ServerSections {
     pub(super) chats: Vec<OwnChat>,
     pub(super) daily: DailyLimit,
     pub(super) schedules: Vec<(Duration, Trigger)>,
+    pub(super) sessions: SessionsIn,
 }
 
 impl ConfigFile {
@@ -78,6 +79,7 @@ impl ConfigFile {
             chats,
             daily,
             schedules,
+            sessions: self.sessions.sessions_in()?,
         })
     }
 
@@ -134,10 +136,40 @@ impl LimitsSection {
     }
 }
 
+/// Where the sessions and the program's stores are kept: `dir` or `postgresUrlEnv`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct SessionsSection {
-    pub(super) dir: PathBuf,
+    /// A directory of files, on a disk of the process's own or a persistent volume.
+    dir: Option<PathBuf>,
+    /// The environment variable that holds the connection string of Postgres, which the
+    /// replicas of a deployment share.
+    postgres_url_env: Option<String>,
+}
+
+/// Where the sessions and the program's stores are kept, as `[sessions]` says.
+#[derive(Debug, PartialEq)]
+pub(super) enum SessionsIn {
+    /// Files in this directory.
+    Dir(PathBuf),
+    /// Postgres, at the connection string the variable `url_env` holds.
+    Postgres { url_env: String },
+}
+
+impl SessionsSection {
+    /// Where the section keeps the sessions: a directory or Postgres, one of them.
+    fn sessions_in(&self) -> Result<SessionsIn> {
+        match (&self.dir, &self.postgres_url_env) {
+            (Some(dir), None) => Ok(SessionsIn::Dir(dir.clone())),
+            (None, Some(url_env)) => {
+                ensure!(!url_env.trim().is_empty(), "sessions.postgresUrlEnv is empty");
+                Ok(SessionsIn::Postgres {
+                    url_env: url_env.clone(),
+                })
+            }
+            _ => bail!("sessions: give dir or postgresUrlEnv, one of them"),
+        }
+    }
 }
 
 /// One of `[[schedules]]`: a conversation started in `chat` every `every_secs`.
@@ -585,7 +617,36 @@ mod tests {
         let file =
             ConfigFile::parse("[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n").unwrap();
         assert_eq!(file.platforms, [("slack".to_string(), toml::Table::new())]);
-        assert_eq!(file.sessions.dir, Path::new("/data/sessions"));
+        assert_eq!(
+            file.sessions.sessions_in().unwrap(),
+            SessionsIn::Dir("/data/sessions".into())
+        );
+    }
+
+    #[test]
+    fn the_sessions_are_kept_in_a_directory_or_in_postgres_one_of_them() {
+        let sessions = |section: &str| {
+            let file = ConfigFile::parse(&format!("[access]\nconversations = []\n[sessions]\n{section}"))?;
+            file.sessions.sessions_in()
+        };
+        assert_eq!(
+            sessions("postgresUrlEnv = \"ZX_IM_POSTGRES_URL\"\n").unwrap(),
+            SessionsIn::Postgres {
+                url_env: "ZX_IM_POSTGRES_URL".into()
+            }
+        );
+        for (section, expected) in [
+            ("", "give dir or postgresUrlEnv, one of them"),
+            (
+                "dir = \"d\"\npostgresUrlEnv = \"URL\"\n",
+                "give dir or postgresUrlEnv, one of them",
+            ),
+            ("postgresUrlEnv = \" \"\n", "sessions.postgresUrlEnv is empty"),
+            ("postgresUrl = \"postgres://\"\n", "unknown field `postgresUrl`"),
+        ] {
+            let error = format!("{:#}", sessions(section).unwrap_err());
+            assert!(error.contains(expected), "{section}: expected {expected:?} in {error}");
+        }
     }
 
     #[test]

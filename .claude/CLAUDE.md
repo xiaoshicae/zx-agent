@@ -22,7 +22,7 @@
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |
 | `zx-app` | 应用层，命令行、IM 服务与其他宿主（如 Web 服务）共用：`config.toml` 与 agent 文件（`config`）、由它们装配 agent 的 `Application`、追踪导出（`otel`）、进程收尾（`shutdown`）。不知道命令行、终端与协议（ACP、IM 平台），不打印，要说的返回给宿主 |
 | `zx-cli` | 程序 `zx-agent`（代码都在库里，`main.rs` 只调用它）：参数、输出与退出码；agent 都经 `zx_app::Application` 得到 |
-| `zx-im` | 程序 `zx-im`（同上）：平台接口 `ImChannel` 与由 `im.toml` 的段建出它的 `PlatformFactory`、按会话分派的 `Server`、各平台（Slack；⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后）、`im.toml`、参数、操作日志与退出码；agent 经 `zx_app::Application` 得到，宿主自己的程序经 `Program` 加平台与部件 |
+| `zx-im` | 程序 `zx-im`（同上）：平台接口 `ImChannel` 与由 `im.toml` 的段建出它的 `PlatformFactory`、按会话分派的 `Server`、各平台（Slack；⚑ D:5/CHINA FLAG: 飞书在默认开启的 feature `feishu` 后）、Postgres 存储（默认开启的 feature `postgres`）、`im.toml`、参数、操作日志与退出码；agent 经 `zx_app::Application` 得到，宿主自己的程序经 `Program` 加平台与部件 |
 | `zx-testing` | 各包集成测试共用的测试设施，只作 `[dev-dependencies]`；crate 自己的单元测试不用它，它不依赖 `zx-im` |
 
 设计取舍（改动前先理解原因；括号里是 `docs/ROADMAP.md` 的决策编号）：
@@ -40,8 +40,8 @@
 根目录的 `Cargo.toml` 是虚拟 workspace，在根目录运行覆盖全部 crate；加 `-p <crate>` 或在 `crates/<crate>` 里运行只处理那一个。
 
 - 格式：`cargo fmt -- --config group_imports=StdExternalCrate`（按规则 01 给导入分组）
-- lint：`cargo clippy --all-targets -- -D warnings`，零警告。以下改动另跑 `cargo clippy -p <crate> --no-default-features --all-targets -- -D warnings`，检查关掉默认 feature 的构建：内核的工具校验（`zx-core`，feature `json-schema`）、`zx-builtin`（`mcp`，MCP 客户端）、`zx-im`（⚑ D:5/CHINA FLAG: `feishu`，飞书平台）
-- 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`
+- lint：`cargo clippy --all-targets -- -D warnings`，零警告。以下改动另跑 `cargo clippy -p <crate> --no-default-features --all-targets -- -D warnings`，检查关掉默认 feature 的构建：内核的工具校验（`zx-core`，feature `json-schema`）、`zx-builtin`（`mcp`，MCP 客户端）、`zx-im`（⚑ D:5/CHINA FLAG: `feishu`，飞书平台；`postgres`，Postgres 存储）
+- 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`。zx-im 的 Postgres 存储测试没有 `ZX_TEST_POSTGRES_URL` 时跳过，起库与运行的命令见 `docs/TESTS.md`
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`（引号不能省），零警告，断掉的文档链接也算
 - MSRV：`cargo +1.88.0 check --all-targets`，用到新语法或新标准库 API 时运行
 - 自查：提交前运行 `.claude/scripts/self-check.sh`，它列出的每一处都要能说出理由

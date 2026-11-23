@@ -225,8 +225,8 @@ impl Outlet {
     }
 
     /// Count `usage`, what work of this conversation used, as the day's.
-    pub(super) fn spend(&self, usage: &Usage) {
-        self.shared.spend(&self.key.platform, &self.key.conversation, usage);
+    pub(super) async fn spend(&self, usage: &Usage) {
+        self.shared.spend(&self.key, usage).await;
     }
 
     /// Post that the work goes on ([`Replies::working`]), kept before the work goes on:

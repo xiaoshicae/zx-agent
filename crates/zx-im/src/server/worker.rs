@@ -496,7 +496,7 @@ impl Worker {
         } = running;
         drop(slot);
         if let Ok(finished) = &ended {
-            self.out.spend(finished.usage());
+            self.out.spend(finished.usage()).await;
             // Beyond u64 milliseconds, more than 500 million years, it stays at the most.
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let record = finished.record(&self.out.key, duration_ms);

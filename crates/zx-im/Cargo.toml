@@ -18,10 +18,13 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["feishu"]
+default = ["feishu", "postgres"]
 # ⚑ D:5/CHINA FLAG: the Feishu platform (`platform::feishu`) and its im.toml section. A build
 # without it refuses that section by name.
 feishu = []
+# The sessions and the server's records kept in Postgres (`postgres`), for several replicas
+# (D44). A build without it refuses `postgresUrlEnv` in im.toml.
+postgres = ["dep:rustls", "dep:rustls-platform-verifier", "dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 
 [dependencies]
 zx-agent.workspace = true
@@ -33,11 +36,15 @@ async-trait.workspace = true
 clap.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+rustls = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # `#[tokio::main]` runs the program on the multi-thread runtime.
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-postgres = { workspace = true, optional = true }
+tokio-postgres-rustls = { workspace = true, optional = true }
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
