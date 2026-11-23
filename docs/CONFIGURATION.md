@@ -372,7 +372,7 @@ allowed = "已批准"
 
 `[limits]` 中的四个上限与 `longAnswerChars` 须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
-`[sessions]` 写 `dir` 与 `postgresUrlEnv` 之一。`dir` 是本机磁盘或持久卷上的目录，供一个进程使用。`postgresUrlEnv` 是存放 Postgres 连接串的环境变量名，连接串如 `postgres://zx:<密码>@db.example.com:5432/zx?sslmode=require`：会话、backlog、“处理中”的记录与每天的用量都存进这个库里 `zx_im_` 开头的表，启动时建好缺的表；连不上库，或表的版本不是这个程序的，以退出码 2 结束。这个变量与平台的凭据一样对命令隐藏、在工具输出中脱敏，启动行只写 `sessions in Postgres`。`sslmode` 只有 `disable`、`prefer`（默认）与 `require`：用 TLS 时总按系统的根证书校验证书与主机名，`prefer` 只在服务端不支持 TLS 时改用明文，跨网络连接写 `require`；libpq 的 `verify-full` 等写法被拒。会话的工作目录仍在本机。Postgres 在 `zx-im` 默认开启的 cargo feature `postgres` 后，不带它构建的 `zx-im` 遇到 `postgresUrlEnv` 时以退出码 2 报错。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“存在 Postgres”。
+`[sessions]` 写 `dir` 与 `postgresUrlEnv` 之一。`dir` 是本机磁盘或持久卷上的目录，供一个进程使用。`postgresUrlEnv` 是存放 Postgres 连接串的环境变量名，连接串如 `postgres://zx:<密码>@db.example.com:5432/zx?sslmode=require`：会话、backlog、“处理中”的记录与每天的用量都存进这个库里 `zx_im_` 开头的表，启动时建好缺的表；连不上库，或表的版本不是这个程序的，以退出码 2 结束。这个变量与平台的凭据一样对命令隐藏、在工具输出中脱敏，启动行只写 `sessions in Postgres`。`sslmode` 只有 `disable`、`prefer`（默认）与 `require`：用 TLS 时总按系统的根证书校验证书与主机名，`prefer` 只在服务端不支持 TLS 时改用明文，跨网络连接写 `require`；libpq 的 `verify-full` 等写法被拒。会话的工作目录仍在本机。存在 Postgres 时可以用同一个 `im.toml` 运行几个副本：一个当选为主并服务，其余待命，主停止或与库断开后接手（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“主备”）；账号要能在库的默认 schema 中建表与函数，如库的所有者。Postgres 在 `zx-im` 默认开启的 cargo feature `postgres` 后，不带它构建的 `zx-im` 遇到 `postgresUrlEnv` 时以退出码 2 报错。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“存在 Postgres”。
 
 发文件要平台应用有相应权限（Slack 的 `files:write`，⚑ D:5/CHINA FLAG: 飞书的 `im:resource` 或 `im:resource:upload`，见 [IM_SETUP.md](IM_SETUP.md)）：比 `longAnswerChars` 更长的回答作为文件发出，状态换成 `replies.answerAttached`；发不出时照旧分段发文字。每个 IM 会话还有工具 `send_file`，不由 agent 的 `tools` 启用：agent 可以把自己写的内容，或工作目录里的一个文件（至多 20 MiB），作为附件发进对话。后者不经脱敏，见 [SECURITY.md](SECURITY.md#工具)；要审批或禁用它，在 agent 的 `permissions.ask` 或 `deny` 中写 `send_file`。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：zx-im 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 
@@ -382,4 +382,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.45 · 2026年11月
+CONFIGURATION.md · v0.46 · 2026年11月

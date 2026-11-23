@@ -1,9 +1,11 @@
 //! Postgres, where the program keeps what its replicas share (D44): the sessions, the backlog,
 //! the statuses of runs and what the work of each day used, in tables it makes as it starts.
 //! Every store shares one connection, opened again when it was lost; its statements are
-//! pipelined on it.
+//! pipelined on it. One replica leads at a time, and only its writes go through: each checks
+//! the term it leads in.
 //!
 //! - `schema`: the tables, made at the version this program knows
+//! - `leader`: who leads, and until when
 //! - `sessions`: the sessions of the conversations ([`SessionStorage`])
 //! - `backlog`: each message until it is handled ([`Backlog`])
 //! - `statuses`: the statuses of runs in progress ([`StatusStore`])
@@ -17,6 +19,7 @@
 //! [`UsageStore`]: crate::UsageStore
 
 mod backlog;
+mod leader;
 mod schema;
 mod sessions;
 mod statuses;
@@ -26,7 +29,7 @@ mod usage;
 
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustls::ClientConfig;
@@ -39,6 +42,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use zx_agent::ai::now_ms;
 
 pub(crate) use self::backlog::PostgresBacklog;
+pub(crate) use self::leader::{Pace, lead};
 pub(crate) use self::sessions::PostgresSessions;
 pub(crate) use self::statuses::PostgresStatuses;
 pub(crate) use self::usage::PostgresUsage;
@@ -56,6 +60,8 @@ pub(crate) struct Database {
     /// The connection's client, until the connection is lost: the next statement then
     /// connects again.
     client: Mutex<Option<Arc<Client>>>,
+    /// The term this process leads in, once it leads: what each write checks.
+    term: OnceLock<i64>,
 }
 
 /// Why a statement failed.
@@ -63,6 +69,8 @@ pub(crate) struct Database {
 pub(crate) enum Failure {
     /// A row with the same key exists: the statement would have overwritten it.
     Duplicate,
+    /// Another replica leads now: the term of this one is over, and its writes are refused.
+    Fenced,
     /// Anything else, as the operator reads it.
     Other(String),
 }
@@ -71,6 +79,7 @@ impl fmt::Display for Failure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Duplicate => formatter.write_str("a row with the same key exists"),
+            Self::Fenced => formatter.write_str("another replica leads now"),
             Self::Other(error) => formatter.write_str(error),
         }
     }
@@ -80,6 +89,9 @@ impl From<tokio_postgres::Error> for Failure {
     fn from(error: tokio_postgres::Error) -> Self {
         if error.code() == Some(&SqlState::UNIQUE_VIOLATION) {
             return Self::Duplicate;
+        }
+        if error.code().map(SqlState::code) == Some(schema::FENCED) {
+            return Self::Fenced;
         }
         match error.as_db_error() {
             // The server's own words; the client's error says only that it was the server's.
@@ -102,6 +114,7 @@ impl Database {
             config,
             tls: tls()?,
             client: Mutex::new(None),
+            term: OnceLock::new(),
         });
         let client = timed(database.client())
             .await
@@ -110,6 +123,27 @@ impl Database {
             .await
             .map_err(|failure| format!("cannot set up the tables in Postgres: {failure}"))?;
         Ok(database)
+    }
+
+    /// Run `statement`, a write of a store, with `params` and then the term this process leads
+    /// in, which the statement checks with `zx_im_fence($n)`, `n` the number of `params` plus
+    /// one: the number of rows it changed. [`Failure::Fenced`] when another replica leads now,
+    /// and an error before this process leads.
+    pub(crate) async fn write(&self, statement: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64, Failure> {
+        let term = self
+            .term
+            .get()
+            .ok_or_else(|| Failure::Other("this replica does not lead".into()))?;
+        let mut all = params.to_vec();
+        all.push(term);
+        self.execute(statement, &all).await
+    }
+
+    /// Lead in `term` from now on: what the writes check. Fails when the process led already.
+    fn lead_in(&self, term: i64) -> Result<(), Failure> {
+        self.term
+            .set(term)
+            .map_err(|_| Failure::Other("this replica leads already".into()))
     }
 
     /// Run `statement` with `params`: the number of rows it changed.

@@ -26,7 +26,10 @@ impl PostgresBacklog {
         let window = i64::try_from(HANDLED_FOR.as_millis()).unwrap_or(i64::MAX);
         let before = now().saturating_sub(window);
         self.database
-            .execute("DELETE FROM zx_im_backlog WHERE completed_ms < $1", &[&before])
+            .write(
+                "DELETE FROM zx_im_backlog WHERE completed_ms < $1 AND zx_im_fence($2)",
+                &[&before],
+            )
             .await
             .map(drop)
             .map_err(|failure| format!("cannot prune the backlog: {failure}"))
@@ -38,8 +41,9 @@ impl Backlog for PostgresBacklog {
     async fn keep(&self, key: &MessageKey, record: &str) -> Result<Kept, String> {
         let kept = self
             .database
-            .execute(
-                "INSERT INTO zx_im_backlog (platform, conversation, message, record) VALUES ($1, $2, $3, $4) \
+            .write(
+                "INSERT INTO zx_im_backlog (platform, conversation, message, record) \
+                 SELECT $1::text, $2::text, $3::text, $4::text WHERE zx_im_fence($5) \
                  ON CONFLICT (platform, conversation, message) DO NOTHING",
                 &[&key.platform, &key.conversation.0, &key.message.0, &record],
             )
@@ -52,10 +56,11 @@ impl Backlog for PostgresBacklog {
     async fn complete(&self, key: &MessageKey) -> Result<(), String> {
         let now = now();
         self.database
-            .execute(
+            .write(
                 "INSERT INTO zx_im_backlog (platform, conversation, message, record, completed_ms) \
-                 VALUES ($1, $2, $3, '', $4) \
-                 ON CONFLICT (platform, conversation, message) DO UPDATE SET record = '', completed_ms = $4",
+                 SELECT $1::text, $2::text, $3::text, '', $4::bigint WHERE zx_im_fence($5) \
+                 ON CONFLICT (platform, conversation, message) \
+                 DO UPDATE SET record = '', completed_ms = EXCLUDED.completed_ms",
                 &[&key.platform, &key.conversation.0, &key.message.0, &now],
             )
             .await
@@ -95,13 +100,13 @@ fn pending(row: &Row) -> Result<(MessageKey, String), Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::database;
+    use super::super::test_support::leading;
     use super::*;
     use crate::test_support::message_key as key;
 
     #[tokio::test]
     async fn a_message_is_kept_once_and_known_after_it_is_handled() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let backlog = PostgresBacklog::new(database);
@@ -123,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_message_handled_longer_ago_than_a_platform_redelivers_is_forgotten() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let backlog = PostgresBacklog::new(Arc::clone(&database));

@@ -1,0 +1,42 @@
+# Two replicas, on different nodes where there are several. With no volume of their own to wait
+# for, a rolling update starts the new Pod before the old one stops; the old one, if it leads,
+# lets go of the lead as it stops, and a waiting replica takes over.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zx-agent
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: zx-agent
+      containers:
+        - name: zx-agent
+          env:
+            # The connection string, password included: what im.toml's [sessions]
+            # postgresUrlEnv names.
+            - name: ZX_IM_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-im
+                  key: postgres-url
+      volumes:
+        # HOME, the Pod's own: the sessions are in Postgres, the files that commands write in
+        # the working directory stay with the Pod.
+        - name: data
+          persistentVolumeClaim: null
+          emptyDir:
+            sizeLimit: 1Gi

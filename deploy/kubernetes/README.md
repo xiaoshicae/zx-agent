@@ -93,6 +93,32 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。只改了 `im.toml` 的 `[access]` 时可以不重启：等挂载的 ConfigMap 更新（约 1 分钟），再执行 `kubectl -n zx-agent exec deploy/zx-agent -c zx-agent -- sh -c 'kill -HUP "$(pidof zx-im)"'`，日志里出现 `reloaded` 行即已生效。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
 
+### IM 服务的多副本
+
+同时启用 `im` 与 `im-replicas` 时，IM 服务有两个副本，会话存在 Postgres 里（D44）：
+- 一个当选为主，连平台、服务对话；
+- 另一个待命，主停止或与库断开后接手，在原会话里接着对话。
+
+1. 准备一个 Postgres 库，和一个能在其默认 schema 中建表、建函数的账号，如库的所有者。zx-im 启动时自己建表。测试用的是 Postgres 16。
+2. 第 1 步的 Secret 里多加一个键 `postgres-url`，值是连接串，跨网络时带 `sslmode=require`。例如加上 `--from-literal=postgres-url='postgres://<账号>:<密码>@<主机>:5432/<库>?sslmode=require'`，已有的 Secret 用 `--dry-run=client -o yaml | kubectl apply -f -` 更新。
+3. `im.toml` 的 `[sessions]` 去掉 `dir`，改为 `postgresUrlEnv = "ZX_IM_POSTGRES_URL"`，再更新 ConfigMap。
+4. 在 `kustomization.yaml` 的 `components:` 中再取消 `- im-replicas` 的注释，`apply -k`。
+
+这个组件对 Deployment 的改动：
+- 改为 2 个副本，滚动更新时先起新 Pod 再停旧的；
+- 尽量把两个 Pod 分到不同节点；
+- 去掉只能在一个节点上挂载的卷 `zx-agent-data`：会话在库里，命令在工作目录里写的文件随 Pod 而去。
+
+两个 Pod 的日志里：
+- 主有一行 `[im] leading, term <n>`；
+- 备有一行 `[im] another replica leads; this one waits to take over`。
+
+接手的时间：
+- 主的进程结束时（滚动更新时收尾完毕退出，或崩溃），锁随即放出，备在 2 秒内接手。
+- 主所在的节点或网络出了问题时，库要等半分钟左右才放出锁。原来的主连不上库后约 10 秒内发现自己已不再是主，停止服务，以退出码 1 结束，由 Kubernetes 重启为备。
+
+只改了 `[access]` 时，向每个 Pod 发 SIGHUP，待命的那个也会重读，接手时用新的名单。也可以 `rollout restart`。列出这两个 Pod：`kubectl -n zx-agent get pods -l app.kubernetes.io/name=zx-agent -o name`。
+
 ## 权限
 
 两个账号都只能读：`view` 覆盖各命名空间中除 Secret 外的多数对象，`zx-agent-cluster-view` 补上 `view` 不含的节点、持久卷与存储类。应用 `operator.yaml` 后，`zx-agent` 在其中写了 RoleBinding 的命名空间里另有下列写权限：chat 与 zx-im 中这些命令每次都要人工确认；在常驻 Pod 中执行的 `run` 不询问，会直接执行（见“使用”）。
@@ -129,4 +155,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-deploy/kubernetes/README.md · v0.11 · 2026年11月
+deploy/kubernetes/README.md · v0.12 · 2026年11月

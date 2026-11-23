@@ -42,7 +42,7 @@ pub(crate) use self::args::Args;
 use self::config_file::{ConfigFile, OwnChat, ServerSections, read_file, server_config};
 use self::log::{Log, failure_log};
 use self::send_file::SendFiles;
-use self::stores::Stores;
+use self::stores::{LeadLost, Leadership, Stores};
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION};
 use crate::{ChatConfig, DailyLimit, ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
@@ -178,6 +178,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 usage,
                 shown,
                 hidden_env: connection_env,
+                leadership,
             } = stores::open(&sessions).await?;
             let mut hidden_env = hidden_env;
             hidden_env.extend(connection_env);
@@ -205,7 +206,12 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 im_toml: &path,
                 sessions: &shown,
             };
-            Ok(serve(config, &agent, channels, files, unprompted).await)
+            let serving = Serving {
+                channels,
+                unprompted,
+                leadership,
+            };
+            serve(config, &agent, serving, files).await
         })
         .await?;
     for notice in end.notices() {
@@ -350,45 +356,95 @@ struct Files<'a> {
     sessions: &'a str,
 }
 
-/// Serve `channels` as `config` says, with the sessions of `agent`, kept where `files` says,
-/// and the conversations that `unprompted` starts without a message, until a signal or a
-/// platform's failure; the exit code says which.
-async fn serve(
-    config: ServerConfig,
-    agent: &ConfiguredAgent,
+/// What the server serves besides its configuration and agent: the platforms' channels, the
+/// conversations started without a message, and when this process may serve.
+struct Serving {
     channels: Vec<Arc<dyn ImChannel>>,
-    files: Files<'_>,
     unprompted: Unprompted,
-) -> u8 {
+    leadership: Leadership,
+}
+
+/// Serve as `config` says, with the sessions of `agent`, kept where `files` says, what
+/// `serving` gives, once this process's turn comes, until a signal, a platform's failure or
+/// the loss of the lead; the exit code says which. The signals are heard while it waits for
+/// its turn: SIGINT and SIGTERM end the wait, and SIGHUP reads the lists again. An `Err` when
+/// the turn cannot be waited for, such as when the database cannot be reached.
+async fn serve(config: ServerConfig, agent: &ConfiguredAgent, serving: Serving, files: Files<'_>) -> Result<u8> {
+    let Serving {
+        channels,
+        unprompted,
+        leadership,
+    } = serving;
     let names: Vec<String> = channels.iter().map(|channel| channel.platform().to_string()).collect();
-    eprint_line(&format!(
-        "[im] platforms={}; sessions in {}; schedules: {}",
-        names.join(","),
-        files.sessions,
-        unprompted.schedules.len()
-    ));
     let cancel = CancellationToken::new();
     // Without the listeners serving goes on, each run still bounded by its own limits.
     if let Err(error) = spawn_signal_handler(cancel.clone()) {
         eprint_line(&format!("zx-im: cannot listen for shutdown signals: {error}"));
     }
     // The session file is the record of each conversation; the operator log holds approvals,
-    // triggers and failures (Log), and traces, when exported, the timeline.
+    // triggers and failures (Log), and traces, when exported, the timeline. Made before the
+    // turn comes, so that a SIGHUP reaches its lists meanwhile.
     let server = Server::new(config, agent.agent().clone(), Arc::new(Log));
-    for source in unprompted.sources {
-        source(server.triggers());
-    }
-    let scheduling = tokio::spawn(scheduler::run(unprompted.schedules, server.triggers(), cancel.clone()));
     #[cfg(unix)]
-    let reloading = reload::on_hangup(files.im_toml.to_path_buf(), names, server.access(), cancel.clone());
-    let served = server.run(channels, &cancel).await;
+    let reloading = reload::on_hangup(
+        files.im_toml.to_path_buf(),
+        names.clone(),
+        server.access(),
+        cancel.clone(),
+    );
+    let served = match leadership.take(&cancel).await {
+        Ok(Some(lead_lost)) => {
+            eprint_line(&format!(
+                "[im] platforms={}; sessions in {}; schedules: {}",
+                names.join(","),
+                files.sessions,
+                unprompted.schedules.len()
+            ));
+            Ok(serve_turn(server, channels, unprompted, &cancel, lead_lost).await)
+        }
+        // A signal came first.
+        Ok(None) => Ok(EXIT_COMPLETED),
+        Err(error) => Err(error),
+    };
     #[cfg(unix)]
     if let Some(reloading) = reloading {
         reloading.abort();
     }
+    served
+}
+
+/// Serve with `server` until a signal cancels `cancel`, a platform fails or `lead_lost`
+/// resolves, which stops the server as a signal does; the exit code says which.
+async fn serve_turn(
+    server: Server,
+    channels: Vec<Arc<dyn ImChannel>>,
+    unprompted: Unprompted,
+    cancel: &CancellationToken,
+    mut lead_lost: LeadLost,
+) -> u8 {
+    for source in unprompted.sources {
+        source(server.triggers());
+    }
+    let scheduling = tokio::spawn(scheduler::run(unprompted.schedules, server.triggers(), cancel.clone()));
+    let running = server.run(channels, cancel);
+    tokio::pin!(running);
+    let (served, lost) = tokio::select! {
+        served = &mut running => (served, None),
+        why = &mut lead_lost => {
+            cancel.cancel();
+            ((&mut running).await, Some(why))
+        }
+    };
     // The server is gone, also after a platform's failure, which cancels nothing.
     scheduling.abort();
-    serve_exit_code(served)
+    let code = serve_exit_code(served);
+    match lost {
+        Some(why) => {
+            eprint_line(&format!("zx-im: lost the lead: {why}"));
+            EXIT_ERROR
+        }
+        None => code,
+    }
 }
 
 /// The channels of the configured IM platforms, and the environment variables that hold

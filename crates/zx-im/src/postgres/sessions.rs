@@ -92,15 +92,16 @@ impl SessionStorage for PostgresSessions {
         let labels = serde_json::to_string(&header.labels)?;
         let created = self
             .database
-            .execute(
-                "INSERT INTO zx_im_sessions (id, header, cwd, labels) VALUES ($1, $2, $3, $4::text::jsonb)",
+            .write(
+                "INSERT INTO zx_im_sessions (id, header, cwd, labels) \
+                 SELECT $1::text, $2::text, $3::text, $4::text::jsonb WHERE zx_im_fence($5)",
                 &[&header.id, &text, &header.cwd, &labels],
             )
             .await;
         match created {
             Ok(_) => Ok(self.log(&header.id)),
             Err(Failure::Duplicate) => bail!("session {} exists already", header.id),
-            Err(Failure::Other(error)) => bail!("cannot create session {}: {error}", header.id),
+            Err(failure) => bail!("cannot create session {}: {failure}", header.id),
         }
     }
 
@@ -161,8 +162,9 @@ impl SessionLog for PostgresLog {
         let seq = bigint(record.seq, "the record number").map_err(|failure| anyhow!("{failure}"))?;
         let appended = self
             .database
-            .execute(
-                "INSERT INTO zx_im_records (session_id, seq, record) VALUES ($1, $2, $3)",
+            .write(
+                "INSERT INTO zx_im_records (session_id, seq, record) \
+                 SELECT $1::text, $2::bigint, $3::text WHERE zx_im_fence($4)",
                 &[&self.id, &seq, &record.json],
             )
             .await;
@@ -173,7 +175,7 @@ impl SessionLog for PostgresLog {
                 self.id,
                 record.seq
             ),
-            Err(Failure::Other(error)) => bail!("cannot append to session {}: {error}", self.id),
+            Err(failure) => bail!("cannot append to session {}: {failure}", self.id),
         }
     }
 }
@@ -196,7 +198,7 @@ mod tests {
 
     use zx_agent::ai::Message;
 
-    use super::super::test_support::database;
+    use super::super::test_support::leading;
     use super::*;
 
     /// A header of a session in `cwd` with the label `who`.
@@ -208,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_is_written_found_by_its_labels_and_opened_again() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let storage = PostgresSessions::new(database);
@@ -243,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_is_created_once_and_a_second_writer_cannot_fork_it() {
-        let Some(database) = database().await else {
+        let Some(database) = leading().await else {
             return;
         };
         let storage = PostgresSessions::new(database);
