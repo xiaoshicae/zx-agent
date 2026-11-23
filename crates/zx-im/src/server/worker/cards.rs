@@ -35,7 +35,7 @@ impl Worker {
             // The card was closed already; a late click changes nothing.
             return;
         };
-        if !self.out.shared.is_approver(&self.out.key.platform, &user) {
+        if !self.out.shared.is_approver(&self.out.key, &user) {
             self.out.post(self.out.replies().not_approver.clone()).await;
             return;
         }

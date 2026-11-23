@@ -159,7 +159,7 @@ apiKeyHeader = "authorization"
 
 ### 内置 agent
 
-`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-app/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
+`run` 使用内置的 `unattended`，`chat`、`acp` 与 `zx-im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-app/agents/`）。主目录下的同名文件替换它们；其他名字的文件只在 `zx-im` 的 [`[[chats]]`](#imtoml) 为某个聊天选用时读取（名字只能用字母、数字、`-` 与 `_`），没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
 
 | | `unattended` | `assistant` |
 |---|---|---|
@@ -311,7 +311,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]`、`[[schedules]]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]`、`[[schedules]]`、`[[chats]]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]
@@ -348,6 +348,12 @@ everySecs = 3600                   # 至少 60；第一次在启动后一个间�
 prompt = "检查集群：未就绪的 Pod 与最近一小时的 Warning 事件，有问题再展开。"
 # title = "定时巡检"                 # 开出线程的那条消息，默认为 name
 
+# 可选：某个聊天用自己的 agent 或审批人，可以写多个
+[[chats]]
+chat = "slack:C0987654321"         # 须在 access.conversations 里，不能重复
+agent = "prod-readonly"            # 主目录的 agents/prod-readonly.md；不写时用 assistant
+approvers = ["slack:U0123456789"]  # 替换 access.approvers，只能是这个聊天所在平台的用户
+
 # 可选：替换默认的英文文案，全部字段与中文译文见仓库的 deploy/kubernetes/im/im.example.toml
 [replies]
 working = "处理中…"
@@ -359,6 +365,8 @@ allowed = "已批准"
 
 `[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
+`[[chats]]` 让一个进程服务的聊天各有自己的角色，例如生产群用只读的 agent、只让值班的人审批。每项至少写 `agent` 与 `approvers` 之一，没写的那一项用默认的。工具、权限、上限与说明都随 agent 文件（见上文 [agent](#agent)）；每个 agent 启动时各装配一次、试开一个会话，文件不存在或设置有误时以退出码 2 结束。MCP 连接、会话目录与 `[limits]` 由所有聊天共用。聊天换了 agent 后，已有的对话在原来的会话里继续，按新 agent 的设置。
+
 ---
 
-CONFIGURATION.md · v0.40 · 2026年11月
+CONFIGURATION.md · v0.41 · 2026年11月

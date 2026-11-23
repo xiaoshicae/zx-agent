@@ -1,7 +1,8 @@
 //! The program `zx-im`: configuration errors, the MCP servers it connects before serving,
 //! and the whole path against a fake Slack and a fake model: a mention, an approval card and
 //! its click, hidden and redacted Slack tokens, the session file, the operator log, the stop,
-//! and restarts after a kill: a status replaced, and a message not handled yet answered.
+//! restarts after a kill (a status replaced, and a message not handled yet answered), and the
+//! agent a chat has of its own.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -345,6 +346,61 @@ async fn im_tells_the_model_how_the_conversation_reaches_people() {
     assert!(section.contains("Only your final answer"), "{prompt}");
     assert!(section.contains("sender's name"), "{prompt}");
     child.kill().await.unwrap();
+}
+
+/// The instructions of the agent `prod`, which no built-in agent has.
+const PROD_INSTRUCTIONS: &str = "You only look at production.";
+
+/// [`VALID`] with the slack:C2 served too, where the agent `prod` answers.
+fn with_prod_chat(slack_api: &str) -> String {
+    let served = VALID
+        .replace("[slack]\n", &format!("[slack]\napiBase = \"{slack_api}\"\n"))
+        .replace("[\"slack:C1\"]", "[\"slack:C1\", \"slack:C2\"]");
+    format!("{served}\n[[chats]]\nchat = \"slack:C2\"\nagent = \"prod\"\n")
+}
+
+#[tokio::test]
+async fn a_chat_with_an_agent_of_its_own_is_answered_by_that_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::text("assistant"), Reply::text("prod")]).await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_im_config(dir.path(), &with_prod_chat(&slack.api_base));
+    let mut command = im(dir.path(), &config, &model.base_url);
+    program::write_agent_file(
+        &dir.path().join(".zx-agent-home"),
+        "prod",
+        &program::agent_text("extends = \"assistant\"", PROD_INSTRUCTIONS),
+    );
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "hello")).await;
+    model.wait_for_requests(1).await;
+    let mut in_prod = mention("e2", "1700000002.000100", "hello");
+    in_prod["payload"]["event"]["channel"] = json!("C2");
+    socket.send(in_prod).await;
+    model.wait_for_requests(2).await;
+
+    let system = |index: usize| model.requests()[index].body["messages"][0]["content"].to_string();
+    assert!(!system(0).contains(PROD_INSTRUCTIONS), "{}", system(0));
+    assert!(system(1).contains(PROD_INSTRUCTIONS), "{}", system(1));
+    child.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_naming_an_agent_the_home_does_not_have_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_im_config(dir.path(), &with_prod_chat("http://127.0.0.1:9/api"));
+    let output = im(dir.path(), &config, "http://127.0.0.1:9/v1").output().await.unwrap();
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("chats \"slack:C2\": agent \"prod\": "), "{stderr}");
+    assert!(stderr.contains("prod.md does not exist"), "{stderr}");
 }
 
 #[tokio::test]

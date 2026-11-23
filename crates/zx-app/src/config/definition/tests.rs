@@ -47,7 +47,7 @@ const BUILTINS: [Builtin; 2] = [Builtin::Unattended, Builtin::Assistant];
 
 /// The built-in agent `builtin`, without a zx-agent home.
 fn load(builtin: Builtin) -> AgentDefinition {
-    AgentDefinition::load(builtin, None, &Config::default(), &HostTools::default()).unwrap()
+    AgentDefinition::load(builtin.name(), None, &Config::default(), &HostTools::default()).unwrap()
 }
 
 /// The configuration of a `config.toml` holding `text`.
@@ -289,7 +289,7 @@ fn an_agent_without_extends_starts_from_nothing_and_needs_instructions() {
     std::fs::create_dir(home.path().join("agents")).unwrap();
     std::fs::write(home.path().join("agents/unattended.md"), "+++\n+++\nOnly this.\n").unwrap();
     let in_run = AgentDefinition::load(
-        Builtin::Unattended,
+        Builtin::Unattended.name(),
         Some(home.path()),
         &Config::default(),
         &HostTools::default(),
@@ -359,7 +359,7 @@ fn a_user_agent_that_fails_its_checks_names_its_file() {
     )
     .unwrap();
     let loaded = AgentDefinition::load(
-        Builtin::Unattended,
+        Builtin::Unattended.name(),
         Some(home.path()),
         &Config::default(),
         &HostTools::default(),
@@ -379,10 +379,16 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
         "+++\nextends = 'assistant'\ntools = []\n+++\nMine.\n",
     )
     .unwrap();
-    // Not the name of a built-in agent: never read, even though it is broken.
+    // Another agent, which nobody chooses here: never read, even though it is broken.
     std::fs::write(agents.join("ops.md"), "not an agent").unwrap();
-    let load_in =
-        |builtin| AgentDefinition::load(builtin, Some(home.path()), &Config::default(), &HostTools::default());
+    let load_in = |builtin: Builtin| {
+        AgentDefinition::load(
+            builtin.name(),
+            Some(home.path()),
+            &Config::default(),
+            &HostTools::default(),
+        )
+    };
     let assistant = load_in(Builtin::Assistant).unwrap();
     assert_eq!(assistant.name, "assistant");
     assert_eq!((assistant.instructions.as_str(), assistant.tools.len()), ("Mine.\n", 0));
@@ -397,6 +403,47 @@ fn a_file_in_the_home_replaces_the_built_in_agent_of_its_name_only() {
     let error = format!("{:#}", load_in(Builtin::Unattended).unwrap_err());
     assert!(error.contains("unattended.md"), "{error}");
     assert!(error.contains("the first line must be +++"), "{error}");
+}
+
+#[test]
+fn a_host_chooses_another_agent_of_the_home_by_its_name() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    std::fs::create_dir(&agents).unwrap();
+    std::fs::write(
+        agents.join("prod-readonly.md"),
+        "+++\nextends = 'assistant'\ntools = ['read_file']\n+++\nOnly look.\n",
+    )
+    .unwrap();
+    let load_in = |name: &str, home: Option<&Path>| {
+        AgentDefinition::load(name, home, &Config::default(), &HostTools::default())
+            .map_err(|error| format!("{error:#}"))
+    };
+    let agent = load_in("prod-readonly", Some(home.path())).unwrap();
+    assert_eq!(agent.name, "prod-readonly");
+    assert_eq!(
+        (agent.instructions.as_str(), agent.tools.as_slice()),
+        ("Only look.\n", &["read_file".to_string()][..])
+    );
+    // The assistant's settings that the file leaves out are inherited.
+    assert_eq!(agent.permissions.ask, ["bash", "edit_file", "write_file"]);
+
+    // Another name needs its file, and a home to find it in.
+    let missing = load_in("prod", Some(home.path())).unwrap_err();
+    assert!(missing.starts_with("agent \"prod\": "), "{missing}");
+    assert!(missing.ends_with("prod.md does not exist"), "{missing}");
+    assert_eq!(
+        load_in("prod-readonly", None).unwrap_err(),
+        "agent \"prod-readonly\": there is no zx-agent home to read agents/prod-readonly.md from"
+    );
+    // A name only names a file in agents/.
+    for name in ["", "../prod-readonly", "sub/prod", "prod.md", "生产"] {
+        let error = load_in(name, Some(home.path())).unwrap_err();
+        assert!(
+            error.contains("a name is made of letters, digits, '-' and '_'"),
+            "{name:?}: {error}"
+        );
+    }
 }
 
 #[test]

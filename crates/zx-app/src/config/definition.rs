@@ -1,9 +1,10 @@
 //! An agent: what it does and may do. A host runs one of the built-in agents, which a file of
-//! the same name in the `agents/` directory of the zx-agent home replaces.
+//! the same name in the `agents/` directory of the zx-agent home replaces, or another file
+//! there that it chooses by name.
 
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use zx_agent::agent::RunLimits;
 use zx_agent::builtin::tools::{EXECUTOR_TOOL_NAMES, READ_OUTPUT};
@@ -15,7 +16,8 @@ use super::permissions::Permissions;
 use super::skills::{READ_SKILL, Skill, validate_skills};
 use super::{Config, read_text};
 
-/// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
+/// Under the zx-agent home: the user's agents. One of a built-in agent's name replaces it; a
+/// host chooses the others by name.
 const AGENTS_DIR: &str = "agents";
 
 /// A built-in agent: the one a host runs, unless the user's file of its name replaces it. An
@@ -36,6 +38,13 @@ impl Builtin {
             Self::Unattended => "unattended",
             Self::Assistant => "assistant",
         }
+    }
+
+    /// The built-in agent `name` names, as [`name`](Self::name) spells it.
+    fn named(name: &str) -> Option<Self> {
+        [Self::Unattended, Self::Assistant]
+            .into_iter()
+            .find(|builtin| builtin.name() == name)
     }
 
     /// The agent file embedded in the program.
@@ -85,13 +94,26 @@ pub(crate) struct AgentDefinition {
 }
 
 impl AgentDefinition {
-    /// The agent `builtin`, checked against `config` and the tools of the `host`: the user's
+    /// The agent `name`, checked against `config` and the tools of the `host`: the user's
     /// `agents/<name>.md` in the zx-agent `home` when that file exists, else the built-in
-    /// agent. No other file is read: a file in `agents/` with another name is ignored.
-    pub(crate) fn load(builtin: Builtin, home: Option<&Path>, config: &Config, host: &HostTools) -> Result<Self> {
-        match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", builtin.name()))) {
-            Some(path) if exists(&path)? => Self::from_file(&path, config, host),
-            _ => Self::builtin(builtin)?.checked(config, host),
+    /// agent of that name. No other file is read.
+    ///
+    /// Fails on a name of other characters than letters, digits, `-` and `_`, and on a name
+    /// that is no built-in agent's and has no file.
+    pub(crate) fn load(name: &str, home: Option<&Path>, config: &Config, host: &HostTools) -> Result<Self> {
+        // The name becomes a file name in `agents/`, so it can name nothing else.
+        let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        ensure!(valid, "agent {name:?}: a name is made of letters, digits, '-' and '_'");
+        let path = home.map(|home| home.join(AGENTS_DIR).join(format!("{name}.md")));
+        if let Some(path) = &path
+            && exists(path)?
+        {
+            return Self::from_file(path, config, host);
+        }
+        match (Builtin::named(name), path) {
+            (Some(builtin), _) => Self::builtin(builtin)?.checked(config, host),
+            (None, Some(path)) => bail!("agent {name:?}: {} does not exist", path.display()),
+            (None, None) => bail!("agent {name:?}: there is no zx-agent home to read agents/{name}.md from"),
         }
     }
 

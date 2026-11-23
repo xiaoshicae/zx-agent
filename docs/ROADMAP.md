@@ -31,7 +31,7 @@
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `zx-im` 与 SDK |
 | D15 | 只读写当前会话格式（`SESSION_VERSION`），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
 | D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；在频道里直接 @ 机器人时，先读入频道里上次 @ 它之后的消息（至多 50 条）再回答，“上次”以平台上的消息为准，不另存游标；不加开关（2026-11-22 用户决定，原为不读频道历史）。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
-| D17 | `config.toml` 是环境，agent 文件是角色，都在主目录；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
+| D17 | `config.toml` 是环境，agent 文件是角色，都在主目录；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；其他名字的文件只在宿主选用时读取，zx-im 由 `im.toml` 按聊天选（D39）。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要：摘要每次读取原始记录，上限见 [CONFIGURATION.md](CONFIGURATION.md#上下文管理) |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs` 一个设置；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
 | D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名，不进入模型上下文，不能清除；只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置，chat 按 D13 不加命令；`session/set_title` 在协议中仍不稳定，不实现。细节见 [REFERENCE.md](REFERENCE.md) |
@@ -53,6 +53,7 @@
 | D36 | 支持图片输入（2026-11-20 用户决定，原先第 7 节的“工具结果中的图片”不做取消）：用户消息与工具结果在文本旁带 `images`（base64 与媒体类型），不像 pi 那样与文本穿插；`[[models]]` 的 `input` 默认只有文本（沿用 pi），没声明 `"image"` 的模型由 provider 按请求把图片换成一句说明，会话里存原图；图片进入会话前由 `zx_agent::builtin::images` 按 pi 的上限适配。入口：`read_file` 与 MCP 的结果、ACP 提问、`run` 的 `@文件`、IM 附件（Slack 与 ⚑ D:5/CHINA FLAG: 飞书。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书平台模块下载用户发送的图片（软件/数据）] Subject to Legal/Export Compliance approval）。音频与视频不收（第 5 节）。行为见 [REFERENCE.md](REFERENCE.md#图片) |
 | D37 | zx-im 可以不等人发消息就开始对话（2026-11-22 用户决定，原第 7 节“由 webhook 或告警触发运行”不做取消）：一个触发（`zx_im::Trigger`）在名单里的频道发一条消息开出线程，在线程里问给定的提问，此后回答、审批与接话都照常。来源是 `im.toml` 的 `[[schedules]]`（固定间隔，至少 60 秒，第一次在启动后一个间隔），以及宿主经 `Server::triggers` 或 `Program::on_triggers` 给出的触发。zx-im 仍只需出网，不开监听端口；告警等外部系统按 D10 由宿主的适配器接入。触发计入 `maxConversations`，不进 backlog，停机期间到点的不补。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D38 | MCP 客户端适合常驻（2026-11-23，P19 ②）。断线与会话失效：服务器停机期间的调用以错误结果交给模型，恢复后照常；服务器回 404 表示会话已失效时，rmcp 重新握手、重发这次请求；都不必重启宿主，测试覆盖两代协议。调用失败的错误不带 URL 的路径与查询（可能含凭据），也不带 rmcp 内部的类型名。工具只在启动时列出一次，不重新列出：说明与参数在会话打开时声明，放行规则在装配 agent 时定，中途更换要两处一起改；服务器换了工具后，重启宿主生效。请求头：`[[mcp]]` 的 `headers` 直接写值，`headerEnv` 从环境变量读值，与 `tokenEnv` 一样对命令隐藏、在输出中脱敏；传输自己用的头不能设，设了 `tokenEnv` 时不能再设 `Authorization`。只读标注：`trustReadOnly = true` 时信任该服务器的 `readOnlyHint`，标了只读的工具声明为只读（中断时不报“可能改过状态”），并且不询问；agent 的 `permissions.ask` 与 `deny` 仍可收紧。不设时标注只是提示，工具照旧询问 |
+| D39 | zx-im 按聊天选 agent 与审批人（2026-11-23，P19 ③）：一个进程服务的聊天可以各有自己的角色，例如生产群用只读的 agent、只让值班的人审批，测试群用可写的。`im.toml` 的 `[[chats]]` 给名单里的一个聊天指定 `agent` 或 `approvers`：`agent` 是主目录 `agents/<名字>.md` 的名字（只能用字母、数字、`-` 与 `_`），工具、权限、上限与说明都随它；内置 agent 的名字照旧取用户的同名文件或内置的。`approvers` 替换 `access.approvers`，只能是该聊天所在平台的用户。没写的聊天用 `assistant` 与 `access.approvers`。选 agent 的只有部署配置：命令行仍没有 `--agent`（D17），项目内容也选不了。每个 agent 启动时各装配一次、试开一个会话；MCP 连接、会话目录与 `[limits]` 由所有聊天共用，工作目录与模型仍按进程。聊天换了 agent 后，已有对话在原会话里继续，按新 agent 的设置（说明的变化按不变量 6 追加）。库：`zx_im::ServerConfig::chats`（`ChatConfig`；其中的 agent 须把会话存在服务的 agent 的存储里，服务在那里找对话的会话）与 `zx_app::Application::build_named` |
 
 ## 4. 当前阶段
 
@@ -62,7 +63,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - P9 可选增强：Anthropic Messages API 的 provider 已实现（`provider.api = "anthropic"`），只对模拟服务测试过，待真实 API 验收（付费，须用户授权）；⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口可用，不单独写。
 - P15 IM 对话模型（D16）：Slack 实现了读线程与频道、查名字与回执；⚑ D:5/CHINA FLAG: 飞书读话题与群（2026-11-22），名字与回执沿用默认（用 open_id、不回执），待按需补上。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取该平台上话题与群的历史消息；补上名字后还会读取用户名称] Subject to Legal/Export Compliance approval。
 
-- P19 常驻 agent 的核心能力（2026-11-22 用户决定，按顺序做）：① 主动发起对话（D37，已实现）；② MCP 客户端的常驻能力（D38，已实现）：断线与会话失效后照常调用、自定义请求头、按服务器信任只读标注；③ 按聊天选 agent 与权限；④ 按天的用量上限；⑤ 名单热加载；⑥ IM 发文件；⑦ 运行指标；⑧ 多副本（要选数据库，新增依赖须另行批准）。观测、数据库等场景能力由外部实现（D8、D10）。
+- P19 常驻 agent 的核心能力（2026-11-22 用户决定，按顺序做）：① 主动发起对话（D37，已实现）；② MCP 客户端的常驻能力（D38，已实现）：断线与会话失效后照常调用、自定义请求头、按服务器信任只读标注；③ 按聊天选 agent 与权限（D39，已实现）：权限随 agent 文件，另可指定审批人；④ 按天的用量上限；⑤ 名单热加载；⑥ IM 发文件；⑦ 运行指标；⑧ 多副本（要选数据库，新增依赖须另行批准）。观测、数据库等场景能力由外部实现（D8、D10）。
 
 ## 5. 待办与已知缺口
 
@@ -141,4 +142,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.67 · 2026年11月
+ROADMAP.md · v0.68 · 2026年11月

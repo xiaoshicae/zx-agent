@@ -14,7 +14,7 @@ mod config_file;
 mod log;
 mod scheduler;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
+use zx_agent::Agent;
 use zx_agent::builtin::files::create_private_dir;
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
@@ -32,12 +33,12 @@ use zx_util::registry::Registry;
 use zx_util::stdio::eprint_line;
 
 pub(crate) use self::args::Args;
-use self::config_file::{ConfigFile, access, read_file, schedules, server_config};
+use self::config_file::{ConfigFile, OwnChat, access, chats, read_file, schedules, server_config};
 use self::log::{Log, failure_log};
 use crate::backlog::BacklogFiles;
 use crate::platform::{self, BuiltChannel, PlatformFactory, PlatformInput};
 use crate::server::{CONVERSATION, CONVERSATION_SECTION, StatusFiles};
-use crate::{ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
+use crate::{ChatConfig, ImChannel, ImError, Server, ServerConfig, Trigger, Triggers};
 
 /// Exit codes, so that a supervisor can react without parsing output: serving ended as
 /// asked, a platform failed while serving, or the configuration or the credentials were
@@ -47,6 +48,8 @@ const EXIT_ERROR: u8 = 1;
 pub(crate) const EXIT_USAGE: u8 = 2;
 /// The traces' `service.name` when the environment names no service: the program's name.
 const SERVICE_NAME: &str = "zx-im";
+/// The agent of the conversations in every chat without one of its own.
+const SERVER_AGENT: Builtin = Builtin::Assistant;
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`), and the
 /// messages received and not handled yet (`BacklogFiles`). The leading dot keeps them apart
 /// from the directories of the sessions, whose names start with `--`.
@@ -150,6 +153,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     let BuiltChannels { channels, hidden_env } = build_channels(&file, &registered, &path)?;
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &names)?;
+    let chats = chats(&file.chats, &conversations, &names)?;
     let unprompted = Unprompted {
         schedules: schedules(&file.schedules, &conversations, &names)?,
         sources: trigger_sources,
@@ -168,11 +172,13 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 &hidden_env,
                 telemetry.map(Telemetry::hook),
             );
-            let agent = conversations_agent(&app, &dir).await?;
+            // A conversation's sessions are those in the directory that carry its labels.
+            let (agent, chats) = conversations_agents(&app, &SessionPlace::directory(&dir), chats).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
                 statuses: Some(Arc::new(statuses)),
                 backlog: Arc::new(backlog),
+                chats,
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
             Ok(serve(config, &agent, channels, &dir, unprompted).await)
@@ -189,7 +195,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
 /// subcommands connect the same way: zx-app neither prints nor names the programs' options,
 /// and the two programs share no code.
 async fn connect(overrides: Overrides) -> Result<Application> {
-    let app = Application::from_environment(overrides, Builtin::Assistant)
+    let app = Application::from_environment(overrides, SERVER_AGENT)
         .await
         .map_err(with_model_hint)?;
     for notice in app.notices() {
@@ -227,24 +233,73 @@ fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// The agent of every conversation, whose sessions are kept under `dir`, once a session with
-/// these settings could be prepared: a wrong model, agent or tool setting would otherwise
+/// The agent of the conversations in every chat without one of its own, and what `chats` have
+/// of their own, each with the agent it names. Every agent keeps its sessions in `place`, and
+/// is built once, after a session with its settings could be prepared.
+async fn conversations_agents(
+    app: &Application,
+    place: &SessionPlace,
+    chats: Vec<OwnChat>,
+) -> Result<(ConfiguredAgent, Vec<ChatConfig>)> {
+    let server = conversations_agent(app, place, SERVER_AGENT.name()).await?;
+    let mut built = HashMap::from([(SERVER_AGENT.name().to_string(), server.agent().clone())]);
+    let mut configs = Vec::with_capacity(chats.len());
+    for OwnChat {
+        platform,
+        chat,
+        agent,
+        approvers,
+    } in chats
+    {
+        let agent = match agent {
+            Some(name) => {
+                let named = named_agent(app, place, &mut built, name).await;
+                Some(named.with_context(|| format!("chats \"{platform}:{chat}\""))?)
+            }
+            None => None,
+        };
+        configs.push(ChatConfig {
+            platform,
+            chat,
+            agent,
+            approvers,
+        });
+    }
+    Ok((server, configs))
+}
+
+/// The agent `name` among those `built`, built and kept there the first time a chat names it.
+async fn named_agent(
+    app: &Application,
+    place: &SessionPlace,
+    built: &mut HashMap<String, Agent>,
+    name: String,
+) -> Result<Agent> {
+    if let Some(agent) = built.get(&name) {
+        return Ok(agent.clone());
+    }
+    let agent = conversations_agent(app, place, &name).await?.agent().clone();
+    built.insert(name, agent.clone());
+    Ok(agent)
+}
+
+/// The agent `name` of conversations, whose sessions are kept in `place`, once a session with
+/// its settings could be prepared: a wrong model, agent or tool setting would otherwise
 /// surface only at the first message, in the chat. That session is never stored.
-async fn conversations_agent(app: &Application, dir: &Path) -> Result<ConfiguredAgent> {
-    build_agent(app, &SessionPlace::memory())?
+async fn conversations_agent(app: &Application, place: &SessionPlace, name: &str) -> Result<ConfiguredAgent> {
+    build_agent(app, name, &SessionPlace::memory())?
         .create(None)
         .await
         .context("cannot prepare a session with these settings")?;
-    // A conversation's sessions are those under `dir` that carry its labels.
-    build_agent(app, &SessionPlace::directory(dir))
+    build_agent(app, name, place)
 }
 
-/// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
+/// The agent `name` of conversations, whose sessions are kept in `place`, as chat's are, with
 /// approvals in the conversation: the server resolves each request with an approver's click
 /// on the card it posts.
-fn build_agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgent> {
+fn build_agent(app: &Application, name: &str, place: &SessionPlace) -> Result<ConfiguredAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
-    app.build(app.model(), place, approvals)
+    app.build_named(name, app.model(), place, approvals)
 }
 
 /// Serve `channels` as `config` says, with the sessions of `agent`, kept under `dir`, and the

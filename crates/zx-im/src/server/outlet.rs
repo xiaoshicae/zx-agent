@@ -220,7 +220,7 @@ impl Outlet {
     pub(super) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
-            match shared.agent.open_session(&id).await {
+            match shared.agent_of(&self.key).open_session(&id).await {
                 Ok(session) => return Ok(self.hold(session)),
                 Err(error) if !self.still_kept(&id).await => {
                     self.failed(format!("session {id} is gone ({error:#}); a new one is made"));
@@ -249,7 +249,7 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionQuery::default()
         };
-        match self.shared.agent.session_headers(&query).await {
+        match self.shared.agent_of(&self.key).session_headers(&query).await {
             Ok(headers) => headers.iter().any(|header| header.id == id),
             Err(_) => true,
         }
@@ -262,7 +262,7 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
         };
-        let created = self.shared.agent.create_session(options).await;
+        let created = self.shared.agent_of(&self.key).create_session(options).await;
         // The whole chain of causes.
         let session = created.map_err(|error| format!("{error:#}"))?;
         self.shared.go_on_in(&self.key, session.id());
@@ -273,7 +273,7 @@ impl Outlet {
     fn hold(&self, session: Session) -> Opened {
         Opened {
             session,
-            agent: self.shared.agent.clone(),
+            agent: self.shared.agent_of(&self.key).clone(),
         }
     }
 

@@ -14,7 +14,15 @@ use crate::{CardLabels, ConversationId, Replies, ServerConfig, Trigger, UserId};
 
 /// The sections of im.toml that are the server's; each of the others configures the platform
 /// registered under its name.
-const SERVER_SECTIONS: [&str; 6] = ["access", "limits", "sessions", "replies", "cardLabels", "schedules"];
+const SERVER_SECTIONS: [&str; 7] = [
+    "access",
+    "limits",
+    "sessions",
+    "replies",
+    "cardLabels",
+    "schedules",
+    "chats",
+];
 /// The shortest interval of a schedule: each time it posts in the chat and runs the model, so
 /// more often than once a minute is noise and cost rather than watch.
 const MIN_SCHEDULE_SECS: u64 = 60;
@@ -39,6 +47,9 @@ pub(super) struct ConfigFile {
     /// Conversations the server starts at fixed intervals, `[[schedules]]`.
     #[serde(default)]
     pub(super) schedules: Vec<ScheduleSection>,
+    /// Chats with an agent or approvers of their own, `[[chats]]`.
+    #[serde(default)]
+    pub(super) chats: Vec<ChatSection>,
     /// The section of each platform, by its name: what is left of the file but the server's.
     #[serde(skip)]
     pub(super) platforms: Vec<(String, toml::Table)>,
@@ -107,6 +118,82 @@ pub(super) struct ScheduleSection {
     title: Option<String>,
 }
 
+/// One of `[[chats]]`: what a chat the server serves has of its own.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct ChatSection {
+    /// A served chat, as `platform:id`, given once among the chats.
+    chat: String,
+    /// The agent of its conversations, by name: `agents/<agent>.md` in the zx-agent home, or
+    /// a built-in agent.
+    agent: Option<String>,
+    /// Who may approve in it, as `platform:id` on its platform, in place of
+    /// `access.approvers`.
+    approvers: Option<Vec<String>>,
+}
+
+/// A chat of `[[chats]]`, checked: what it has of its own, its agent by name.
+#[derive(Debug, PartialEq)]
+pub(super) struct OwnChat {
+    pub(super) platform: String,
+    pub(super) chat: ConversationId,
+    pub(super) agent: Option<String>,
+    pub(super) approvers: Option<Vec<UserId>>,
+}
+
+/// The chats of the file with settings of their own, checked: each names a chat among
+/// `conversations`, on one of `platforms`, once, and gives an agent or approvers, those on
+/// the chat's platform. Whether the agent exists is known once it is built.
+pub(super) fn chats(
+    sections: &[ChatSection],
+    conversations: &Conversations,
+    platforms: &HashSet<&str>,
+) -> Result<Vec<OwnChat>> {
+    let mut given = HashSet::new();
+    let mut chats = Vec::with_capacity(sections.len());
+    for section in sections {
+        let (platform, chat) = served_chat(&section.chat, conversations, platforms, "chats")?;
+        let field = format!("chats {:?}", section.chat);
+        ensure!(
+            given.insert((platform.clone(), chat.clone())),
+            "{field}: the chat is given more than once"
+        );
+        ensure!(
+            section.agent.is_some() || section.approvers.is_some(),
+            "{field}: give agent, approvers or both"
+        );
+        let approvers = match &section.approvers {
+            Some(listed) => Some(approvers_on(
+                listed,
+                &platform,
+                platforms,
+                &format!("{field}.approvers"),
+            )?),
+            None => None,
+        };
+        chats.push(OwnChat {
+            platform,
+            chat,
+            agent: section.agent.clone(),
+            approvers,
+        });
+    }
+    Ok(chats)
+}
+
+/// The users of the `platform:id` entries `listed` for `field`, each on `platform`.
+fn approvers_on(listed: &[String], platform: &str, platforms: &HashSet<&str>, field: &str) -> Result<Vec<UserId>> {
+    let mut users = Vec::with_capacity(listed.len());
+    for (on, id) in entries(listed, platforms, field)? {
+        ensure!(
+            on == platform,
+            "{field}: \"{on}:{id}\" is on another platform than the chat"
+        );
+        users.push(UserId(id));
+    }
+    Ok(users)
+}
+
 /// The schedules of the file, checked: each with its interval and the trigger it asks for.
 /// Each names a chat among `conversations`, on one of `platforms`, and has a unique name, a
 /// prompt and an interval of at least a minute.
@@ -125,14 +212,7 @@ pub(super) fn schedules(
             "schedules: more than one schedule is named {name:?}"
         );
         let field = format!("schedules {name:?}");
-        let mut split = entries(std::slice::from_ref(&section.chat), platforms, &format!("{field}.chat"))?;
-        let (platform, chat) = split.pop().expect("entries gives one pair for each entry");
-        let chat = ConversationId(chat);
-        ensure!(
-            conversations.contains(&(platform.clone(), chat.clone())),
-            "{field}.chat: {:?} is not in access.conversations",
-            section.chat
-        );
+        let (platform, chat) = served_chat(&section.chat, conversations, platforms, &format!("{field}.chat"))?;
         ensure!(
             section.every_secs >= MIN_SCHEDULE_SECS,
             "{field}.everySecs: at least {MIN_SCHEDULE_SECS}"
@@ -200,6 +280,24 @@ pub(super) fn server_config(
         config.idle = Duration::from_secs(secs);
     }
     config
+}
+
+/// The chat the `platform:id` entry `chat` names for `field`: one among `conversations`, on
+/// one of `platforms`.
+fn served_chat(
+    chat: &str,
+    conversations: &Conversations,
+    platforms: &HashSet<&str>,
+    field: &str,
+) -> Result<(String, ConversationId)> {
+    let mut split = entries(&[chat.to_string()], platforms, field)?;
+    let (platform, id) = split.pop().expect("entries gives one pair for each entry");
+    let served = (platform, ConversationId(id));
+    ensure!(
+        conversations.contains(&served),
+        "{field}: {chat:?} is not in access.conversations"
+    );
+    Ok(served)
 }
 
 /// Split `platform:id` entries, each naming a configured platform.
@@ -317,6 +415,64 @@ mod tests {
                 error.contains(expected),
                 "{schedules}: expected {expected:?} in {error}"
             );
+        }
+    }
+
+    /// The chats of a file that serves slack:C1 and feishu:oc_1, with `chats` after its
+    /// server's sections.
+    fn checked_chats(chats: &str) -> Result<Vec<OwnChat>> {
+        let platforms = HashSet::from(["slack", "feishu"]);
+        let config =
+            format!("[access]\nconversations = [\"slack:C1\", \"feishu:oc_1\"]\n[sessions]\ndir = \"d\"\n{chats}");
+        let file = ConfigFile::parse(&config)?;
+        let (conversations, _) = access(&file.access, &platforms)?;
+        super::chats(&file.chats, &conversations, &platforms)
+    }
+
+    const PROD: &str = "[[chats]]\nchat = \"slack:C1\"\nagent = \"prod\"\napprovers = [\"slack:U9\"]\n";
+
+    #[test]
+    fn a_chat_has_an_agent_and_approvers_of_its_own() {
+        let prod = OwnChat {
+            platform: "slack".into(),
+            chat: ConversationId("C1".into()),
+            agent: Some("prod".into()),
+            approvers: Some(vec![UserId("U9".into())]),
+        };
+        assert_eq!(checked_chats(PROD).unwrap(), [prod]);
+        // Either is enough: the chat keeps the server's other.
+        let agent_only = checked_chats(&PROD.replace("approvers = [\"slack:U9\"]\n", "")).unwrap();
+        assert_eq!(
+            (agent_only[0].agent.as_deref(), &agent_only[0].approvers),
+            (Some("prod"), &None)
+        );
+    }
+
+    #[test]
+    fn a_chat_that_cannot_be_used_as_written_is_refused() {
+        let cases = [
+            (
+                PROD.replace("slack:C1", "slack:C2"),
+                "chats: \"slack:C2\" is not in access.conversations",
+            ),
+            (PROD.replace("slack:C1", "teams:C1"), "which is not configured"),
+            (
+                format!("{PROD}{PROD}"),
+                "chats \"slack:C1\": the chat is given more than once",
+            ),
+            (
+                "[[chats]]\nchat = \"slack:C1\"\n".to_string(),
+                "chats \"slack:C1\": give agent, approvers or both",
+            ),
+            (
+                PROD.replace("slack:U9", "feishu:ou_9"),
+                "chats \"slack:C1\".approvers: \"feishu:ou_9\" is on another platform than the chat",
+            ),
+            (format!("{PROD}model = \"m\"\n"), "unknown field `model`"),
+        ];
+        for (chats, expected) in cases {
+            let error = format!("{:#}", checked_chats(&chats).unwrap_err());
+            assert!(error.contains(expected), "{chats}: expected {expected:?} in {error}");
         }
     }
 
