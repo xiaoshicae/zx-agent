@@ -50,6 +50,38 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
     assert!(!std::fs::read_to_string(session).unwrap().contains(KEY));
 }
 
+#[tokio::test]
+async fn a_key_written_in_config_toml_is_sent_and_redacted_as_one_from_a_variable() {
+    const KEY: &str = "sk-hooks-test-written";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("credentials.txt"), format!("token={KEY}\n")).unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("read1", "read_file", &json!({"path": "credentials.txt"})),
+        Reply::text("done"),
+    ])
+    .await;
+
+    let home = AgentHome::new(&format!("[provider]\napiKey = \"{KEY}\"\nmaxRetries = 0\n"));
+    let output = zx_agent_in(dir.path(), Home::Agent(home.path()))
+        .args(["run", "--model", "mock", "--tools", "read_file", "read credentials.txt"])
+        .env("ZX_BASE_URL", &server.base_url)
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let requests = server.requests();
+    // The headers are lowercased as received.
+    assert!(
+        requests[0].headers.contains(&format!("authorization: bearer {KEY}")),
+        "{}",
+        requests[0].headers
+    );
+    let messages = requests[1].body["messages"].to_string();
+    assert!(!messages.contains(KEY) && messages.contains("[REDACTED]"), "{messages}");
+    assert!(!stdout(&output).contains(KEY));
+}
+
 /// `zx-agent run` with bash against `server`, in `dir`.
 fn run_bash(server: &MockServer, dir: &Path) -> Command {
     run_bash_redacting(server, dir, &[])

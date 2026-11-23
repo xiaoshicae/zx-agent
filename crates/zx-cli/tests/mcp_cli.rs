@@ -54,7 +54,7 @@ fn agent_home_with(dir: &Path, url: &str, builtin_tools: &str, more: &str) -> Pa
         );
     }
     let server = format!(
-        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\ntools = [\"query\", \"range\"]\n{more}"
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntoken = \"${{{TOKEN_VAR}}}\"\ntools = [\"query\", \"range\"]\n{more}"
     );
     write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
@@ -187,7 +187,7 @@ async fn every_mcp_request_carries_the_configured_headers() {
         Reply::text("done"),
     ])
     .await;
-    let more = format!("headers = {{ X-Scope-OrgID = \"tenant-a\" }}\nheaderEnv = {{ X-Api-Key = \"{HEADER_VAR}\" }}");
+    let more = format!("headers = {{ X-Scope-OrgID = \"tenant-a\", X-Api-Key = \"${{{HEADER_VAR}}}\" }}");
     let home = agent_home_with(dir.path(), &fake.url, "[]", &more);
     let output = run(&model, dir.path(), &home).output().await.unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -231,7 +231,7 @@ async fn commands_do_not_see_a_header_variable_and_its_value_is_redacted() {
         Reply::text("done"),
     ])
     .await;
-    let more = format!("headerEnv = {{ X-Api-Key = \"{HEADER_VAR}\" }}");
+    let more = format!("headers = {{ X-Api-Key = \"${{{HEADER_VAR}}}\" }}");
     let home = agent_home_with(dir.path(), &fake.url, "[\"bash\"]", &more);
     let output = run(&model, dir.path(), &home).output().await.unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -329,7 +329,7 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
     );
     // The variable of a header is not set.
     let third = tempfile::tempdir().unwrap();
-    let more = format!("headerEnv = {{ X-Api-Key = \"{HEADER_VAR}\" }}");
+    let more = format!("headers = {{ X-Api-Key = \"${{{HEADER_VAR}}}\" }}");
     let mut no_header = run(
         &model,
         third.path(),
@@ -337,9 +337,12 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
     );
     no_header.env_remove(HEADER_VAR);
     for (mut command, expected) in [
-        (unset, "must hold its token"),
+        (unset, "mcp[0].token: names ${ZX_MCP_CLI_TEST_TOKEN}, which is not set"),
         (unreachable, "MCP server prom:"),
-        (no_header, "must hold the value of header X-Api-Key"),
+        (
+            no_header,
+            "mcp[0].headers.X-Api-Key: names ${ZX_MCP_CLI_TEST_HEADER}, which is not set",
+        ),
     ] {
         let output = command.output().await.unwrap();
         let stderr = stderr(&output);

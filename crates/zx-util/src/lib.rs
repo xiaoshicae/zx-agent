@@ -12,7 +12,8 @@
 //! - [`default`]: [`default::is_default`], for leaving a type's default, such as a zero count,
 //!   out of serialized records
 //! - [`env`](mod@env): [`env::env_value`], an environment variable that counts only when it
-//!   is set and not empty
+//!   is set and not empty, and [`env::expand`], a value of a configuration file whose
+//!   `${NAME}` placeholders are replaced by variables
 //! - [`registry`]: implementations registered under names, for a configuration to choose one
 //! - [`stdio`]: lines on stdout and stderr that do not panic when the stream is closed
 

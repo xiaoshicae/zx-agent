@@ -26,8 +26,8 @@ spec:
       containers:
         - name: zx-agent
           env:
-            # The connection string, password included: what im.toml's [sessions]
-            # postgresUrlEnv names.
+            # The connection string, password included, which im.toml's [sessions]
+            # names: postgresUrl = "${ZX_IM_POSTGRES_URL}".
             - name: ZX_IM_POSTGRES_URL
               valueFrom:
                 secretKeyRef:

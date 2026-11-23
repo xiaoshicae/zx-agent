@@ -18,13 +18,15 @@
 
 最多 64 KiB 的普通 UTF-8 文件。键用 camelCase，顶层的键写在第一个 `[表]` 之前。未知的键与无效的值以退出码 2 报错，错误信息带文件路径（值无效时还带键名）。
 
+任何字符串值都可以写占位符 `${NAME}`，读文件时换成环境变量 NAME 的值；`$$` 写字面的 `$`，其他的 `$` 照原样。NAME 由字母、数字与 `_` 组成，不以数字开头。`${` 没有闭合、名字不合法，或变量没有值时，以退出码 2 报错，写明键与变量（`provider.apiKey` 例外，见下表）。只有字符串能写占位符：数字照常写成数字。`im.toml` 也一样。
+
 ```toml
 model = "my-model"
 reasoning = "high"
 
 [provider]
 baseUrl = "https://llm-gateway.example.com/v1"
-apiKeyEnv = "LLM_API_KEY"          # 存放 API key 的环境变量名，不是 key 本身
+apiKey = "${LLM_API_KEY}"          # 引用环境变量；也可以直接写 key
 
 [[models]]
 id = "my-model"
@@ -43,9 +45,9 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝。等待的时间也计入运行的时间上限（`--timeout-secs`）：那个上限先到时，运行以超时结束，审批算作取消 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
-| `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKeyEnv`、`maxRetries` 以外的键 |
+| `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKey`、`maxRetries` 以外的键 |
 | `provider.baseUrl` | 服务的地址，请求的路径接在它后面：`openai` 不含 `/chat/completions`，默认 `https://api.openai.com/v1`；`anthropic` 不含 `/v1/messages`，默认 `https://api.anthropic.com`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
-| `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认为 provider 自己的：`openai` 是 `OPENAI_API_KEY`，`anthropic` 是 `ANTHROPIC_API_KEY`；变量没有值时请求不带认证头 |
+| `provider.apiKey` | API key，通常写成 `"${变量名}"`，也可以直接写 key（这样它会随文件出现在任何能读到文件的地方）。不写时是 provider 自己的变量：`openai` 为 `${OPENAI_API_KEY}`，`anthropic` 为 `${ANTHROPIC_API_KEY}`。引用的变量没有值时请求不带认证头（本地模型服务不要 key）。引用的变量对命令隐藏，key 在工具输出中脱敏 |
 | `provider.apiKeyHeader` | 仅 `anthropic`。API key 放在哪个请求头：`x-api-key`（默认，Anthropic API 的写法）或 `authorization`（发 `Authorization: Bearer <key>`，如 OpenRouter 的 Anthropic Messages 兼容接口 `https://openrouter.ai/api/v1/messages`，`baseUrl` 写 `https://openrouter.ai/api`）。不按服务地址推断 |
 | `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的系统提示词；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
 | `provider.reasoningFormat` | 仅 `openai`。`reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
@@ -103,7 +105,7 @@ model = "deepseek-flash"
 
 [provider]
 baseUrl = "https://api.deepseek.com"
-apiKeyEnv = "DEEPSEEK_API_KEY"
+apiKey = "${DEEPSEEK_API_KEY}"
 # 关闭思考模式：
 # requestFields = { thinking = { type = "disabled" } }
 ```
@@ -121,7 +123,7 @@ model = "anthropic/claude-haiku-5.5"
 
 [provider]
 baseUrl = "https://openrouter.ai/api/v1"
-apiKeyEnv = "OPENROUTER_API_KEY"
+apiKey = "${OPENROUTER_API_KEY}"
 
 [[models]]
 id = "anthropic/claude-haiku-5.5"
@@ -137,7 +139,7 @@ cost = { input = 0.10, output = 0.50, cacheRead = 0.01, cacheWrite = 0.125 }   #
 [provider]
 api = "anthropic"
 baseUrl = "https://openrouter.ai/api"
-apiKeyEnv = "OPENROUTER_API_KEY"
+apiKey = "${OPENROUTER_API_KEY}"
 apiKeyHeader = "authorization"
 ```
 
@@ -251,9 +253,8 @@ shortFlags = ["A"]
 [[mcp]]
 name = "prom"
 url = "https://prom-mcp.monitoring.svc/mcp"
-tokenEnv = "PROM_MCP_TOKEN"
-headers = { X-Scope-OrgID = "team-a" }
-headerEnv = { X-Api-Key = "PROM_MCP_KEY" }
+token = "${PROM_MCP_TOKEN}"
+headers = { X-Scope-OrgID = "team-a", X-Api-Key = "${PROM_MCP_KEY}" }
 tools = ["query", "query_range"]
 trustReadOnly = true
 ```
@@ -262,15 +263,14 @@ trustReadOnly = true
 |---|---|
 | `name` | 服务器名，小写 ASCII 字母、数字与 `-`，不能重复。模型看到的工具名是 `<name>__<工具名>`（其他字符换成 `_`，全名至多 64 个字符） |
 | `url` | `http://` 或 `https://` 端点 |
-| `tokenEnv` | 可选，存放 token 的环境变量，以 `Authorization: Bearer` 发送；设置后必须有值 |
-| `headers` | 可选，每个请求另带的请求头，值直接写在这里，不要放凭据 |
-| `headerEnv` | 可选，每个请求另带的请求头，值取自所写的环境变量，设置后必须有值；与 `tokenEnv` 一样对命令隐藏、在输出中脱敏。两处的头名不分大小写，不能重复，也不能是传输自己用的 `Accept`、`Content-Type`、`Mcp-Session-Id`、`MCP-Protocol-Version`、`Last-Event-ID`；设了 `tokenEnv` 时不能再设 `Authorization` |
+| `token` | 可选，以 `Authorization: Bearer` 发送的 token，通常写成 `"${变量名}"`，也可以直接写。是凭据：引用的变量对命令隐藏，值在输出中脱敏 |
+| `headers` | 可选，每个请求另带的请求头。引用了变量的值是凭据，与 `token` 一样对命令隐藏、在输出中脱敏；直接写的值不算凭据，不脱敏。头名不分大小写，不能重复，也不能是传输自己用的 `Accept`、`Content-Type`、`Mcp-Session-Id`、`MCP-Protocol-Version`、`Last-Event-ID`；写了 `token` 时不能再设 `Authorization` |
 | `tools` | 交给模型的工具，至少一个，其余不暴露；服务器缺少其中的工具时启动失败 |
 | `trustReadOnly` | 可选，默认 `false`。为 `true` 时信任服务器的 `readOnlyHint`：标为只读的工具不经审批直接执行（agent 的 `permissions.ask` 列出的仍要审批，`deny` 列出的仍拒绝），中断时也不按“可能已改动”报告。只对自己掌控的服务器打开 |
 | `timeoutSecs` | 可选，大于零：一次调用多久没有应答也没有进度通知就超时，默认同 `toolTimeoutSecs`；每条进度通知重新计时 |
 
 - 只有列出的工具交给模型；agent 的 `permissions.allow` 列出的直接执行，`trustReadOnly` 的服务器标为只读的也直接执行，其余每次都要审批（run 中因此拒绝）。没有 `trustReadOnly` 时，服务器给出的 annotations 不影响放行。
-- 每个进程启动时连接一次，列出工具；服务器之后更新了工具的说明或参数，重启后才生效。连不上、`tokenEnv` 或 `headerEnv` 的变量没有值、服务器缺少列出的工具时以退出码 2 报错。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址去掉路径的部分>`，`trustReadOnly` 认作只读的工具后面标 `(read-only)`；经 `http://` 发送 `tokenEnv` 或 `headerEnv` 的值时另加 `; credentials are sent unencrypted`。
+- 每个进程启动时连接一次，列出工具；服务器之后更新了工具的说明或参数，重启后才生效。连不上、服务器缺少列出的工具时以退出码 2 报错（引用的变量没有值，读 config.toml 时就已报错）。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址去掉路径的部分>`，`trustReadOnly` 认作只读的工具后面标 `(read-only)`；经 `http://` 发送 `token` 或算作凭据的请求头时另加 `; credentials are sent unencrypted`。
 - 服务器在运行中停机或重启后，不必重启 zx-agent 或 zx-im：停机期间的调用失败，错误作为工具结果交给模型，恢复后照常调用；服务器回 404 表示会话已失效时，自动重新握手并重发这次请求。错误中的地址只写到端口，不带路径与查询。
 - 先用 `server/discover` 握手，旧服务器回退到 `initialize`。结果中的文本原样交给模型，图片、音频与二进制资源只写一行说明，最多 2000 行或 50 KiB；进度通知作为工具进度显示。
 
@@ -315,14 +315,14 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ```toml
 [slack]
-# appTokenEnv = "SLACK_APP_TOKEN"     # 存放 token 的环境变量名，注释中的值为默认值
-# botTokenEnv = "SLACK_BOT_TOKEN"
+# appToken = "${SLACK_APP_TOKEN}"     # 凭据，注释中的值为默认值；也可以直接写 token
+# botToken = "${SLACK_BOT_TOKEN}"
 # apiBase = "https://slack.com/api"   # 经代理或测试服务器时改
 
 # ⚑ D:5/CHINA FLAG: 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
 # [feishu]
-# appIdEnv = "FEISHU_APP_ID"
-# appSecretEnv = "FEISHU_APP_SECRET"
+# appId = "${FEISHU_APP_ID}"          # App ID 不是机密，不算凭据
+# appSecret = "${FEISHU_APP_SECRET}"
 # apiBase = "https://open.feishu.cn"
 # tokenUrl = "https://accounts.feishu.cn/oauth/v3/token"
 
@@ -342,7 +342,7 @@ longAnswerChars = 8000       # 比这更长的回答作为 Markdown 文件 answe
 
 [sessions]
 dir = "/data/sessions"       # 会话文件在 <dir>/--<工作目录>--/ 下；<dir>/.running 与 <dir>/.backlog 是服务自己的记录
-# postgresUrlEnv = "ZX_IM_POSTGRES_URL"   # 改存 Postgres：存放连接串的环境变量名，与 dir 二选一
+# postgresUrl = "${ZX_IM_POSTGRES_URL}"   # 改存 Postgres：连接串，与 dir 二选一
 
 # 可选：定时开始对话，可以写多个（行为见 REFERENCE.md 的“主动发起”）
 [[schedules]]
@@ -372,7 +372,7 @@ allowed = "已批准"
 
 `[limits]` 中的四个上限与 `longAnswerChars` 须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
-`[sessions]` 写 `dir` 与 `postgresUrlEnv` 之一。`dir` 是本机磁盘或持久卷上的目录，供一个进程使用。`postgresUrlEnv` 是存放 Postgres 连接串的环境变量名，连接串如 `postgres://zx:<密码>@db.example.com:5432/zx?sslmode=require`：会话、backlog、“处理中”的记录与每天的用量都存进这个库里 `zx_im_` 开头的表，启动时建好缺的表；连不上库，或表的版本不是这个程序的，以退出码 2 结束。这个变量与平台的凭据一样对命令隐藏、在工具输出中脱敏，启动行只写 `sessions in Postgres`。`sslmode` 只有 `disable`、`prefer`（默认）与 `require`：用 TLS 时总按系统的根证书校验证书与主机名，`prefer` 只在服务端不支持 TLS 时改用明文，跨网络连接写 `require`；libpq 的 `verify-full` 等写法被拒。会话的工作目录仍在本机。存在 Postgres 时可以用同一个 `im.toml` 运行几个副本：一个当选为主并服务，其余待命，主停止或与库断开后接手（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“主备”）；账号要能在库的默认 schema 中建表与函数，如库的所有者。Postgres 在 `zx-im` 默认开启的 cargo feature `postgres` 后，不带它构建的 `zx-im` 遇到 `postgresUrlEnv` 时以退出码 2 报错。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“存在 Postgres”。
+`[sessions]` 写 `dir` 与 `postgresUrl` 之一。`dir` 是本机磁盘或持久卷上的目录，供一个进程使用。`postgresUrl` 是 Postgres 的连接串，如 `postgres://zx:<密码>@db.example.com:5432/zx?sslmode=require`，通常写成 `"${变量名}"`：会话、backlog、“处理中”的记录与每天的用量都存进这个库里 `zx_im_` 开头的表，启动时建好缺的表；连不上库，或表的版本不是这个程序的，以退出码 2 结束。连接串是凭据，与平台的凭据一样：引用的变量对命令隐藏，值在工具输出中脱敏，启动行只写 `sessions in Postgres`。`sslmode` 只有 `disable`、`prefer`（默认）与 `require`：用 TLS 时总按系统的根证书校验证书与主机名，`prefer` 只在服务端不支持 TLS 时改用明文，跨网络连接写 `require`；libpq 的 `verify-full` 等写法被拒。会话的工作目录仍在本机。存在 Postgres 时可以用同一个 `im.toml` 运行几个副本：一个当选为主并服务，其余待命，主停止或与库断开后接手（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“主备”）；账号要能在库的默认 schema 中建表与函数，如库的所有者。Postgres 在 `zx-im` 默认开启的 cargo feature `postgres` 后，不带它构建的 `zx-im` 遇到 `postgresUrl` 时以退出码 2 报错。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“存在 Postgres”。
 
 发文件要平台应用有相应权限（Slack 的 `files:write`，⚑ D:5/CHINA FLAG: 飞书的 `im:resource` 或 `im:resource:upload`，见 [IM_SETUP.md](IM_SETUP.md)）：比 `longAnswerChars` 更长的回答作为文件发出，状态换成 `replies.answerAttached`；发不出时照旧分段发文字。每个 IM 会话还有工具 `send_file`，不由 agent 的 `tools` 启用：agent 可以把自己写的内容，或工作目录里的一个文件（至多 20 MiB），作为附件发进对话。后者不经脱敏，见 [SECURITY.md](SECURITY.md#工具)；要审批或禁用它，在 agent 的 `permissions.ask` 或 `deny` 中写 `send_file`。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：zx-im 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 
@@ -382,4 +382,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.46 · 2026年11月
+CONFIGURATION.md · v0.47 · 2026年11月

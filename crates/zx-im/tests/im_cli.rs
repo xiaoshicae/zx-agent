@@ -28,7 +28,7 @@ const START_WAIT: Duration = Duration::from_secs(20);
 /// The error for a `[feishu]` section whose secret is not set: a build without that platform
 /// refuses the section itself.
 #[cfg(feature = "feishu")]
-const FEISHU_SECRET_UNSET: &str = "FEISHU_APP_SECRET must hold";
+const FEISHU_SECRET_UNSET: &str = "[feishu]: appSecret: names ${FEISHU_APP_SECRET}, which is not set";
 #[cfg(not(feature = "feishu"))]
 const FEISHU_SECRET_UNSET: &str = "this build of zx-im has no such platform";
 
@@ -123,7 +123,12 @@ async fn configuration_errors_are_reported_before_serving() {
             None,
             "missing field `access`",
         ),
-        (VALID, &[], Some("SLACK_APP_TOKEN"), "SLACK_APP_TOKEN must hold"),
+        (
+            VALID,
+            &[],
+            Some("SLACK_APP_TOKEN"),
+            "[slack]: appToken: names ${SLACK_APP_TOKEN}, which is not set",
+        ),
         (
             "[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],
@@ -680,7 +685,7 @@ fn mcp_home(dir: &Path, url: &str) -> PathBuf {
         "tools = []\n[context]\ndiscover = false\n[permissions]\nallow = [\"prom__query\"]\n",
     );
     let server = format!(
-        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{MCP_TOKEN_VAR}\"\ntools = [\"query\", \"range\"]"
+        "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntoken = \"${{{MCP_TOKEN_VAR}}}\"\ntools = [\"query\", \"range\"]"
     );
     program::write_config(&home, &fake_model_config(KEY_VAR, &server, ""));
     home
@@ -763,7 +768,7 @@ fn postgres_im_config(dir: &Path, slack_api: &str) -> PathBuf {
         .replace("[slack]\n", &format!("[slack]\napiBase = \"{slack_api}\"\n"))
         .replace(
             "dir = \"sessions\"",
-            &format!("postgresUrlEnv = \"{POSTGRES_URL_VAR}\""),
+            &format!("postgresUrl = \"${{{POSTGRES_URL_VAR}}}\""),
         );
     write_im_config(dir, &text)
 }

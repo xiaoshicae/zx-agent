@@ -14,6 +14,7 @@ use zx_agent::builtin::output_store::{
     InvalidOutputStoreConfig, MAX_FILE_BYTES, MIN_THRESHOLD_BYTES, OutputStoreConfig,
 };
 
+use super::placeholders::{Credentials, Holds, expand_table};
 use super::provider::ProviderSettings;
 use super::{parsed, read_text};
 
@@ -60,17 +61,14 @@ pub struct McpServer {
     pub name: String,
     /// The server's MCP endpoint (Streamable HTTP).
     pub url: String,
-    /// The variable holding the token sent as `Authorization: Bearer`; unset sends none.
-    /// Commands do not see the variable, and its value is redacted from tool output.
-    pub token_env: Option<String>,
-    /// Headers sent with every request, by name, with their values as written: not for
-    /// credentials, which `headerEnv` reads from variables.
+    /// The token sent as `Authorization: Bearer`; unset sends none. A credential: the
+    /// variables it names are hidden from commands, and its value is redacted from tool
+    /// output.
+    pub token: Option<String>,
+    /// Headers sent with every request, by name. A value that names a variable is a
+    /// credential, as the token is; one written as it is, is not.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Headers sent with every request, by name, each with the value of a variable, which
-    /// commands do not see and which is redacted from tool output, as with `tokenEnv`.
-    #[serde(default)]
-    pub header_env: BTreeMap<String, String>,
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
     /// Whether the server's `readOnlyHint` is trusted: a tool it annotates as read-only runs
@@ -82,25 +80,6 @@ pub struct McpServer {
     /// unset uses `toolTimeoutSecs`. A call that keeps reporting progress is bounded by the
     /// run's timeout and cancellation.
     pub timeout_secs: Option<u64>,
-}
-
-impl McpServer {
-    /// The headers to send: those of `headers` as written, then those of `headerEnv`, each
-    /// with the value `value_of` gives for its header and variable.
-    pub(crate) fn sent_headers(
-        &self,
-        value_of: impl Fn(&str, &str) -> Result<String>,
-    ) -> Result<Vec<(String, String)>> {
-        let written = self
-            .headers
-            .iter()
-            .map(|(header, value)| Ok((header.clone(), value.clone())));
-        let read = self
-            .header_env
-            .iter()
-            .map(|(header, variable)| Ok((header.clone(), value_of(header, variable)?)));
-        written.chain(read).collect()
-    }
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
@@ -138,6 +117,9 @@ pub struct Config {
     pub models: HashMap<String, ModelMeta>,
     /// External MCP servers.
     pub mcp: Vec<McpServer>,
+    /// The credentials the file holds, but for the API key, which the assembly expands: the
+    /// MCP servers' tokens and the headers that name variables.
+    pub credentials: Credentials,
 }
 
 impl Default for Config {
@@ -157,6 +139,7 @@ impl Default for Config {
             tool_output: OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY),
             models: HashMap::new(),
             mcp: Vec::new(),
+            credentials: Credentials::default(),
         }
     }
 }
@@ -217,15 +200,23 @@ impl Config {
         Self::parse(text.as_deref(), path).with_context(|| format!("invalid {}", path.display()))
     }
 
-    /// The configuration in `text`, the file at `path`; `None` is an empty file.
+    /// The configuration in `text`, the file at `path`; `None` is an empty file. Its
+    /// placeholders are replaced.
     fn parse(text: Option<&str>, path: &Path) -> Result<Self> {
-        let raw = match text {
-            Some(text) => toml::from_str(text)?,
-            None => RawConfig::default(),
+        let (raw, credentials) = match text {
+            Some(text) => {
+                // Read as written first, so that an error points at its line.
+                toml::from_str::<RawConfig>(text)?;
+                let mut table: toml::Table = toml::from_str(text)?;
+                let credentials = expand_table(&mut table, &holds)?;
+                (toml::Value::Table(table).try_into()?, credentials)
+            }
+            None => (RawConfig::default(), Credentials::default()),
         };
         // A file path always has a parent; the root stands in for one that has none.
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-        let config = raw.into_config(path, parent)?;
+        let mut config = raw.into_config(path, parent)?;
+        config.credentials = credentials;
         config.validate()?;
         Ok(config)
     }
@@ -238,20 +229,9 @@ impl Config {
         let mut names = Vec::new();
         for server in &self.mcp {
             let name = server.name.as_str();
-            ensure!(
-                server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
-                "MCP server {name}: tokenEnv must not be empty"
-            );
-            for (header, variable) in &server.header_env {
-                ensure!(
-                    !variable.trim().is_empty(),
-                    "MCP server {name}: headerEnv.{header} must not be empty"
-                );
-            }
-            // The variables are read when connecting, and their values checked then.
             let config = ServerConfig {
-                token: server.token_env.as_ref().map(|_| String::new()),
-                headers: server.sent_headers(|_, _| Ok(String::new()))?,
+                token: server.token.clone(),
+                headers: server.headers.clone().into_iter().collect(),
                 ..ServerConfig::new(name, server.url.as_str(), server.tools.clone())
             };
             names.extend(config.validate().map_err(anyhow::Error::msg)?);
@@ -375,6 +355,8 @@ impl RawConfig {
             tool_output: self.tool_output.into_config(parent)?,
             models: HashMap::new(),
             mcp: self.mcp,
+            // Set by the caller, which expanded the file.
+            credentials: Credentials::default(),
         };
         for model in self.models {
             ensure!(
@@ -398,6 +380,18 @@ impl RawConfig {
             );
         }
         Ok(config)
+    }
+}
+
+/// What each string of config.toml holds: the API key is kept for the assembly, which expands
+/// it with the provider's own variable as the default; the MCP servers' tokens are credentials,
+/// and so are the headers that name variables.
+fn holds(keys: &[&str]) -> Holds {
+    match keys {
+        ["provider", "apiKey"] => Holds::Kept,
+        ["mcp", "token"] => Holds::Credential,
+        ["provider" | "mcp", "headers", _] => Holds::Header,
+        _ => Holds::Text,
     }
 }
 
