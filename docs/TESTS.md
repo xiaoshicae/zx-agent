@@ -40,7 +40,7 @@
 | `crates/zx-agent/tests/hooks.rs` | 钩子、审批、策略事件与脱敏；`Agent::new` 拒绝的工具 |
 | `crates/zx-agent/tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
 | `crates/zx-agent/tests/extensions.rs` | `AgentConfig::extensions`：扩展给会话加了什么，哪些扩展让 `Agent::new` 拒绝 |
-| `crates/zx-agent/tests/mcp.rs` | MCP 客户端对假服务器：两代协议、工具的选择与命名、调用结果、错误与超时；运行被取消时通知服务器放弃调用 |
+| `crates/zx-agent/tests/mcp.rs` | MCP 客户端对假服务器：两代协议、工具的选择与命名、调用结果、错误与超时；运行被取消时通知服务器放弃调用；服务器停机期间的调用失败（错误里的地址只写到端口）、恢复后照常，旧服务器重启丢了会话时重新握手并重发；每个请求带上配置的请求头；只有受信任的服务器标为只读的工具声明为只读 |
 | `crates/zx-agent/tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
 ## 应用层：`crates/zx-app/tests/`
@@ -65,7 +65,7 @@
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
-| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat |
+| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），配置的请求头随每个请求发送，`tokenEnv` 与 `headerEnv` 的变量对命令隐藏、值被脱敏，服务器用不了时启动失败 |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
 | `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放；被取消的运行为整批调用写下结果 |
 
@@ -82,4 +82,4 @@
 
 ---
 
-TESTS.md · v0.29 · 2026年11月
+TESTS.md · v0.30 · 2026年11月

@@ -29,7 +29,8 @@
 //!   SSE, HTTP errors, a stream that stalls after some data or ends when told, and waiting
 //!   for a number of requests
 //! - [`http`]: reading and answering one HTTP request, and a listener that never answers
-//! - [`fake_mcp`] (http): an MCP server written from the specification, without rmcp
+//! - [`fake_mcp`] (http): an MCP server written from the specification, without rmcp; it can
+//!   restart, losing its session, and go down for a while
 //! - [`fake_slack`], [`fake_feishu`] (http): the fake chat platforms
 //! - [`program`]: a program a test runs, such as the compiled `zx-agent` or `zx-im`: the
 //!   command that starts it apart from the developer's environment, the zx-agent home a

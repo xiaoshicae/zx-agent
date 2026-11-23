@@ -1,7 +1,13 @@
 //! A client for external MCP servers that only lists and calls their tools, over Streamable
 //! HTTP. The servers, and which of their tools the model gets, come from configuration;
 //! whether a call may run is for the host's policies to decide, not for the server: its tool
-//! annotations are only hints.
+//! annotations are only hints, unless the host trusts its read-only ones
+//! ([`ServerConfig::trust_read_only`]).
+//!
+//! A server that goes down for a while, or restarts and loses its session, is called again
+//! once it answers: a call in between fails, and when the server says the session is gone
+//! (HTTP 404), rmcp opens a new one and sends the request again. The tools are listed once,
+//! when connecting.
 //!
 //! A [`Server`] is an [`Extension`]: an agent takes it in
 //! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
@@ -12,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
     ClientConfig, ClientRequest, ContentBlock, Implementation, ProgressNotificationParam, ProgressToken,
@@ -24,7 +31,7 @@ use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lif
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 use zx_core::extensions::Extension;
-use zx_core::tools::{Tool, ToolContext, ToolOutput};
+use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 use crate::ai::{ToolDef, api_identifier};
 use crate::images;
@@ -50,6 +57,14 @@ const MAX_QUEUED_PROGRESS: usize = 16;
 /// courtesy that lets the transport close the request's stream; the call that needed the
 /// answer is gone already.
 const GIVE_UP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Headers the transport sets itself (Streamable HTTP), which configuration may not.
+const TRANSPORT_HEADERS: [&str; 5] = [
+    "accept",
+    "content-type",
+    "mcp-session-id",
+    "mcp-protocol-version",
+    "last-event-id",
+];
 
 /// One MCP server and the tools to take from it.
 ///
@@ -62,9 +77,18 @@ pub struct ServerConfig {
     pub url: String,
     /// Sent as `Authorization: Bearer <token>` with every request; `None` sends none.
     pub token: Option<String>,
+    /// More headers sent with every request, as name and value, such as a tenant or an API
+    /// key. Not the transport's own (`Accept`, `Content-Type`, `Mcp-Session-Id`,
+    /// `MCP-Protocol-Version`, `Last-Event-ID`), and no `Authorization` beside a `token`. A
+    /// value may be a credential: errors name only its header.
+    pub headers: Vec<(String, String)>,
     /// The server's tools to offer the model, by the names the server gives them. The others
     /// are left out, descriptions included. Not empty.
     pub tools: Vec<String>,
+    /// Whether the server's `readOnlyHint` is trusted: a tool it annotates as read-only then
+    /// declares [`Effects::ReadOnly`], which a host may let run without asking. Untrusted, the
+    /// annotations are hints, and every tool declares side effects.
+    pub trust_read_only: bool,
     /// Bound for connecting and listing the tools.
     pub connect_timeout: Duration,
     /// Longest a call may go without an answer or a progress notification: each
@@ -74,14 +98,17 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// The settings for `tools` of the server `name` at `url`: no token, and the default
-    /// timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_CALL_TIMEOUT`]).
+    /// The settings for `tools` of the server `name` at `url`: no token or other headers,
+    /// annotations not trusted, and the default timeouts ([`DEFAULT_CONNECT_TIMEOUT`],
+    /// [`DEFAULT_CALL_TIMEOUT`]).
     pub fn new(name: impl Into<String>, url: impl Into<String>, tools: Vec<String>) -> Self {
         Self {
             name: name.into(),
             url: url.into(),
             token: None,
+            headers: Vec::new(),
             tools,
+            trust_read_only: false,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             call_timeout: DEFAULT_CALL_TIMEOUT,
         }
@@ -93,13 +120,15 @@ impl ServerConfig {
     ///
     /// Errors, each naming the server: a name that is not ASCII lowercase letters, digits and
     /// `-` (so that it ends at the first `__` of a tool's name); a URL that is not `http://` or
-    /// `https://`; no tools; a name longer than model APIs accept ([`MAX_TOOL_NAME_CHARS`]);
-    /// two tools that would get the same name.
+    /// `https://`; a header whose name or value is not valid, that is the transport's own,
+    /// that is given twice, or that is `Authorization` beside a token; no tools; a name longer
+    /// than model APIs accept ([`MAX_TOOL_NAME_CHARS`]); two tools that would get the same
+    /// name.
     pub fn validate(&self) -> Result<Vec<String>, String> {
         self.check().map(|checked| checked.names)
     }
 
-    /// What [`validate`](Self::validate) checks, with the origin of the URL it parsed.
+    /// What [`validate`](Self::validate) checks, with what it parsed.
     fn check(&self) -> Result<Checked, String> {
         let server = self.name.as_str();
         check_server_name(server)?;
@@ -110,6 +139,7 @@ impl ServerConfig {
         if !matches!(url.scheme(), "http" | "https") {
             return Err(fault(server, "the url must be http:// or https://"));
         }
+        let headers = self.header_map()?;
         if self.tools.is_empty() {
             return Err(fault(server, "tools lists no tool"));
         }
@@ -125,18 +155,68 @@ impl ServerConfig {
             names.push(name);
         }
         Ok(Checked {
-            origin: url.origin().ascii_serialization(),
+            address: Address {
+                urls: [self.url.clone(), url.as_str().to_string()],
+                origin: url.origin().ascii_serialization(),
+            },
+            headers,
             names,
         })
+    }
+
+    /// The configured headers as the transport sends them, the values marked sensitive.
+    /// Errors name the header and never its value.
+    fn header_map(&self) -> Result<HashMap<HeaderName, HeaderValue>, String> {
+        let server = self.name.as_str();
+        let mut headers = HashMap::new();
+        for (name, value) in &self.headers {
+            let refused = |problem: &str| fault(server, format_args!("header {name:?} {problem}"));
+            let parsed = HeaderName::from_bytes(name.as_bytes()).map_err(|_| refused("is not a valid header name"))?;
+            if TRANSPORT_HEADERS.contains(&parsed.as_str()) {
+                return Err(refused("is set by the transport"));
+            }
+            if parsed == AUTHORIZATION && self.token.is_some() {
+                return Err(refused("is set by the token"));
+            }
+            let mut value =
+                HeaderValue::from_str(value).map_err(|_| refused("has a value that is not a valid header value"))?;
+            value.set_sensitive(true);
+            if headers.insert(parsed, value).is_some() {
+                return Err(refused("is given more than once"));
+            }
+        }
+        Ok(headers)
     }
 }
 
 /// The settings of a server, checked.
 struct Checked {
-    /// The scheme, host and port of its URL.
-    origin: String,
+    address: Address,
+    /// The configured headers, by lowercase name.
+    headers: HashMap<HeaderName, HeaderValue>,
     /// The names the model calls its tools by, in configuration order.
     names: Vec<String>,
+}
+
+/// Where a server is, and what of it may be shown: the user, path or query of its URL may
+/// hold a credential, and the HTTP client's errors write the whole URL.
+#[derive(Clone)]
+struct Address {
+    /// The URL as configured, and as the HTTP client parsed and writes it.
+    urls: [String; 2],
+    /// The scheme, host and port of the URL.
+    origin: String,
+}
+
+impl Address {
+    /// `text` with the server's URL written as its origin.
+    fn hide(&self, text: &str) -> String {
+        // The longer form first, so that the other cannot leave a part of it behind.
+        let mut urls: Vec<&String> = self.urls.iter().collect();
+        urls.sort_by_key(|url| std::cmp::Reverse(url.len()));
+        urls.into_iter()
+            .fold(text.to_string(), |text, url| text.replace(url.as_str(), &self.origin))
+    }
 }
 
 type Client = RunningService<RoleClient, Handler>;
@@ -158,10 +238,11 @@ impl Server {
     ///
     /// Errors, each naming the server: settings that [`ServerConfig::validate`] refuses, no
     /// answer within `connect_timeout`, a protocol or transport failure, and a configured tool
-    /// the server does not offer. The token never appears in them.
+    /// the server does not offer. The token, the header values and the URL's user, path and
+    /// query never appear in them.
     pub async fn connect(config: ServerConfig) -> Result<Self, String> {
         let checked = config.check()?;
-        let (client, listed) = connect_and_list(&config).await?;
+        let (client, listed) = connect_and_list(&config, &checked).await?;
         // A completed handshake or discovery records the server's information, so the empty
         // fallback is not expected; it only affects what is reported.
         let protocol_version = client
@@ -190,6 +271,10 @@ impl Server {
                     format!("it has no tool named {remote:?}; it offers: {}", offered.join(", ")),
                 ));
             };
+            let read_only = offered
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint);
             tools.push(Arc::new(McpTool {
                 definition: ToolDef {
                     name: name.clone(),
@@ -198,13 +283,19 @@ impl Server {
                 },
                 remote: remote.clone(),
                 server: server.to_string(),
+                address: checked.address.clone(),
                 client: Arc::clone(client),
                 timeout: config.call_timeout,
+                effects: if config.trust_read_only && read_only == Some(true) {
+                    Effects::ReadOnly
+                } else {
+                    Effects::SideEffects
+                },
             }));
         }
         Ok(Self {
             name: config.name,
-            origin: checked.origin,
+            origin: checked.address.origin,
             protocol_version,
             tools,
             names: checked.names,
@@ -243,10 +334,26 @@ fn fault(server: &str, message: impl std::fmt::Display) -> String {
     format!("MCP server {server}: {message}")
 }
 
-/// Connect to the server within its connect timeout and list its tools.
-async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
+/// What went wrong with a request: a transport's own error without rmcp's wrapping, which
+/// names its internal types, and other errors as rmcp writes them.
+fn service_error(error: &ServiceError) -> String {
+    match error {
+        ServiceError::TransportSend(sent) => sent.error.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Connect to the server within its connect timeout, sending the `checked` headers with every
+/// request, and list its tools.
+async fn connect_and_list(
+    config: &ServerConfig,
+    checked: &Checked,
+) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
     let server = config.name.as_str();
-    let mut transport = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
+    // rmcp starts a new session and sends the request again when the server answers 404, as
+    // it does once it lost the session (`reinit_on_expired_session`, on by default).
+    let mut transport =
+        StreamableHttpClientTransportConfig::with_uri(config.url.as_str()).custom_headers(checked.headers.clone());
     if let Some(token) = &config.token {
         transport = transport.auth_header(token.as_str());
     }
@@ -259,12 +366,12 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
         let client = serve_client_with_lifecycle(Handler::new(), transport, lifecycle)
             .await
             .map_err(|error| error.to_string())?;
-        let listed = client.list_all_tools().await.map_err(|error| error.to_string())?;
+        let listed = client.list_all_tools().await.map_err(|error| service_error(&error))?;
         Ok::<_, String>((client, listed))
     };
     match tokio::time::timeout(config.connect_timeout, connecting).await {
         Ok(Ok(connected)) => Ok(connected),
-        Ok(Err(error)) => Err(fault(server, error)),
+        Ok(Err(error)) => Err(fault(server, checked.address.hide(&error))),
         Err(_) => Err(fault(server, format!("no answer within {:?}", config.connect_timeout))),
     }
 }
@@ -378,21 +485,21 @@ struct McpTool {
     /// The server's name for the tool.
     remote: String,
     server: String,
+    address: Address,
     client: Arc<Client>,
     /// Re-armed by every progress notification.
     timeout: Duration,
+    /// Side effects, unless the host trusts the server's annotation that the tool only reads.
+    effects: Effects,
 }
 
 impl McpTool {
-    /// The error of a failed call; the server's text in `error` is bounded like a result.
-    fn failed(&self, error: &dyn std::fmt::Display) -> String {
+    /// The error of a failed call, as [`service_error`] writes it, bounded like a result.
+    fn failed(&self, error: &ServiceError) -> String {
+        let text = self.address.hide(&service_error(error));
         fault(
             &self.server,
-            format_args!(
-                "{} failed: {}",
-                self.remote,
-                truncate_head_noted(&error.to_string(), "error")
-            ),
+            format_args!("{} failed: {}", self.remote, truncate_head_noted(&text, "error")),
         )
     }
 
@@ -546,8 +653,11 @@ impl Tool for McpTool {
         self.definition.clone()
     }
 
-    // `effects` stays `SideEffects`: the server's annotations are hints, so a call that was
-    // interrupted is reported as possibly having changed state.
+    /// Side effects, so that a call that was interrupted is reported as possibly having
+    /// changed state, unless the host trusts the server's annotation that the tool only reads.
+    fn effects(&self) -> Effects {
+        self.effects
+    }
 
     /// Progress notifications of the call reach `ctx` as progress updates and re-arm the
     /// timeout. Stops waiting on `ctx.cancel` or after `timeout` without an answer or
@@ -673,6 +783,68 @@ mod tests {
             assert!(error.starts_with("MCP server ") && error.contains(expected), "{error}");
             assert!(error.contains(&config.name), "{error}");
         }
+    }
+
+    #[test]
+    fn headers_are_checked_and_their_values_never_shown() {
+        let secret = "secret-1234";
+        let headers = |pairs: &[(&str, &str)]| ServerConfig {
+            headers: pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect(),
+            ..ServerConfig::new("prom", "https://x", vec!["q".to_string()])
+        };
+        assert!(
+            headers(&[("X-Scope-OrgID", "tenant-a"), ("X-Api-Key", secret)])
+                .validate()
+                .is_ok()
+        );
+        // Without a token, Authorization is a header like any other.
+        assert!(headers(&[("Authorization", "Basic abc")]).validate().is_ok());
+        for (config, expected) in [
+            (headers(&[("X Api", secret)]), "is not a valid header name"),
+            (headers(&[("Content-Type", secret)]), "is set by the transport"),
+            (headers(&[("mcp-session-id", secret)]), "is set by the transport"),
+            (
+                headers(&[("X-Api-Key", &format!("{secret}\nX-Other: 1"))]),
+                "has a value that is not a valid header value",
+            ),
+            (
+                ServerConfig {
+                    token: Some("token".to_string()),
+                    ..headers(&[("authorization", secret)])
+                },
+                "is set by the token",
+            ),
+            (
+                headers(&[("X-Api-Key", secret), ("x-api-key", secret)]),
+                "is given more than once",
+            ),
+        ] {
+            let error = config.validate().unwrap_err();
+            assert!(
+                error.starts_with("MCP server prom: header ") && error.contains(expected),
+                "{error}"
+            );
+            assert!(!error.contains(secret), "{error}");
+        }
+    }
+
+    #[test]
+    fn errors_show_the_origin_of_the_url_in_its_place() {
+        let url = "https://user:pw@Prom.example/mcp?key=s3cret";
+        let address = ServerConfig::new("prom", url, vec!["q".to_string()])
+            .check()
+            .unwrap()
+            .address;
+        // The HTTP client writes the host in lowercase.
+        let written = "error sending request for url (https://user:pw@prom.example/mcp?key=s3cret)";
+        assert_eq!(
+            address.hide(written),
+            "error sending request for url (https://prom.example)"
+        );
+        assert_eq!(address.hide(&format!("at {url}")), "at https://prom.example");
     }
 
     #[test]

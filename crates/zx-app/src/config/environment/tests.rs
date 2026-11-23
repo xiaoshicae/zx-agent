@@ -320,11 +320,35 @@ fn mcp_servers_are_read_from_the_file() {
             name: "prom".into(),
             url: "https://prom.example/mcp".into(),
             token_env: Some("PROM_TOKEN".into()),
+            headers: BTreeMap::new(),
+            header_env: BTreeMap::new(),
             tools: vec!["query".into(), "range".into()],
+            trust_read_only: false,
             timeout_secs: Some(30),
         }]
     );
     assert_eq!(config.mcp_tool_names().unwrap(), ["prom__query", "prom__range"]);
+}
+
+#[test]
+fn an_mcp_server_sends_its_headers_and_trusts_its_read_only_tools_when_told() {
+    let text = format!(
+        "{PROM}headers = {{ X-Scope-OrgID = 'tenant-a' }}\nheaderEnv = {{ X-Api-Key = 'PROM_KEY' }}\ntrustReadOnly = true\n"
+    );
+    let config = load_text(&text).unwrap();
+    let server = &config.mcp[0];
+    assert!(server.trust_read_only);
+    // Written values first, then those of the variables, read when connecting.
+    let sent = server
+        .sent_headers(|header, variable| Ok(format!("{header} from {variable}")))
+        .unwrap();
+    assert_eq!(
+        sent,
+        [
+            ("X-Scope-OrgID".to_string(), "tenant-a".to_string()),
+            ("X-Api-Key".to_string(), "X-Api-Key from PROM_KEY".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -358,7 +382,27 @@ fn malformed_mcp_settings_are_refused() {
             "[[mcp]]\nname = 'Prom'\nurl = 'https://prom.example/mcp'\ntools = ['query']\n".to_string(),
             "must be ASCII lowercase",
         ),
-        (server("tools = ['query']\nheaders = {}"), "unknown field"),
+        (
+            server("tools = ['query']\nheaders = { Accept = 'text/plain' }"),
+            "header \"Accept\" is set by the transport",
+        ),
+        (
+            server("tools = ['query']\ntokenEnv = 'T'\nheaderEnv = { Authorization = 'A' }"),
+            "header \"Authorization\" is set by the token",
+        ),
+        (
+            server("tools = ['query']\nheaders = { X-A = '1' }\nheaderEnv = { x-a = 'A' }"),
+            "header \"x-a\" is given more than once",
+        ),
+        (
+            server("tools = ['query']\nheaders = { 'X A' = '1' }"),
+            "header \"X A\" is not a valid header name",
+        ),
+        (
+            server("tools = ['query']\nheaderEnv = { X-Api-Key = ' ' }"),
+            "headerEnv.X-Api-Key must not be empty",
+        ),
+        (server("tools = ['query']\ntrustReadOnly = 'yes'"), "invalid type"),
     ] {
         let error = error(&text);
         assert!(error.contains(expected), "{text}\n{error}");

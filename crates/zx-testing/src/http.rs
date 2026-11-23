@@ -42,6 +42,11 @@ impl Request {
             .map(|(_, value)| value.as_str())
     }
 
+    /// The headers, by name as sent and value, in the order sent.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
     /// The request line and the headers, one per line, as they were sent.
     pub fn head_text(&self) -> String {
         let mut text = format!("{} {}\n", self.method, self.path);
