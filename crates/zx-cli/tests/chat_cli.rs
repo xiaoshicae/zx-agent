@@ -126,6 +126,8 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
         .to_string();
     assert!(system.contains("working with a person"));
     assert!(!system.contains("No one will answer"));
+    // Without tools nothing asks, so the prompt says nothing about approvals.
+    assert!(!system.contains("<approvals>"), "{system}");
 }
 
 #[tokio::test]
@@ -556,6 +558,40 @@ async fn skipping_approvals_runs_a_shell_call_unasked_and_says_so() {
     assert!(log.contains("bash runs without asking"), "{log}");
     assert!(!log.contains("[approval"), "{log}");
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "ran");
+    let system = server.requests()[0].body["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        system.contains("<approvals>\nNo tool call asks for approval: every call runs at once"),
+        "{system}"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_names_the_tools_that_ask_the_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash,read_file,edit_file"],
+        "hi\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let system = server.requests()[0].body["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // write_file asks too, but the agent does not have it here.
+    assert!(
+        system.contains(
+            "<approvals>\nA person approves each call of these tools before it runs: bash, edit_file. \
+             Plain bash commands that start with grep, head, tail, wc, jq can skip approval"
+        ),
+        "{system}"
+    );
 }
 
 #[tokio::test]
