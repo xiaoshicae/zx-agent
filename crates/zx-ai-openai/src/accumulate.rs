@@ -196,35 +196,40 @@ impl Accumulator {
         }
     }
 
+    /// Read the counts a usage object reports. A count it leaves out keeps its value: a
+    /// server that reports usage in several chunks may leave some counts out of one.
     fn apply_usage(&mut self, usage: &Value) {
-        let get = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        self.usage.input = get("prompt_tokens");
-        self.usage.output = get("completion_tokens");
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+        let detail = |details: &str, key: &str| {
+            usage
+                .get(details)
+                .and_then(|details| details.get(key))
+                .and_then(Value::as_u64)
+        };
+        if let Some(input) = count("prompt_tokens") {
+            self.usage.input = input;
+        }
+        if let Some(output) = count("completion_tokens") {
+            self.usage.output = output;
+        }
         // OpenAI reports cache hits in `prompt_tokens_details.cached_tokens`, DeepSeek in
         // `prompt_cache_hit_tokens`.
-        self.usage.cache_read = usage
-            .get("prompt_tokens_details")
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_u64)
-            .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
-            .unwrap_or(0);
+        if let Some(read) =
+            detail("prompt_tokens_details", "cached_tokens").or_else(|| count("prompt_cache_hit_tokens"))
+        {
+            self.usage.cache_read = read;
+        }
         // Reported by a few servers only (pi: `cache_write_tokens`, `reasoning_tokens`).
-        self.usage.cache_write = usage
-            .get("prompt_tokens_details")
-            .and_then(|details| details.get("cache_write_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        self.usage.reasoning = usage
-            .get("completion_tokens_details")
-            .and_then(|details| details.get("reasoning_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let total = get("total_tokens");
-        self.usage.total_tokens = if total > 0 {
-            total
-        } else {
+        if let Some(written) = detail("prompt_tokens_details", "cache_write_tokens") {
+            self.usage.cache_write = written;
+        }
+        if let Some(reasoning) = detail("completion_tokens_details", "reasoning_tokens") {
+            self.usage.reasoning = reasoning;
+        }
+        self.usage.total_tokens = match count("total_tokens") {
+            Some(total) if total > 0 => total,
             // Counts come from the server, so a bogus value must not overflow.
-            self.usage.input.saturating_add(self.usage.output)
+            _ => self.usage.input.saturating_add(self.usage.output),
         };
     }
 
@@ -345,6 +350,28 @@ mod tests {
         assert_eq!(calls[0].arguments, json!({"command":"ls"}));
         assert_eq!(
             message.usage,
+            Usage {
+                input: 12,
+                output: 5,
+                cache_read: 4,
+                total_tokens: 17,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_count_left_out_of_a_later_usage_object_keeps_its_value() {
+        let mut acc = Accumulator::new("p", "m", 1);
+        apply_all(
+            &mut acc,
+            &[
+                json!({"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}),
+                json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":4}}}),
+            ],
+        );
+        assert_eq!(
+            acc.finish().unwrap().usage,
             Usage {
                 input: 12,
                 output: 5,

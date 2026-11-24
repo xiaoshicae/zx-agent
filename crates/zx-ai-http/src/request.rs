@@ -45,7 +45,7 @@ pub async fn send(request: reqwest::RequestBuilder, idle_timeout: Duration) -> R
                 format!("request timed out after {idle_timeout:?} waiting for response headers"),
             )
         })?
-        .map_err(|error| transport_failure("request failed", &error))
+        .map_err(|error| transport_failure("request failed", error))
 }
 
 #[cfg(test)]

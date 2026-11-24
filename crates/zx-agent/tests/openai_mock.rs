@@ -184,6 +184,38 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 }
 
 #[tokio::test]
+async fn a_retry_after_longer_than_a_retry_waits_ends_the_run_without_retrying() {
+    let server = MockServer::start(vec![Reply::error(
+        429,
+        "retry-after: 120\r\n",
+        r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+    )])
+    .await;
+    let (runner, observed) = RunnerSetup {
+        retry: RetryPolicy::default(),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build()
+    .await;
+
+    let report = runner.run("check").await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    let error = report.error.unwrap();
+    assert!(
+        error.ends_with("the service asks to wait 120s before it is asked again, longer than a retry waits (60s)"),
+        "{error}"
+    );
+    assert!(
+        !observed
+            .events()
+            .iter()
+            .any(|event| matches!(event, EventKind::RetryScheduled { .. }))
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn an_http_error_shows_the_servers_message() {
     let body = json!({"error": {"message": "Rate limit reached, slow down", "type": "requests"}});
     let server = MockServer::start(vec![Reply::error(429, "", &body.to_string())]).await;

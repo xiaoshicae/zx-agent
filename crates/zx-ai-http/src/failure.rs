@@ -51,14 +51,21 @@ pub fn error_object_message(text: &str) -> String {
     format!("provider error: {text}")
 }
 
-/// The failure of `operation`, a request or a stream read, that `error` ended.
-pub(crate) fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
+/// The failure of `operation`, a request or a stream read, that `error` ended. Of the
+/// address, only the origin is told: its path and query can hold a credential, such as a
+/// gateway's token, and the message goes into the session, as for an MCP server.
+pub(crate) fn transport_failure(operation: &str, error: reqwest::Error) -> Failure {
     let kind = if error.is_timeout() {
         ProviderErrorKind::Timeout
     } else {
         ProviderErrorKind::Transport
     };
-    Failure::error(kind, format!("{operation}: {}", with_causes(error)))
+    let origin = error
+        .url()
+        .map(|url| format!(" ({})", url.origin().ascii_serialization()))
+        .unwrap_or_default();
+    let error = error.without_url();
+    Failure::error(kind, format!("{operation}{origin}: {}", with_causes(&error)))
 }
 
 /// Whether the server answered with a JSON document rather than an event stream: a gateway
@@ -217,6 +224,33 @@ mod tests {
     use std::fmt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_request_names_only_the_origin_of_its_address() {
+        // A port nothing listens on, so that the connection is refused.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://user:pw@127.0.0.1:{port}/gateway/s3cret-token/v1?key=k3y"
+            ))
+            .send()
+            .await
+            .unwrap_err();
+
+        let Failure::Error { message, .. } = transport_failure("request failed", error) else {
+            panic!("a refused connection is a failed request");
+        };
+
+        assert!(
+            message.starts_with(&format!("request failed (http://127.0.0.1:{port}): ")),
+            "{message}"
+        );
+        for secret in ["s3cret", "k3y", "pw", "/gateway"] {
+            assert!(!message.contains(secret), "{message}");
+        }
+    }
 
     #[derive(Debug)]
     struct Layer(&'static str, Option<Box<Layer>>);
