@@ -143,6 +143,7 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 队列取法 | 两个队列共用一种取法（`QueueMode`），默认 `All`；pi 两个队列各设一种，默认 `one-at-a-time` |
 | 扩展的消息与状态 | 运行中排队，下一回合开始或运行结束时写入；消息只有文本；请求只声明当前活跃的工具 |
 | 环境信息 | 会话打开时写入系统提示词 |
+| 项目上下文文件 | 每层目录只认 `AGENTS.md`；pi 每层取 `AGENTS.override.md`、`AGENTS.md`、`CLAUDE.md` 等候选名中找到的第一个。其他文件由 agent 的 `context.files` 列出 |
 | 续接会话的目录 | 记录的目录已不存在时报错（见 `--cwd`），不询问是否改在当前目录继续 |
 | 参数校验 | 严格按 JSON Schema，不转换类型；改写只在工具的 `prepare_arguments` 中 |
 | 中断的工具调用 | 有副作用的调用执行前先记录开始；恢复时补写“结果未知”或“未执行”，不重放 |
@@ -203,7 +204,7 @@ HTTP 错误按状态归类，错误码表明上下文过长或凭据、配额问
 
 ### 事件（`--output jsonl`）
 
-每行一个事件，带信封字段：`schemaVersion`（当前为 7）、`seq`（运行内从 1 递增）、`atMs`、`sessionId`、`runId` 与 `type`。一次运行以 `run_start` 开始，以 `run_end`（`report`）结束：
+每行一个事件，带信封字段：`schemaVersion`（当前为 7）、`seq`（运行内从 1 递增）、`atMs`、`sessionId`、`runId` 与 `type`。新增事件类型或字段时 `schemaVersion` 不变，读取方跳过不认识的 `type` 与字段；删除、改名或改变含义时才提高。一次运行以 `run_start` 开始，以 `run_end`（`report`）结束：
 
 ```json
 {"schemaVersion":7,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionId":"…"}}
@@ -234,7 +235,7 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
-- 只读写版本 15，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 15，其他版本的文件拒绝打开，不做升级。zx-im 启动时建立的对话索引跳过其他版本的会话（存在 Postgres 里的也一样）：这样的对话下次被回答时像第一次一样建新会话，旧会话留在存储中。
 - 用户消息与工具结果可以带 `images`：每项是 `mimeType` 与 base64 的 `data`，没有图片时不写这个字段。`request_config` 记下请求的模型能否看图（`takesImages`，不能时不写），还原的请求与当时发出的相同。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
@@ -246,4 +247,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.41 · 2026年11月
+REFERENCE.md · v0.42 · 2026年11月

@@ -58,7 +58,15 @@ pub(super) struct RawPermissions {
 impl RawPermissions {
     /// Lay these values over `permissions`, checking the syntax of every entry.
     pub(super) fn apply(self, permissions: &mut Permissions) -> Result<()> {
-        if let Some(ask) = self.ask {
+        let Self {
+            ask,
+            allow,
+            allow_except,
+            allow_options,
+            deny,
+            approve_all,
+        } = self;
+        if let Some(ask) = ask {
             for tool in &ask {
                 ensure!(
                     !tool.starts_with("bash("),
@@ -68,21 +76,21 @@ impl RawPermissions {
             }
             permissions.ask = ask;
         }
-        if let Some(allow) = self.allow {
+        if let Some(allow) = allow {
             permissions.allow = entries("allow", allow)?;
         }
-        if let Some(texts) = self.allow_except {
+        if let Some(texts) = allow_except {
             ensure!(
                 texts.iter().all(|text| !text.trim().is_empty()),
                 "permissions.allowExcept: an entry must not be empty"
             );
             permissions.allow_except = texts;
         }
-        permissions.allow_options.extend(self.allow_options);
-        if let Some(deny) = self.deny {
+        permissions.allow_options.extend(allow_options);
+        if let Some(deny) = deny {
             permissions.deny = entries("deny", deny)?;
         }
-        if let Some(approve_all) = self.approve_all {
+        if let Some(approve_all) = approve_all {
             permissions.approve_all = approve_all;
         }
         Ok(())

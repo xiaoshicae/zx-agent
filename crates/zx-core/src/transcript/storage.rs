@@ -70,8 +70,10 @@ pub trait SessionStorage: Send + Sync {
     /// The headers of the sessions `query` asks for, the most recently started first and no
     /// more than its limit, as [`SessionQuery::arrange_headers`] arranges them: what a host
     /// that keeps an index of its sessions reads, without their records. A session whose
-    /// header cannot be read is left out; [`list`](Self::list) reports it. The default reads
-    /// every session `list` names; a storage that can read headers alone does so instead.
+    /// header cannot be read, or that is of another format
+    /// ([`SessionHeader::check_version`]), cannot be opened, so it is left out;
+    /// [`list`](Self::list) reports it. The default reads every session `list` names; a
+    /// storage that can read headers alone does so instead.
     async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
         let listed = self
             .list(&SessionQuery {

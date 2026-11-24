@@ -298,7 +298,7 @@ trustReadOnly = true
 
 ## 项目上下文
 
-开启 `context.discover` 时，从最近的 Git 根目录到工具 cwd 依次加载各层 `AGENTS.md`（没有 Git 根目录时只检查 cwd）。自动发现的文件解析符号链接后必须位于 Git 根目录（或 cwd）内，否则在请求模型前以退出码 2 报错。每个文件最多 64 KiB，总量最多 256 KiB，超限报错，不截断。
+开启 `context.discover` 时，从最近的 Git 根目录到工具 cwd 依次加载各层 `AGENTS.md`（没有 Git 根目录时只检查 cwd）。自动发现的文件解析符号链接后必须位于 Git 根目录（或 cwd）内，否则在请求模型前以退出码 2 报错。每个文件最多 64 KiB，总量最多 256 KiB，超限报错，不截断。`context.files` 列出的文件排在自动发现的之后，路径相对 agent 文件所在目录，不限于 Git 根目录内；同一个文件只读一次，与自动发现的一起受这两个上限约束。自动发现只认 `AGENTS.md` 这个文件名（pi 还认 `CLAUDE.md` 等，见 [REFERENCE.md](REFERENCE.md#与-pi-的差异)）。
 
 ## skills
 
@@ -405,4 +405,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.52 · 2026年11月
+CONFIGURATION.md · v0.53 · 2026年11月

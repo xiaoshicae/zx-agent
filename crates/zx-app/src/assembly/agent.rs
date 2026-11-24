@@ -58,9 +58,12 @@ pub enum Approvals<'a> {
     /// Nobody, for runs that nobody attends: a call that a policy asks about is denied.
     Nobody,
     /// A person, within the approval timeout of config.toml. Every bash command asks first,
-    /// for this reason, except those the agent auto-approves, or none when the agent
-    /// approves every call or the host skips approvals ([`Asking::Never`]), when nothing else
-    /// asks either; other tools follow the agent's permissions.
+    /// except those the agent auto-approves, or none when the agent approves every call or
+    /// the host skips approvals ([`Asking::Never`]), when nothing else asks either; other
+    /// tools follow the agent's permissions. The text is the reason a bash command's approval
+    /// request gives the person who answers it (the `reason` of `approval_requested`), such
+    /// as "shell commands require approval in the chat"; for a command the agent's
+    /// auto-approval does not cover, the request adds what it does not cover.
     Person(&'a str),
 }
 

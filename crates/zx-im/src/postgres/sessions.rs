@@ -116,8 +116,12 @@ impl SessionStorage for PostgresSessions {
 
     async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
         let rows = self.matching(query).await?;
-        // A header that cannot be read is left out; a listing reports it.
-        let headers = rows.iter().filter_map(|row| header_of_column(row, 1).ok()).collect();
+        // A header that cannot be read, or of another format, is left out; a listing reports it.
+        let headers = rows
+            .iter()
+            .filter_map(|row| header_of_column(row, 1).ok())
+            .filter(|header| header.check_version().is_ok())
+            .collect();
         Ok(query.arrange_headers(headers))
     }
 
@@ -197,6 +201,7 @@ mod tests {
     use std::path::Path;
 
     use zx_agent::ai::Message;
+    use zx_agent::transcript::SESSION_VERSION;
 
     use super::super::test_support::leading;
     use super::*;
@@ -241,6 +246,37 @@ mod tests {
             ..SessionQuery::default()
         };
         assert!(storage.headers(&elsewhere).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_of_another_format_is_left_out_of_the_headers_and_reported_by_a_listing() {
+        let Some(database) = leading().await else {
+            return;
+        };
+        let storage = PostgresSessions::new(Arc::clone(&database));
+        let current = header("/work", "ops");
+        storage.create(&current).await.unwrap();
+        let older = header("/work", "ops");
+        storage.create(&older).await.unwrap();
+        // As an earlier program wrote it: `create` refuses a header of another format.
+        let text = serde_json::to_string(&SessionHeader {
+            version: SESSION_VERSION - 1,
+            ..older.clone()
+        })
+        .unwrap();
+        let changed = database
+            .write(
+                "UPDATE zx_im_sessions SET header = $2::text WHERE id = $1::text AND zx_im_fence($3)",
+                &[&older.id, &text],
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        assert_eq!(storage.headers(&SessionQuery::default()).await.unwrap(), [current]);
+        let listed = storage.list(&SessionQuery::default()).await.unwrap();
+        assert_eq!(listed.unreadable.len(), 1, "{:?}", listed.unreadable);
+        assert_eq!(listed.unreadable[0].location, older.id);
     }
 
     #[tokio::test]

@@ -73,7 +73,7 @@
 
 属于程序 `zx-im`：服务与平台经它的库测，程序运行编译出的 `zx-im`。飞书 channel 的测试要 feature `feishu`（`[[test]]` 的 `required-features`），`cargo test -p zx-im --no-default-features` 时不编译。
 
-Postgres 存储的单元测试（`crates/zx-im/src/postgres/` 各模块：建表与拒绝别的版本、会话的读写与第二个写入者、backlog、“处理中”的记录、每天的用量；主备：一个副本当选时另一个等待、放手后它在下一个任期接手、等待可以取消、任期已过的副本写不进去、持锁的连接被服务端断开时报告失去主的身份）与 `im_cli.rs` 中会话存在 Postgres 的测试，只在设置 `ZX_TEST_POSTGRES_URL` 时连库运行，没设置时在 stderr 说一句后跳过；每个测试在库里新建一个自己的 schema，用完不删。CI 在 Linux 上起一个 Postgres 16 容器这样运行。本地运行：
+Postgres 存储的单元测试（`crates/zx-im/src/postgres/` 各模块：建表与拒绝别的版本、会话的读写与第二个写入者、其他格式的会话不进头部的列表、backlog、“处理中”的记录、每天的用量；主备：一个副本当选时另一个等待、放手后它在下一个任期接手、等待可以取消、任期已过的副本写不进去、持锁的连接被服务端断开时报告失去主的身份）与 `im_cli.rs` 中会话存在 Postgres 的测试，只在设置 `ZX_TEST_POSTGRES_URL` 时连库运行，没设置时在 stderr 说一句后跳过；每个测试在库里新建一个自己的 schema，用完不删。CI 在 Linux 上起一个 Postgres 16 容器这样运行。本地运行：
 
 ```bash
 docker run --detach --name zx-im-postgres --publish 127.0.0.1:5432:5432 \
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.44 · 2026年11月
+TESTS.md · v0.45 · 2026年11月

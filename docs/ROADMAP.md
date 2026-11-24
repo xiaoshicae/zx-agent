@@ -29,7 +29,7 @@
 | D12 | chat 不给 `--session` 时把会话存到主目录的会话目录（路径与权限见 [REFERENCE.md](REFERENCE.md#chat)），`--no-session` 只存在内存；`run` 只在给出 `--session` 时写文件 |
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `zx-im` 与 SDK |
-| D15 | 只读写当前会话格式（`SESSION_VERSION`），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
+| D15 | 只读写当前会话格式（`SESSION_VERSION`），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，只加字段也提高，不写升级代码。前提是还没有使用者：有使用者之前再定兼容的范围，如只加字段时仍读旧版本 |
 | D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；在频道里直接 @ 机器人时，先读入频道里上次 @ 它之后的消息（至多 50 条）再回答，“上次”以平台上的消息为准，不另存游标；不加开关（2026-11-22 用户决定，原为不读频道历史）。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；其他名字的文件只在宿主选用时读取，zx-im 由 `im.toml` 按聊天选（D39）。键与规则见 [CONFIGURATION.md](CONFIGURATION.md)。命令行设置权限的唯一例外是 `--dangerously-skip-approvals`（D47） |
 | D18 | 没有命令白名单、幂等键与增量摘要：摘要每次读取原始记录，上限见 [CONFIGURATION.md](CONFIGURATION.md#上下文管理) |
@@ -64,6 +64,7 @@
 | D47 | 跳过审批（2026-11-24，用户要求，参照 Claude Code 的 `--dangerously-skip-permissions`）：`run`、`chat`、`acp` 的 `--dangerously-skip-approvals` 让这一次运行不询问任何审批，效果同 agent 的 `permissions.approveAll`：bash、MCP 与宿主扩展的工具、agent 的 `ask` 列出的工具都直接执行，拒绝规则与命令的拒绝列表照旧。它是 D17（命令行不设权限）的唯一例外，只对这一次运行有效：config.toml、agent 文件与项目文件都打不开它；zx-im 没有这个开关，审批属于聊天里的审批人。与 approveAll 不同，它不要求隔离命令的执行环境；以 root 运行且执行环境不隔离时拒绝启动（同 Claude Code），检查经 `geteuid`。启动时在 stderr 打印一行 `[danger]`，chat 的横幅写明 bash 不询问。默认不开：Claude Code 与 Gemini CLI 默认询问，Codex CLI 默认在沙箱里自动执行、越界时询问，三者跳过审批都要显式开启；不询问的默认只适合有隔离的部署，那里已有容器执行加 approveAll。原定保留 agent 的 `ask` 列表（同 Claude Code 的 ask 规则），实现时发现内置 assistant 的 `ask` 就是 bash、edit_file、write_file，保留它会让开关在默认的 chat 里不起作用，所以改为全部跳过。库中是 `Overrides::asking`（`Asking::Never`） |
 | D48 | 外部评审后的修正（2026-11-24，用户同意按建议做）：① 自动放行没有放行的命令，审批原因后写明没满足哪一条（`not auto-approved: …`，如含引号、URL、`allowExcept` 的字词、不在清单的命令段或选项），ACP 的审批请求以原因为调用的内容；② `run` 没人回答审批、bash 不询问且执行环境不隔离时，开始前在 stderr 打印一行 `[bash]`（跳过审批时只有 `[danger]`），不因此拒绝 root（root 只在跳过审批时拒绝，D47）；chat 的横幅按执行环境写命令在本机运行还是隔离运行；③ 落盘的工具结果按 `toolOutput.maxAgeDays` 保留（默认 7 天，0 不删；库中至少一天，免得删掉别的会话正在用的结果），每个会话第一次落盘前删除更旧的，常驻部署的卷不再只增不减；④ `edit_file` 与 `write_file` 经同目录的新文件改名替换原文件（本机写完先同步到磁盘），磁盘写满或进程被杀不再留下空的或写了一半的文件；会改变文件身份时（符号链接、硬链接、属主或属组不同、目录不能新建文件）仍原地写，容器中核对收到的字节数后才替换。评审中没有采纳的：错误类型全面换成枚举（规则 03，调用方不需要区分）、MCP 的 stdio（D8）、把 `files` 移出 zx-builtin、让容器中的调用并发（每次 bash 类调用约 3 次 `docker exec`，macOS 的 Docker Desktop 上实测每次约 30 ms，相对模型请求不大；按进程组清扫会漏掉 `setsid` 脱离的进程） |
 | D49 | 第二轮外部评审（zx-ai、zx-im，2026-11-24，用户同意按建议做）：① 服务端要求的重试等待超过 `max_delay`（60 秒）时不再重试，失败原因写明要求等多久（同 pi），原来截到 60 秒后照样重试；② IM 平台调用的限流等待合计至多 20 秒，短于出站时限 30 秒，要求更久时立即以“被限流”失败，原来等到出站超时、报成“超时”，回答可能送不到；读不出的等待按 1 秒并记日志；③ 传输错误只写服务地址的 origin，路径与查询可能带凭据（与 MCP 一致）；④ OpenAI 兼容服务的 usage 缺某个计数时保留原值，与 Anthropic 一致；⑤ 错误措辞判断用具体短语（如 `connection refused`），不用 `connection`、`temporarily` 这样的单词；⑥ IM 审批只给一次性授权是有意的，不加“本会话允许”：点按钮的审批人不一定是发起人。不做：两个 provider 共用读流程、拆分 `types.rs`、`worker.rs`、`outlet.rs`（纯结构调整，另行）；读个别服务商放在别处的 usage（用到时再加，按 D10 显式开启）；拆 crate、细分 `ImError` 与配置错误、IM 的指标导出（D42）、Responses API（见第 5 节） |
+| D50 | 第三轮外部评审（zx-app、zx-core，2026-11-24，用户同意按建议做）：① 配置文件的表在读取处写出全部字段（规则 05），漏读的键编译报错，不再被静默忽略；② zx-core 的单元测试按 `lib.rs` 的模块清单检查每个模块引用的模块；③ 事件流新增事件类型或字段时 `schemaVersion` 不变，读取方跳过不认识的，删除、改名或改变含义时才提高；④ `SessionStorage::headers` 不给出其他格式的会话，原来 Postgres 给出，格式升级后对话的每条消息都打不开会话，直到 `/new`；⑤ 文档写明只认 `AGENTS.md`（与 pi 的差异）、`context.files` 与自动发现的关系、`Approvals::Person` 的文字是审批请求的理由；D15 写明前提。不做：合并配置的三层表示、`Config` 字段私有化、notices 结构化、追踪导出放进 feature、给未结束的 span 设上限、一次报出全部校验错误、登记部件时就报名字冲突；会话格式迁移（D15）、合并运行层的文件、`Halt` 换写法、裁剪 `Session` 与公开 API、hold 换成具名 trait、为会话自行关闭另发事件 |
 
 ## 4. 当前阶段
 
@@ -157,4 +158,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.79 · 2026年11月
+ROADMAP.md · v0.80 · 2026年11月
