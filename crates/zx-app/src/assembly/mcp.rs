@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use zx_agent::ai::Proxy;
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::extensions::Extension;
 use zx_agent::tools::Effects;
@@ -32,7 +33,9 @@ impl McpTools {
     /// Fails when a server cannot be reached in time or lacks a tool.
     pub(super) async fn connect(settings: &Settings) -> Result<(Self, Vec<String>)> {
         let mcp = &settings.config.mcp;
-        let configs = mcp.iter().map(|server| server_config(server, settings.tool_timeout));
+        let configs = mcp
+            .iter()
+            .map(|server| server_config(server, settings.tool_timeout, &settings.config.proxy));
         // Each connection has its own bound, so the slowest server sets the startup time.
         let connected = futures::future::join_all(configs.map(Server::connect)).await;
         let mut tools = Self::default();
@@ -82,14 +85,15 @@ fn sends_credentials(server: &McpServer, credentials: &Credentials) -> bool {
     server.token.is_some() || server.headers.values().any(|value| credentials.values.contains(value))
 }
 
-/// The settings to connect `server` with: its token and headers, and calls bounded by its
-/// `timeoutSecs` or else by `tool_timeout`.
-fn server_config(server: &McpServer, tool_timeout: Duration) -> ServerConfig {
+/// The settings to connect `server` with: its token and headers, calls bounded by its
+/// `timeoutSecs` or else by `tool_timeout`, and requests sent through `proxy`.
+fn server_config(server: &McpServer, tool_timeout: Duration, proxy: &Proxy) -> ServerConfig {
     ServerConfig {
         token: server.token.clone(),
         headers: server.headers.clone().into_iter().collect(),
         trust_read_only: server.trust_read_only,
         call_timeout: server.timeout_secs.map_or(tool_timeout, Duration::from_secs),
+        proxy: proxy.clone(),
         ..ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone())
     }
 }

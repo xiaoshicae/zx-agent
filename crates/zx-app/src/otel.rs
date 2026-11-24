@@ -27,7 +27,10 @@ use anyhow::{Context, Result, anyhow};
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider};
 use opentelemetry::{Key, Value};
-use opentelemetry_otlp::SpanExporter;
+use opentelemetry_otlp::{
+    OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, SpanExporter,
+    WithHttpConfig,
+};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::resource::{EnvResourceDetector, ResourceDetector};
@@ -35,6 +38,8 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Proxy;
+use zx_ai_http::client::routed;
 use zx_util::env::env_value;
 
 use self::signal::Signal;
@@ -136,16 +141,15 @@ impl Telemetry {
     ///
     /// Traces go out when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
     /// is set and not empty; `None` when neither is: nothing is then sent anywhere. The SDK reads the other
-    /// standard variables, such as `OTEL_EXPORTER_OTLP_HEADERS`. Needs a Tokio runtime. An error
-    /// is a configuration that the exporter refuses, such as an invalid endpoint.
-    pub fn from_env(service_name: &str) -> Result<Option<Self>> {
+    /// standard variables, such as `OTEL_EXPORTER_OTLP_HEADERS`. Requests go through `proxy`,
+    /// config.toml's ([`Config::proxy`](crate::config::Config::proxy)). Needs a Tokio
+    /// runtime. An error is a configuration that the exporter refuses, such as an invalid
+    /// endpoint, or a proxy that is not the `http://` URL of one.
+    pub fn from_env(service_name: &str, proxy: &Proxy) -> Result<Option<Self>> {
         if ENDPOINT_ENVS.iter().all(|name| env_value(name).is_none()) {
             return Ok(None);
         }
-        let exporter = SpanExporter::builder()
-            .with_http()
-            .build()
-            .context("cannot set up the OTLP span exporter")?;
+        let exporter = exporter(proxy)?;
         let tracer_provider = SdkTracerProvider::builder()
             .with_resource(resource(service_name))
             .with_batch_exporter(exporter)
@@ -216,6 +220,52 @@ impl Telemetry {
         .await
         .context("the export failed")?
     }
+}
+
+/// The span exporter of the endpoint the standard variables name, sending through `proxy`.
+/// The client the exporter makes itself sends through the environment's proxies; another
+/// proxy takes a client of the same kind made here.
+fn exporter(proxy: &Proxy) -> Result<SpanExporter> {
+    const SET_UP: &str = "cannot set up the OTLP span exporter";
+    let builder = SpanExporter::builder().with_http();
+    let route = match proxy {
+        Proxy::FromEnvironment => return builder.build().context(SET_UP),
+        Proxy::Direct => None,
+        Proxy::Through(proxies) => Some(routed(proxies).map_err(|error| anyhow!("[proxy]: {error}"))?),
+    };
+    builder
+        .with_http_client(blocking_client(route)?)
+        .build()
+        .context(SET_UP)
+}
+
+/// The blocking client the exporter would make itself, with the same timeout, sending through
+/// `route`, or directly without one. Made on a thread of its own, as the exporter makes
+/// its client: a blocking client cannot be made on a thread that runs async tasks.
+fn blocking_client(route: Option<reqwest::Proxy>) -> Result<reqwest::blocking::Client> {
+    let timeout = export_timeout();
+    std::thread::spawn(move || {
+        let builder = reqwest::blocking::Client::builder().timeout(timeout).no_proxy();
+        match route {
+            Some(route) => builder.proxy(route),
+            None => builder,
+        }
+        .build()
+    })
+    .join()
+    // The panic hook has already said why.
+    .map_err(|_| anyhow!("the thread making the trace export's HTTP client panicked"))?
+    .context("cannot build the trace export's HTTP client")
+}
+
+/// How long one export request may take: the standard variables, in milliseconds, as the
+/// exporter reads them for its own client; otherwise its default.
+fn export_timeout() -> Duration {
+    [OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT]
+        .iter()
+        // A value that is not a number is passed over, as the exporter does.
+        .find_map(|name| env_value(name)?.parse().ok())
+        .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
 /// The resource that the traces come from: the SDK's, with its own attributes and those in

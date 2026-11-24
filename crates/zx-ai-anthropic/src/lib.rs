@@ -25,6 +25,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use zx_ai::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use zx_ai::{ProviderErrorKind, Request, StreamEvent, now_ms};
+use zx_ai_http::client::with_proxy;
 use zx_ai_http::failure::answers_json;
 use zx_ai_http::request::{api_key, send};
 use zx_ai_http::stream::{Events, end};
@@ -45,15 +46,15 @@ pub struct AnthropicMessages {
 impl AnthropicMessages {
     /// Check the settings and build the HTTP client. Errors: an address requests cannot go
     /// to, a byte budget or a timeout of zero, an extra field the provider sets itself, a
-    /// header the client cannot send, and a client that cannot be built.
+    /// header the client cannot send, a proxy that is not the `http://` URL of one, and a
+    /// client that cannot be built.
     pub fn new(config: AnthropicConfig) -> anyhow::Result<Self> {
         config.check()?;
-        let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
-        if !config.use_system_proxy {
-            builder = builder.no_proxy();
-        }
+        let builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
         Ok(Self {
-            client: builder.build()?,
+            client: with_proxy(builder, &config.proxy)
+                .map_err(anyhow::Error::msg)?
+                .build()?,
             config,
         })
     }

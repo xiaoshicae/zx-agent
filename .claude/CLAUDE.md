@@ -13,10 +13,10 @@
 | crate | 负责 |
 |---|---|
 | `zx-util` | 各 crate 共用的小工具：加锁、文本截短与小额数字的显示、随机数、判断默认值、读环境变量、按名字登记、不会 panic 的输出行；不属于 API。只收没有业务含义、至少两个 crate 要用、只依赖标准库与 tokio 的函数，其余留在用它的 crate |
-| `zx-ai` | 消息类型、流式事件、`Provider` 契约 |
+| `zx-ai` | 消息类型、流式事件、`Provider` 契约，连接经过的代理（`Proxy`） |
 | `zx-ai-openai` | OpenAI 兼容的 provider；模型层里依赖 reqwest 的只有两个 provider 与它们共用的 `zx-ai-http`，都不依赖内核 |
 | `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |
-| `zx-ai-http` | 两个 provider 共用的 HTTP 部分：设置检查、取 key 与发请求、按限额读事件流、请求失败（`Failure`、Retry-After）；不属于 API。协议的写法与失败的归类留在各 provider |
+| `zx-ai-http` | 两个 provider 共用的 HTTP 部分：设置检查、取 key 与发请求、按限额读事件流、请求失败（`Failure`、Retry-After）；程序的其他 HTTP 客户端（MCP、IM 平台、追踪导出）也用它的 `client` 经代理发送；不属于 API。协议的写法与失败的归类留在各 provider |
 | `zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP、图片进入会话前的适配 |
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use zx_agent::ai::anthropic::AnthropicMessages;
 use zx_agent::ai::openai::OpenAiCompatible;
-use zx_agent::ai::{Provider, Reasoning};
+use zx_agent::ai::{Provider, Proxy, Reasoning};
 use zx_util::registry::Registry;
 
 use super::settings::BASE_URL_ENV;
@@ -33,6 +33,9 @@ pub struct ProviderInput<'a> {
     pub api_key: Option<String>,
     /// The reasoning level of config.toml, for a factory whose settings can conflict with it.
     pub reasoning: Option<Reasoning>,
+    /// How the provider's requests reach the network: through the proxies of config.toml's
+    /// `[proxy]`, else as the environment says.
+    pub proxy: &'a Proxy,
 }
 
 /// A provider a factory built.
@@ -77,6 +80,7 @@ impl ProviderFactory for OpenAi {
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
         let mut config = openai_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
+        config.proxy = input.proxy.clone();
         let session_cache_key = config.body.prompt_cache_key;
         let provider = OpenAiCompatible::new(config).with_context(invalid_settings)?;
         Ok(BuiltProvider {
@@ -97,6 +101,7 @@ impl ProviderFactory for Anthropic {
     fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
         let mut config = anthropic_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
+        config.proxy = input.proxy.clone();
         let provider = AnthropicMessages::new(config).with_context(invalid_settings)?;
         Ok(BuiltProvider {
             provider: Arc::new(provider),
@@ -108,6 +113,8 @@ impl ProviderFactory for Anthropic {
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::Proxies;
+
     use super::*;
 
     fn options(text: &str) -> toml::Table {
@@ -120,6 +127,7 @@ mod tests {
             options: &options(text),
             api_key: None,
             reasoning,
+            proxy: &Proxy::Direct,
         })
     }
 
@@ -142,6 +150,26 @@ mod tests {
             let error = format!("{:#}", built(api, text, Some(Reasoning::Low)).err().unwrap());
             assert!(error.contains("conflicts with reasoning"), "{api}: {error}");
             built(api, text, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_built_in_factories_send_through_the_proxy_they_are_given() {
+        // A proxy that the client refuses shows that it reached the provider.
+        let proxy = Proxy::Through(Proxies {
+            https: Some("socks5://proxy.internal:1080".into()),
+            ..Proxies::default()
+        });
+        let registered = built_in();
+        for api in [OPENAI, ANTHROPIC] {
+            let built = registered.get(api).unwrap().build(ProviderInput {
+                options: &options(""),
+                api_key: None,
+                reasoning: None,
+                proxy: &proxy,
+            });
+            let error = format!("{:#}", built.err().unwrap());
+            assert!(error.contains("not socks5://"), "{api}: {error}");
         }
     }
 

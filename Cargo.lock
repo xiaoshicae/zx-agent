@@ -3877,6 +3877,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -3885,6 +3886,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "zx-agent",
+ "zx-ai-http",
  "zx-testing",
  "zx-util",
 ]
@@ -3909,6 +3911,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "zx-ai",
+ "zx-ai-http",
  "zx-core",
  "zx-util",
 ]
@@ -3961,6 +3964,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "futures",
  "image",
@@ -3978,6 +3982,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "zx-agent",
+ "zx-ai-http",
  "zx-app",
  "zx-testing",
  "zx-util",

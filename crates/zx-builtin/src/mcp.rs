@@ -11,6 +11,10 @@
 //!
 //! A [`Server`] is an [`Extension`]: an agent takes it in
 //! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
+//!
+//! - `http`: the HTTP client a server's transport sends with, through its proxy
+
+mod http;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,7 +37,8 @@ use tokio::sync::mpsc;
 use zx_core::extensions::Extension;
 use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
-use crate::ai::{ToolDef, api_identifier};
+use self::http::http_client;
+use crate::ai::{Proxy, ToolDef, api_identifier};
 use crate::images;
 use crate::sync::lock;
 use crate::text::prefix_noted;
@@ -95,12 +100,14 @@ pub struct ServerConfig {
     /// notification starts it over (pi: the request timeout re-armed on progress). A call
     /// that keeps reporting progress is bounded by the run's timeout and cancellation.
     pub call_timeout: Duration,
+    /// How requests reach the server: the environment's proxies by default.
+    pub proxy: Proxy,
 }
 
 impl ServerConfig {
     /// The settings for `tools` of the server `name` at `url`: no token or other headers,
-    /// annotations not trusted, and the default timeouts ([`DEFAULT_CONNECT_TIMEOUT`],
-    /// [`DEFAULT_CALL_TIMEOUT`]).
+    /// annotations not trusted, the default timeouts ([`DEFAULT_CONNECT_TIMEOUT`],
+    /// [`DEFAULT_CALL_TIMEOUT`]) and the environment's proxies.
     pub fn new(name: impl Into<String>, url: impl Into<String>, tools: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -111,6 +118,7 @@ impl ServerConfig {
             trust_read_only: false,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            proxy: Proxy::default(),
         }
     }
 
@@ -357,7 +365,8 @@ async fn connect_and_list(
     if let Some(token) = &config.token {
         transport = transport.auth_header(token.as_str());
     }
-    let transport = StreamableHttpClientTransport::from_config(transport);
+    let client = http_client(&config.proxy).map_err(|error| fault(server, error))?;
+    let transport = StreamableHttpClientTransport::with_client(client, transport);
     let lifecycle = ClientLifecycleMode::Auto {
         preferred_versions: vec![ProtocolVersion::LATEST],
         legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),

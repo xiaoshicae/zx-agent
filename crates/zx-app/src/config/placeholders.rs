@@ -16,6 +16,9 @@ pub enum Holds {
     /// The value of a request header: a credential when it names a variable, as a token in it
     /// would; text when written as it is, as most headers are.
     Header,
+    /// The URL of a server that may carry a user and password (`http://user:password@host`),
+    /// as a proxy's does: a credential when it carries either.
+    Address,
     /// Left as written, for its key's owner to expand: the API key, which goes without when
     /// its variable has no value.
     Kept,
@@ -120,6 +123,7 @@ fn expand_text(
     let credential = match holds {
         Holds::Credential => true,
         Holds::Header => !expanded.variables.is_empty(),
+        Holds::Address => carries_user(&expanded.value),
         Holds::Text | Holds::Kept => false,
     };
     if credential {
@@ -130,6 +134,14 @@ fn expand_text(
     }
     *text = expanded.value;
     Ok(())
+}
+
+/// Whether `url` carries a user or password: an `@` before the end of its host and port.
+fn carries_user(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
 }
 
 /// `path` as a key of the file: `mcp[1].headers.X-Api-Key`.
@@ -154,11 +166,12 @@ mod tests {
     use super::*;
 
     /// What the strings of the test file hold: `secret` is a credential, the values of
-    /// `headers` are headers, `kept` is kept.
+    /// `headers` are headers, a `proxy` is an address, `kept` is kept.
     fn holds(keys: &[&str]) -> Holds {
         match keys {
             [.., "secret"] => Holds::Credential,
             [.., "headers", _] => Holds::Header,
+            [.., "proxy"] => Holds::Address,
             ["kept"] => Holds::Kept,
             _ => Holds::Text,
         }
@@ -190,6 +203,19 @@ mod tests {
                 format!("x{path}")
             ]
         );
+    }
+
+    #[test]
+    fn an_address_is_a_credential_when_it_carries_a_user_or_password() {
+        let mut table: toml::Table = toml::from_str(
+            "[a]\nproxy = \"http://user:secret@proxy:3128\"\n[b]\nproxy = \"http://proxy:3128/a@b\"\n\
+             [c]\nproxy = \"http://token@proxy\"\n[d]\nproxy = \"http://proxy:3128\"\n",
+        )
+        .unwrap();
+        let found = expand_table(&mut table, &holds).unwrap();
+        // An `@` after the host is not a user's.
+        assert_eq!(found.values, ["http://user:secret@proxy:3128", "http://token@proxy"]);
+        assert!(found.variables.is_empty());
     }
 
     #[test]

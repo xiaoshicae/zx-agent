@@ -28,11 +28,15 @@ postgres = ["dep:rustls", "dep:rustls-platform-verifier", "dep:tokio-postgres", 
 
 [dependencies]
 zx-agent.workspace = true
+# The proxies of the platforms' HTTP clients.
+zx-ai-http.workspace = true
 zx-app.workspace = true
 zx-util.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
+# The proxy's credentials on a WebSocket's tunnel (`Proxy-Authorization: Basic`).
+base64.workspace = true
 clap.workspace = true
 futures.workspace = true
 reqwest.workspace = true
@@ -41,8 +45,9 @@ rustls-platform-verifier = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# `#[tokio::main]` runs the program on the multi-thread runtime.
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# `#[tokio::main]` runs the program on the multi-thread runtime; a WebSocket's tunnel speaks to
+# the proxy itself (`io-util`).
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tokio-postgres-rustls = { workspace = true, optional = true }
 tokio-tungstenite.workspace = true

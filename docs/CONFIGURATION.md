@@ -61,6 +61,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `execution` | 命令在哪里执行：`local`（默认，本机）、`container`（见下文“容器执行”），或宿主经 `register_executor` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错 |
 | `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价：`input`、`output` 必填，`cacheRead`、`cacheWrite` 默认 0；都不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）、`input`（模型收的输入，`["text"]` 或 `["text", "image"]`，默认只有文本，必须含 `"text"`；不含 `"image"` 时，发给它的图片换成一句说明，见 [REFERENCE.md](REFERENCE.md#图片)）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
+| `[proxy]` | 程序自己的出网连接经过的代理，见下文“代理” |
 
 `reasoning`、`maxTokens` 与 provider 中决定请求体写法的键（`systemUpdates`、`reasoningFormat`、`maxTokensField`、`fillMissingReasoning`、`promptCacheKey`、`requestFields`）随请求记入会话；服务地址、`headers` 与 API key 不记录。宿主注册的 provider 记录什么由它自己决定。
 
@@ -156,6 +157,27 @@ apiKeyHeader = "authorization"
 | `container.network` | Docker 网络：`bridge`（默认）、`none`（无网络）或自建网络的名字；`host` 与 `container:<名字>` 报配置错误 |
 | `container.workspace` | `readWrite`（默认）或 `readOnly`：命令能否修改工作目录 |
 | `container.root` | `readWrite`（默认）或 `readOnly`：命令能否修改容器自身的文件；`readOnly` 时只有内存中的 `/tmp` 可写 |
+
+### 代理
+
+`[proxy]` 给出程序自己的出网连接经过的代理：模型请求、MCP 服务器、IM 平台的 API 与长连接（WebSocket），以及追踪导出。
+
+```toml
+[proxy]
+http = "http://proxy.internal:3128"                              # http:// 与 ws:// 的目标
+https = "http://user:${PROXY_PASSWORD}@proxy.internal:3128"     # https:// 与 wss:// 的目标
+noProxy = ["localhost", "127.0.0.1", ".svc.cluster.local", "10.0.0.0/8"]
+```
+
+| 键 | 语义 |
+|---|---|
+| `proxy.http` | `http://` 与 `ws://` 目标经过的代理 |
+| `proxy.https` | `https://` 与 `wss://` 目标经过的代理：代理用 `CONNECT` 建立隧道，TLS 在隧道里与目标直接握手 |
+| `proxy.noProxy` | 直连、不经代理的主机：主机名涵盖它自己与子域（开头的 `.` 可写可不写），IP 地址只涵盖自己，CIDR 网段（`10.0.0.0/8`）涵盖其中的地址，`*` 涵盖所有主机。按目标地址的写法比较，不解析域名。一项里可以用逗号分隔多个，所以 `["${NO_PROXY}"]` 沿用环境变量的列表。集群内的服务（追踪的收集器、内部的 MCP 服务器）通常写在这里 |
+
+代理的地址写成 `http://[用户名:密码@]主机[:端口]`，不写端口时为 80，后面至多跟一个 `/`；`https://`、`socks5://` 等其他代理以退出码 2 报错。用户名与密码里的 `@`、`:`、`/`、`%` 等字符按 URL 的写法转义（`@` 写作 `%40`），经变量给出时变量的值也是转义后的。地址带用户名或密码时算凭据：引用的变量对命令隐藏，地址在工具输出中脱敏。因此，命令也要经代理时，带密码的地址不要引用命令所用的 `HTTPS_PROXY`，另用一个变量。
+
+写了 `[proxy]` 就只用它，环境变量中的代理不再起作用；表里既没有 `http` 也没有 `https` 时，所有连接都直连。没写 `[proxy]` 时照旧：HTTP 请求（模型、MCP、IM 平台的 API、追踪导出）读环境变量 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY`，IM 平台的长连接直连。agent 执行的命令不受 `[proxy]` 影响，看到的环境变量照旧。
 
 ## agent
 
@@ -382,4 +404,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.47 · 2026年11月
+CONFIGURATION.md · v0.48 · 2026年11月

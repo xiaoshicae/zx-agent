@@ -8,6 +8,7 @@ use anyhow::Result;
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Proxy;
 use zx_agent::events::Event;
 use zx_agent::{Run, Session};
 
@@ -158,18 +159,19 @@ impl ExportEnd {
 }
 
 /// Run `body` with the trace export started, when the environment names an OTLP endpoint, as
-/// the service `service_name`, the host's name ([`Telemetry::from_env`]); once `body` returns,
+/// the service `service_name`, the host's name, sending through `proxy`, config.toml's
+/// ([`Telemetry::from_env`]); once `body` returns,
 /// whatever it returns, what remains to export is sent before this returns. `body` gets the
 /// export, `None` when nothing is exported, to observe the agents' runs with its hook
 /// ([`Application::set_traces`](crate::Application::set_traces)).
 ///
 /// Fails before `body` starts when the exporter refuses its configuration, such as an invalid
 /// endpoint. The export never changes what `body` returns: how it ended comes beside it.
-pub async fn with_telemetry<B, T>(service_name: &str, body: B) -> Result<(T, ExportEnd)>
+pub async fn with_telemetry<B, T>(service_name: &str, proxy: &Proxy, body: B) -> Result<(T, ExportEnd)>
 where
     B: AsyncFnOnce(Option<&Telemetry>) -> T,
 {
-    let telemetry = Telemetry::from_env(service_name)?;
+    let telemetry = Telemetry::from_env(service_name, proxy)?;
     let value = body(telemetry.as_ref()).await;
     let end = match telemetry {
         Some(telemetry) => finish(telemetry).await,

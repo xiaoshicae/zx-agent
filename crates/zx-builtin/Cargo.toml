@@ -12,12 +12,14 @@ workspace = true
 
 [features]
 default = ["mcp"]
-# The client of external MCP servers (`mcp`), with the HTTP client and the MCP SDK it brings;
-# without it, the built-in tools, executors, policies and hooks compile without either.
-mcp = ["dep:reqwest", "dep:rmcp"]
+# The client of external MCP servers (`mcp`), with the HTTP client, the proxies it sends through
+# (`zx-ai-http`) and the MCP SDK it brings; without it, the built-in tools, executors, policies
+# and hooks compile without them.
+mcp = ["dep:reqwest", "dep:rmcp", "dep:zx-ai-http"]
 
 [dependencies]
 zx-ai.workspace = true
+zx-ai-http = { workspace = true, optional = true }
 zx-core.workspace = true
 zx-util.workspace = true
 

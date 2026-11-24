@@ -57,13 +57,9 @@ impl Settings {
     /// Read config.toml from the zx-agent home and lay `model`, the host's, else `ZX_MODEL`,
     /// and `ZX_BASE_URL` over it. A process without a model anywhere is a configuration error.
     pub(super) fn from_environment(model: Option<String>) -> Result<Self> {
-        let home = config::home()?;
-        let config = match &home {
-            Some(home) => Config::load(&home.join(config::CONFIG_FILE))?,
-            None => Config::default(),
-        };
+        let config = Config::from_environment()?;
         let model = model.or_else(|| env_value(MODEL_ENV));
-        Self::over(model, env_value(BASE_URL_ENV), config, home)
+        Self::over(model, env_value(BASE_URL_ENV), config, config::home()?)
     }
 
     /// `model` and `base_url` over `config`, read from `home`. Every host comes here, so a

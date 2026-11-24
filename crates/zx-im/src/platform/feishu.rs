@@ -28,6 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Proxy;
 use zx_util::sync::lock;
 
 use self::api::CallError;
@@ -76,6 +77,9 @@ pub struct FeishuConfig {
     /// failed attempt to connect, before the channel waits and tries again, a connection
     /// that went silent, a frame it cannot decode, and an event that is not JSON.
     pub on_error: Option<ErrorReport>,
+    /// How the APIs and the long connection are reached: by default, the APIs through the
+    /// environment's proxies and the connection directly.
+    pub proxy: Proxy,
 }
 
 impl FeishuConfig {
@@ -90,6 +94,7 @@ impl FeishuConfig {
             post_interval: DEFAULT_POST_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
+            proxy: Proxy::default(),
         }
     }
 }
@@ -131,6 +136,7 @@ impl PlatformFactory for Feishu {
         }
         config.labels.clone_from(input.labels);
         config.on_error = Some(input.on_error);
+        config.proxy = input.proxy.clone();
         let channel = FeishuChannel::new(config)?;
         Ok(BuiltChannel {
             channel: Arc::new(channel),
@@ -162,10 +168,11 @@ pub struct FeishuChannel {
 }
 
 impl FeishuChannel {
-    /// A channel for `config`. Fails when the HTTP client cannot be built.
+    /// A channel for `config`. Fails when the HTTP client cannot be built, as for a proxy
+    /// that is not the `http://` URL of one.
     pub fn new(config: FeishuConfig) -> Result<Self, ImError> {
         Ok(Self {
-            http: http_client(config.request_timeout)?,
+            http: http_client(config.request_timeout, &config.proxy)?,
             posts: Pacer::new(config.post_interval),
             config,
             token: tokio::sync::Mutex::new(None),

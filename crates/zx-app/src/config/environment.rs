@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use zx_agent::ai::{ModelCost, ModelMeta, Reasoning};
+use zx_agent::ai::{ModelCost, ModelMeta, Proxies, Proxy, Reasoning};
 use zx_agent::builtin::executor::{Access, ContainerConfig, InvalidContainerConfig};
 use zx_agent::builtin::mcp::ServerConfig;
 use zx_agent::builtin::output_store::{
     InvalidOutputStoreConfig, MAX_FILE_BYTES, MIN_THRESHOLD_BYTES, OutputStoreConfig,
 };
+use zx_ai_http::client::check_proxy;
 
 use super::placeholders::{Credentials, Holds, expand_table};
 use super::provider::ProviderSettings;
@@ -117,8 +118,14 @@ pub struct Config {
     pub models: HashMap<String, ModelMeta>,
     /// External MCP servers.
     pub mcp: Vec<McpServer>,
+    /// How the program's own connections reach the network: those to the model, the MCP
+    /// servers, the chat platforms and the trace collector. `[proxy]` gives the proxies,
+    /// which replace the environment's; without it, the environment's apply as the HTTP
+    /// client reads them. The commands an agent runs see the environment as it is.
+    pub proxy: Proxy,
     /// The credentials the file holds, but for the API key, which the assembly expands: the
-    /// MCP servers' tokens and the headers that name variables.
+    /// MCP servers' tokens, the headers that name variables and the proxies that carry a user
+    /// or password.
     pub credentials: Credentials,
 }
 
@@ -139,6 +146,7 @@ impl Default for Config {
             tool_output: OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY),
             models: HashMap::new(),
             mcp: Vec::new(),
+            proxy: Proxy::default(),
             credentials: Credentials::default(),
         }
     }
@@ -160,6 +168,17 @@ struct RawConfig {
     tool_output: RawToolOutput,
     models: Vec<RawModel>,
     mcp: Vec<McpServer>,
+    /// `None` without a `[proxy]` table, which leaves the proxies to the environment.
+    proxy: Option<RawProxy>,
+}
+
+/// `[proxy]`: the proxies of the program's own connections, in place of the environment's.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct RawProxy {
+    http: Option<String>,
+    https: Option<String>,
+    no_proxy: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -190,6 +209,18 @@ enum ModelInput {
 }
 
 impl Config {
+    /// Read and check config.toml in the zx-agent home ([`home`](super::home)); without a
+    /// home, the built-in defaults. The file
+    /// [`Application::from_environment`](crate::Application::from_environment) reads, for
+    /// what a host starts before it: its chat platforms and the trace export, which send
+    /// through [`proxy`](Self::proxy).
+    pub fn from_environment() -> Result<Self> {
+        match super::home()? {
+            Some(home) => Self::load(&home.join(super::CONFIG_FILE)),
+            None => Ok(Self::default()),
+        }
+    }
+
     /// Read and check the file at `path`; a file that does not exist is an empty one. Paths in
     /// the file are relative to its directory.
     pub fn load(path: &Path) -> Result<Self> {
@@ -270,6 +301,13 @@ impl Config {
             self.container.container_config()?;
         }
         self.mcp_tool_names()?;
+        if let Proxy::Through(proxies) = &self.proxy {
+            for (key, url) in [("proxy.http", &proxies.http), ("proxy.https", &proxies.https)] {
+                if let Some(url) = url {
+                    check_proxy(url).map_err(|error| anyhow::anyhow!("{key} {error}"))?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -355,6 +393,13 @@ impl RawConfig {
             tool_output: self.tool_output.into_config(parent)?,
             models: HashMap::new(),
             mcp: self.mcp,
+            proxy: self.proxy.map_or(Proxy::FromEnvironment, |proxy| {
+                Proxy::Through(Proxies {
+                    http: proxy.http,
+                    https: proxy.https,
+                    no_proxy: proxy.no_proxy,
+                })
+            }),
             // Set by the caller, which expanded the file.
             credentials: Credentials::default(),
         };
@@ -385,12 +430,13 @@ impl RawConfig {
 
 /// What each string of config.toml holds: the API key is kept for the assembly, which expands
 /// it with the provider's own variable as the default; the MCP servers' tokens are credentials,
-/// and so are the headers that name variables.
+/// and so are the headers that name variables and the proxies that carry a user or password.
 fn holds(keys: &[&str]) -> Holds {
     match keys {
         ["provider", "apiKey"] => Holds::Kept,
         ["mcp", "token"] => Holds::Credential,
         ["provider" | "mcp", "headers", _] => Holds::Header,
+        ["proxy", "http" | "https"] => Holds::Address,
         _ => Holds::Text,
     }
 }
