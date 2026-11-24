@@ -1,6 +1,7 @@
 //! Environment variables that count only when they hold something, and the values of
-//! configuration files that name them as `${NAME}` (pi: `resolveConfigValue`, without `$NAME`
-//! and `!command`).
+//! configuration files that name them as `${NAME}`, with a default as the shell and Docker
+//! Compose write one, `${NAME:-default}` or `${NAME-default}` (pi: `resolveConfigValue`,
+//! without its `$NAME` and `!command`; pi has no defaults).
 
 use std::fmt;
 
@@ -15,17 +16,18 @@ pub fn env_value(name: &str) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expanded {
     pub value: String,
-    /// The variables `${NAME}` named, in the order written, each once.
+    /// The variables the placeholders named, in the order written, each once, whether their
+    /// value or a default took their place.
     pub variables: Vec<String>,
 }
 
 /// Why a value's placeholders cannot be replaced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unexpandable {
-    /// A `${` without its `}`, or with something else than a variable's name before it, as
-    /// written.
+    /// A `${` without its `}`, or with something else than a variable's name and a default
+    /// before it, as written.
     Malformed(String),
-    /// A variable named that is not set, or is empty.
+    /// A variable named without a default that is not set, or is empty.
     Unset(String),
 }
 
@@ -34,21 +36,26 @@ impl fmt::Display for Unexpandable {
         match self {
             Self::Malformed(written) => write!(
                 formatter,
-                "{written} is no placeholder: write ${{NAME}}, NAME of letters, digits and _, or $$ for a $"
+                "{written} is no placeholder: write ${{NAME}}, ${{NAME:-default}} or ${{NAME-default}}, NAME of letters, digits and _ and the default without $; or $$ for a $"
             ),
             Self::Unset(name) => write!(formatter, "names ${{{name}}}, which is not set"),
         }
     }
 }
 
-/// `text` with each `${NAME}` replaced by the value of the environment variable NAME
-/// ([`env_value`]), and each `$$` by `$`; any other `$` stays as it is. Fails for a malformed
-/// placeholder and for a variable that is not set.
+/// `text` with each placeholder replaced, and each `$$` by `$`; any other `$` stays as it is.
+/// `${NAME}` takes the value of the environment variable NAME, which must be set and not
+/// empty; `${NAME:-default}` takes `default` when NAME is unset or empty, `${NAME-default}`
+/// only when it is unset. A value that is not UTF-8 counts as unset. Fails for a malformed
+/// placeholder and for a variable that has neither a value nor a default.
 pub fn expand(text: &str) -> Result<Expanded, Unexpandable> {
-    expand_with(text, env_value)
+    // Unlike for `env_value`, an empty value is one: `${NAME-default}` keeps it. A value that
+    // is not UTF-8 is none, as there.
+    expand_with(text, |name| std::env::var(name).ok())
 }
 
-/// [`expand`], with `lookup` giving the value of a variable, `None` when it has none.
+/// [`expand`], with `lookup` giving the value of a variable: `None` when it is unset, and an
+/// empty string when it is set but empty.
 pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Expanded, Unexpandable> {
     let mut expanded = Expanded {
         value: String::with_capacity(text.len()),
@@ -57,9 +64,8 @@ pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Resul
     for part in parts(text)? {
         match part {
             Part::Text(text) => expanded.value.push_str(text),
-            Part::Variable(name) => {
-                let value = lookup(name).ok_or_else(|| Unexpandable::Unset(name.to_string()))?;
-                expanded.value.push_str(&value);
+            Part::Variable(name, fallback) => {
+                expanded.value.push_str(&fallback.replacing(name, lookup(name))?);
                 if !expanded.variables.iter().any(|known| known == name) {
                     expanded.variables.push(name.to_string());
                 }
@@ -69,12 +75,12 @@ pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Resul
     Ok(expanded)
 }
 
-/// The variables `text` names, in the order written, each once, whether or not they are set.
-/// Fails for a malformed placeholder.
+/// The variables `text` names, in the order written, each once, whether or not they are set
+/// and whether or not they have a default. Fails for a malformed placeholder.
 pub fn variables(text: &str) -> Result<Vec<String>, Unexpandable> {
     let mut names: Vec<String> = Vec::new();
     for part in parts(text)? {
-        if let Part::Variable(name) = part
+        if let Part::Variable(name, _) = part
             && !names.iter().any(|known| known == name)
         {
             names.push(name.to_string());
@@ -86,7 +92,37 @@ pub fn variables(text: &str) -> Result<Vec<String>, Unexpandable> {
 /// A piece of a value: text as it is, or a variable's place.
 enum Part<'a> {
     Text(&'a str),
-    Variable(&'a str),
+    Variable(&'a str, Fallback<'a>),
+}
+
+/// What takes a variable's place when it has no value.
+enum Fallback<'a> {
+    /// Nothing: `${NAME}` needs a value, and an empty one is none.
+    Required,
+    /// `${NAME:-default}`: the default, when the variable is unset or empty.
+    IfUnsetOrEmpty(&'a str),
+    /// `${NAME-default}`: the default, only when the variable is unset.
+    IfUnset(&'a str),
+}
+
+impl Fallback<'_> {
+    /// What takes the place of the variable `name`, whose value is `value`.
+    fn replacing(&self, name: &str, value: Option<String>) -> Result<String, Unexpandable> {
+        match (value, self) {
+            (Some(value), Self::IfUnset(_)) => Ok(value),
+            (Some(value), Self::Required | Self::IfUnsetOrEmpty(_)) if !value.is_empty() => Ok(value),
+            (_, Self::IfUnsetOrEmpty(default) | Self::IfUnset(default)) => Ok((*default).to_string()),
+            (_, Self::Required) => Err(Unexpandable::Unset(name.to_string())),
+        }
+    }
+
+    /// The default, empty for none.
+    fn default(&self) -> &str {
+        match self {
+            Self::Required => "",
+            Self::IfUnsetOrEmpty(default) | Self::IfUnset(default) => default,
+        }
+    }
 }
 
 /// The pieces of `text`, `$$` standing for one `$`.
@@ -104,11 +140,10 @@ fn parts(text: &str) -> Result<Vec<Part<'_>>, Unexpandable> {
             let end = inside
                 .find('}')
                 .ok_or_else(|| Unexpandable::Malformed(from_dollar.to_string()))?;
-            let name = &inside[..end];
-            if !is_name(name) {
-                return Err(Unexpandable::Malformed(format!("${{{name}}}")));
-            }
-            parts.push(Part::Variable(name));
+            let within = &inside[..end];
+            let (name, fallback) =
+                placeholder(within).ok_or_else(|| Unexpandable::Malformed(format!("${{{within}}}")))?;
+            parts.push(Part::Variable(name, fallback));
             rest = &inside[end + 1..];
         } else {
             parts.push(Part::Text("$"));
@@ -117,6 +152,24 @@ fn parts(text: &str) -> Result<Vec<Part<'_>>, Unexpandable> {
     }
     parts.push(Part::Text(rest));
     Ok(parts)
+}
+
+/// The variable and the default of the placeholder `${within}`, when it is one.
+fn placeholder(within: &str) -> Option<(&str, Fallback<'_>)> {
+    let name_end = within
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        // Nothing but the name.
+        .unwrap_or(within.len());
+    let (name, rest) = within.split_at(name_end);
+    let fallback = if rest.is_empty() {
+        Fallback::Required
+    } else if let Some(default) = rest.strip_prefix(":-") {
+        Fallback::IfUnsetOrEmpty(default)
+    } else {
+        Fallback::IfUnset(rest.strip_prefix('-')?)
+    };
+    // A `$` in a default would read as a placeholder in it, which is not expanded.
+    (is_name(name) && !fallback.default().contains('$')).then_some((name, fallback))
 }
 
 /// Whether `name` can name an environment variable here: letters, digits and `_`, not
@@ -133,11 +186,13 @@ fn is_name(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The variables of the tests: `KEY` and `HOST` are set, nothing else is.
+    /// The variables of the tests: `KEY` and `HOST` are set, `EMPTY` is set but empty,
+    /// nothing else is set.
     fn lookup(name: &str) -> Option<String> {
         match name {
             "KEY" => Some("sk-1".into()),
             "HOST" => Some("proxy.internal".into()),
+            "EMPTY" => Some(String::new()),
             _ => None,
         }
     }
@@ -151,6 +206,29 @@ mod tests {
     }
 
     #[test]
+    fn a_default_takes_the_place_of_an_unset_variable_and_with_a_colon_of_an_empty_one() {
+        for (text, expected) in [
+            ("${MISSING:-d}", "d"),
+            ("${EMPTY:-d}", "d"),
+            ("${KEY:-d}", "sk-1"),
+            ("${MISSING-d}", "d"),
+            ("${EMPTY-d}", ""),
+            ("${KEY-d}", "sk-1"),
+            ("${MISSING:-}", ""),
+            ("${MISSING-http://h:1/a-b c 默认}", "http://h:1/a-b c 默认"),
+        ] {
+            assert_eq!(expand_with(text, lookup).unwrap().value, expected, "{text}");
+        }
+        // A variable with a default is named all the same, for a credential to hide it.
+        let expanded = expand_with("${MISSING:-x}${KEY-y}", lookup).unwrap();
+        assert_eq!(expanded.variables, ["MISSING", "KEY"]);
+        assert_eq!(variables("${MISSING:-x}${KEY-y}").unwrap(), ["MISSING", "KEY"]);
+        // The environment: PATH is set, ZX_UTIL_TEST_UNSET is not.
+        assert_eq!(expand("${ZX_UTIL_TEST_UNSET:-d}").unwrap().value, "d");
+        assert_eq!(expand("${PATH-d}").unwrap().value, std::env::var("PATH").unwrap());
+    }
+
+    #[test]
     fn a_dollar_is_written_as_two_and_any_other_dollar_stays_as_it_is() {
         let expanded = expand_with("pa$$word $5 cost$ $HOME 多字节$", lookup).unwrap();
         assert_eq!(expanded.value, "pa$word $5 cost$ $HOME 多字节$");
@@ -159,13 +237,20 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_placeholder_and_an_unset_variable_are_refused() {
+    fn a_malformed_placeholder_and_a_variable_without_value_or_default_are_refused() {
         for (text, expected) in [
             ("${KEY", Unexpandable::Malformed("${KEY".into())),
             ("x ${}", Unexpandable::Malformed("${}".into())),
             ("${1KEY}", Unexpandable::Malformed("${1KEY}".into())),
-            ("${KEY-1}", Unexpandable::Malformed("${KEY-1}".into())),
+            // The shell's substring and its other forms are not defaults here.
+            ("${KEY:1}", Unexpandable::Malformed("${KEY:1}".into())),
+            ("${KEY:=d}", Unexpandable::Malformed("${KEY:=d}".into())),
+            ("${:-d}", Unexpandable::Malformed("${:-d}".into())),
+            // Nor is a placeholder within a default.
+            ("${KEY:-${HOST}}", Unexpandable::Malformed("${KEY:-${HOST}".into())),
+            ("${KEY-a$$b}", Unexpandable::Malformed("${KEY-a$$b}".into())),
             ("${MISSING}", Unexpandable::Unset("MISSING".into())),
+            ("${EMPTY}", Unexpandable::Unset("EMPTY".into())),
         ] {
             assert_eq!(expand_with(text, lookup), Err(expected), "{text}");
         }
