@@ -443,6 +443,19 @@ impl Session {
         Ok(())
     }
 
+    /// The model ID later task requests pass to the provider, read while idle: the agent's
+    /// unless [`Session::set_model`] changed it. A run returns Busy. A hook may still pick
+    /// another model for a request.
+    pub fn model(&self) -> Result<String, SessionError> {
+        self.idle(|runner| runner.config().model.clone())
+    }
+
+    /// The reasoning level of later task requests, read while idle; `None` leaves the
+    /// server's default. A run returns Busy.
+    pub fn reasoning(&self) -> Result<Option<Reasoning>, SessionError> {
+        self.idle(|runner| runner.config().reasoning)
+    }
+
     /// Change the reasoning level of later task requests while idle; `None` leaves the
     /// server's default. A run returns Busy. The change is recorded with the next request
     /// (`request_config`); no request is made now.

@@ -316,6 +316,7 @@ async fn switching_models_preserves_history_and_uses_the_new_provider() {
     session.prompt("first").await.unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
     session.set_model(next.clone(), "next-model").unwrap();
+    assert_eq!(session.model().unwrap(), "next-model");
     let report = session.prompt("second").await.unwrap();
     assert_eq!(report.final_text, "two");
     assert_eq!(first.requests().len(), 1);
@@ -345,10 +346,13 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     .build()
     .await;
 
+    assert_eq!(session.reasoning().unwrap(), Some(Reasoning::Low));
     session.prompt("first").await.unwrap();
     session.set_reasoning(Some(Reasoning::High)).unwrap();
+    assert_eq!(session.reasoning().unwrap(), Some(Reasoning::High));
     session.prompt("second").await.unwrap();
     session.set_reasoning(None).unwrap();
+    assert_eq!(session.reasoning().unwrap(), None);
     session.prompt("third").await.unwrap();
 
     let sent: Vec<Option<Reasoning>> = provider.requests().iter().map(|request| request.reasoning).collect();
@@ -415,6 +419,8 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
     provider.wait_for_start(&mut running).await;
     let next = Arc::new(FauxProvider::new([FauxStep::text("must not run")]));
     assert_eq!(session.set_model(next.clone(), "next"), Err(SessionError::Busy));
+    assert_eq!(session.model(), Err(SessionError::Busy));
+    assert_eq!(session.reasoning(), Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
     assert_eq!(session.prompt("second").await.unwrap().final_text, "old provider");

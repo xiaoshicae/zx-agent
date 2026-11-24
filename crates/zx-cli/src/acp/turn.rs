@@ -2,13 +2,14 @@
 //! sent to the client, and the stop reason that answers `session/prompt`.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, SessionId, StopReason};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use zx_agent::ai::Image;
+use zx_agent::ai::{Image, Message};
 use zx_agent::builtin::images;
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
@@ -16,8 +17,9 @@ use zx_agent::input::Input;
 use zx_agent::{Run, Session};
 use zx_app::shutdown::next_event;
 
-use super::permissions;
+use super::models::Models;
 use super::updates::Updates;
+use super::{permissions, usage};
 
 /// What a turn runs: the task a prompt starts, or the compaction `/compact` starts.
 pub(super) enum Running {
@@ -33,29 +35,40 @@ pub(super) struct Turn {
     id: SessionId,
     /// Cancelled when the process is told to stop.
     stop: CancellationToken,
+    /// The models config.toml lists, for the context window of each answer's model.
+    models: Arc<Models>,
 }
 
 impl Turn {
     /// The turn of `session`, reported to the client `cx`, which knows the session as `id`;
-    /// `stop` is cancelled when the process is told to stop.
-    pub(super) fn new(session: Session, cx: ConnectionTo<Client>, id: SessionId, stop: CancellationToken) -> Self {
+    /// `stop` is cancelled when the process is told to stop, and `models` gives the context
+    /// windows.
+    pub(super) fn new(
+        session: Session,
+        cx: ConnectionTo<Client>,
+        id: SessionId,
+        stop: CancellationToken,
+        models: Arc<Models>,
+    ) -> Self {
         Self {
             updates: Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf()),
             session,
             cx,
             id,
             stop,
+            models,
         }
     }
 
     /// The response to `session/prompt` once `running`, the turn, has ended: its stop reason,
     /// or its error. A compaction that found nothing old enough to summarize says so, since
-    /// nothing else would show that it ran.
+    /// nothing else would show that it ran. Before the response, the client learns how full
+    /// the context is now, after the tool results of the turn or the summary.
     pub(super) async fn answer(mut self, running: Running) -> Result<PromptResponse> {
         let reason = match running {
             Running::Task(mut run) => {
                 self.read(&mut run).await?;
-                stop_reason(&run.wait().await)?
+                stop_reason(&run.wait().await)
             }
             Running::Compaction(mut run) => {
                 self.read(&mut run).await?;
@@ -63,10 +76,11 @@ impl Turn {
                 if report.outcome == Outcome::Noop {
                     self.updates.nothing_to_compact();
                 }
-                compaction_stop(&report)?
+                compaction_stop(&report)
             }
         };
-        Ok(PromptResponse::new(reason))
+        usage::of_session(&self.cx, &self.id, &self.session, &self.models);
+        Ok(PromptResponse::new(reason?))
     }
 
     /// Read `run` to its end: its events go to the client as session updates, and a call
@@ -75,6 +89,13 @@ impl Turn {
     async fn read<T>(&mut self, run: &mut Run<T>) -> Result<()> {
         while let Some(event) = next_event(run, &self.session, &self.stop).await {
             self.updates.emit(&event);
+            if let EventKind::MessageEnd {
+                message: Message::Assistant(answer),
+                ..
+            } = &event.event
+            {
+                usage::after_answer(&self.cx, &self.id, answer, &self.models);
+            }
             if let EventKind::ApprovalRequested {
                 approval_id,
                 tool_call_id,
