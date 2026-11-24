@@ -16,7 +16,7 @@ use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Image, Message, Role, ToolCall as MessageCall,
     ToolResultMessage, UserMessageKind,
 };
-use zx_agent::builtin::tools::WRITE_FILE;
+use zx_agent::builtin::tools::{EDIT_FILE, READ_FILE, WRITE_FILE};
 use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
@@ -151,7 +151,7 @@ impl Updates {
         ToolCall::new(ToolCallId::new(id), call_label(name, args))
             .kind(tool_kind(name))
             .raw_input(args.clone())
-            .locations(self.locations(args))
+            .locations(self.locations(name, args))
     }
 
     /// What a result reports: its status, what the client shows, its images last, and the raw
@@ -188,9 +188,14 @@ impl Updates {
         )));
     }
 
-    /// Where a call works, for clients that show locations: the `path` argument, made
-    /// absolute against the session's directory.
-    fn locations(&self, args: &Value) -> Vec<ToolCallLocation> {
+    /// The file a call works on, for clients that show locations: the `path` argument of the
+    /// built-in file tools, made absolute against the session's directory. Clients open a
+    /// location as a file, and the `path` of `ls`, `find`, `grep` or another tool may name a
+    /// directory, so those calls have none.
+    fn locations(&self, name: &str, args: &Value) -> Vec<ToolCallLocation> {
+        if ![READ_FILE, EDIT_FILE, WRITE_FILE].contains(&name) {
+            return Vec::new();
+        }
         args.get("path")
             .and_then(Value::as_str)
             .map(|path| vec![ToolCallLocation::new(self.absolute(path))])

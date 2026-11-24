@@ -85,7 +85,7 @@
 - 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name` 与 `/compact`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/compact` 请模型摘要较早的对话，自成一个回合，可以用 `session/cancel` 取消：进度以 `compaction_update` 通知，完成时以 `end_turn` 结束，没有可摘要的部分时不发请求、发一条 `notice` 后同样以 `end_turn` 结束，取消为 `cancelled`，失败以 JSON-RPC 错误应答；带了输入时以 `-32602` 应答。`/named` 等其他文本仍是普通提问。
 - 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。提问取其中的文本与图片：`resource_link` 以一行 `[resource <URI> (<名称>)]` 交给模型；图片按模型 API 的上限适配后随提问发给模型，适配不了时以 JSON-RPC 错误（`-32602`）应答并说明是第几张、为什么；音频与内嵌资源没有声明支持，收到时略去。既没有文本也没有图片的提问、带图片的命令（如 `/compact`）同样以 `-32602` 应答。以上被拒的提问不记入会话，也不发请求。工具结果中的图片在工具调用的内容中以图片块显示。
 - 配置项：建会话、载入与续接的应答带 `configOptions`，都是单选：`model`（类别 `model`），可选 `[[models]]` 列出的模型与会话正在用的模型；`reasoning`（类别 `thought_level`），可选 `default`（请求不带推理设置，由服务决定）与 `off` 到 `xhigh`。会话正在回合中时（如载入本进程正在运行的会话）应答不带配置项。`session/set_config_option` 在会话空闲时修改，对之后的提问生效，应答带全部配置项的当前值，与 chat 的 `/model`、`/reasoning` 相同：换模型不换 provider，也不清空对话。不在可选值中的值、未知的配置项、不是单选值的值与回合进行中的修改都以 `-32602` 应答，不做改动。
-- 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 附 diff、`edit_file` 附补丁。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
+- 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态（`read_file`、`edit_file`、`write_file` 带所操作文件的位置；其他工具的 `path` 可能是目录，客户端会把位置当文件打开，所以不带），`write_file` 附 diff、`edit_file` 附补丁。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
 - 用量：会话所用模型在 `[[models]]` 有 `contextWindow` 时，以 `usage_update` 报告上下文的 token 数与窗口大小：每个报告了用量的回答之后，取它的输入加输出 token；建会话、载入或续接之后（在命令之后）、每个回合结束时与换模型之后，取最近一次测得的用量加上之后消息的估算，与自动摘要判断阈值的估算相同。模型没有窗口时不发。不带花费：协议要求写明币种，而 `[[models]]` 的单价不记币种。
 - 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。等待期间再收到一次信号时，进程立即被该信号结束。
 
@@ -244,4 +244,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.38 · 2026年11月
+REFERENCE.md · v0.39 · 2026年11月
