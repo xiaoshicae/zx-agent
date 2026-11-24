@@ -331,6 +331,11 @@ async fn a_shell_call_asks_the_client_and_runs_once_allowed() {
     assert_eq!(params["sessionId"], session);
     assert_eq!(params["toolCall"]["toolCallId"], "c1");
     assert_eq!(params["toolCall"]["title"], "bash: printf approved > marker");
+    // Why it asks, the auto-approval it missed included, until the result takes its place.
+    assert_eq!(
+        params["toolCall"]["content"][0]["content"]["text"],
+        "the agent requires tool approval; not auto-approved: it contains '>', which can change what the shell runs"
+    );
     let options: Vec<&str> = params["options"]
         .as_array()
         .unwrap()

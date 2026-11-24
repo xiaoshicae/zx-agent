@@ -3,8 +3,8 @@
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, SessionId, ToolCallId,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, SessionId,
+    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Client, Error};
 use serde_json::Value;
@@ -27,9 +27,12 @@ pub(super) struct Request {
     pub(super) tool_name: String,
     /// The arguments the call would run with.
     pub(super) args: Value,
+    /// Why the call asks, such as what keeps a command from being auto-approved.
+    pub(super) reason: String,
 }
 
-/// Ask the client to approve `request` of session `session_id`. The client's answer goes to
+/// Ask the client to approve `request` of session `session_id`, with why it asks as the call's
+/// content, which its result replaces once it ends. The client's answer goes to
 /// `session` whenever it comes, from a task of its own: the turn keeps being read meanwhile,
 /// so its timeout and its cancellation take effect at once. An answer for a request the run
 /// no longer waits on changes nothing.
@@ -43,7 +46,8 @@ pub(super) fn ask(
         .title(call_label(&request.tool_name, &request.args))
         .kind(tool_kind(&request.tool_name))
         .status(ToolCallStatus::Pending)
-        .raw_input(request.args);
+        .raw_input(request.args)
+        .content(vec![ToolCallContent::from(request.reason)]);
     let options = vec![
         PermissionOption::new(ALLOW_ONCE, "Allow once", PermissionOptionKind::AllowOnce),
         PermissionOption::new(
