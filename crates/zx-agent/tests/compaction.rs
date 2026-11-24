@@ -412,6 +412,32 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
 }
 
 #[tokio::test]
+async fn a_fact_citing_a_record_it_read_drops_a_mistyped_reference_beside_it() {
+    let (seed, old) = seeded_session().await;
+    // As a model wrote it in a real session: the right ID and a mistyped copy of it.
+    let answer = json!({
+        "facts": [{"text": "Old observation", "sourceEntryIds": [old, "mistyped"]}],
+        "inferences": [],
+        "plans": ["Continue"],
+    });
+    let provider = Arc::new(FauxProvider::new([FauxStep::text(answer.to_string())]));
+    let (runner, _) = RunnerSetup {
+        session: seed.into(),
+        compaction: budget(),
+        ..RunnerSetup::new(config(provider, vec![]))
+    }
+    .build()
+    .await;
+
+    let report = runner.compact().await.unwrap();
+
+    assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
+    let transcript = runner.transcript();
+    let compaction = transcript.latest_compaction().unwrap();
+    assert_eq!(compaction.summary.facts[0].source_entry_ids, [old]);
+}
+
+#[tokio::test]
 async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prompt() {
     let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([

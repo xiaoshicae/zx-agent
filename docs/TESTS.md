@@ -28,7 +28,7 @@
 | `crates/zx-agent/tests/session_fork.rs` | 复制分支成新会话 |
 | `crates/zx-agent/tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：`Agent` 在其中创建会话、按标签列出、由另一个 `Agent` 续接，以及唯一键拦住第二个写入者 |
 | `crates/zx-agent/tests/session_compaction.rs` | 存储中的摘要记录：会话文件拒绝读不了的记录且不改动文件；从摘要留下的会话续跑，上下文计划结束了摘要仍修改它点名的消息。摘要记录本身与投影在 `zx-core` 的单元测试 |
-| `crates/zx-agent/tests/compaction.rs` | 宿主的手动与自动摘要：计费、失败（自动摘要失败后运行照常继续，同一次运行不再尝试，答了却不可用的不再付费）、上限、超时与取消 |
+| `crates/zx-agent/tests/compaction.rs` | 宿主的手动与自动摘要：计费、抄错的引用（事实另有读过的引用时去掉它）、失败（自动摘要失败后运行照常继续，同一次运行不再尝试，答了却不可用的不再付费）、上限、超时与取消 |
 | `crates/zx-agent/tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
 | `crates/zx-agent/tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
 | `crates/zx-agent/tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对；分支配置索引的校验在 `zx-core` 的单元测试 |
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.45 · 2026年11月
+TESTS.md · v0.46 · 2026年11月

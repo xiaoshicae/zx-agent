@@ -480,7 +480,7 @@ impl<'a> Compactor<'a> {
         // The model's final response is recorded with a failure, when one arrived.
         let (checked, response) = match made {
             Ok(Made::Answer(message)) => {
-                let parsed = parse_answer(&message);
+                let parsed = parse_answer(&message, &open.source_ids);
                 let checked = parsed.and_then(|summary| self.check(open, summary, input_bytes));
                 (checked, Some(message))
             }
