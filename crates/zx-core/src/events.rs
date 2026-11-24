@@ -34,8 +34,9 @@ pub(crate) trait Emit: Send + Sync {
     async fn emit(&self, event: EventKind);
 }
 
-/// Version of the event JSON, envelope and event types together. Raised on incompatible
-/// changes.
+/// Version of the event JSON, envelope and event types together. Raised when an event or a
+/// field is removed or renamed, or changes meaning; a new event type or field leaves it as
+/// it is, so a reader skips the types and fields it does not know.
 pub const EVENT_SCHEMA_VERSION: u32 = 7;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
