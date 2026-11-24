@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -22,6 +23,9 @@ use super::{parsed, read_text};
 /// Where long tool results are stored unless `toolOutput.directory` says otherwise: relative
 /// to the working directory of each session.
 const DEFAULT_TOOL_OUTPUT_DIRECTORY: &str = ".zx-agent/outputs";
+
+/// A day, the unit of `toolOutput.maxAgeDays`.
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 /// The built-in executor that runs commands on this machine, as the agent's user: the one
 /// config.toml means unless `execution` names another.
@@ -187,6 +191,7 @@ struct RawToolOutput {
     directory: Option<PathBuf>,
     threshold_bytes: Option<usize>,
     max_file_bytes: Option<usize>,
+    max_age_days: Option<u32>,
 }
 
 /// One `[[models]]` entry.
@@ -372,6 +377,10 @@ fn tool_output_error(error: &InvalidOutputStoreConfig) -> anyhow::Error {
         InvalidOutputStoreConfig::ThresholdBytes { max_file_bytes, .. } => format!(
             "toolOutput.thresholdBytes must be 0, which keeps results inline, or {MIN_THRESHOLD_BYTES}..={max_file_bytes} (toolOutput.maxFileBytes)"
         ),
+        // Whole days from config.toml are never too few; a host that sets the age itself is told.
+        InvalidOutputStoreConfig::MaxAge(_) => {
+            "toolOutput.maxAgeDays must be 0, which keeps the results, or at least 1".to_string()
+        }
     };
     anyhow::anyhow!(message)
 }
@@ -472,7 +481,7 @@ fn secret_files(paths: Vec<PathBuf>, parent: &Path) -> Result<Vec<PathBuf>> {
 impl RawToolOutput {
     /// The settings over the defaults: [`DEFAULT_TOOL_OUTPUT_DIRECTORY`] in each session's
     /// working directory, or an explicit directory, relative to `parent`; a zero threshold
-    /// stores nothing.
+    /// stores nothing, and a zero age keeps the results.
     fn into_config(self, parent: &Path) -> Result<OutputStoreConfig> {
         let mut config = OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY);
         if let Some(path) = self.directory {
@@ -485,6 +494,9 @@ impl RawToolOutput {
         }
         if let Some(bytes) = self.max_file_bytes {
             config.max_file_bytes = bytes;
+        }
+        if let Some(days) = self.max_age_days {
+            config.max_age = (days > 0).then(|| Duration::from_secs(u64::from(days) * SECONDS_PER_DAY));
         }
         Ok(config)
     }

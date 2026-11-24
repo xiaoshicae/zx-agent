@@ -2,16 +2,20 @@
 //!
 //! The spill hook stores what redaction left: it runs at the storage stage, after redaction,
 //! however it is registered. Stored text is the tool's already bounded result, not data
-//! discarded by that tool's own truncation. Files are not auto-deleted.
-//! When storing fails, the result stays inline: storage is an optimisation, not a filter.
+//! discarded by that tool's own truncation. Results are kept for
+//! [`OutputStoreConfig::max_age`]: the hook of each session removes the older ones before it
+//! first stores a result. When storing fails, the result stays inline: storage is an
+//! optimisation, not a filter.
 //!
 //! Only the agent stores results, but the host may put their directory in the working
 //! directory, where commands write too, those in a container included. So nothing is read
 //! or stored that a link there leads to: not a file that is one, and not a directory that
 //! is reached through one below the working directory.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -34,6 +38,13 @@ pub const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
 /// How long storing one result may take by default: under the default hook timeout, so that
 /// a slow disk keeps the result inline rather than losing it to that timeout.
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a stored result is kept by default: a week, for reading on in the results of a
+/// conversation resumed days later, while the directory stops growing.
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(7 * SECONDS_PER_DAY);
+/// The shortest [`OutputStoreConfig::max_age`]: sessions may share the directory, and a
+/// shorter age would remove the results of one that is still at work.
+pub const MIN_MAX_AGE: Duration = Duration::from_secs(SECONDS_PER_DAY);
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Written into the output directory when the store creates it: stored results may contain
 /// sensitive data, and the directory may lie inside a working tree under version control.
 const GITIGNORE: &str = "# Stored tool results may contain sensitive data.\n*\n";
@@ -57,23 +68,29 @@ pub struct OutputStoreConfig {
     /// one fires first, the tool's output is withheld. A write that runs out of time may still
     /// finish later and leave its file behind.
     pub write_timeout: Duration,
+    /// How long a stored result is kept, by the time its file last changed: before it first
+    /// stores a result, the hook of each session removes the older ones, within
+    /// `write_timeout`. `None` keeps them; at least [`MIN_MAX_AGE`].
+    pub max_age: Option<Duration>,
 }
 
 impl OutputStoreConfig {
     /// Settings that store results in `directory`: those over [`DEFAULT_PAGE_BYTES`], up to
-    /// [`MAX_FILE_BYTES`] each, within [`DEFAULT_WRITE_TIMEOUT`].
+    /// [`MAX_FILE_BYTES`] each, within [`DEFAULT_WRITE_TIMEOUT`], kept for [`DEFAULT_MAX_AGE`].
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
             threshold_bytes: Some(DEFAULT_PAGE_BYTES),
             max_file_bytes: MAX_FILE_BYTES,
             write_timeout: DEFAULT_WRITE_TIMEOUT,
+            max_age: Some(DEFAULT_MAX_AGE),
         }
     }
 
     /// Check the settings: the directory is named, the file size limit is within
-    /// [`MAX_FILE_BYTES`] and the threshold, when there is one, is at least
-    /// [`MIN_THRESHOLD_BYTES`] and within that limit.
+    /// [`MAX_FILE_BYTES`], the threshold, when there is one, is at least
+    /// [`MIN_THRESHOLD_BYTES`] and within that limit, and the age results are kept for, when
+    /// there is one, is at least [`MIN_MAX_AGE`].
     pub fn validate(&self) -> Result<(), InvalidOutputStoreConfig> {
         if self.directory.as_os_str().is_empty() {
             return Err(InvalidOutputStoreConfig::EmptyDirectory);
@@ -88,6 +105,11 @@ impl OutputStoreConfig {
                 threshold,
                 max_file_bytes: self.max_file_bytes,
             });
+        }
+        if let Some(max_age) = self.max_age
+            && max_age < MIN_MAX_AGE
+        {
+            return Err(InvalidOutputStoreConfig::MaxAge(max_age));
         }
         Ok(())
     }
@@ -110,6 +132,12 @@ pub enum InvalidOutputStoreConfig {
         min = MIN_THRESHOLD_BYTES
     )]
     ThresholdBytes { threshold: usize, max_file_bytes: usize },
+    /// `max_age`, given here, is shorter than [`MIN_MAX_AGE`].
+    #[error(
+        "max_age is {0:?}; it must be at least {min:?}, or None to keep the results",
+        min = MIN_MAX_AGE
+    )]
+    MaxAge(Duration),
 }
 
 /// The paths on the way from `cwd` to `cwd.join(below)` that are below `cwd`, as `below`
@@ -214,6 +242,26 @@ impl OutputStore {
         }
     }
 
+    /// Remove the stored results older than [`OutputStoreConfig::max_age`]. Nothing when the
+    /// settings keep them, or when the directory is reached through a link below the working
+    /// directory, as for reading and storing; a file that cannot be removed waits for the next
+    /// session.
+    async fn remove_expired(&self) {
+        let Some(max_age) = self.config.max_age else {
+            return;
+        };
+        if self.check_directory().await.is_err() {
+            // The directory is not touched; storing reports why.
+            return;
+        }
+        let directory = self.config.directory.clone();
+        // One blocking task for the whole directory, which can hold many results; it runs to
+        // its end even when the store stops waiting for it.
+        let removal = tokio::task::spawn_blocking(move || remove_older_than(&directory, max_age, SystemTime::now()));
+        // A removal that panicked or never ran leaves the files for the next session.
+        let _ = removal.await;
+    }
+
     /// Store `text` in a new file and return its output ID.
     async fn write(&self, text: &str) -> Result<String, String> {
         if text.len() > self.config.max_file_bytes {
@@ -278,14 +326,58 @@ impl OutputStore {
     }
 }
 
+/// Remove the files in `directory` that are named like a stored result and older than
+/// `max_age` at `now`, by the time they last changed; returns how many. A link is neither
+/// followed nor removed.
+fn remove_older_than(directory: &Path, max_age: Duration, now: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        // Missing, or not to be listed: there is nothing to remove here.
+        return 0;
+    };
+    let mut removed = 0;
+    // An entry that cannot be read is left alone.
+    for entry in entries.flatten() {
+        if !is_output_file_name(&entry.file_name()) {
+            continue;
+        }
+        // On Unix, the metadata of the entry itself: a link is not followed.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let expired = metadata.is_file()
+            && metadata
+                .modified()
+                .ok()
+                // A time in the future is no age.
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > max_age);
+        // A file that cannot be removed stays, for the next session to try again.
+        if expired && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether `name` is that of a stored result: a canonical UUID, the output ID, and `.txt`.
+fn is_output_file_name(name: &OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_suffix(".txt"))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
+}
+
 /// The hook that stores a long tool result as a file and leaves its first page in its
 /// place, as [`ReadOutputTool`] would return it: with a footer that says how to read on.
 ///
 /// Exempt the tools that page their own output, so that a page is not stored again. It runs
-/// after secret filtering by its stage, and the hook chain bounds and cancels its I/O.
+/// after secret filtering by its stage, and the hook chain bounds and cancels its I/O. Before
+/// the first result it stores, it removes the expired ones ([`OutputStoreConfig::max_age`]).
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,
+    /// Whether this hook has begun removing the expired results: once, before the first
+    /// result it stores.
+    swept: AtomicBool,
 }
 
 impl SpillOutputs {
@@ -296,6 +388,7 @@ impl SpillOutputs {
         let hook = Self {
             store: store.clone(),
             exempt_tools,
+            swept: AtomicBool::new(false),
         };
         (hook, ReadOutputTool::new(store))
     }
@@ -317,7 +410,13 @@ impl Hook for SpillOutputs {
                 .is_some_and(|limit| output.content.len() > limit)
         {
             let limit = self.store.config.write_timeout;
-            let stored = match tokio::time::timeout(limit, self.store.write(&output.content)).await {
+            let storing = async {
+                if !self.swept.swap(true, Ordering::Relaxed) {
+                    self.store.remove_expired().await;
+                }
+                self.store.write(&output.content).await
+            };
+            let stored = match tokio::time::timeout(limit, storing).await {
                 Ok(stored) => stored,
                 Err(_) => Err(format!("storing took longer than {limit:?}")),
             };
@@ -430,6 +529,45 @@ mod tests {
         let error = store.check_directory().await.unwrap_err();
 
         assert!(error.contains("through the symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn only_expired_regular_files_named_like_an_output_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let named = |id: &str| dir.path().join(format!("{id}.txt"));
+        let id = || uuid::Uuid::new_v4().to_string();
+        let expired = named(&id());
+        std::fs::write(&expired, "old").unwrap();
+        let uppercase = named(&id().to_uppercase());
+        std::fs::write(&uppercase, "not a canonical id").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), GITIGNORE).unwrap();
+        let target = elsewhere.path().join("target.txt");
+        std::fs::write(&target, "kept").unwrap();
+        let link = named(&id());
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let directory = named(&id());
+        std::fs::create_dir(&directory).unwrap();
+        let fresh = named(&id());
+        std::fs::write(&fresh, "fresh").unwrap();
+        let later = SystemTime::now() + 2 * MIN_MAX_AGE;
+        std::fs::File::options()
+            .write(true)
+            .open(&fresh)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let removed = remove_older_than(dir.path(), MIN_MAX_AGE, later);
+
+        assert_eq!(removed, 1);
+        assert!(!expired.exists());
+        for kept in [&uppercase, &dir.path().join(".gitignore"), &directory, &fresh, &target] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        // A missing directory has nothing to remove.
+        assert_eq!(remove_older_than(&dir.path().join("missing"), MIN_MAX_AGE, later), 0);
     }
 
     #[test]

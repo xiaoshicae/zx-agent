@@ -328,8 +328,9 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 | `toolOutput.thresholdBytes` | 超过此大小的结果落盘；0 保持内联，否则为 256–`maxFileBytes`，默认 8192 |
 | `toolOutput.maxFileBytes` | 单个文件上限，1–1048576，默认 1 MiB |
 | `toolOutput.directory` | 结果目录，相对 `config.toml` 所在目录；省略时为每个会话工作目录下的 `.zx-agent/outputs` |
+| `toolOutput.maxAgeDays` | 结果文件保留的天数，按文件最后修改的时间计；每个会话第一次落盘前删除结果目录中更旧的结果文件（以输出 ID 命名的普通文件，不跟随符号链接），计入上述 3 秒。0 不删除，默认 7 |
 
-文件不自动删除；目录中写入忽略全部文件的 `.gitignore`，Unix 上新目录与文件的权限为 0700 与 0600。
+过期的结果文件删除后，用它的输出 ID 读取会报错；目录中写入忽略全部文件的 `.gitignore`，Unix 上新目录与文件的权限为 0700 与 0600。
 
 ## im.toml
 
