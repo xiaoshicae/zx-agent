@@ -31,7 +31,8 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use zx_agent::Agent;
-use zx_app::config::{Builtin, Credentials};
+use zx_agent::ai::Proxy;
+use zx_app::config::{Builtin, Config, Credentials};
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_app::{Application, Approvals, ConfiguredAgent, NoModel, Overrides, SessionPlace};
@@ -152,10 +153,13 @@ async fn run(args: Args, program: Program) -> Result<u8> {
     } = program;
     let (path, overrides) = args.into_parts();
     let file = read_file(&path)?;
+    // The platforms and the trace export start before the application, which reads
+    // config.toml again.
+    let proxy = Config::from_environment()?.proxy;
     let BuiltChannels {
         channels,
         mut credentials,
-    } = build_channels(&file, &registered, &path)?;
+    } = build_channels(&file, &registered, &path, &proxy)?;
     credentials.extend(file.credentials.clone());
     let names: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let ServerSections {
@@ -170,8 +174,10 @@ async fn run(args: Args, program: Program) -> Result<u8> {
         schedules,
         sources: trigger_sources,
     };
-    let (code, end) =
-        shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| -> Result<u8> {
+    let (code, end) = shutdown::with_telemetry(
+        SERVICE_NAME,
+        &proxy,
+        async move |telemetry: Option<&Telemetry>| -> Result<u8> {
             if telemetry.is_some() {
                 eprint_line(shutdown::EXPORT_NOTICE);
             }
@@ -213,8 +219,9 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 leadership,
             };
             serve(config, &agent, serving, files).await
-        })
-        .await?;
+        },
+    )
+    .await?;
     for notice in end.notices() {
         eprint_line(&notice);
     }
@@ -470,9 +477,15 @@ impl BuiltChannels {
 }
 
 /// The channels of the platforms `file` configures, each built by the factory `registered`
-/// under its section's name. An error when it configures none, when no factory or two are
-/// registered under a name, and when a channel goes by another name than its section's.
-fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>, path: &Path) -> Result<BuiltChannels> {
+/// under its section's name, reaching its platform through `proxy`. An error when it
+/// configures none, when no factory or two are registered under a name, and when a channel
+/// goes by another name than its section's.
+fn build_channels(
+    file: &ConfigFile,
+    registered: &Registry<dyn PlatformFactory>,
+    path: &Path,
+    proxy: &Proxy,
+) -> Result<BuiltChannels> {
     registered.check_names().map_err(anyhow::Error::msg)?;
     let mut channels = BuiltChannels::default();
     for (name, section) in &file.platforms {
@@ -484,6 +497,7 @@ fn build_channels(file: &ConfigFile, registered: &Registry<dyn PlatformFactory>,
                 section,
                 labels: &file.card_labels,
                 on_error: failure_log(name),
+                proxy,
             })
             .with_context(|| format!("[{name}]"))?;
         let platform = built.channel.platform();
@@ -570,14 +584,16 @@ mod tests {
         let file = ConfigFile::parse(text).unwrap();
         format!(
             "{:#}",
-            build_channels(&file, registry, Path::new("im.toml")).err().unwrap()
+            build_channels(&file, registry, Path::new("im.toml"), &Proxy::Direct)
+                .err()
+                .unwrap()
         )
     }
 
     #[test]
     fn a_section_configures_the_platform_registered_under_its_name() {
         let file = ConfigFile::parse(&format!("[teams]\n{SERVER}")).unwrap();
-        let built = build_channels(&file, &with_teams(), Path::new("im.toml")).unwrap();
+        let built = build_channels(&file, &with_teams(), Path::new("im.toml"), &Proxy::Direct).unwrap();
         let names: Vec<&str> = built.channels.iter().map(|channel| channel.platform()).collect();
         assert_eq!(names, ["teams"]);
         assert_eq!(built.credentials.variables, ["TEAMS_TOKEN"]);

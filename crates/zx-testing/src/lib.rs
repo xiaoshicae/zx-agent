@@ -32,6 +32,8 @@
 //! - [`fake_mcp`] (http): an MCP server written from the specification, without rmcp; it can
 //!   restart, losing its session, and go down for a while
 //! - [`fake_slack`], [`fake_feishu`] (http): the fake chat platforms
+//! - [`fake_proxy`] (http): an HTTP proxy that forwards requests and opens tunnels, and
+//!   records what it was asked for, with the credentials
 //! - [`program`]: a program a test runs, such as the compiled `zx-agent` or `zx-im`: the
 //!   command that starts it apart from the developer's environment, the zx-agent home a
 //!   test gives it, how it ended, and what it leaves behind; its [`stdout`], [`stderr`] and
@@ -49,6 +51,7 @@
 
 pub mod fake_feishu;
 pub mod fake_mcp;
+pub mod fake_proxy;
 pub mod fake_slack;
 pub mod http;
 pub mod mock_server;

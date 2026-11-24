@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zx_agent::ai::anthropic::{AnthropicConfig, AnthropicMessages, ApiKeyHeader, DEFAULT_API_VERSION};
-use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, SystemPrompt};
+use zx_agent::ai::{PREAMBLE, ProviderError, ProviderErrorKind, Proxy, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::events::RunOutcome;
 use zx_testing::mock_server::{MockServer, Reply};
@@ -19,7 +19,7 @@ fn settings(server: &MockServer) -> AnthropicConfig {
         // The fake serves any path; the provider adds `/v1/messages` to the address.
         base_url: server.base_url.trim_end_matches("/v1").to_string(),
         api_key: "test-key".into(),
-        use_system_proxy: false,
+        proxy: Proxy::Direct,
         idle_timeout: Duration::from_secs(10),
         ..AnthropicConfig::default()
     }

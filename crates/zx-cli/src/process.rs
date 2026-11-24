@@ -5,6 +5,7 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
+use zx_app::config::Config;
 use zx_app::otel::Telemetry;
 use zx_app::shutdown::{self, spawn_signal_handler};
 use zx_util::stdio::{eprint_line, print_line};
@@ -74,16 +75,19 @@ impl JsonlEvents {
     }
 }
 
-/// Run `body`, a subcommand, with the trace export of [`shutdown::with_telemetry`]: say on
-/// stderr that traces are exported when they are, and, once `body` returns, what could not
-/// be exported. Telemetry never changes the exit code.
+/// Run `body`, a subcommand, with the trace export of [`shutdown::with_telemetry`], through
+/// the proxies of config.toml: say on stderr that traces are exported when they are, and,
+/// once `body` returns, what could not be exported. Telemetry never changes the exit code.
 ///
-/// An endpoint the exporter refuses is a configuration error, reported before `body` starts.
+/// An endpoint the exporter refuses is a configuration error, reported before `body` starts,
+/// as is a config.toml that cannot be read.
 pub(crate) async fn with_telemetry<B>(body: B) -> Result<u8>
 where
     B: AsyncFnOnce(Option<&Telemetry>) -> Result<u8>,
 {
-    let (code, end) = shutdown::with_telemetry(SERVICE_NAME, async move |telemetry: Option<&Telemetry>| {
+    // Read again by the application `body` connects; the export starts before it.
+    let proxy = Config::from_environment()?.proxy;
+    let (code, end) = shutdown::with_telemetry(SERVICE_NAME, &proxy, async move |telemetry: Option<&Telemetry>| {
         if telemetry.is_some() {
             eprint_line(shutdown::EXPORT_NOTICE);
         }

@@ -9,10 +9,12 @@
 //!
 //! - `slack`: Slack, over Socket Mode and the Web API
 //! - `feishu`: Feishu, over its long connection and the open API (the feature `feishu`)
+//! - `socket`: opening a platform's WebSocket, directly or through a proxy's tunnel
 
 #[cfg(feature = "feishu")]
 mod feishu;
 mod slack;
+mod socket;
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -26,6 +28,8 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Proxy;
+use zx_ai_http::client::with_proxy;
 use zx_app::config::{Credentials, Holds, expand_table};
 use zx_util::registry::Registry;
 use zx_util::sync::lock;
@@ -33,6 +37,7 @@ use zx_util::sync::lock;
 #[cfg(feature = "feishu")]
 pub use self::feishu::{FeishuChannel, FeishuConfig};
 pub use self::slack::{SlackChannel, SlackConfig};
+use self::socket::open_socket;
 use crate::{CardLabels, ErrorReport, ImChannel, ImError, Inbound, Inlet, Kept};
 
 /// The names the built-in platforms are registered under, which their channels go by.
@@ -57,6 +62,10 @@ pub struct PlatformInput<'a> {
     /// Where the channel reports what it goes on after: the operator log, as `failed` lines
     /// with the platform's name.
     pub on_error: ErrorReport,
+    /// How the channel reaches its platform, its API and its WebSocket: through the proxies
+    /// of config.toml's `[proxy]`; without them, its HTTP requests go through the
+    /// environment's proxies, and its WebSocket directly.
+    pub proxy: &'a Proxy,
 }
 
 /// A channel a factory built.
@@ -107,11 +116,12 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `wss://`.
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// An HTTP client whose calls each give up after `timeout`. Fails when it cannot be built.
-fn http_client(timeout: Duration) -> Result<reqwest::Client, ImError> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
+/// An HTTP client whose calls each give up after `timeout`, sent through `proxy`. Fails when
+/// it cannot be built, as for a proxy that is not the `http://` URL of one.
+fn http_client(timeout: Duration, proxy: &Proxy) -> Result<reqwest::Client, ImError> {
+    let builder = reqwest::Client::builder().timeout(timeout);
+    with_proxy(builder, proxy)
+        .and_then(|builder| builder.build().map_err(|error| error.to_string()))
         .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))
 }
 

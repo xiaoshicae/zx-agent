@@ -432,3 +432,49 @@ fn the_file_is_read_within_bounds() {
     std::fs::write(&path, format!("# {}", "x".repeat(64 * 1024))).unwrap();
     assert!(format!("{:#}", Config::load(&path).unwrap_err()).contains("exceeds"));
 }
+
+#[test]
+fn proxy_gives_the_proxies_in_place_of_the_environments() {
+    assert_eq!(load_text("").unwrap().proxy, Proxy::FromEnvironment);
+    let config = load_text(
+        "[proxy]\nhttp = 'http://proxy.internal:3128'\nhttps = 'http://user:secret@proxy.internal:3128'\n\
+         noProxy = ['localhost', '.svc.cluster.local']\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.proxy,
+        Proxy::Through(Proxies {
+            http: Some("http://proxy.internal:3128".into()),
+            https: Some("http://user:secret@proxy.internal:3128".into()),
+            no_proxy: vec!["localhost".into(), ".svc.cluster.local".into()],
+        })
+    );
+    // The proxy that carries a password is a credential; the other is not.
+    assert_eq!(config.credentials.values, ["http://user:secret@proxy.internal:3128"]);
+    // A table without proxies sends everything directly, whatever the environment says.
+    assert_eq!(
+        load_text("[proxy]\n").unwrap().proxy,
+        Proxy::Through(Proxies::default())
+    );
+}
+
+#[test]
+fn a_proxy_that_is_not_the_http_url_of_one_is_refused_by_its_key() {
+    let refused = error("[proxy]\nhttps = 'https://proxy.internal:3128'\n");
+    assert!(
+        refused.contains("proxy.https must be an http:// URL of the proxy, not https://"),
+        "{refused}"
+    );
+    let refused = error("[proxy]\nhttp = 'proxy.internal:3128'\n");
+    assert!(
+        refused.contains("proxy.http must be the http:// URL of the proxy, as http://host:port"),
+        "{refused}"
+    );
+    // The check does not quote the URL, which may hold a password.
+    let refused = error("[proxy]\nhttps = 'http://user:secret@proxy.internal:3128/path'\n");
+    assert!(
+        refused.contains("proxy.https must end with the host and port") && !refused.contains("secret"),
+        "{refused}"
+    );
+    assert!(error("[proxy]\nftp = 'http://proxy.internal:3128'\n").contains("unknown field `ftp`"));
+}

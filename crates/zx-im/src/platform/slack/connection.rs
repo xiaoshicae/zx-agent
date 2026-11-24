@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::SlackChannel;
 use super::events::{Me, decisions, message};
-use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, open_socket, report};
 use crate::{ImError, Inbound, Inlet};
 
 impl SlackChannel {
@@ -30,7 +30,7 @@ impl SlackChannel {
                 "slack apps.connections.open: no url in the answer".into(),
             ));
         };
-        let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
+        let connected = tokio::time::timeout(self.config.request_timeout, open_socket(url, &self.config.proxy)).await;
         Ok(match connected {
             Ok(Ok((socket, _))) => Connection::Open(Box::new(socket)),
             Ok(Err(error)) => Connection::Later(format!("slack: cannot open the Socket Mode connection: {error}")),

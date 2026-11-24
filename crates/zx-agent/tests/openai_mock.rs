@@ -9,7 +9,7 @@ use zx_agent::Session;
 use zx_agent::ai::openai::{BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
-    ApiKey, ApiKeySource, Message, PREAMBLE, ProviderError, ProviderErrorKind, StopReason, SystemPrompt,
+    ApiKey, ApiKeySource, Message, PREAMBLE, ProviderError, ProviderErrorKind, Proxy, StopReason, SystemPrompt,
 };
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
@@ -34,7 +34,7 @@ fn setup_with_provider(server: &MockServer, mut settings: OpenAiConfig) -> Runne
     if matches!(settings.api_key, ApiKey::None) {
         settings.api_key = "test-key".into();
     }
-    settings.use_system_proxy = false;
+    settings.proxy = Proxy::Direct;
     let provider = OpenAiCompatible::new(settings).unwrap();
     let mut config = config(Arc::new(provider), vec![Arc::new(BashTool::default())]);
     config.model = "mock-model".into();

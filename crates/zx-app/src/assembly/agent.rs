@@ -325,6 +325,7 @@ fn provider(app: &Application) -> Result<(BuiltProvider, Credentials)> {
         options: &config.provider.options,
         api_key,
         reasoning: config.reasoning,
+        proxy: &config.proxy,
     })?;
     Ok((built, key))
 }

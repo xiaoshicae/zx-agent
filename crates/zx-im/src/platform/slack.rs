@@ -19,6 +19,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use zx_agent::ai::Proxy;
 
 use self::api::CallError;
 use self::events::{Me, button, card_request, escape, history, resolution, section, split};
@@ -94,6 +95,9 @@ pub struct SlackConfig {
     /// failed attempt to connect, before the channel waits and tries again, a connection
     /// that went silent, a frame it cannot read, and a thread it could not read to its end.
     pub on_error: Option<ErrorReport>,
+    /// How the Web API and the Socket Mode connection are reached: by default, the API
+    /// through the environment's proxies and the connection directly.
+    pub proxy: Proxy,
 }
 
 impl SlackConfig {
@@ -108,6 +112,7 @@ impl SlackConfig {
             ping_interval: DEFAULT_PING_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
+            proxy: Proxy::default(),
         }
     }
 }
@@ -143,6 +148,7 @@ impl PlatformFactory for Slack {
         }
         config.labels.clone_from(input.labels);
         config.on_error = Some(input.on_error);
+        config.proxy = input.proxy.clone();
         let channel = SlackChannel::new(config)?;
         Ok(BuiltChannel {
             channel: Arc::new(channel),
@@ -172,10 +178,11 @@ pub struct SlackChannel {
 }
 
 impl SlackChannel {
-    /// A channel for `config`. Fails when the HTTP client cannot be built.
+    /// A channel for `config`. Fails when the HTTP client cannot be built, as for a proxy
+    /// that is not the `http://` URL of one.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
         Ok(Self {
-            http: http_client(config.request_timeout)?,
+            http: http_client(config.request_timeout, &config.proxy)?,
             posts: Pacer::new(config.post_interval),
             config,
             me: OnceLock::new(),

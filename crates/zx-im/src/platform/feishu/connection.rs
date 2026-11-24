@@ -16,7 +16,7 @@ use zx_util::random::random_u64;
 
 use super::frame::Frame;
 use super::{FeishuChannel, MAX_INTERVAL};
-use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, report};
+use crate::platform::{Connection, Ended, Keepalive, Next, Socket, keep, next_message, open_socket, report};
 use crate::{ImError, Inlet};
 
 /// The prefix of every error of the long connection.
@@ -165,7 +165,7 @@ impl FeishuChannel {
     /// connections.
     async fn open_socket(&self, address: &str, ping: Duration) -> Result<Connection<Link>, ImError> {
         let service = service_id(address);
-        match tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(address)).await {
+        match tokio::time::timeout(self.config.request_timeout, open_socket(address, &self.config.proxy)).await {
             Ok(Ok((socket, _))) => Ok(Connection::Open(Box::new(Link::new(socket, service, ping)))),
             Ok(Err(tungstenite::Error::Http(response))) => {
                 let status = response.status();

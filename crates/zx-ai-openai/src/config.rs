@@ -8,7 +8,7 @@ use serde::de::IntoDeserializer;
 use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zx_ai::ApiKey;
+use zx_ai::{ApiKey, Proxy};
 use zx_ai_http::DEFAULT_MAX_EVENT_BYTES;
 use zx_ai_http::settings::{check_base_url, check_headers, check_limits};
 
@@ -45,8 +45,8 @@ pub struct OpenAiConfig {
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
     pub idle_timeout: Duration,
-    /// Honor HTTP(S)_PROXY environment variables.
-    pub use_system_proxy: bool,
+    /// How requests reach the network: the environment's proxies by default.
+    pub proxy: Proxy,
     /// Maximum raw streaming response bytes per request.
     pub max_response_bytes: usize,
     /// Maximum bytes in a single SSE event, including framing.
@@ -64,7 +64,7 @@ impl Default for OpenAiConfig {
             headers: Vec::new(),
             provider_name: "openai-compatible".to_string(),
             idle_timeout: Duration::from_secs(120),
-            use_system_proxy: true,
+            proxy: Proxy::default(),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             body: BodyOptions::default(),
@@ -96,7 +96,7 @@ impl fmt::Debug for OpenAiConfig {
             )
             .field("provider_name", &self.provider_name)
             .field("idle_timeout", &self.idle_timeout)
-            .field("use_system_proxy", &self.use_system_proxy)
+            .field("proxy", &self.proxy)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("max_sse_event_bytes", &self.max_sse_event_bytes)
             .field("body", &self.body)

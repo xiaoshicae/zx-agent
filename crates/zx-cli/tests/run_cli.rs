@@ -1,7 +1,7 @@
 //! `zx-agent run` as a separate process against the local fake server: exit codes, output
 //! modes and their escaping, the session and `--continue`, provider and reasoning settings,
-//! budgets, denied calls, trace export, and the wiring that only main.rs does. No network or
-//! API key needed.
+//! budgets, denied calls, trace export, the proxy of config.toml, and the wiring that only
+//! main.rs does. No network or API key needed.
 
 mod common;
 #[cfg(unix)]
@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use zx_agent::ai::Message;
 use zx_agent::transcript::SessionHeader;
+use zx_testing::fake_proxy::FakeProxy;
 use zx_testing::http::{Request, read_request, silent_listener};
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{
@@ -143,6 +144,46 @@ async fn a_completed_run_prints_the_answer_and_exits_0() {
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "All good.\n");
+}
+
+#[tokio::test]
+async fn the_model_and_the_trace_export_are_reached_through_the_proxy_of_config_toml() {
+    let server = MockServer::start(vec![Reply::text("All good.")]).await;
+    let proxy = FakeProxy::start().await;
+    // A collector that never answers: the export gives up after half a second.
+    let (collector, _exports) = silent_listener().await;
+    let dir = tempfile::tempdir().unwrap();
+    let rest = format!("[proxy]\nhttp = \"{}\"\n", proxy.url(Some("user:p%40ss")));
+
+    let output = run_with_home(&server, dir.path(), &home(dir.path(), "", &rest), &GO)
+        .env(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            format!("http://{collector}/v1/traces"),
+        )
+        .env("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "500")
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "All good.\n");
+    // `user:p@ss`, the user and password of the proxy's URL, decoded.
+    let credentials = Some("Basic dXNlcjpwQHNz".to_string());
+    let asked = proxy.asked();
+    let model = format!("POST {}/", server.base_url);
+    assert!(
+        asked
+            .iter()
+            .any(|asked| asked.line.starts_with(&model) && asked.authorization == credentials),
+        "{asked:?}"
+    );
+    let export = format!("POST http://{collector}/v1/traces");
+    assert!(
+        asked
+            .iter()
+            .any(|asked| asked.line == export && asked.authorization == credentials),
+        "{asked:?}"
+    );
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! The Slack channel against a fake Slack: Socket Mode messages and clicks, acknowledgement,
 //! deduplication, reconnection, credential errors, posting, cards, rate limits, the images of
-//! messages, files posted and the stop.
+//! messages, files posted, the way through a proxy and the stop.
 
 mod common;
 
@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use zx_agent::ai::{Proxies, Proxy};
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalCard, ApprovalId, Attachment, ChatKind, Choice, Destination, ImChannel, ImError, ImageRef,
     Inbound, MessageId, MessageRef, Post, Replacement, Said, SlackChannel, SlackConfig, UserId,
 };
 use zx_testing::WAIT;
+use zx_testing::fake_proxy::FakeProxy;
 use zx_testing::fake_slack::{Answer, BOT_TOKEN, FakeSlack};
 use zx_testing::http::silent_listener;
 
@@ -118,6 +120,41 @@ async fn a_mention_is_acknowledged_and_passed_on_without_the_bot_mention() {
         format!("Bearer {APP_TOKEN}")
     );
     running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_web_api_and_the_socket_mode_connection_go_through_the_proxy_with_its_credentials() {
+    let mut slack = FakeSlack::start().await;
+    let proxy = FakeProxy::start().await;
+    let mut config = config(&slack);
+    config.proxy = Proxy::Through(Proxies {
+        http: Some(proxy.url(Some("bot:p%40ss"))),
+        ..Proxies::default()
+    });
+    let mut running = run_channel(Arc::new(SlackChannel::new(config).unwrap()), WAIT);
+    let mut socket = slack.socket().await;
+    socket
+        .send(envelope("e1", "events_api", &mention("1.000100", None, "<@UBOT> hi")))
+        .await;
+    assert_eq!(running.next().await, message("1.000100", at("C1", None), "hi"));
+    running.stop().await.unwrap();
+
+    // `bot:p@ss`, the user and password of the proxy's URL, decoded.
+    let credentials = Some("Basic Ym90OnBAc3M=".to_string());
+    let asked = proxy.asked();
+    let api_call = format!("POST {}/auth.test", slack.api_base);
+    assert!(
+        asked
+            .iter()
+            .any(|asked| asked.line == api_call && asked.authorization == credentials),
+        "{asked:?}"
+    );
+    assert!(
+        asked
+            .iter()
+            .any(|asked| asked.line.starts_with("CONNECT 127.0.0.1:") && asked.authorization == credentials),
+        "{asked:?}"
+    );
 }
 
 #[tokio::test]

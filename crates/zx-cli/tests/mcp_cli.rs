@@ -1,7 +1,8 @@
 //! The compiled program with MCP servers from config.toml: run and chat connect them at
 //! startup; a tool the agent's permissions.allow lists runs, the others ask (and `run`, with no one
 //! to ask, refuses them), but those a trusted server says only read; the configured headers
-//! go with every request; the token and the header variables are hidden from commands and
+//! go with every request, through the proxy of config.toml when it has one; the token and the
+//! header variables are hidden from commands and
 //! redacted; a server that cannot be used stops startup. The IM service's test of the same is
 //! with its program (`crates/zx-im/tests/im_cli.rs`).
 
@@ -14,6 +15,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
+use zx_testing::fake_proxy::FakeProxy;
 use zx_testing::mock_server::{MockServer, Reply};
 use zx_testing::program::{Home, ended_output, fake_model_config, write_agent, write_config};
 use zx_testing::{stderr, stdout};
@@ -111,6 +113,28 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
     assert!(stderr.contains(&startup), "{stderr}");
     assert_eq!(tool_results(&model), [r#"query: {"q":"up"}"#]);
     assert_eq!(fake.requests("tools/call").len(), 1);
+}
+
+#[tokio::test]
+async fn the_server_is_reached_through_the_proxy_of_config_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = prom().await;
+    let model = MockServer::start(vec![
+        Reply::tool_call("c1", "prom__query", &json!({"q": "up"})),
+        Reply::text("done"),
+    ])
+    .await;
+    let proxy = FakeProxy::start().await;
+    let section = format!("[proxy]\nhttp = \"{}\"\n", proxy.url(None));
+    let home = agent_home_with(dir.path(), &fake.url, "[]", &section);
+
+    let output = run(&model, dir.path(), &home).output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(tool_results(&model), [r#"query: {"q":"up"}"#]);
+    let call = format!("POST {}", fake.url);
+    let asked = proxy.asked();
+    assert!(asked.iter().any(|asked| asked.line == call), "{asked:?}");
 }
 
 #[tokio::test]

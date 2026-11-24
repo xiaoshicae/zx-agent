@@ -12,6 +12,8 @@
 //! - `system_prompt`: the system prompt as named sections, recorded in the conversation
 //! - `provider`: the provider contract ([`Provider`]), the bounded channel of a response's
 //!   events ([`event_channel`]), and the API key a provider authenticates with ([`ApiKey`])
+//! - `proxy`: how a provider's and the program's other connections reach the network
+//!   ([`Proxy`])
 //!
 //! and the modules a reader names by path:
 //! - [`retry`]: whether to try a failed request again, and how long to wait
@@ -21,6 +23,7 @@
 #[cfg(any(test, feature = "testing"))]
 pub mod faux;
 mod provider;
+mod proxy;
 pub mod retry;
 mod system_prompt;
 mod types;
@@ -28,5 +31,6 @@ mod types;
 pub use self::provider::{
     ABORTED_MESSAGE, ApiKey, ApiKeySource, EventReceiver, EventSender, Provider, event_channel, send_event,
 };
+pub use self::proxy::{Proxies, Proxy};
 pub use self::system_prompt::{PREAMBLE, SectionChange, SystemMessage, SystemPrompt};
 pub use self::types::*;
