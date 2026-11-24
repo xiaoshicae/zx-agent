@@ -578,6 +578,29 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
 }
 
 #[tokio::test]
+async fn a_call_on_a_directory_has_no_location_for_the_client_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("l", "ls", &json!({"path": "."})),
+        Reply::text("listed"),
+    ])
+    .await;
+    let mut acp = Acp::start_in(&server, dir.path(), &[], None).await;
+    let session = acp.session(dir.path()).await;
+    acp.write(prompt_request(3, &session, "list")).await;
+
+    let call = acp.next_update().await;
+    assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
+    assert_eq!(call["kind"], "read", "{call}");
+    assert!(call["locations"].as_array().is_none_or(Vec::is_empty), "{call}");
+    assert_eq!(acp.next_update().await["status"], "in_progress");
+    assert_eq!(acp.next_update().await["status"], "completed");
+    assert_eq!(text_of(&acp.next_update().await), "listed");
+    assert_eq!(acp.read().await["result"]["stopReason"], "end_turn");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
 async fn a_session_is_kept_in_the_directory_of_its_cwd_and_loaded_with_its_history() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
