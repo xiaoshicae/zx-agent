@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
-use crate::ai::{AssistantMessage, ContentBlock, Image, Message, StopReason, Usage};
+use crate::ai::{ContentBlock, Image, Message, Usage};
 
 /// A model-visible message and the entry it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -295,7 +295,7 @@ impl Transcript {
                 Entry::ContextEdit(edit) => edited_from = edited_from.min(position(&edit.target_id).unwrap_or(0)),
                 Entry::Message(recorded) => {
                     if let Message::Assistant(answer) = &recorded.message
-                        && reports_usage(answer)
+                        && answer.reports_usage()
                         && position(&recorded.id).is_some_and(|at| at < edited_from)
                     {
                         return Some((&recorded.id, &answer.usage));
@@ -315,17 +315,12 @@ impl Transcript {
     }
 }
 
-/// Whether `answer` finished and reported the tokens of its request.
-fn reports_usage(answer: &AssistantMessage) -> bool {
-    answer.usage.total_tokens > 0 && !matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted)
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::ai::UserMessageKind;
+    use crate::ai::{AssistantMessage, StopReason, UserMessageKind};
     use crate::transcript::test_support::{header, plan, result_with_details, seeded, summary};
 
     /// An answer that reported `input` prompt tokens and 10 output tokens.

@@ -373,6 +373,12 @@ impl AssistantMessage {
         }
     }
 
+    /// Whether the answer finished and reported the tokens of its request, which then measure
+    /// the context it was sent.
+    pub fn reports_usage(&self) -> bool {
+        self.usage.total_tokens > 0 && !matches!(self.stop_reason, StopReason::Error | StopReason::Aborted)
+    }
+
     /// Why a failed response failed: its `error_message`, or one default text for a failed
     /// response that carries none, so that every report of a failure names a reason.
     pub fn failure_reason(&self) -> &str {

@@ -7,6 +7,9 @@
 //! - `updates`: run events as session updates, and the replay of a loaded session
 //! - `permissions`: approvals as permission requests
 //! - `commands`: the agent's slash commands, which a prompt that starts with one runs
+//! - `options`: the session's configuration options, the model and the reasoning level
+//! - `usage`: how full the model's context is
+//! - `models`: the models config.toml lists, which those two use
 //!
 //! Sessions are kept as files, one per session in the directory chat uses for the same
 //! working directory, so that a client can list them and load one again in a later process:
@@ -22,10 +25,13 @@
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
 mod commands;
+mod models;
+mod options;
 mod permissions;
 mod sessions;
 mod turn;
 mod updates;
+mod usage;
 
 use std::sync::Arc;
 
@@ -34,8 +40,9 @@ use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId,
-    SessionListCapabilities, SessionResumeCapabilities, ToolKind,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionId, SessionListCapabilities, SessionResumeCapabilities, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
@@ -48,6 +55,8 @@ use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace};
 
 use self::commands::Command;
+use self::models::Models;
+use self::options::Change;
 use self::turn::{Prompt, Running, Turn};
 use crate::application::connect;
 use crate::cli::{self, AcpArgs};
@@ -58,6 +67,8 @@ struct Host {
     /// client's approval is asked for its calls. With it, where the sessions are kept, which
     /// is the session files chat keeps too, or memory with `--no-session`.
     configured: ConfiguredAgent,
+    /// The models config.toml lists, shared with the turns, which run as tasks of their own.
+    models: Arc<Models>,
     /// Cancelled when the process is told to stop: every turn then cancels its run.
     stop: CancellationToken,
     /// Each turn holds a sender of this channel while it runs, and nothing is ever sent:
@@ -70,6 +81,18 @@ impl Host {
     /// The session `id` when the client has it open.
     fn session(&self, id: &SessionId) -> Option<Session> {
         self.configured.agent().session(&id.0)
+    }
+
+    /// The error for a request about session `id` when the client does not have it open:
+    /// never opened, closed by the client, or closed by itself when its record could no
+    /// longer be written.
+    fn not_open(&self, id: &SessionId) -> Error {
+        let why = if self.keeps_files() {
+            "it is not open; session/load or session/resume opens it"
+        } else {
+            "it is not open, and nothing is kept of a closed session (--no-session)"
+        };
+        sessions::unknown_session(&id.0, why)
     }
 
     /// Whether sessions are kept as files, where a later request or process finds them
@@ -100,7 +123,9 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let result = sessions::create(&self.configured, &request.cwd).await;
-        opened(responder, cx, result, NewSessionResponse::new)
+        opened(responder, cx, &self.models, result, |id, options| {
+            NewSessionResponse::new(id).config_options(options)
+        })
     }
 
     /// `session/load`: the replay is sent before the response, as the protocol has it.
@@ -111,7 +136,9 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let result = sessions::load(&self.configured, cx, request).await;
-        opened(responder, cx, result, |_| LoadSessionResponse::new())
+        opened(responder, cx, &self.models, result, |_, options| {
+            LoadSessionResponse::new().config_options(options)
+        })
     }
 
     /// `session/resume`: the session goes on from its file, with nothing replayed.
@@ -122,7 +149,9 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let result = sessions::resume(&self.configured, request).await;
-        opened(responder, cx, result, |_| ResumeSessionResponse::new())
+        opened(responder, cx, &self.models, result, |_, options| {
+            ResumeSessionResponse::new().config_options(options)
+        })
     }
 
     /// `session/list`: the sessions kept for a working directory.
@@ -153,14 +182,7 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let Some(session) = self.session(&request.session_id) else {
-            // Never opened, closed by the client, or closed by itself when its record could
-            // no longer be written.
-            let why = if self.keeps_files() {
-                "it is not open; session/load or session/resume opens it"
-            } else {
-                "it is not open, and nothing is kept of a closed session (--no-session)"
-            };
-            return responder.respond_with_error(sessions::unknown_session(&request.session_id.0, why));
+            return responder.respond_with_error(self.not_open(&request.session_id));
         };
         let prompt = match Prompt::of(&request.prompt).await {
             Ok(prompt) => prompt,
@@ -195,7 +217,13 @@ impl Host {
             Ok(running) => running,
             Err(error) => return responder.respond_with_error(protocol_error(error.into())),
         };
-        let turn = Turn::new(session, cx.clone(), session_id, self.stop.clone());
+        let turn = Turn::new(
+            session,
+            cx.clone(),
+            session_id,
+            self.stop.clone(),
+            Arc::clone(&self.models),
+        );
         // None once the stop has waited for the turns: this one then ends with the process.
         let in_progress = self.turns.upgrade();
         cx.spawn(async move {
@@ -204,6 +232,32 @@ impl Host {
             drop(in_progress);
             answered
         })
+    }
+
+    /// `session/set_config_option`: change the model or the reasoning level of an idle
+    /// session; the response has every option as it is then. A new model may have another
+    /// context window, so the usage follows.
+    fn set_config_option(
+        &self,
+        request: &SetSessionConfigOptionRequest,
+        responder: Responder<SetSessionConfigOptionResponse, V1>,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let Some(session) = self.session(&request.session_id) else {
+            return responder.respond_with_error(self.not_open(&request.session_id));
+        };
+        let change = Change {
+            option: &request.config_id.0,
+            value: &request.value,
+        };
+        match options::set(&session, self.configured.provider(), &self.models, &change) {
+            Ok(options) => {
+                responder.respond(SetSessionConfigOptionResponse::new(options))?;
+                usage::of_session(cx, &request.session_id, &session, &self.models);
+                Ok(())
+            }
+            Err(error) => responder.respond_with_error(protocol_error(error)),
+        }
     }
 
     /// `session/cancel`: abort the session's turn, if it has one.
@@ -248,11 +302,13 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
     let configured = app.build(app.model(), &place, approvals)?;
+    let models = Arc::new(Models::new(app.models()));
     let stop = CancellationToken::new();
     cancel_on_signals(stop.clone());
     let (turns, mut turns_ended) = mpsc::channel::<()>(1);
     let connection = client_connection(Arc::new(Host {
         configured,
+        models,
         stop: stop.clone(),
         turns: turns.downgrade(),
     }));
@@ -281,6 +337,7 @@ async fn client_connection(host: Arc<Host>) -> Result<(), Error> {
     let on_resume = Arc::clone(&host);
     let on_list = Arc::clone(&host);
     let on_prompt = Arc::clone(&host);
+    let on_set_option = Arc::clone(&host);
     let on_cancel = Arc::clone(&host);
     let on_close = Arc::clone(&host);
     Agent
@@ -336,6 +393,12 @@ async fn client_connection(host: Arc<Host>) -> Result<(), Error> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, cx| {
+                on_set_option.set_config_option(&request, responder, &cx)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
             async move |request: CloseSessionRequest, responder, _cx| on_close.close_session(&request, responder),
             agent_client_protocol::on_receive_request!(),
         )
@@ -350,18 +413,25 @@ async fn client_connection(host: Arc<Host>) -> Result<(), Error> {
         .await
 }
 
-/// Answer a request that opened a session, then offer the session's commands: the client
-/// knows the session from the answer on.
+/// Answer a request that opened a session, with its configuration options, then offer the
+/// session's commands and say how full its context is: the client knows the session from
+/// the answer on.
 fn opened<T: JsonRpcResponse>(
     responder: Responder<T, V1>,
     cx: &ConnectionTo<Client>,
-    result: Result<SessionId>,
-    response: impl FnOnce(SessionId) -> T,
+    models: &Models,
+    result: Result<Session>,
+    response: impl FnOnce(SessionId, Option<Vec<SessionConfigOption>>) -> T,
 ) -> Result<(), Error> {
     match result {
-        Ok(id) => {
-            responder.respond(response(id.clone()))?;
+        Ok(session) => {
+            let id = SessionId::new(session.id());
+            // None while a turn runs, as when a client loads a session this process runs:
+            // its options cannot be read then, and the response leaves them out.
+            let options = options::of(&session, models).ok();
+            responder.respond(response(id.clone(), options))?;
             commands::offer(cx, &id);
+            usage::of_session(cx, &id, &session, models);
             Ok(())
         }
         Err(error) => responder.respond_with_error(protocol_error(error)),

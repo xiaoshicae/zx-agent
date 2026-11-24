@@ -20,9 +20,8 @@ use crate::render::{preview_text, utc_time, visible};
 
 /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
 /// It is kept among the session files, where `session/load` finds it again.
-pub(super) async fn create(configured: &ConfiguredAgent, cwd: &Path) -> Result<SessionId> {
-    let session = configured.create(Some(cwd)).await?;
-    Ok(SessionId::new(session.id()))
+pub(super) async fn create(configured: &ConfiguredAgent, cwd: &Path) -> Result<Session> {
+    configured.create(Some(cwd)).await
 }
 
 /// The session `id` for `cwd`: the one this process has open, or the one kept among the
@@ -76,21 +75,20 @@ pub(super) async fn load(
     configured: &ConfiguredAgent,
     cx: &ConnectionTo<Client>,
     request: &LoadSessionRequest,
-) -> Result<SessionId> {
+) -> Result<Session> {
     let id = &request.session_id;
     let session = locate(configured, id, &request.cwd).await?;
     let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
     session
         .with_transcript(|transcript| updates.replay(transcript))
         .with_context(|| format!("cannot replay session {}", id.0))?;
-    Ok(id.clone())
+    Ok(session)
 }
 
 /// Continue the session `request` names without replaying it (`session/resume`): the
 /// client keeps what it shows, and the conversation goes on from the file.
-pub(super) async fn resume(configured: &ConfiguredAgent, request: &ResumeSessionRequest) -> Result<SessionId> {
-    locate(configured, &request.session_id, &request.cwd).await?;
-    Ok(request.session_id.clone())
+pub(super) async fn resume(configured: &ConfiguredAgent, request: &ResumeSessionRequest) -> Result<Session> {
+    locate(configured, &request.session_id, &request.cwd).await
 }
 
 /// The sessions kept that were started in `request.cwd`, or in `--cwd`'s directory when

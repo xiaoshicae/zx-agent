@@ -1378,3 +1378,244 @@ async fn an_image_a_tool_reads_shows_in_its_call() {
     );
     assert!(acp.finish().await.success());
 }
+
+/// Two models, the second with a context window, after the provider keys of config.toml.
+const TWO_MODELS: &str =
+    "idleTimeoutSecs = 10\n[[models]]\nid = \"mock-model\"\n[[models]]\nid = \"next-model\"\ncontextWindow = 2000";
+
+/// The reasoning levels the reasoning option offers.
+const LEVELS: [&str; 7] = ["default", "off", "minimal", "low", "medium", "high", "xhigh"];
+
+/// The ID, current value and choices of each configuration option in `options`.
+fn options_of(options: &Value) -> Vec<(String, String, Vec<String>)> {
+    let options = options.as_array().unwrap_or_else(|| panic!("no options: {options}"));
+    options
+        .iter()
+        .map(|option| {
+            assert_eq!(option["type"], "select", "{option}");
+            let choices = option["options"].as_array().unwrap();
+            (
+                option["id"].as_str().unwrap().to_string(),
+                option["currentValue"].as_str().unwrap().to_string(),
+                choices
+                    .iter()
+                    .map(|choice| choice["value"].as_str().unwrap().to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+impl Acp {
+    /// Set option `id` of `session` to `value`; the response.
+    async fn set_option(&mut self, session: &str, id: &str, value: &str) -> Value {
+        self.request(
+            "session/set_config_option",
+            json!({"sessionId": session, "configId": id, "value": value}),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn a_session_offers_the_model_and_the_reasoning_level_as_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, TWO_MODELS).await;
+    acp.initialize().await;
+    let created = acp
+        .request("session/new", json!({"cwd": dir.path(), "mcpServers": []}))
+        .await;
+    let session = created["result"]["sessionId"].as_str().unwrap().to_string();
+    acp.expect_commands(&session).await;
+
+    let options = &created["result"]["configOptions"];
+    assert_eq!(
+        options_of(options),
+        [
+            (
+                "model".to_string(),
+                "mock-model".to_string(),
+                vec!["mock-model".to_string(), "next-model".to_string()]
+            ),
+            (
+                "reasoning".to_string(),
+                "default".to_string(),
+                LEVELS.map(str::to_string).to_vec()
+            ),
+        ]
+    );
+    assert_eq!(options[0]["category"], "model", "{options}");
+    assert_eq!(options[1]["category"], "thought_level", "{options}");
+    // A session opened again shows its options too.
+    let resumed = acp.resume(&session, dir.path()).await;
+    assert_eq!(options_of(&resumed["result"]["configOptions"]).len(), 2, "{resumed}");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn changing_an_option_changes_the_next_requests_and_keeps_the_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two"), Reply::text("three")]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, TWO_MODELS).await;
+    let session = acp.session(dir.path()).await;
+    acp.prompt(&session, "first").await;
+
+    let changed = acp.set_option(&session, "model", "next-model").await;
+    assert_eq!(
+        options_of(&changed["result"]["configOptions"])[0].1,
+        "next-model",
+        "{changed}"
+    );
+    let changed = acp.set_option(&session, "reasoning", "high").await;
+    assert_eq!(
+        options_of(&changed["result"]["configOptions"])[1].1,
+        "high",
+        "{changed}"
+    );
+    acp.prompt(&session, "second").await;
+    let changed = acp.set_option(&session, "reasoning", "default").await;
+    assert_eq!(
+        options_of(&changed["result"]["configOptions"])[1].1,
+        "default",
+        "{changed}"
+    );
+    acp.prompt(&session, "third").await;
+
+    let requests = server.requests();
+    let models: Vec<&Value> = requests.iter().map(|request| &request.body["model"]).collect();
+    assert_eq!(
+        models,
+        [&json!("mock-model"), &json!("next-model"), &json!("next-model")]
+    );
+    let efforts: Vec<Value> = requests
+        .iter()
+        .map(|request| request.body.get("reasoning_effort").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(efforts, [Value::Null, json!("high"), Value::Null]);
+    let users: Vec<&str> = texts(&requests[2].body)
+        .into_iter()
+        .filter(|text| ["first", "second", "third"].contains(text))
+        .collect();
+    assert_eq!(users, ["first", "second", "third"]);
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn an_option_outside_its_choices_is_refused_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("done")]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, TWO_MODELS).await;
+    let session = acp.session(dir.path()).await;
+    for (id, value, says) in [
+        ("model", "other-model", "unknown model \"other-model\""),
+        ("reasoning", "bogus", "unknown reasoning level \"bogus\""),
+        ("mode", "auto", "unknown option \"mode\""),
+    ] {
+        let refused = acp.set_option(&session, id, value).await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains(says), "{message}");
+    }
+    let refused = acp
+        .request(
+            "session/set_config_option",
+            json!({"sessionId": session, "configId": "model", "type": "boolean", "value": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let unknown = acp.set_option("nope", "model", "next-model").await;
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown session")),
+        "{unknown}"
+    );
+
+    acp.prompt(&session, "go").await;
+    let request = &server.requests()[0].body;
+    assert_eq!(request["model"], "mock-model");
+    assert!(request.get("reasoning_effort").is_none(), "{request}");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn an_option_does_not_change_while_a_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![stalled_answer(), Reply::text("after")]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, TWO_MODELS).await;
+    let session = acp.session(dir.path()).await;
+    acp.write(prompt_request(50, &session, "first")).await;
+    assert_eq!(text_of(&acp.next_update().await), "partial");
+
+    let refused = acp.set_option(&session, "model", "next-model").await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("a turn is running"), "{message}");
+
+    acp.notify("session/cancel", json!({"sessionId": session})).await;
+    assert_eq!(acp.response(50).await["result"]["stopReason"], "cancelled");
+    acp.prompt(&session, "second").await;
+    assert_eq!(server.requests()[1].body["model"], "mock-model");
+    assert!(acp.finish().await.success());
+}
+
+/// Three models: two with a context window, and one without.
+const WINDOWED: &str = "idleTimeoutSecs = 10\n[[models]]\nid = \"mock-model\"\ncontextWindow = 1000\n\
+     [[models]]\nid = \"next-model\"\ncontextWindow = 2000\n[[models]]\nid = \"unmeasured\"";
+
+#[tokio::test]
+async fn the_usage_follows_the_context_of_a_model_with_a_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi"), Reply::text("unmeasured")]).await;
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--tools", ""], None, WINDOWED).await;
+    let session = acp.session(dir.path()).await;
+
+    // Right after the commands: the system prompt, estimated.
+    let opened = acp.next_update().await;
+    assert_eq!(opened["sessionUpdate"], "usage_update", "{opened}");
+    assert_eq!(opened["size"], 1000, "{opened}");
+    assert!(opened["used"].as_u64().unwrap() > 0, "{opened}");
+    assert!(opened.get("cost").is_none(), "{opened}");
+
+    acp.prompt(&session, "hello").await;
+    let updates = acp.replayed();
+    let kinds: Vec<&str> = updates
+        .iter()
+        .map(|update| update["sessionUpdate"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["agent_message_chunk", "usage_update", "usage_update"],
+        "{updates:?}"
+    );
+    // The answer measured its request: 10 prompt and 2 completion tokens.
+    let answered = &updates[1];
+    assert_eq!(
+        (answered["used"].as_u64(), answered["size"].as_u64()),
+        (Some(12), Some(1000))
+    );
+    // The end of the turn adds an estimate from the bytes of the messages after the answer:
+    // there are none, but even an empty list serializes to a few bytes.
+    let ended = &updates[2];
+    let used = ended["used"].as_u64().unwrap();
+    assert!((12..20).contains(&used), "{ended}");
+    assert_eq!(ended["size"], 1000, "{ended}");
+
+    acp.set_option(&session, "model", "next-model").await;
+    let switched = acp.next_update().await;
+    assert_eq!(switched["sessionUpdate"], "usage_update", "{switched}");
+    assert_eq!(
+        (switched["used"].as_u64(), switched["size"].as_u64()),
+        (Some(used), Some(2000))
+    );
+    // Without a window there is nothing to measure against.
+    acp.set_option(&session, "model", "unmeasured").await;
+    acp.prompt(&session, "again").await;
+    let updates = acp.replayed();
+    assert!(
+        updates.iter().all(|update| update["sessionUpdate"] != "usage_update"),
+        "{updates:?}"
+    );
+    assert!(acp.finish().await.success());
+}

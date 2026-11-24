@@ -25,11 +25,12 @@ mod settings;
 mod setup;
 mod skills;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use zx_agent::ai::Reasoning;
+use zx_agent::ai::{ModelMeta, Reasoning};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, short_secret_files};
 use zx_agent::builtin::tools::FileMutationQueue;
 use zx_agent::compaction::Summarizer;
@@ -316,6 +317,11 @@ impl Application {
             .models
             .get(model)
             .is_some_and(|meta| meta.cost.is_some())
+    }
+
+    /// What `[[models]]` of config.toml says of each model, by ID: empty when it lists none.
+    pub fn models(&self) -> &HashMap<String, ModelMeta> {
+        &self.settings.config.models
     }
 
     /// The reasoning level config.toml sets; `None` when it sets none.
