@@ -4,7 +4,8 @@
 //! it whole, module by module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
-//! it, named in brackets where it uses any:
+//! it, named in brackets where it uses any; the crate's tests check the source against this
+//! list:
 //!
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
 //!   rules, the projection the model sees, and where sessions are kept (pi: SessionManager)
@@ -30,6 +31,8 @@
 //! - [`agent`] (all of the above): the role every session plays, the host's setup of what
 //!   belongs to one session, and the sessions that are open
 //! - `test_support`, compiled for tests only: what the unit tests of several modules share
+//! - `tests`, compiled for tests only: that this list names every module, and that each one
+//!   uses only the modules it names for it
 //!
 //! # Where each feature lives
 //!
@@ -110,6 +113,8 @@ mod runner;
 pub mod session;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tests;
 pub mod tools;
 pub mod transcript;
 
