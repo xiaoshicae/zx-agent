@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.43 · 2026年11月
+TESTS.md · v0.44 · 2026年11月

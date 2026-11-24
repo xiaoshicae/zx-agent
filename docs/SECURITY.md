@@ -64,4 +64,4 @@
 
 ---
 
-SECURITY.md · v0.17 · 2026年11月
+SECURITY.md · v0.18 · 2026年11月

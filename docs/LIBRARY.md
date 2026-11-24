@@ -63,4 +63,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.39 · 2026年11月
+LIBRARY.md · v0.40 · 2026年11月

@@ -1,7 +1,9 @@
 //! Environment variables that count only when they hold something, and the values of
 //! configuration files that name them as `${NAME}`, with a default as the shell and Docker
 //! Compose write one, `${NAME:-default}` or `${NAME-default}` (pi: `resolveConfigValue`,
-//! without its `$NAME` and `!command`; pi has no defaults).
+//! without its `!command`; pi has no defaults). pi's `$NAME` is refused rather than taken as
+//! text, so that a value written for the shell fails where it is read instead of where it is
+//! used, such as an API key sent as `$OPENAI_API_KEY`.
 
 use std::fmt;
 
@@ -27,6 +29,9 @@ pub enum Unexpandable {
     /// A `${` without its `}`, or with something else than a variable's name and a default
     /// before it, as written.
     Malformed(String),
+    /// A `$` followed by a variable's name, the shell's `$NAME`: `${NAME}` here, or `$$NAME`
+    /// for the text. Holds the name.
+    Unbraced(String),
     /// A variable named without a default that is not set, or is empty.
     Unset(String),
 }
@@ -38,16 +43,21 @@ impl fmt::Display for Unexpandable {
                 formatter,
                 "{written} is no placeholder: write ${{NAME}}, ${{NAME:-default}} or ${{NAME-default}}, NAME of letters, digits and _ and the default without $; or $$ for a $"
             ),
+            Self::Unbraced(name) => write!(
+                formatter,
+                "${name} is no placeholder: write ${{{name}}} for the variable, or $${name} for the text"
+            ),
             Self::Unset(name) => write!(formatter, "names ${{{name}}}, which is not set"),
         }
     }
 }
 
-/// `text` with each placeholder replaced, and each `$$` by `$`; any other `$` stays as it is.
-/// `${NAME}` takes the value of the environment variable NAME, which must be set and not
-/// empty; `${NAME:-default}` takes `default` when NAME is unset or empty, `${NAME-default}`
-/// only when it is unset. A value that is not UTF-8 counts as unset. Fails for a malformed
-/// placeholder and for a variable that has neither a value nor a default.
+/// `text` with each placeholder replaced, and each `$$` by `$`; any other `$` stays as it is,
+/// but for one followed by a variable's name, the shell's `$NAME`. `${NAME}` takes the value
+/// of the environment variable NAME, which must be set and not empty; `${NAME:-default}`
+/// takes `default` when NAME is unset or empty, `${NAME-default}` only when it is unset. A
+/// value that is not UTF-8 counts as unset. Fails for a malformed placeholder, for `$NAME`
+/// and for a variable that has neither a value nor a default.
 pub fn expand(text: &str) -> Result<Expanded, Unexpandable> {
     // Unlike for `env_value`, an empty value is one: `${NAME-default}` keeps it. A value that
     // is not UTF-8 is none, as there.
@@ -76,7 +86,7 @@ pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Resul
 }
 
 /// The variables `text` names, in the order written, each once, whether or not they are set
-/// and whether or not they have a default. Fails for a malformed placeholder.
+/// and whether or not they have a default. Fails for a malformed placeholder and for `$NAME`.
 pub fn variables(text: &str) -> Result<Vec<String>, Unexpandable> {
     let mut names: Vec<String> = Vec::new();
     for part in parts(text)? {
@@ -125,7 +135,8 @@ impl Fallback<'_> {
     }
 }
 
-/// The pieces of `text`, `$$` standing for one `$`.
+/// The pieces of `text`, `$$` standing for one `$`. A `$` before a variable's name is
+/// refused.
 fn parts(text: &str) -> Result<Vec<Part<'_>>, Unexpandable> {
     let mut parts = Vec::new();
     let mut rest = text;
@@ -145,6 +156,8 @@ fn parts(text: &str) -> Result<Vec<Part<'_>>, Unexpandable> {
                 placeholder(within).ok_or_else(|| Unexpandable::Malformed(format!("${{{within}}}")))?;
             parts.push(Part::Variable(name, fallback));
             rest = &inside[end + 1..];
+        } else if let Some(name) = unbraced_name(after) {
+            return Err(Unexpandable::Unbraced(name.to_string()));
         } else {
             parts.push(Part::Text("$"));
             rest = after;
@@ -170,6 +183,19 @@ fn placeholder(within: &str) -> Option<(&str, Fallback<'_>)> {
     };
     // A `$` in a default would read as a placeholder in it, which is not expanded.
     (is_name(name) && !fallback.default().contains('$')).then_some((name, fallback))
+}
+
+/// The variable's name that `after`, what follows a `$`, starts with, as the shell reads
+/// `$NAME`: a letter or `_`, then letters, digits and `_`.
+fn unbraced_name(after: &str) -> Option<&str> {
+    let first = after.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    let end = after
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(after.len());
+    Some(&after[..end])
 }
 
 /// Whether `name` can name an environment variable here: letters, digits and `_`, not
@@ -229,11 +255,32 @@ mod tests {
     }
 
     #[test]
-    fn a_dollar_is_written_as_two_and_any_other_dollar_stays_as_it_is() {
-        let expanded = expand_with("pa$$word $5 cost$ $HOME 多字节$", lookup).unwrap();
-        assert_eq!(expanded.value, "pa$word $5 cost$ $HOME 多字节$");
+    fn a_dollar_is_written_as_two_and_one_before_no_name_stays_as_it_is() {
+        let expanded = expand_with("pa$$word $5 cost$ $-x $.多字节$", lookup).unwrap();
+        assert_eq!(expanded.value, "pa$word $5 cost$ $-x $.多字节$");
         assert!(expanded.variables.is_empty());
         assert_eq!(expand_with("$${KEY}", lookup).unwrap().value, "${KEY}");
+        assert_eq!(expand_with("$$HOME", lookup).unwrap().value, "$HOME");
+    }
+
+    #[test]
+    fn a_name_after_a_dollar_is_refused_for_want_of_braces() {
+        for (text, name) in [
+            ("$OPENAI_API_KEY", "OPENAI_API_KEY"),
+            ("Bearer $KEY", "KEY"),
+            ("${HOST}:$_PORT1/x", "_PORT1"),
+        ] {
+            assert_eq!(
+                expand_with(text, lookup),
+                Err(Unexpandable::Unbraced(name.into())),
+                "{text}"
+            );
+            assert_eq!(variables(text), Err(Unexpandable::Unbraced(name.into())), "{text}");
+        }
+        assert_eq!(
+            Unexpandable::Unbraced("KEY".into()).to_string(),
+            "$KEY is no placeholder: write ${KEY} for the variable, or $$KEY for the text"
+        );
     }
 
     #[test]

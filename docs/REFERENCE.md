@@ -245,4 +245,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.40 · 2026年11月
+REFERENCE.md · v0.41 · 2026年11月

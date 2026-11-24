@@ -300,6 +300,13 @@ mod tests {
         let broken = ProviderSettings::from_table(table("apiKey = '${KEY'")).unwrap();
         let error = format!("{:#}", broken.validate(None).unwrap_err());
         assert!(error.starts_with("provider.apiKey: ${KEY is no placeholder"), "{error}");
+        // A variable as the shell names it would be sent as the key itself.
+        let unbraced = ProviderSettings::from_table(table("apiKey = '$OPENAI_API_KEY'")).unwrap();
+        let error = format!("{:#}", unbraced.validate(None).unwrap_err());
+        assert!(
+            error.starts_with("provider.apiKey: $OPENAI_API_KEY is no placeholder: write ${OPENAI_API_KEY}"),
+            "{error}"
+        );
         // Written as it is, the key is taken as it is.
         let literal = ProviderSettings::from_table(table("apiKey = 'sk-1'")).unwrap();
         assert!(literal.validate(None).is_ok());
