@@ -18,7 +18,7 @@
 
 最多 64 KiB 的普通 UTF-8 文件。键用 camelCase，顶层的键写在第一个 `[表]` 之前。未知的键与无效的值以退出码 2 报错，错误信息带文件路径（值无效时还带键名）。
 
-任何字符串值都可以写占位符 `${NAME}`，读文件时换成环境变量 NAME 的值；`$$` 写字面的 `$`，其他的 `$` 照原样。NAME 由字母、数字与 `_` 组成，不以数字开头。`${` 没有闭合、名字不合法，或变量没有值时，以退出码 2 报错，写明键与变量（`provider.apiKey` 例外，见下表）。只有字符串能写占位符：数字照常写成数字。`im.toml` 也一样。
+任何字符串值都可以写占位符 `${NAME}`，读文件时换成环境变量 NAME 的值；`$$` 写字面的 `$`，其他的 `$` 照原样。NAME 由字母、数字与 `_` 组成，不以数字开头。默认值的写法同 shell 与 Docker Compose：`${NAME:-默认值}` 在 NAME 未设置或为空时取默认值，`${NAME-默认值}` 只在未设置时取。默认值照字面使用，不能含 `$`（不支持嵌套占位符）与 `}`。shell 里的 `${NAME:x}` 是取子串，这里与其他写法一样报错。`${` 没有闭合、写法不合法，或变量没有值又没有默认值时，以退出码 2 报错，写明键与变量（`provider.apiKey` 例外，见下表）。只有字符串能写占位符：数字照常写成数字。`im.toml` 也一样。
 
 ```toml
 model = "my-model"
@@ -47,7 +47,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `secretFiles` | 存放密钥的文件或目录（目录中以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件须为至多 64 KiB 的普通文件。`ZX_SECRET_FILES`（逗号分隔）中的文件另外加上。规则见 [SECURITY.md](SECURITY.md#密钥) |
 | `provider.api` | 由哪个 provider 访问模型：`openai`（默认，OpenAI 兼容的 Chat Completions）、`anthropic`（Anthropic Messages API，见下文示例），或宿主经 `register_provider` 注册的名字（见 [LIBRARY.md](LIBRARY.md#与命令行共用配置)）；没有注册的名字以退出码 2 报错。下面标明“仅 `openai`”的键对 `anthropic` 是配置错误；宿主注册的 provider 自己检查 `api`、`apiKey`、`maxRetries` 以外的键 |
 | `provider.baseUrl` | 服务的地址，请求的路径接在它后面：`openai` 不含 `/chat/completions`，默认 `https://api.openai.com/v1`；`anthropic` 不含 `/v1/messages`，默认 `https://api.anthropic.com`。须是 `http://` 或 `https://` 开头的地址，以路径结尾，不带查询串与片段；`ZX_BASE_URL` 也一样，不满足时以退出码 2 报错 |
-| `provider.apiKey` | API key，通常写成 `"${变量名}"`，也可以直接写 key（这样它会随文件出现在任何能读到文件的地方）。不写时是 provider 自己的变量：`openai` 为 `${OPENAI_API_KEY}`，`anthropic` 为 `${ANTHROPIC_API_KEY}`。引用的变量没有值时请求不带认证头（本地模型服务不要 key）。引用的变量对命令隐藏，key 在工具输出中脱敏 |
+| `provider.apiKey` | API key，通常写成 `"${变量名}"`，也可以直接写 key（这样它会随文件出现在任何能读到文件的地方）。不写时是 provider 自己的变量：`openai` 为 `${OPENAI_API_KEY}`，`anthropic` 为 `${ANTHROPIC_API_KEY}`。引用的变量没有值、也没有默认值时，请求不带认证头（本地模型服务不要 key）。引用的变量对命令隐藏，key 在工具输出中脱敏 |
 | `provider.apiKeyHeader` | 仅 `anthropic`。API key 放在哪个请求头：`x-api-key`（默认，Anthropic API 的写法）或 `authorization`（发 `Authorization: Bearer <key>`，如 OpenRouter 的 Anthropic Messages 兼容接口 `https://openrouter.ai/api/v1/messages`，`baseUrl` 写 `https://openrouter.ai/api`）。不按服务地址推断 |
 | `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发送：`collapse`（默认）合进开头的系统提示词；`inline` 发在变化发生的位置，保留提示词缓存，但服务必须接受对话中间的 system 消息 |
 | `provider.reasoningFormat` | 仅 `openai`。`reasoning` 的写法：`effort`（默认，`reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象加 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`），以服务的文档为准 |
@@ -404,4 +404,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.48 · 2026年11月
+CONFIGURATION.md · v0.49 · 2026年11月
