@@ -18,7 +18,8 @@ pub struct RetryPolicy {
     pub max_retries: u32,
     /// The delay before the first retry, doubled for each one after it.
     pub base_delay: Duration,
-    /// The longest wait before a retry, whatever the backoff or the server's hint says.
+    /// The longest wait before a retry: a longer backoff is cut to it, and a server that asks
+    /// for a longer wait is not retried ([`wait_beyond_limit`](Self::wait_beyond_limit)).
     pub max_delay: Duration,
     /// How much of a backoff is taken off at random, at most: 0.25 shortens each wait by up
     /// to a quarter, so that clients that failed together do not retry together. 0 waits
@@ -48,12 +49,15 @@ impl RetryPolicy {
     /// The wait before the `retry`th retry: the nominal delay with jitter taken off, or the
     /// server's `Retry-After` when that is longer; never above `max_delay`.
     pub fn delay_for(&self, retry: u32, message: &AssistantMessage) -> Duration {
-        let hint = message
-            .provider_error
-            .as_ref()
-            .and_then(|error| error.retry_after_ms)
-            .map_or(Duration::ZERO, Duration::from_millis);
+        let hint = asked_wait(message).unwrap_or(Duration::ZERO);
         self.jittered(self.delay(retry)).max(hint).min(self.max_delay)
+    }
+
+    /// The wait that `message`'s server asks for before it is asked again (`Retry-After`),
+    /// when that is longer than `max_delay`: a sooner retry would most likely be refused the
+    /// same way, so the failure stands (pi: `maxRetryDelayMs`).
+    pub fn wait_beyond_limit(&self, message: &AssistantMessage) -> Option<Duration> {
+        asked_wait(message).filter(|asked| *asked > self.max_delay)
     }
 
     /// `delay` shortened by a random share of at most `jitter`; a jitter that is not a number
@@ -67,6 +71,15 @@ impl RetryPolicy {
         let share = jitter * random_fraction();
         delay.mul_f64(1.0 - share)
     }
+}
+
+/// The wait that the server of the failed `message` asks for before it is asked again.
+fn asked_wait(message: &AssistantMessage) -> Option<Duration> {
+    message
+        .provider_error
+        .as_ref()
+        .and_then(|error| error.retry_after_ms)
+        .map(Duration::from_millis)
 }
 
 /// The kind of failure that ended `message`: `None` when it did not fail, was cancelled, or
@@ -151,6 +164,19 @@ mod tests {
         ProviderErrorKind::ResourceLimit,
         ProviderErrorKind::Other,
     ];
+
+    #[test]
+    fn only_a_wait_the_server_asks_for_beyond_the_limit_ends_the_retries() {
+        let policy = exact();
+        assert_eq!(
+            policy.wait_beyond_limit(&hinted(120_000)),
+            Some(Duration::from_secs(120))
+        );
+        // Up to the limit, the wait is waited.
+        assert_eq!(policy.wait_beyond_limit(&hinted(60_000)), None);
+        assert_eq!(policy.delay_for(1, &hinted(60_000)), Duration::from_secs(60));
+        assert_eq!(policy.wait_beyond_limit(&failed(ProviderErrorKind::RateLimited)), None);
+    }
 
     #[test]
     fn a_jitter_that_is_not_a_number_takes_nothing_off() {

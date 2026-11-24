@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 use super::auto_approve::AutoApprove;
+use super::{BashCall, bash_call};
 use crate::ai::ToolCall;
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
@@ -34,7 +35,8 @@ impl Rule {
 
 /// Deny rules are tried before Ask, then Allow; registration order breaks ties.
 /// A call with no matching rule is denied. With an [`AutoApprove`] list, an Ask decision for
-/// a call the list covers becomes Allow; Deny decisions are never changed.
+/// a bash command the list covers becomes Allow, and one for a command it does not cover says
+/// why ([`AutoApprove::uncovered`]); Deny decisions are never changed.
 pub struct RulePolicy {
     rules: Vec<Rule>,
     auto_approve: AutoApprove,
@@ -72,14 +74,28 @@ impl RulePolicy {
             )
     }
 
-    /// The decision on `call`: the strictest rule that matches its tool, with an ask on a call
-    /// the auto-approval list covers turned into an allow.
+    /// The decision on `call`: the strictest rule that matches its tool, with an ask on a bash
+    /// command that the auto-approval list covers turned into an allow.
     pub fn decision(&self, call: &ToolCall) -> PolicyDecision {
-        let decision = self.rule_decision(&call.name);
-        if matches!(decision, PolicyDecision::Ask(_)) && self.auto_approve.covers_call(call) {
-            return PolicyDecision::Allow;
+        match self.rule_decision(&call.name) {
+            PolicyDecision::Ask(reason) => self.unless_auto_approved(call, reason),
+            decision @ (PolicyDecision::Allow | PolicyDecision::Deny(_)) => decision,
         }
-        decision
+    }
+
+    /// An ask on `call` for `reason`, or an allow where `call` runs a bash command that the
+    /// auto-approval list covers. Where the list names commands but not this one, the reason
+    /// goes on to say what keeps the command asking, for the person who approves it.
+    fn unless_auto_approved(&self, call: &ToolCall, reason: String) -> PolicyDecision {
+        let BashCall::Command(command) = bash_call(call) else {
+            return PolicyDecision::Ask(reason);
+        };
+        match self.auto_approve.uncovered(command) {
+            None => PolicyDecision::Allow,
+            // With no command listed, none was expected to run without asking.
+            Some(_) if self.auto_approve.is_empty() => PolicyDecision::Ask(reason),
+            Some(uncovered) => PolicyDecision::Ask(format!("{reason}; not auto-approved: {uncovered}")),
+        }
     }
 }
 
@@ -178,7 +194,9 @@ mod tests {
         );
         assert_eq!(
             policy.decision(&call("bash", json!({"command": "rm x"}))),
-            PolicyDecision::Ask("approve bash".into())
+            PolicyDecision::Ask(
+                "approve bash; not auto-approved: \"rm x\" starts with none of the auto-approved commands".into()
+            )
         );
         assert_eq!(
             policy.decision(&call("bash", json!({}))),
@@ -187,6 +205,28 @@ mod tests {
         assert_eq!(
             policy.decision(&call("read_file", json!({"command": "ls"}))),
             PolicyDecision::Ask("approve any".into())
+        );
+    }
+
+    #[test]
+    fn an_ask_says_what_keeps_a_command_asking_only_where_commands_are_auto_approved() {
+        let asking = |list: AutoApprove| {
+            RulePolicy::new(vec![Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: PolicyDecision::Ask("approve bash".into()),
+            }])
+            .auto_approve(list)
+        };
+        let quoted = call("bash", json!({"command": "ls 'a b'"}));
+        assert_eq!(
+            asking(AutoApprove::new(["ls"])).decision(&quoted),
+            PolicyDecision::Ask(
+                "approve bash; not auto-approved: it contains '\\'', which can change what the shell runs".into()
+            )
+        );
+        assert_eq!(
+            asking(AutoApprove::default()).decision(&quoted),
+            PolicyDecision::Ask("approve bash".into())
         );
     }
 

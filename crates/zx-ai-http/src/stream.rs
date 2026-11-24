@@ -66,7 +66,7 @@ impl Events {
                         format!("stream stalled: no data for {idle:?}"),
                     )
                 })?
-                .map_err(|error| transport_failure("stream read failed", &error))?;
+                .map_err(|error| transport_failure("stream read failed", error))?;
             let Some(chunk) = chunk else {
                 self.ended = true;
                 self.ready.extend(self.parser.finish());

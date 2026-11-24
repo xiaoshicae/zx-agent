@@ -74,6 +74,10 @@ pub struct ConfiguredAgent {
     auto_approve_commands: Vec<String>,
     /// [`asks_before_commands`](Self::asks_before_commands).
     commands_ask: bool,
+    /// [`isolates_commands`](Self::isolates_commands).
+    isolates_commands: bool,
+    /// [`notices`](Self::notices).
+    notices: Vec<String>,
     place: SessionPlace,
     /// Where new sessions work unless a request names a directory: [`Overrides::cwd`].
     cwd: Option<PathBuf>,
@@ -122,6 +126,8 @@ impl ConfiguredAgent {
         let auto_approve_commands = permissions.allowed_commands();
         let asked = Asked::new(app, &permissions, &host);
         let approvals_section = asked.section(approvals, &enabled, &auto_approve_commands);
+        let isolates_commands = executor_factory.isolates();
+        let notices = asked.notices(approvals, &enabled, &permissions, executor_factory.as_ref());
         let (policies, approvals) = policies(app, &permissions, &asked, approvals);
         let hooks = hooks(app, continue_on_length, &credentials);
         let skills = skills_tool(skills, &enabled);
@@ -169,6 +175,8 @@ impl ConfiguredAgent {
             name,
             auto_approve_commands,
             commands_ask: !matches!(asked, Asked::Nothing),
+            isolates_commands,
+            notices,
             place: place.clone(),
             cwd: app.overrides.cwd.clone(),
         })
@@ -199,6 +207,19 @@ impl ConfiguredAgent {
     /// the agent or by the host ([`Asking::Never`]). For a host to display.
     pub fn asks_before_commands(&self) -> bool {
         self.commands_ask
+    }
+
+    /// Whether the executor runs commands apart from this machine, in a sandbox such as the
+    /// container ([`ExecutorFactory::isolates`]). For a host to display.
+    pub fn isolates_commands(&self) -> bool {
+        self.isolates_commands
+    }
+
+    /// What a host tells its user about the agent once, before its first run: that bash
+    /// commands run on this machine without anyone asked, where nobody answers approvals and
+    /// the executor does not isolate commands. Empty when there is nothing to tell.
+    pub fn notices(&self) -> &[String] {
+        &self.notices
     }
 
     /// Where the agent keeps its sessions, for a host that lists them or shows their files.

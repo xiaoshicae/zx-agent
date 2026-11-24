@@ -575,6 +575,21 @@ async fn a_rate_limited_call_waits_and_is_retried() {
 }
 
 #[tokio::test]
+async fn a_call_rate_limited_for_longer_than_a_call_waits_fails_at_once_as_rate_limited() {
+    let fake = FakeFeishu::start(120).await;
+    fake.script("create", vec![Answer::RateLimited { reset_secs: 45 }]);
+    let sent = tokio::time::timeout(WAIT, channel(&fake).send(&at("oc_1", None), &Post::Text("hi".into())))
+        .await
+        .expect("the call waited out a rate limit longer than a call waits");
+    let error = sent.unwrap_err().to_string();
+    assert!(
+        error.ends_with("rate limited, for 45s: longer than a call waits (20s in all)"),
+        "{error}"
+    );
+    assert_eq!(fake.calls("create").len(), 1);
+}
+
+#[tokio::test]
 async fn a_busy_endpoint_is_reported_and_retried() {
     let mut fake = FakeFeishu::start(120).await;
     fake.script("endpoint", vec![Answer::Code(1)]);

@@ -110,8 +110,14 @@ pub trait Executor: Send + Sync {
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String>;
 
     /// Replace the contents of the file at `path` with `contents`, creating the file and its
-    /// missing parent directories. Directories and special files are refused. The write is
-    /// not atomic: a reader may see it half done.
+    /// missing parent directories. Directories and special files are refused.
+    ///
+    /// [`LocalExecutor`] and [`ContainerExecutor`] write the contents into a new file beside
+    /// the old one and rename it into place, so that no reader and no crash finds the file
+    /// empty or cut short, and a write that fails leaves it as it was; the new file keeps the
+    /// old one's permissions and group. Where it would not be the same file, they write in
+    /// place, which a reader may see half done: through a symbolic link, for a file with more
+    /// than one name or of another owner, and in a directory that takes no new file.
     ///
     /// Once the write has begun it must run to its end, also when the future is dropped, as
     /// the loop drops the calls of a cancelled run: a write stopped half way would leave the

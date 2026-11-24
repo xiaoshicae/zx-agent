@@ -39,7 +39,10 @@ const RATE_LIMIT_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "too many 
 const TIMEOUT_TEXT: &[&str] = &["timed out"];
 
 /// Wording of a service that fails, is overloaded or cannot be reached for now. A gateway's
-/// timeout is the gateway's status, a 504, which is a failing service's.
+/// timeout is the gateway's status, a 504, which is a failing service's. Phrases that name a
+/// failure, not a word that any text may hold: "connection" or "temporarily" alone would take
+/// an error about connection pooling, or an account temporarily disabled, for an outage that
+/// a retry may get past (pi: `RETRYABLE_ERROR_PATTERNS`).
 const UNAVAILABLE_TEXT: &[&str] = &[
     "overloaded",
     "server_busy",
@@ -51,8 +54,14 @@ const UNAVAILABLE_TEXT: &[&str] = &[
     "bad gateway",
     "service unavailable",
     "gateway timeout",
-    "connection",
-    "temporarily",
+    "temporarily unavailable",
+    "connection error",
+    "connection_error",
+    "connection refused",
+    "connection reset",
+    "connection lost",
+    "connection closed",
+    "network error",
 ];
 
 /// The kind of failure of a response with the error status `status`, the error code `code`
@@ -197,6 +206,27 @@ mod tests {
         assert_eq!(of_status(429, None, "slow down"), ProviderErrorKind::RateLimited);
         assert_eq!(of_status(408, None, "slow down"), ProviderErrorKind::Timeout);
         assert_eq!(of_status(401, None, "bad key"), ProviderErrorKind::AccessDenied);
+    }
+
+    #[test]
+    fn wording_without_a_code_is_an_outage_only_where_it_names_one() {
+        for text in [
+            "upstream connection error",
+            "Connection reset by peer",
+            "The service is temporarily unavailable",
+        ] {
+            assert_eq!(
+                of_error(None, &text.to_lowercase()),
+                ProviderErrorKind::Unavailable,
+                "{text}"
+            );
+        }
+        for text in [
+            "your request mentions connection pooling",
+            "this key is temporarily disabled",
+        ] {
+            assert_eq!(of_error(None, text), ProviderErrorKind::Other, "{text}");
+        }
     }
 
     #[test]

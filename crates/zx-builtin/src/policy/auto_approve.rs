@@ -1,11 +1,17 @@
-//! Bash commands that run without asking where a rule would otherwise ask.
+//! Bash commands that run without asking where a rule would otherwise ask, and why the others
+//! ask.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::Deserialize;
 
-use super::{BashCall, bash_call, begins_with, collapse_whitespace, non_empty, normalize};
-use crate::ai::ToolCall;
+use super::{begins_with, collapse_whitespace, non_empty, normalize};
+use crate::text::clip;
+
+/// The most characters of a pipeline segment that [`Uncovered::Unlisted`] quotes: enough to
+/// tell which segment it is, while the approval shows the whole command.
+const MAX_QUOTED_SEGMENT_CHARS: usize = 60;
 
 /// Punctuation that a command approved without asking may contain, besides letters, digits
 /// and whitespace. None of it lets the shell run or read anything but what the words spell;
@@ -73,6 +79,46 @@ impl ProgramOptions {
     }
 }
 
+/// What of a bash command an [`AutoApprove`] list does not cover, so that the command asks:
+/// the first thing found, in the order of the conditions listed there. Its text tells the
+/// person who approves why the command was not auto-approved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Uncovered {
+    /// A character that is not a letter, a digit, whitespace or the plain punctuation, such
+    /// as a quote, `$` or `>`.
+    Syntax(char),
+    /// A URL (`://`).
+    Url,
+    /// One of the [`except`](AutoApprove::except) texts, as they are compared.
+    Excepted(String),
+    /// A pipeline segment, its whitespace collapsed, that starts with none of the prefixes.
+    Unlisted(String),
+    /// An option that a segment passes and the [`options`](AutoApprove::options) of its
+    /// program, named as they are looked up, do not list.
+    Option { program: String, option: String },
+}
+
+impl fmt::Display for Uncovered {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(character) => write!(
+                formatter,
+                "it contains {character:?}, which can change what the shell runs"
+            ),
+            Self::Url => write!(formatter, "it contains a URL"),
+            Self::Excepted(text) => write!(formatter, "it contains {text:?}, which keeps commands asking"),
+            Self::Unlisted(segment) => write!(
+                formatter,
+                "{:?} starts with none of the auto-approved commands",
+                clip(segment, MAX_QUOTED_SEGMENT_CHARS)
+            ),
+            Self::Option { program, option } => {
+                write!(formatter, "{option} is not among the options listed for {program}")
+            }
+        }
+    }
+}
+
 /// Bash commands that run without asking where a rule would otherwise ask for approval.
 ///
 /// A command is covered only when all of these hold:
@@ -86,7 +132,8 @@ impl ProgramOptions {
 ///
 /// The check is lexical: it decides only whether to ask, and never turns a denial into an
 /// approval. It knows no particular program: which of a program's options are safe to pass
-/// without asking is configuration.
+/// without asking is configuration. [`uncovered`](Self::uncovered) says which condition a
+/// command fails.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoApprove {
     /// The prefixes with their whitespace collapsed, in the case they were given.
@@ -125,65 +172,126 @@ impl AutoApprove {
         self
     }
 
-    /// Whether `call` is a call of the `bash` tool whose command may run without asking
-    /// ([`covers`](Self::covers)). A call of another tool, or one without a command, is not.
-    pub fn covers_call(&self, call: &ToolCall) -> bool {
-        match bash_call(call) {
-            BashCall::Command(command) => self.covers(command),
-            BashCall::Other | BashCall::NoCommand => false,
-        }
+    /// Whether no prefix is listed, so that every command asks.
+    pub(super) fn is_empty(&self) -> bool {
+        self.prefixes.is_empty()
     }
 
-    /// Whether `command` may run without asking.
+    /// Whether `command` may run without asking: [`uncovered`](Self::uncovered) finds nothing.
     pub fn covers(&self, command: &str) -> bool {
-        let plain = command
+        self.uncovered(command).is_none()
+    }
+
+    /// What of `command` this list does not cover, so that it asks; `None` when it may run
+    /// without asking. An empty list covers no command.
+    pub fn uncovered(&self, command: &str) -> Option<Uncovered> {
+        if let Some(character) = command
             .chars()
-            .all(|c| c.is_alphanumeric() || c == ' ' || c == '\t' || PLAIN_PUNCTUATION.contains(&c));
-        if self.prefixes.is_empty() || !plain {
-            return false;
+            .find(|&c| !(c.is_alphanumeric() || c == ' ' || c == '\t' || PLAIN_PUNCTUATION.contains(&c)))
+        {
+            return Some(Uncovered::Syntax(character));
         }
         let normalized = normalize(command);
-        if normalized.contains("://") || self.except.iter().any(|text| normalized.contains(text.as_str())) {
-            return false;
+        if normalized.contains("://") {
+            return Some(Uncovered::Url);
+        }
+        if let Some(text) = self.except.iter().find(|text| normalized.contains(text.as_str())) {
+            return Some(Uncovered::Excepted(text.clone()));
         }
         // Without quotes in the command, every `|` separates two segments.
-        command.split('|').all(|raw| {
+        command.split('|').find_map(|raw| {
             let segment = collapse_whitespace(raw);
-            self.prefixes.iter().any(|prefix| begins_with(&segment, prefix)) && self.passes_listed_options(&segment)
+            if self.prefixes.iter().any(|prefix| begins_with(&segment, prefix)) {
+                self.unlisted_option(&segment)
+            } else {
+                Some(Uncovered::Unlisted(segment))
+            }
         })
     }
 
-    /// Whether a pipeline segment, its whitespace collapsed, passes only the options its
-    /// program may pass. The program is looked up without regard to case, unlike the
-    /// prefixes: that only puts more segments under a list of options.
-    fn passes_listed_options(&self, segment: &str) -> bool {
+    /// The first option that a pipeline segment, its whitespace collapsed, passes and its
+    /// program may not. The program is looked up without regard to case, unlike the prefixes:
+    /// that only puts more segments under a list of options.
+    fn unlisted_option(&self, segment: &str) -> Option<Uncovered> {
         let mut words = segment.split(' ');
-        let Some(program) = words.next().map(str::to_lowercase) else {
-            return true;
-        };
-        let Some(options) = self.options.get(&program) else {
-            return true;
-        };
-        words
+        let program = words.next()?.to_lowercase();
+        let options = self.options.get(&program)?;
+        let option = words
             .filter(|word| word.starts_with('-'))
-            .all(|option| options.allows(option))
+            .find(|option| !options.allows(option))?;
+        Some(Uncovered::Option {
+            program,
+            option: option.to_string(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
-    use crate::policy::test_support::call;
 
     #[test]
-    fn only_a_bash_call_with_a_covered_command_is_covered() {
-        let list = AutoApprove::new(["ls"]);
-        assert!(list.covers_call(&call("bash", json!({"command": "ls -a"}))));
-        assert!(!list.covers_call(&call("bash", json!({"command": "rm x"}))));
-        assert!(!list.covers_call(&call("bash", json!({"command": 1}))));
-        assert!(!list.covers_call(&call("read_file", json!({"command": "ls"}))));
+    fn an_uncovered_command_says_what_keeps_it_asking() {
+        let list = AutoApprove::new(["kubectl get", "grep"])
+            .except(["Secret"])
+            .options("kubectl", kubectl_read_only());
+        for (command, uncovered) in [
+            ("grep x app.log > copy", Uncovered::Syntax('>')),
+            ("grep \"a b\" app.log", Uncovered::Syntax('"')),
+            ("grep a\nrm b", Uncovered::Syntax('\n')),
+            ("kubectl get -f https://example.com/pods.yaml", Uncovered::Url),
+            ("kubectl get SECRETS -A", Uncovered::Excepted("secret".into())),
+            ("kubectl get pods |  rm  -rf x", Uncovered::Unlisted("rm -rf x".into())),
+            (
+                "kubectl get pods -n prod -w",
+                Uncovered::Option {
+                    program: "kubectl".into(),
+                    option: "-w".into(),
+                },
+            ),
+        ] {
+            assert_eq!(list.uncovered(command), Some(uncovered), "{command}");
+        }
+        assert_eq!(list.uncovered("kubectl get pods -n prod | grep web"), None);
+        // An empty list covers nothing, and says which segment it found unlisted.
+        assert_eq!(
+            AutoApprove::default().uncovered("ls"),
+            Some(Uncovered::Unlisted("ls".into()))
+        );
+    }
+
+    #[test]
+    fn why_a_command_asks_is_told_in_words_for_the_approver() {
+        for (uncovered, text) in [
+            (
+                Uncovered::Syntax('$'),
+                "it contains '$', which can change what the shell runs",
+            ),
+            (Uncovered::Url, "it contains a URL"),
+            (
+                Uncovered::Excepted("secret".into()),
+                "it contains \"secret\", which keeps commands asking",
+            ),
+            (
+                Uncovered::Unlisted("rm -rf x".into()),
+                "\"rm -rf x\" starts with none of the auto-approved commands",
+            ),
+            (
+                Uncovered::Option {
+                    program: "kubectl".into(),
+                    option: "--raw".into(),
+                },
+                "--raw is not among the options listed for kubectl",
+            ),
+        ] {
+            assert_eq!(uncovered.to_string(), text);
+        }
+        // A long segment is quoted only as far as it tells which one it is.
+        let long = Uncovered::Unlisted("x".repeat(MAX_QUOTED_SEGMENT_CHARS + 1)).to_string();
+        assert!(
+            long.starts_with(&format!("\"{}...\"", "x".repeat(MAX_QUOTED_SEGMENT_CHARS))),
+            "{long}"
+        );
     }
 
     #[test]

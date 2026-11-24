@@ -521,7 +521,9 @@ async fn approving_once_allows_the_displayed_shell_call() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "approved");
     assert!(stderr(&output).contains("[approval 1] bash: printf approved > marker"));
-    assert!(stderr(&output).contains("  the agent requires tool approval"));
+    assert!(stderr(&output).contains(
+        "  the agent requires tool approval; not auto-approved: it contains '>', which can change what the shell runs"
+    ));
     // The scope and the auto-approved commands are stated once, at startup.
     assert!(
         stderr(&output).contains(

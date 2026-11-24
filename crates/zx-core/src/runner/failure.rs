@@ -48,6 +48,12 @@ impl Running<'_> {
         if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || no_further_request {
             return Err(RunStop::Failed(error.to_string()));
         }
+        if let Some(asked) = self.retry.wait_beyond_limit(failed) {
+            return Err(RunStop::Failed(format!(
+                "{error}; the service asks to wait {asked:?} before it is asked again, longer than a retry waits ({:?})",
+                self.retry.max_delay
+            )));
+        }
         self.scope
             .schedule_retry(self.retry, &mut self.accounting, failed, entry_id)
             .await

@@ -28,8 +28,12 @@ fn a_missing_file_is_an_empty_one() {
     assert_eq!(config.provider.retry.max_retries, 3);
     assert_eq!(config.execution, LOCAL);
     assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
-    // In each session's working directory.
+    // In each session's working directory, kept for a week.
     assert_eq!(config.tool_output.directory, Path::new(".zx-agent/outputs"));
+    assert_eq!(
+        config.tool_output.max_age,
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    );
     assert!(config.mcp.is_empty() && config.models.is_empty());
 }
 
@@ -224,11 +228,19 @@ fn an_output_directory_is_relative_to_the_file_and_settings_validate() {
     let config = Config::load(&path).unwrap();
     assert_eq!(config.tool_output.directory, dir.path().join("results"));
     assert_eq!(config.tool_output.threshold_bytes, None);
+    // Results are kept for whole days, or for good with 0.
+    let days = |text: &str| load_text(text).unwrap().tool_output.max_age;
+    assert_eq!(
+        days("[toolOutput]\nmaxAgeDays = 2"),
+        Some(std::time::Duration::from_secs(2 * 24 * 60 * 60))
+    );
+    assert_eq!(days("[toolOutput]\nmaxAgeDays = 0"), None);
     for text in [
         "[toolOutput]\ndirectory = ''",
         "[toolOutput]\nthreshold_bytes = 256",
         "[toolOutput]\nthresholdBytes = 1",
         "[toolOutput]\nmaxFileBytes = 1048577",
+        "[toolOutput]\nmaxAgeDays = -1",
     ] {
         assert!(load_text(text).is_err(), "{text}");
     }

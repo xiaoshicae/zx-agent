@@ -205,6 +205,10 @@ async fn build_session(app: &Application, file: Option<&Path>) -> Result<Session
         None => (SessionPlace::memory(), None),
     };
     let agent = app.build(app.model(), &place, Approvals::Nobody)?;
+    // Before the run, as the application's notices are when it connects.
+    for notice in agent.notices() {
+        eprint_line(&visible(notice));
+    }
     open_or_create(&agent, held.as_deref()).await
 }
 

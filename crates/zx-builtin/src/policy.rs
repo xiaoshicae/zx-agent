@@ -4,7 +4,8 @@
 //!
 //! - `rules`: rules by tool name
 //! - `command`: the command policy of `bash`: denied patterns and programs
-//! - `auto_approve`: the bash commands that run without asking where a rule would ask
+//! - `auto_approve`: the bash commands that run without asking where a rule would ask, and
+//!   why the others ask
 //! - `test_support`, compiled for tests only: the calls the tests of the policies check
 
 mod auto_approve;
@@ -15,7 +16,7 @@ mod test_support;
 
 use serde_json::Value;
 
-pub use self::auto_approve::{AutoApprove, ProgramOptions};
+pub use self::auto_approve::{AutoApprove, ProgramOptions, Uncovered};
 pub use self::command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DEFAULT_DENIED_PROGRAMS, DEFAULT_READ_ONLY_PROGRAMS};
 pub use self::rules::{Rule, RuleMatcher, RulePolicy};
 use crate::ai::ToolCall;

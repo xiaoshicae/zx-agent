@@ -101,7 +101,7 @@ impl Turn {
                 tool_call_id,
                 tool_name,
                 args,
-                ..
+                reason,
             } = event.event
             {
                 let request = permissions::Request {
@@ -109,6 +109,7 @@ impl Turn {
                     tool_call_id,
                     tool_name,
                     args,
+                    reason,
                 };
                 permissions::ask(&self.cx, &self.id, &self.session, request)?;
             }

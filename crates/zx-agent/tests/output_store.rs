@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -639,6 +640,67 @@ async fn a_created_output_directory_keeps_its_files_out_of_git() {
     assert!(ignore.lines().any(|line| line == "*"), "{ignore}");
 }
 
+/// A file named like a stored result in the output directory of `dir`, last changed `age` ago.
+fn stored_result_of_age(dir: &Path, age: Duration) -> PathBuf {
+    let root = dir.join(OUTPUTS);
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join(format!("{}.txt", uuid::Uuid::new_v4()));
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_modified(SystemTime::now() - age).unwrap();
+    path
+}
+
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[tokio::test]
+async fn results_older_than_their_age_are_removed_before_a_session_first_stores_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let expired = stored_result_of_age(dir.path(), 8 * DAY);
+    let recent = stored_result_of_age(dir.path(), 6 * DAY);
+    let other = dir.path().join(OUTPUTS).join("notes.txt");
+    std::fs::write(&other, "not a stored result").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&other)
+        .unwrap()
+        .set_modified(SystemTime::now() - 8 * DAY)
+        .unwrap();
+    let (hook, reader) = parts(dir.path());
+
+    let (_, id) = spill(&hook, &"r".repeat(1000)).await;
+
+    // Kept a week by default: the older result goes, the rest stays.
+    assert!(!expired.exists());
+    assert!(recent.exists() && other.exists());
+    assert!(stored_file(dir.path(), &id).exists());
+    // A removed result cannot be read on.
+    let gone = expired.file_stem().unwrap().to_str().unwrap();
+    let error = reader
+        .execute(json!({"id": gone}), &tool_context(dir.path()))
+        .await
+        .unwrap_err();
+    assert!(error.contains("cannot read tool output"), "{error}");
+}
+
+#[tokio::test]
+async fn results_are_kept_without_an_age() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = stored_result_of_age(dir.path(), 400 * DAY);
+    let store = OutputStore::new(
+        dir.path(),
+        OutputStoreConfig {
+            max_age: None,
+            ..settings()
+        },
+    )
+    .unwrap();
+    let (hook, _) = SpillOutputs::with_reader(store, Vec::new());
+
+    spill(&hook, &"k".repeat(1000)).await;
+
+    assert!(old.exists());
+}
+
 #[tokio::test]
 async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues() {
     let dir = tempfile::tempdir().unwrap();
@@ -716,6 +778,13 @@ fn invalid_storage_budgets_are_rejected_at_startup() {
                 ..settings()
             },
             InvalidOutputStoreConfig::EmptyDirectory,
+        ),
+        (
+            OutputStoreConfig {
+                max_age: Some(Duration::from_secs(3600)),
+                ..settings()
+            },
+            InvalidOutputStoreConfig::MaxAge(Duration::from_secs(3600)),
         ),
     ] {
         assert_eq!(config.validate(), Err(expected.clone()));

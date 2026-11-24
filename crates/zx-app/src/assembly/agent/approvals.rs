@@ -4,11 +4,17 @@
 use zx_agent::builtin::tools::BASH;
 
 use super::Approvals;
+use crate::assembly::execution::ExecutorFactory;
 use crate::assembly::{Application, Asking};
 use crate::config::{HostTools, Permissions};
 
 /// The name of the prompt section that says which calls ask.
 pub(super) const APPROVALS: &str = "approvals";
+
+/// What a host tells its user when bash commands run on this machine without anyone asked
+/// ([`Asked::bash_runs_unasked`]): the exposure of skipped approvals, which have a notice of
+/// their own, for bash alone.
+const UNASKED_COMMANDS: &str = "[bash] nobody answers approvals: bash commands run on this machine without asking, with this process's permissions; only the agent's deny rules apply, and execution = \"container\" in config.toml isolates them";
 
 /// What the section says when nothing asks.
 const NOTHING_ASKS: &str =
@@ -52,6 +58,35 @@ impl<'a> Asked<'a> {
             agent: &permissions.ask,
             extensions,
         }
+    }
+
+    /// What a host tells its user about these calls, once: [`UNASKED_COMMANDS`] where bash
+    /// commands run without anyone asked ([`bash_runs_unasked`](Self::bash_runs_unasked)),
+    /// given the agent's `permissions`, and the `executor` does not isolate them; nothing
+    /// otherwise.
+    pub(super) fn notices(
+        &self,
+        approvals: Approvals<'_>,
+        enabled: &[String],
+        permissions: &Permissions,
+        executor: &dyn ExecutorFactory,
+    ) -> Vec<String> {
+        if executor.isolates() || !self.bash_runs_unasked(approvals, enabled, &permissions.denied_tools()) {
+            return Vec::new();
+        }
+        vec![UNASKED_COMMANDS.to_string()]
+    }
+
+    /// Whether bash commands run without anyone asked though approvals are not skipped:
+    /// nobody answers `approvals`, the agent's tools (`enabled`) include bash, and neither its
+    /// `permissions.ask` nor its `denied` tools hold it. Skipped approvals, under which nothing
+    /// asks, are told of apart.
+    fn bash_runs_unasked(&self, approvals: Approvals<'_>, enabled: &[String], denied: &[String]) -> bool {
+        let Self::Tools { agent, .. } = self else {
+            return false;
+        };
+        let holds_bash = |tools: &[String]| tools.iter().any(|tool| tool == BASH);
+        matches!(approvals, Approvals::Nobody) && holds_bash(enabled) && !holds_bash(agent) && !holds_bash(denied)
     }
 
     /// The prompt section that tells the model which calls ask and what becomes of them, when
@@ -98,6 +133,8 @@ impl<'a> Asked<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assembly::execution::built_in;
+    use crate::config::{CONTAINER, ContainerSettings, LOCAL};
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(ToString::to_string).collect()
@@ -150,6 +187,45 @@ mod tests {
         );
         // bash asks a person only when the agent has it.
         assert_eq!(asked.section(Approvals::Person("ask"), &names(&["read_file"]), &[]), "");
+    }
+
+    #[test]
+    fn bash_runs_unasked_only_where_nobody_answers_and_nothing_holds_it_back() {
+        let none: &[String] = &[];
+        let unasked = Asked::Tools {
+            agent: none,
+            extensions: Vec::new(),
+        };
+        let bash = names(&["bash"]);
+        assert!(unasked.bash_runs_unasked(Approvals::Nobody, &bash, none));
+        // A person asked, bash not enabled, asking for it or denying it: it does not run unasked.
+        assert!(!unasked.bash_runs_unasked(Approvals::Person("ask"), &bash, none));
+        assert!(!unasked.bash_runs_unasked(Approvals::Nobody, &names(&["read_file"]), none));
+        assert!(!unasked.bash_runs_unasked(Approvals::Nobody, &bash, &bash));
+        let asking = Asked::Tools {
+            agent: &bash,
+            extensions: Vec::new(),
+        };
+        assert!(!asking.bash_runs_unasked(Approvals::Nobody, &bash, none));
+        // Skipped approvals have a notice of their own.
+        assert!(!Asked::Nothing.bash_runs_unasked(Approvals::Nobody, &bash, none));
+    }
+
+    #[test]
+    fn bash_running_unasked_is_told_only_where_the_executor_does_not_isolate_it() {
+        let executors = built_in(&ContainerSettings::default());
+        let unasked = Asked::Tools {
+            agent: &[],
+            extensions: Vec::new(),
+        };
+        let bash = names(&["bash"]);
+        let permissions = Permissions::default();
+        let notices = |name: &str| {
+            let executor = executors.get(name).unwrap().as_ref();
+            unasked.notices(Approvals::Nobody, &bash, &permissions, executor)
+        };
+        assert_eq!(notices(LOCAL), [UNASKED_COMMANDS]);
+        assert!(notices(CONTAINER).is_empty());
     }
 
     #[test]

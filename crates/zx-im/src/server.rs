@@ -59,6 +59,7 @@ pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
 pub use self::trigger::{Trigger, Triggers};
 pub use self::usage::{ChatUsage, DailyLimit, UsageStore};
+use crate::platform::RATE_LIMIT_BUDGET;
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
@@ -72,6 +73,9 @@ const DEFAULT_LONG_ANSWER_CHARS: NonZeroUsize = NonZeroUsize::new(8000).expect("
 /// Long enough for a platform's rate-limit queue, short enough that a platform that stopped
 /// answering does not hold a conversation for minutes.
 const DEFAULT_OUTBOUND_TIMEOUT: Duration = Duration::from_secs(30);
+
+// A call that a platform rate limits fails as such before the server stops waiting for it.
+const _: () = assert!(RATE_LIMIT_BUDGET.as_secs() < DEFAULT_OUTBOUND_TIMEOUT.as_secs());
 
 /// One conversation, with a session of its own: a direct chat, or a thread in a group.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -236,7 +240,8 @@ pub struct ServerConfig {
     /// Limit for each call to a channel but [`ImChannel::run`], and for each call to
     /// [`statuses`](Self::statuses), to [`usage`](Self::usage) and to the
     /// [`backlog`](Self::backlog) but [`Backlog::keep`]; a call that takes longer counts as
-    /// failed.
+    /// failed. Keep it over the 20 seconds that a built-in platform's call waits out rate
+    /// limits in all, so that a call it limits fails as rate limited rather than as slow.
     pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
