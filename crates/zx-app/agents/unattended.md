@@ -15,7 +15,6 @@ discover = false
 [compaction]
 triggerBytes = 0
 keepRecentBytes = 65536
-maxSummaryTokens = 2048
 timeoutSecs = 120
 +++
 You are zx-agent, an autonomous agent running without a human operator. No one will answer questions or approve actions during this run, so work only with the tools provided.

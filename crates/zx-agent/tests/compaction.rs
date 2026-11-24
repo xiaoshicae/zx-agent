@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ContentBlock, Message, ProviderErrorKind, Request, StopReason, ToolResultMessage};
-use zx_agent::compaction::{Config, Outcome, Report};
+use zx_agent::compaction::{Config, DEFAULT_MAX_SUMMARY_TOKENS, Outcome, Report};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
 use zx_agent::session::SessionError;
@@ -53,7 +53,7 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
     assert_eq!(report.model_requests, 1);
     assert_eq!(report.final_text, "finished");
     let requests = provider.requests();
-    assert_eq!(requests[0].max_tokens, Some(2048));
+    assert_eq!(requests[0].max_tokens, Some(DEFAULT_MAX_SUMMARY_TOKENS));
     assert!(requests[0].tools.is_empty());
     let Message::User { content, .. } = requests[0].messages.last().unwrap() else {
         panic!("source");
@@ -320,7 +320,7 @@ async fn repeated_compaction_uses_originals_instead_of_a_previous_summary() {
 }
 
 #[tokio::test]
-async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks() {
+async fn a_failed_automatic_summary_leaves_the_context_and_the_run_goes_on_without_it() {
     for step in [
         FauxStep::text("not JSON"),
         FauxStep::text(summary_json("unknown")),
@@ -330,7 +330,7 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
     ] {
         let (seed, _) = seeded_session().await;
         let before = seed.raw_projection();
-        let provider = Arc::new(FauxProvider::new([step, FauxStep::text("should not execute")]));
+        let provider = Arc::new(FauxProvider::new([step, FauxStep::text("answered")]));
         let (runner, _) = RunnerSetup {
             session: seed.into(),
             retry: fast_retry(3),
@@ -343,18 +343,50 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         .build()
         .await;
         let report = runner.run("continue").await;
-        assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
-        assert_eq!(report.model_requests, 1);
+        // The summary is neither retried nor taken for the task's answer: the task request
+        // follows it, with the context as it was.
+        assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+        assert_eq!(report.final_text, "answered");
+        assert_eq!(report.model_requests, 2);
         assert_eq!(report.retries, 0);
-        assert!(report.final_text.is_empty());
-        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(provider.requests().len(), 2);
         assert_eq!(&runner.transcript().raw_projection()[..before.len()], before);
         assert!(runner.transcript().latest_compaction().is_none());
-        assert!(matches!(
-            runner.transcript().entries().last(),
-            Some(Entry::CompactionFailed(_))
-        ));
+        assert!(
+            runner
+                .transcript()
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry, Entry::CompactionFailed(_)))
+        );
     }
+}
+
+#[tokio::test]
+async fn a_run_whose_summary_failed_does_not_summarize_before_its_later_requests() {
+    let (seed, _) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: overloaded"),
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
+        FauxStep::text("answered"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: seed.into(),
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build()
+    .await;
+
+    let report = runner.run("continue").await;
+
+    // One summary, then both task steps, though the context stays over the trigger.
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answered");
+    assert_eq!(provider.requests().len(), 3);
 }
 
 #[tokio::test]
@@ -384,6 +416,7 @@ async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prom
     let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::fail(ProviderErrorKind::Unavailable, "HTTP 503: overloaded"),
+        FauxStep::text("first answer"),
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answered"),
     ]));
@@ -398,12 +431,13 @@ async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prom
     .build()
     .await;
     let first = runner.run("continue").await;
-    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+    assert_eq!(first.final_text, "first answer", "{first:?}");
 
     let second = runner.run("try again").await;
 
     assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
     assert_eq!(second.final_text, "answered");
+    assert!(runner.transcript().latest_compaction().is_some());
 }
 
 #[tokio::test]
@@ -411,7 +445,8 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text("not JSON"),
-        FauxStep::text("must not be requested"),
+        FauxStep::text("first answer"),
+        FauxStep::text("second answer"),
     ]));
     let (runner, _) = RunnerSetup {
         session: seed.into(),
@@ -424,15 +459,11 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     .build()
     .await;
     let first = runner.run("continue").await;
-    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+    assert_eq!(first.final_text, "first answer", "{first:?}");
     let second = runner.run("try again").await;
-    assert_eq!(second.outcome, RunOutcome::Failed, "{second:?}");
-    assert_eq!(second.model_requests, 0);
-    assert!(
-        second.error.as_deref().unwrap_or_default().contains("paused"),
-        "{second:?}"
-    );
-    assert_eq!(provider.requests().len(), 1, "the failed summary is not paid for again");
+    assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
+    assert_eq!(second.final_text, "second answer");
+    assert_eq!(second.model_requests, 1, "the failed summary is not paid for again");
 }
 
 #[tokio::test]
@@ -453,7 +484,8 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     let (seed, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text("not JSON"),
-        FauxStep::text("must not be requested"),
+        FauxStep::text("first answer"),
+        FauxStep::text("third answer"),
     ]));
     let waiting = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider.clone(), vec![]);
@@ -471,7 +503,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     .build()
     .await;
     let first = runner.run("continue").await;
-    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+    assert_eq!(first.final_text, "first answer", "{first:?}");
     {
         // Dropped while its input waits in a hook, before it reaches the summary step.
         let held = runner.run("hold");
@@ -482,26 +514,24 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
         }
     }
     let third = runner.run("try again").await;
-    assert_eq!(third.outcome, RunOutcome::Failed, "{third:?}");
-    assert!(
-        third.error.as_deref().unwrap_or_default().contains("paused"),
-        "{third:?}"
-    );
-    assert_eq!(provider.requests().len(), 1, "the failed summary is not paid for again");
+    assert_eq!(third.final_text, "third answer", "{third:?}");
+    assert_eq!(third.model_requests, 1, "the failed summary is not paid for again");
 }
 
 #[tokio::test]
 async fn a_successful_manual_summary_resumes_automatic_summaries() {
     let (seed, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        // The automatic attempt fails and pauses automatic summaries.
+        // The automatic attempt fails and pauses automatic summaries; the run goes on.
         FauxStep::text("not JSON"),
+        FauxStep::text("first answer"),
         // A manual summary succeeds.
         FauxStep::text(summary_json(&old)),
         // A long answer grows the context over the trigger again.
         FauxStep::text("y".repeat(3000)),
-        // The next automatic attempt is made instead of being skipped.
+        // The next automatic attempt is made instead of being skipped, and fails again.
         FauxStep::text("not JSON"),
+        FauxStep::text("last answer"),
     ]));
     let (runner, _) = RunnerSetup {
         session: seed.into(),
@@ -513,19 +543,19 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
     }
     .build()
     .await;
-    assert_eq!(runner.run("continue").await.outcome, RunOutcome::Failed);
+    assert_eq!(runner.run("continue").await.final_text, "first answer");
     let compact = runner.compact().await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     let answered = runner.run("next").await;
     assert_eq!(answered.outcome, RunOutcome::Completed, "{answered:?}");
     let resumed = runner.run("again").await;
-    assert_eq!(resumed.outcome, RunOutcome::Failed, "{resumed:?}");
-    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(resumed.final_text, "last answer", "{resumed:?}");
+    assert_eq!(resumed.model_requests, 2, "a summary, then the task");
 }
 
 #[tokio::test]
-async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_model() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("must not execute")]));
+async fn an_input_over_the_trigger_with_nothing_to_summarize_goes_to_the_model_whole() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("answered")]));
     let (runner, _) = RunnerSetup {
         compaction: Config {
             trigger_bytes: Some(1024),
@@ -537,9 +567,10 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
     .await;
     let input = "界".repeat(1000);
     let report = runner.run(input.as_str()).await;
-    assert_eq!(report.outcome, RunOutcome::Failed);
-    assert_eq!(report.model_requests, 0);
-    assert!(provider.requests().is_empty());
+    // No summary could bring it under the trigger; the model alone can say it is too long.
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answered");
+    assert_eq!(report.model_requests, 1);
     assert!(matches!(&runner.transcript().messages()[0], Message::User{content,..} if content == &input));
 }
 

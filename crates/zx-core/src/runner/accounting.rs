@@ -42,6 +42,10 @@ pub(crate) struct RunAccounting {
     pub(crate) tool_usage: BTreeMap<String, Usage>,
     /// Tool calls that a policy or an approval denied.
     pub(crate) denied_calls: u32,
+    /// Automatic compactions before a request that left the context over its trigger, failed
+    /// or with nothing to summarize: after one, the run goes on with its context as it is and
+    /// does not compact before its later requests.
+    pub(crate) failed_compactions: u32,
 }
 
 /// Refuse a request to `model` whose cost `cost_budget` could not count: with a budget, every
