@@ -19,7 +19,7 @@ doc = false
 
 [features]
 default = ["feishu", "postgres"]
-# ⚑ D:5/CHINA FLAG: the Feishu platform (`platform::feishu`) and its im.toml section. A build
+# the Feishu platform (`platform::feishu`) and its im.toml section. A build
 # without it refuses that section by name.
 feishu = []
 # The sessions and the server's records kept in Postgres (`postgres`), for several replicas
@@ -64,7 +64,7 @@ image.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }
 
-# ⚑ D:5/CHINA FLAG: the Feishu channel's tests need its platform.
+# the Feishu channel's tests need its platform.
 [[test]]
 name = "im_feishu"
 required-features = ["feishu"]

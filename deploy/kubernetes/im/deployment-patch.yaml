@@ -34,7 +34,7 @@ spec:
                   name: zx-agent-im
                   key: slack-bot-token
                   optional: true
-            # ⚑ D:5/CHINA FLAG: Feishu (Subject to Legal/Export Compliance approval).
+            # Feishu (Subject to Legal/Export Compliance approval).
             - name: FEISHU_APP_ID
               valueFrom:
                 secretKeyRef:

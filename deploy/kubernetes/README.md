@@ -87,11 +87,11 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 启用 `im` 组件后，主进程是 IM 服务 `zx-im`，在 IM 中 @ 机器人排障、审批写操作（用法见 [README 的“IM 服务”](../../README.md#im-服务)）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
 
-1. 创建 Secret `zx-agent-im`，只写用到的平台（⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键，Subject to Legal/Export Compliance approval）：`kubectl -n zx-agent create secret generic zx-agent-im --from-literal=slack-app-token=xapp-... --from-literal=slack-bot-token=xoxb-...`。
+1. 创建 Secret `zx-agent-im`，只写用到的平台（飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键，Subject to Legal/Export Compliance approval）：`kubectl -n zx-agent create secret generic zx-agent-im --from-literal=slack-app-token=xapp-... --from-literal=slack-bot-token=xoxb-...`。
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
 3. 取消 `kustomization.yaml` 中 `components:` 与 `- im` 的注释，再 `apply -k`。
 
-修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。只改了 `im.toml` 的 `[access]` 时可以不重启：等挂载的 ConfigMap 更新（约 1 分钟），再执行 `kubectl -n zx-agent exec deploy/zx-agent -c zx-agent -- sh -c 'kill -HUP "$(pidof zx-im)"'`，日志里出现 `reloaded` 行即已生效。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，⚑ D:5/CHINA FLAG: 飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
+修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。只改了 `im.toml` 的 `[access]` 时可以不重启：等挂载的 ConfigMap 更新（约 1 分钟），再执行 `kubectl -n zx-agent exec deploy/zx-agent -c zx-agent -- sh -c 'kill -HUP "$(pidof zx-im)"'`，日志里出现 `reloaded` 行即已生效。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
 
 ### IM 服务的多副本
 
