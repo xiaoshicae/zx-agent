@@ -28,7 +28,7 @@
 设计取舍（改动前先理解原因；括号里是 `docs/ROADMAP.md` 的决策编号）：
 
 - **机制在内核，场景在外层**（D10）：提示词、上限与续写默认值来自 agent 文件，命令策略、续写与脱敏由外层注册；某个环境、平台或厂商的知识写在 agent、部署清单或配置里，代码不解析私有格式；provider 的协议方言显式开启（如 `provider.fillMissingReasoning`），不按厂商推断。
-- **环境、角色与项目分开**（D17）：主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml` 决定环境，agent 文件决定角色，命令行只选模型、工作目录、工具集、预算、会话与输出，不设环境与权限。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
+- **环境、角色与项目分开**（D17）：主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml` 决定环境，agent 文件决定角色，命令行只选模型、工作目录、工具集、预算、会话与输出，不设环境与权限，唯一的例外是让一次运行跳过审批的 `--dangerously-skip-approvals`（D47）。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
 - **`Agent` 是唯一入口**（D21）：`AgentConfig` 是所有会话共用的角色，属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 给出。`Session` 的 `send`、`continue_run`、`compact` 返回 `Run`，读它才推进；事件只从 `Run` 读出，观察所有运行用 `Hook::on_event`。
 - **审批由内核等待，不是接口**：策略询问时，默认（`ApprovalMode::Deny`）立即拒绝，`Wait` 时调用在内核里等宿主经 `Session::resolve_approval` 回答；审批不写入会话。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore`、`Backlog` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。

@@ -291,9 +291,12 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before what remains of the traces is exported.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let app = connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
-        .await?
-        .set_traces(traces);
+    let app = connect(
+        cli::overrides(args.base, &args.budget, &args.approvals),
+        Builtin::Assistant,
+    )
+    .await?
+    .set_traces(traces);
     let place = if args.no_session {
         SessionPlace::memory()
     } else {

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use zx_app::Overrides;
+use zx_app::{Asking, Overrides};
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
@@ -60,6 +60,9 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
 
+    #[command(flatten)]
+    pub(crate) approvals: ApprovalArgs,
+
     /// text: progress on stderr, final answer on stdout. jsonl: one event per line on stdout.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
@@ -82,6 +85,9 @@ pub(crate) struct ChatArgs {
 
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
+
+    #[command(flatten)]
+    pub(crate) approvals: ApprovalArgs,
 
     /// text: stream replies on stdout. jsonl: emit events and per-prompt reports.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
@@ -132,6 +138,9 @@ pub(crate) struct AcpArgs {
 
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
+
+    #[command(flatten)]
+    pub(crate) approvals: ApprovalArgs,
 
     /// Keep conversations in memory only: no session file is written, and `session/load` is
     /// not offered. Otherwise each session has a file in sessions/--<cwd with / as ->-- of
@@ -190,11 +199,29 @@ pub(crate) struct BudgetArgs {
     pub(crate) cost_budget: Option<f64>,
 }
 
-/// What `base` and `budget` say over the agent and config.toml, as the application takes it
-/// and checks it.
-pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs) -> Overrides {
+/// What asks before it runs. The one permission the command line sets, for one invocation,
+/// which says so on stderr; zx-im has no such option.
+#[derive(Args)]
+pub(crate) struct ApprovalArgs {
+    /// Run bash commands and the tools of MCP servers without asking, wherever commands run.
+    /// Only the tools in the agent's permissions.ask still ask, and its deny rules still
+    /// apply. Refused as root unless execution in config.toml isolates commands. Whatever the
+    /// model reads can then run commands as this user: use it in a sandbox.
+    #[arg(long)]
+    pub(crate) dangerously_skip_approvals: bool,
+}
+
+/// What `base`, `budget` and `approvals` say over the agent and config.toml, as the
+/// application takes it and checks it.
+pub(crate) fn overrides(base: BaseArgs, budget: &BudgetArgs, approvals: &ApprovalArgs) -> Overrides {
+    let asking = if approvals.dangerously_skip_approvals {
+        Asking::Never
+    } else {
+        Asking::AsConfigured
+    };
     Overrides {
         model: base.model,
+        asking,
         cwd: base.cwd,
         tools: base.tools,
         max_model_requests: budget.max_model_requests,
@@ -221,6 +248,28 @@ mod tests {
                 Command::Sessions(_) => panic!("{subcommand:?} parsed as sessions"),
             };
             assert_eq!(budget.max_model_requests, Some(3), "{subcommand:?}");
+        }
+    }
+
+    #[test]
+    fn approvals_can_be_skipped_in_each_subcommand_that_runs_and_are_not_by_default() {
+        for subcommand in [&["run", "go"][..], &["chat"], &["acp"]] {
+            for (flag, expected) in [
+                (None, Asking::AsConfigured),
+                (Some("--dangerously-skip-approvals"), Asking::Never),
+            ] {
+                let args = ["zx-agent", subcommand[0]]
+                    .into_iter()
+                    .chain(flag)
+                    .chain(subcommand[1..].iter().copied());
+                let overrides = match Cli::try_parse_from(args).unwrap().command {
+                    Command::Run(args) => overrides(args.base, &args.budget, &args.approvals),
+                    Command::Chat(args) => overrides(args.base, &args.budget, &args.approvals),
+                    Command::Acp(args) => overrides(args.base, &args.budget, &args.approvals),
+                    Command::Sessions(_) => panic!("{subcommand:?} parsed as sessions"),
+                };
+                assert_eq!(overrides.asking, expected, "{subcommand:?} {flag:?}");
+            }
         }
     }
 

@@ -26,7 +26,7 @@ use super::execution::ExecutorFactory;
 use super::provider::{BuiltProvider, ProviderInput};
 use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
-use super::{Application, Overrides, SessionPlace, resolve_cwd};
+use super::{Application, Asking, Overrides, SessionPlace, resolve_cwd};
 use crate::config::{
     AgentDefinition, Credentials, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
 };
@@ -53,7 +53,8 @@ pub enum Approvals<'a> {
     Nobody,
     /// A person, within the approval timeout of config.toml. Every bash command asks first,
     /// for this reason, except those the agent auto-approves, or none when the agent
-    /// approves every call; other tools follow the agent's permissions.
+    /// approves every call or the host skips approvals ([`Asking::Never`]), when nothing else
+    /// asks either; other tools follow the agent's permissions.
     Person(&'a str),
 }
 
@@ -65,6 +66,8 @@ pub struct ConfiguredAgent {
     provider: Arc<dyn Provider>,
     name: String,
     auto_approve_commands: Vec<String>,
+    /// [`asks_before_commands`](Self::asks_before_commands).
+    commands_ask: bool,
     place: SessionPlace,
     /// Where new sessions work unless a request names a directory: [`Overrides::cwd`].
     cwd: Option<PathBuf>,
@@ -77,8 +80,8 @@ impl ConfiguredAgent {
     /// Configuration errors are reported here: an agent that cannot be found, an agent file or
     /// a tool setting that cannot be used, a cost budget without prices, invalid provider
     /// settings, a provider or an executor that no factory is registered for, approving every
-    /// call where commands run on this machine, and a part of the host's whose name another
-    /// part goes by.
+    /// call where commands run on this machine, skipping approvals there as root, and a part
+    /// of the host's whose name another part goes by.
     pub(super) fn build(
         app: &Application,
         name: &str,
@@ -156,6 +159,7 @@ impl ConfiguredAgent {
             provider: built.provider,
             name,
             auto_approve_commands: permissions.allowed_commands(),
+            commands_ask: !approves_every_call(&permissions, app.overrides.asking),
             place: place.clone(),
             cwd: app.overrides.cwd.clone(),
         })
@@ -179,6 +183,13 @@ impl ConfiguredAgent {
     /// The agent's auto-approved command prefixes, for a host to display.
     pub fn auto_approve_commands(&self) -> &[String] {
         &self.auto_approve_commands
+    }
+
+    /// Whether bash commands ask a person who answers approvals, but the
+    /// [auto-approved](Self::auto_approve_commands) ones: not when every call is approved, by
+    /// the agent or by the host ([`Asking::Never`]). For a host to display.
+    pub fn asks_before_commands(&self) -> bool {
+        self.commands_ask
     }
 
     /// Where the agent keeps its sessions, for a host that lists them or shows their files.
@@ -295,7 +306,38 @@ fn executor_factory(app: &Application, permissions: &Permissions) -> Result<Arc<
         !permissions.approve_all || factory.isolates(),
         "permissions.approveAll needs execution = \"container\" in config.toml, or another executor that isolates commands: without a sandbox, every command would run on this machine unasked"
     );
+    unasked_as_root(app.overrides.asking, factory.as_ref(), current_user())?;
     Ok(Arc::clone(factory))
+}
+
+/// Who this process runs as, for what its commands could change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum User {
+    /// Root, whose commands could change anything on this machine.
+    Root,
+    Other,
+}
+
+/// The user this process runs as: root when its effective user ID is 0.
+fn current_user() -> User {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return User::Root;
+        }
+    }
+    User::Other
+}
+
+/// Fails when approvals are skipped for `user` root and the `factory` does not isolate
+/// commands: every command would run on this machine as root, unasked.
+fn unasked_as_root(asking: Asking, factory: &dyn ExecutorFactory, user: User) -> Result<()> {
+    anyhow::ensure!(
+        asking == Asking::AsConfigured || user == User::Other || factory.isolates(),
+        "approvals cannot be skipped as root where commands run on this machine: run as another user, or set execution = \"container\" in config.toml"
+    );
+    Ok(())
 }
 
 /// The provider of config.toml, built by the factory registered for its `provider.api`, and
@@ -373,8 +415,8 @@ fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>,
 /// The policies every session of the agent asks, in this order: the command policy, the
 /// policy of the agent's `permissions` with the tools of MCP servers and of the `host`'s
 /// extensions that they do not allow (but the MCP tools a trusted server says only read), the
-/// host's own, and, where a person answers, the one that asks before bash commands. With
-/// them, who answers.
+/// host's own, and, where a person answers, the one that asks before bash commands. Nothing
+/// asks when every call is approved ([`approves_every_call`]). With them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest decision of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
@@ -397,8 +439,13 @@ fn policies(
         .chain(&host.extensions)
         .cloned()
         .collect();
-    let asking = asking_tools(permissions, &extension_tools);
-    if let Some(rules) = rules_policy(permissions, &asking, auto_approve.clone()) {
+    let every_call = approves_every_call(permissions, app.overrides.asking);
+    let (asked, extension_ask): (&[String], Vec<String>) = if every_call {
+        (&[], Vec::new())
+    } else {
+        (&permissions.ask, unallowed(permissions, &extension_tools))
+    };
+    if let Some(rules) = rules_policy(permissions, asked, &extension_ask, auto_approve.clone()) {
         policies.push(AGENT_PERMISSIONS, Arc::new(rules));
     }
     for (name, policy) in &app.policies {
@@ -408,7 +455,7 @@ fn policies(
         Approvals::Nobody => return (policies, ApprovalMode::Deny),
         Approvals::Person(reason) => reason,
     };
-    if !permissions.approve_all {
+    if !every_call {
         let bash = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
@@ -466,25 +513,33 @@ fn credentials(app: &Application, key: Credentials) -> Credentials {
     credentials
 }
 
-/// The tools of `names`, those of MCP servers and of the host's extensions, that ask a person:
-/// those not in `permissions.allow`, and none when the agent approves every call, since the
-/// container is the sandbox.
-fn asking_tools(permissions: &Permissions, names: &[String]) -> Vec<String> {
-    if permissions.approve_all {
-        return Vec::new();
-    }
+/// The tools of `names`, those of MCP servers and of the host's extensions, that
+/// `permissions.allow` does not list, which ask a person.
+fn unallowed(permissions: &Permissions, names: &[String]) -> Vec<String> {
     let allowed = permissions.allowed_tools();
     names.iter().filter(|name| !allowed.contains(name)).cloned().collect()
 }
 
-/// The denied and asking tools of the agent's `permissions` and the tools of extensions that
-/// ask, MCP servers among them, as one policy that allows the rest; none without any of them.
-fn rules_policy(permissions: &Permissions, extension_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
+/// Whether every call runs unasked: when the agent approves every call, since the container is
+/// the sandbox, and when the host skips approvals ([`Asking::Never`]).
+fn approves_every_call(permissions: &Permissions, asking: Asking) -> bool {
+    permissions.approve_all || asking == Asking::Never
+}
+
+/// The denied tools of the agent's `permissions`, the tools it `asked` about and the tools of
+/// extensions that ask, MCP servers among them, as one policy that allows the rest; none
+/// without any of them.
+fn rules_policy(
+    permissions: &Permissions,
+    asked: &[String],
+    extension_ask: &[String],
+    auto_approve: AutoApprove,
+) -> Option<RulePolicy> {
     let denied = permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
         decision: PolicyDecision::Deny("tool denied by the agent".into()),
     });
-    let asked = permissions.ask.iter().map(|tool| Rule {
+    let asked = asked.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });
@@ -504,4 +559,37 @@ fn rules_policy(permissions: &Permissions, extension_ask: &[String], auto_approv
         decision: PolicyDecision::Allow,
     });
     Some(RulePolicy::new(rules).auto_approve(auto_approve))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::execution::built_in;
+    use super::*;
+    use crate::config::{CONTAINER, ContainerSettings, LOCAL};
+
+    #[test]
+    fn approvals_are_skipped_as_root_only_where_the_executor_isolates_commands() {
+        let executors = built_in(&ContainerSettings::default());
+        let local = executors.get(LOCAL).unwrap();
+        let container = executors.get(CONTAINER).unwrap();
+        for (asking, factory, user, allowed) in [
+            (Asking::Never, local, User::Root, false),
+            (Asking::Never, container, User::Root, true),
+            (Asking::Never, local, User::Other, true),
+            (Asking::AsConfigured, local, User::Root, true),
+        ] {
+            let checked = unasked_as_root(asking, factory.as_ref(), user);
+            assert_eq!(
+                checked.is_ok(),
+                allowed,
+                "{asking:?}, isolating: {}",
+                factory.isolates()
+            );
+        }
+        let refused = unasked_as_root(Asking::Never, local.as_ref(), User::Root).unwrap_err();
+        assert!(
+            refused.to_string().contains("set execution = \"container\""),
+            "{refused}"
+        );
+    }
 }

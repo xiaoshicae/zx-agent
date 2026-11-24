@@ -65,7 +65,8 @@ use crate::otel::TraceHook;
 /// are, and a name that another part goes by already fails [`build`](Self::build).
 pub struct Application {
     settings: Settings,
-    /// What the host says over the agent: the working directory, the tools and the budgets.
+    /// What the host says over the agent: the working directory, the tools, the budgets and
+    /// which calls ask.
     overrides: Overrides,
     /// The agent [`build`](Self::build) assembles: a built-in one, or the user's file that
     /// replaces it.
@@ -146,6 +147,9 @@ impl Application {
     ) -> Result<Self> {
         overrides.validate()?;
         let (mcp, mut notices) = McpTools::connect(&settings).await?;
+        if overrides.asking == Asking::Never {
+            notices.insert(0, SKIPPED_APPROVALS.to_string());
+        }
         let executors = execution::built_in(&settings.config.container);
         for file in short_secret_files(&secret_files) {
             notices.push(format!(
@@ -355,11 +359,13 @@ pub trait SessionTools: Send + Sync {
 }
 
 /// What a host says over config.toml and the agent when it starts, such as a program's
-/// arguments: `None` keeps their value.
+/// arguments: `None`, and [`Asking::AsConfigured`], keep their value.
 #[derive(Default)]
 pub struct Overrides {
     /// The model ID, over `ZX_MODEL` and the `model` of config.toml.
     pub model: Option<String>,
+    /// Which tool calls ask before they run, over the agent's permissions.
+    pub asking: Asking,
     /// Where new sessions work; the current directory without it.
     pub cwd: Option<PathBuf>,
     /// The enabled tools, by name, in place of the agent's: each name is trimmed of
@@ -375,6 +381,23 @@ pub struct Overrides {
     /// agent file, an amount that is negative or not finite is refused.
     pub cost_budget: Option<f64>,
 }
+
+/// Which tool calls ask for approval before they run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Asking {
+    /// Those the agent's permissions ask about, the tools of MCP servers and of extensions
+    /// that they do not allow, and, where a person answers, the bash commands but the
+    /// auto-approved ones.
+    #[default]
+    AsConfigured,
+    /// None, as when the agent approves every call (`permissions.approveAll`), which its
+    /// `permissions.ask` may then list too; unlike it, wherever commands run, except as root,
+    /// where the executor must isolate them. Denied tools and commands stay denied.
+    Never,
+}
+
+/// The notice of a start that skips approvals ([`Asking::Never`]).
+const SKIPPED_APPROVALS: &str = "[danger] approvals are skipped: every tool call runs without asking, bash commands on this machine unless execution isolates them; only the agent's deny rules still apply";
 
 impl Overrides {
     /// Refuse what an agent file may not say either: a cost budget that is negative or not
