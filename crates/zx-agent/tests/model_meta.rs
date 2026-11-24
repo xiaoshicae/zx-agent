@@ -208,11 +208,9 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
 #[tokio::test]
 async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_trigger() {
     let mut seed = Seed::in_memory(header()).await;
-    let old = seed.append_old_observation().await;
-    let provider = Arc::new(FauxProvider::new([
-        FauxStep::text(summary_json(&old)),
-        FauxStep::text("answer"),
-    ]));
+    // Something old enough to summarize, though no summary would be enough.
+    seed.append_old_observation().await;
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (runner, _) = RunnerSetup {
         session: seed.into(),
         compaction: only_token_trigger(100),
@@ -222,17 +220,17 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
     .await;
 
     // Some 1.4 KiB, which estimate to about 350 tokens: a summary keeps the latest input
-    // whole, so none can bring the context under the trigger.
+    // whole, so none can bring the context under the trigger. The context goes to the model
+    // as it is, which alone can say whether it is too long.
     let report = runner.run("latest ".repeat(200)).await;
 
-    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
-    let error = report.error.as_deref().unwrap_or_default();
-    assert!(error.contains("trigger_tokens"), "{error}");
-    assert!(provider.requests().is_empty(), "no summary is asked for");
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answer");
+    assert_eq!(provider.requests().len(), 1, "the task request, and no summary");
 }
 
 #[tokio::test]
-async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
+async fn a_summary_that_leaves_the_context_above_the_token_trigger_is_not_kept() {
     let (seed, old) = seeded_session().await;
     // About 600 bytes of summary, which alone estimate to some 150 tokens.
     let long_summary =
@@ -251,10 +249,26 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
 
     let report = runner.run("continue").await;
 
-    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
-    let error = report.error.as_deref().unwrap_or_default();
-    assert!(error.contains("still exceeds trigger_tokens"), "{error}");
-    assert_eq!(provider.requests().len(), 1, "the summary request, and no task request");
+    // The summary would not help, so the context stays as it was and the run goes on.
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answer");
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "the summary request, then the task request"
+    );
+    assert!(runner.transcript().latest_compaction().is_none());
+    let failed = runner.transcript().entries().iter().find_map(|entry| match entry {
+        Entry::CompactionFailed(failed) => Some(failed.error.clone()),
+        _ => None,
+    });
+    assert!(
+        failed
+            .as_deref()
+            .unwrap_or_default()
+            .contains("still exceeds trigger_tokens"),
+        "{failed:?}"
+    );
 }
 
 /// A token trigger of 1000 that keeps about 1 KiB of recent messages.

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 use zx_agent::ai::Message;
+use zx_agent::compaction::DEFAULT_MAX_SUMMARY_TOKENS;
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, ended, ended_output, retrying_fake_model_config, write_agent, write_config};
 use zx_testing::{json_lines, signal, stderr, stdout, summary_json, tool_call_answer};
@@ -217,7 +218,7 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
             .to_string()
             .contains(&"x".repeat(1000))
     );
-    assert_eq!(server.requests()[0].body["max_tokens"], 2048);
+    assert_eq!(server.requests()[0].body["max_tokens"], DEFAULT_MAX_SUMMARY_TOKENS);
     assert!(server.requests()[0].body.get("tools").is_none());
     let seed = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
         .await

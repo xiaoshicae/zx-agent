@@ -20,7 +20,7 @@
 //! The summary evaluation, `summaries_over_eight_rounds_of_a_scripted_session`, costs far more:
 //! 8 summaries that read about 0.5 MiB of records in all. It also needs `ZX_E2E_EVAL=1`, and
 //! otherwise only prints that it was skipped. It fails when a summary is not made.
-//! `ZX_E2E_SUMMARY_TOKENS` sets each summary's output budget (default 2048, at most 16384),
+//! `ZX_E2E_SUMMARY_TOKENS` sets each summary's output budget (by default `DEFAULT_MAX_SUMMARY_TOKENS`, at most 16384),
 //! which a model whose reasoning counts as output needs raised. It keeps its session file,
 //! with every round's summary, in a temporary directory and prints the path. Run it on its
 //! own:
@@ -284,7 +284,7 @@ async fn an_invalid_key_fails_without_retrying() {
 /// The scripted session of `zx_testing::summary_eval` summarized after each of its rounds.
 /// Prints each round's score and the final facts. Fails when a summary is not made, since the
 /// scores then mean nothing; otherwise asserts only what holds whatever the model answers.
-/// Each summary has the default budgets, 2048 output tokens and 2 minutes, unless
+/// Each summary has the default budgets, `DEFAULT_MAX_SUMMARY_TOKENS` output tokens and 2 minutes, unless
 /// `ZX_E2E_SUMMARY_TOKENS` sets the output budget. The session file stays in a temporary
 /// directory, whose path is printed first.
 #[tokio::test]

@@ -65,13 +65,18 @@ pub enum TokenTrigger {
 /// A reserve for [`TokenTrigger::BelowWindow`] (pi: the default `reserveTokens`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 
+/// The default [`Config::max_summary_tokens`]. Models that reason before they answer count
+/// the reasoning as output, and a summary has to fit after it: with 2048 tokens, reasoning
+/// models such as deepseek-flash ran out before the summary ended.
+pub const DEFAULT_MAX_SUMMARY_TOKENS: u32 = 8192;
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
             trigger_tokens: None,
             keep_recent_bytes: 64 * 1024,
-            max_summary_tokens: 2048,
+            max_summary_tokens: DEFAULT_MAX_SUMMARY_TOKENS,
             timeout: Duration::from_secs(120),
         }
     }

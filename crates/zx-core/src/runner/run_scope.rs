@@ -47,6 +47,11 @@ enum LastMessage {
 pub(super) struct CompactionPause(Option<String>);
 
 impl CompactionPause {
+    /// Whether automatic compaction is paused.
+    pub(super) fn is_paused(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Why automatic compaction does not run now, when it is paused.
     pub(super) fn refusal(&self) -> Option<String> {
         let reason = self.0.as_ref()?;
@@ -303,12 +308,21 @@ impl<'a> RunScope<'a> {
 
     /// Prepare the context before a task request: compact first when automatic compaction
     /// is on and the context passes a trigger; what that records is in the projection
-    /// afterwards. Returns how many model requests it took. They and their usage are counted
+    /// afterwards. Returns how many model requests changed the context: none when there was
+    /// nothing to do or the summary failed. Every summary request and its usage are counted
     /// into `accounting`, failed ones included, so that they count against the run's budget
     /// whatever the result.
     ///
-    /// An error stops the loop: preparation failed and left the context unchanged
-    /// ([`Halt::Failed`]), or the session could not record it ([`Halt::Unrecorded`]).
+    /// A trigger lies below what the model accepts, so a compaction that cannot bring the
+    /// context under it, because the summary failed or because there is nothing old enough to
+    /// summarize, leaves the context as it was and the run goes on with it: only the model
+    /// rejecting the context as too long makes a summary necessary, which recovering from
+    /// that overflow tries. The run does not try again before its later requests, nor, while
+    /// automatic compaction is paused, does any run of the session.
+    ///
+    /// An error stops the loop: the context cannot be measured or the compaction was
+    /// cancelled ([`Halt::Failed`]), or the session could not record it
+    /// ([`Halt::Unrecorded`]).
     pub(super) async fn prepare_context(&mut self, accounting: &mut RunAccounting) -> Result<u32, Halt> {
         if !self.compacts_automatically() {
             return Ok(0);
@@ -316,24 +330,18 @@ impl<'a> RunScope<'a> {
         let over_trigger = self
             .over_trigger()
             .map_err(|error| Halt::Failed(format!("cannot measure context: {error:#}")))?;
-        if !over_trigger {
+        if !over_trigger || accounting.failed_compactions > 0 || self.pause.is_paused() {
             return Ok(0);
-        }
-        if let Some(paused) = self.pause.refusal() {
-            return Err(Halt::Failed(format!(
-                "{paused}; compact manually to retry, start a new session, or disable automatic compaction"
-            )));
         }
         let compacted = self.compact_for_run(accounting).await;
         match compacted.end {
             End::Completed { .. } => Ok(compacted.reply.requests()),
+            End::Failed(_) | End::Noop => {
+                accounting.failed_compactions = accounting.failed_compactions.saturating_add(1);
+                Ok(0)
+            }
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
-            End::Failed(error) | End::Cancelled(error) => Err(Halt::Failed(error)),
-            End::Noop => Err(Halt::Failed(
-                "context exceeds its compaction trigger but cannot be compacted while preserving \
-                 system messages and the latest input; raise the trigger or start a new session"
-                    .into(),
-            )),
+            End::Cancelled(error) => Err(Halt::Failed(error)),
         }
     }
 

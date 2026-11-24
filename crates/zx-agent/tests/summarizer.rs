@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Usage};
-use zx_agent::compaction::{Config, Outcome, Summarized, Summarizer, SummarySource};
+use zx_agent::compaction::{Config, DEFAULT_MAX_SUMMARY_TOKENS, Outcome, Summarized, Summarizer, SummarySource};
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{CompactionSummary, Entry, SummarizedBy, SummaryFact, Transcript};
 use zx_testing::{Collect, Driven, RunnerSetup, config, refusal, seeded_session};
@@ -154,7 +154,10 @@ async fn a_summarizer_makes_the_summary_and_the_model_is_not_asked() {
     assert!(compact.output_bytes < compact.input_bytes);
     assert_eq!(events.kinds(), ["compaction_start", "compaction_end"]);
     assert!(provider.requests().is_empty(), "the model is not asked for the summary");
-    assert_eq!(*summarizer.asked.lock().unwrap(), [(vec![old], 2048)]);
+    assert_eq!(
+        *summarizer.asked.lock().unwrap(),
+        [(vec![old], DEFAULT_MAX_SUMMARY_TOKENS)]
+    );
     // The start names the summarizer, and the session holds no request for the summary.
     let (starts, requests) = session.with_transcript(recorded).unwrap();
     assert_eq!(starts, [SummarizedBy::Summarizer("notes".into())]);
