@@ -140,17 +140,6 @@ impl BuiltInKeys {
         Ok(keys)
     }
 
-    /// Refuse a header named `key_header`, which carries the API key.
-    fn refuse_key_header(&self, key_header: &str) -> Result<()> {
-        for name in self.headers.keys() {
-            ensure!(
-                !name.trim().eq_ignore_ascii_case(key_header),
-                "provider.headers: {key_header} comes from the API key (provider.apiKey); it cannot be set as a header"
-            );
-        }
-        Ok(())
-    }
-
     /// Refuse the keys only the OpenAI-compatible provider reads, for the provider `api`.
     fn refuse_openai_keys(&self, api: &str) -> Result<()> {
         for (key, set) in [
@@ -168,33 +157,55 @@ impl BuiltInKeys {
     }
 }
 
+/// Refuse a header among `headers` named `key_header`, which carries the API key.
+fn refuse_key_header(headers: &BTreeMap<String, String>, key_header: &str) -> Result<()> {
+    for name in headers.keys() {
+        ensure!(
+            !name.trim().eq_ignore_ascii_case(key_header),
+            "provider.headers: {key_header} comes from the API key (provider.apiKey); it cannot be set as a header"
+        );
+    }
+    Ok(())
+}
+
 /// The settings of the OpenAI-compatible provider that `options` give, over its defaults,
 /// checked, also against the `reasoning` level; without the API key, which the assembly reads.
 pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<OpenAiConfig> {
-    let keys = BuiltInKeys::read(options)?;
-    keys.refuse_key_header("Authorization")?;
+    let BuiltInKeys {
+        base_url,
+        request_fields,
+        headers,
+        idle_timeout_secs,
+        system_updates,
+        reasoning_format,
+        max_tokens_field,
+        fill_missing_reasoning,
+        prompt_cache_key,
+        api_key_header,
+    } = BuiltInKeys::read(options)?;
+    refuse_key_header(&headers, "Authorization")?;
     ensure!(
-        keys.api_key_header.is_none(),
+        api_key_header.is_none(),
         "provider.apiKeyHeader is a setting of the {ANTHROPIC} provider, not of {OPENAI}"
     );
     let mut config = OpenAiConfig::default();
-    if let Some(url) = keys.base_url {
+    if let Some(url) = base_url {
         config.base_url = url;
     }
-    if let Some(updates) = parsed("provider.systemUpdates", keys.system_updates)? {
+    if let Some(updates) = parsed("provider.systemUpdates", system_updates)? {
         config.body.system_updates = updates;
     }
-    if let Some(format) = parsed("provider.reasoningFormat", keys.reasoning_format)? {
+    if let Some(format) = parsed("provider.reasoningFormat", reasoning_format)? {
         config.body.reasoning_format = format;
     }
-    if let Some(field) = parsed("provider.maxTokensField", keys.max_tokens_field)? {
+    if let Some(field) = parsed("provider.maxTokensField", max_tokens_field)? {
         config.body.max_tokens_field = field;
     }
-    config.body.fill_missing_reasoning = keys.fill_missing_reasoning;
-    config.body.prompt_cache_key = keys.prompt_cache_key;
-    config.body.extra_fields = keys.request_fields;
-    config.headers = keys.headers.into_iter().collect();
-    if let Some(secs) = keys.idle_timeout_secs {
+    config.body.fill_missing_reasoning = fill_missing_reasoning;
+    config.body.prompt_cache_key = prompt_cache_key;
+    config.body.extra_fields = request_fields;
+    config.headers = headers.into_iter().collect();
+    if let Some(secs) = idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
     if reasoning.is_some()
@@ -214,24 +225,36 @@ pub(crate) fn openai_config(options: &toml::Table, reasoning: Option<Reasoning>)
 pub(crate) fn anthropic_config(options: &toml::Table, reasoning: Option<Reasoning>) -> Result<AnthropicConfig> {
     let keys = BuiltInKeys::read(options)?;
     keys.refuse_openai_keys(ANTHROPIC)?;
-    let api_key_header: ApiKeyHeader =
-        parsed("provider.apiKeyHeader", keys.api_key_header.clone())?.unwrap_or_default();
-    keys.refuse_key_header(api_key_header.name())?;
+    let BuiltInKeys {
+        base_url,
+        request_fields,
+        headers,
+        idle_timeout_secs,
+        system_updates,
+        // Refused above: keys of the OpenAI-compatible provider alone.
+        reasoning_format: _,
+        max_tokens_field: _,
+        fill_missing_reasoning: _,
+        prompt_cache_key: _,
+        api_key_header,
+    } = keys;
+    let api_key_header: ApiKeyHeader = parsed("provider.apiKeyHeader", api_key_header)?.unwrap_or_default();
+    refuse_key_header(&headers, api_key_header.name())?;
     let mut config = AnthropicConfig {
         api_key_header,
         ..AnthropicConfig::default()
     };
     // The address, the request fields, the headers and the idle timeout are set as for the
     // OpenAI-compatible provider: the two configurations share no type to set them through.
-    if let Some(url) = keys.base_url {
+    if let Some(url) = base_url {
         config.base_url = url;
     }
-    if let Some(updates) = parsed("provider.systemUpdates", keys.system_updates)? {
+    if let Some(updates) = parsed("provider.systemUpdates", system_updates)? {
         config.body.system_updates = updates;
     }
-    config.body.extra_fields = keys.request_fields;
-    config.headers = keys.headers.into_iter().collect();
-    if let Some(secs) = keys.idle_timeout_secs {
+    config.body.extra_fields = request_fields;
+    config.headers = headers.into_iter().collect();
+    if let Some(secs) = idle_timeout_secs {
         config.idle_timeout = Duration::from_secs(secs);
     }
     if reasoning.is_some()

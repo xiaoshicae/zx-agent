@@ -321,26 +321,35 @@ impl ContainerSettings {
     /// The settings of the containers commands run in: these over the executor's defaults,
     /// checked. Errors name the keys of config.toml, as for a missing `container.image`.
     pub(crate) fn container_config(&self) -> Result<ContainerConfig> {
-        let Some(image) = &self.image else {
+        let Self {
+            image,
+            user,
+            memory,
+            pids_limit,
+            network,
+            workspace,
+            root,
+        } = self;
+        let Some(image) = image else {
             bail!("execution = \"container\" needs container.image");
         };
         let mut config = ContainerConfig::new(image.as_str());
-        if let Some(user) = &self.user {
+        if let Some(user) = user {
             config.user.clone_from(user);
         }
-        if let Some(memory) = &self.memory {
+        if let Some(memory) = memory {
             config.memory.clone_from(memory);
         }
-        if let Some(limit) = self.pids_limit {
+        if let Some(limit) = *pids_limit {
             config.pids_limit = limit;
         }
-        if let Some(network) = &self.network {
+        if let Some(network) = network {
             config.network = network.parse().map_err(container_error)?;
         }
-        if let Some(access) = self.workspace {
+        if let Some(access) = *workspace {
             config.workspace_access = access;
         }
-        if let Some(access) = self.root {
+        if let Some(access) = *root {
             config.root_access = access;
         }
         config.validate().map_err(container_error)?;
@@ -388,31 +397,42 @@ fn tool_output_error(error: &InvalidOutputStoreConfig) -> anyhow::Error {
 impl RawConfig {
     /// The configuration this file describes; `parent` is its directory.
     fn into_config(self, path: &Path, parent: &Path) -> Result<Config> {
+        let Self {
+            model,
+            reasoning,
+            max_tokens,
+            tool_timeout_secs,
+            approval_timeout_secs,
+            secret_files: secrets,
+            provider,
+            execution,
+            container,
+            tool_output,
+            models,
+            mcp,
+            proxy,
+        } = self;
         let mut config = Config {
             path: Some(path.to_path_buf()),
-            model: self.model,
-            reasoning: parsed("reasoning", self.reasoning)?,
-            max_tokens: self.max_tokens,
-            tool_timeout_secs: self.tool_timeout_secs,
-            approval_timeout_secs: self.approval_timeout_secs,
-            secret_files: secret_files(self.secret_files, parent)?,
-            provider: ProviderSettings::from_table(self.provider)?,
-            execution: self.execution.unwrap_or_else(|| LOCAL.to_string()),
-            container: self.container,
-            tool_output: self.tool_output.into_config(parent)?,
+            model,
+            reasoning: parsed("reasoning", reasoning)?,
+            max_tokens,
+            tool_timeout_secs,
+            approval_timeout_secs,
+            secret_files: secret_files(secrets, parent)?,
+            provider: ProviderSettings::from_table(provider)?,
+            execution: execution.unwrap_or_else(|| LOCAL.to_string()),
+            container,
+            tool_output: tool_output.into_config(parent)?,
             models: HashMap::new(),
-            mcp: self.mcp,
-            proxy: self.proxy.map_or(Proxy::FromEnvironment, |proxy| {
-                Proxy::Through(Proxies {
-                    http: proxy.http,
-                    https: proxy.https,
-                    no_proxy: proxy.no_proxy,
-                })
+            mcp,
+            proxy: proxy.map_or(Proxy::FromEnvironment, |RawProxy { http, https, no_proxy }| {
+                Proxy::Through(Proxies { http, https, no_proxy })
             }),
             // Set by the caller, which expanded the file.
             credentials: Credentials::default(),
         };
-        for model in self.models {
+        for model in models {
             ensure!(
                 !config.models.contains_key(&model.id),
                 "more than one [[models]] entry has the id {:?}",
@@ -483,19 +503,25 @@ impl RawToolOutput {
     /// working directory, or an explicit directory, relative to `parent`; a zero threshold
     /// stores nothing, and a zero age keeps the results.
     fn into_config(self, parent: &Path) -> Result<OutputStoreConfig> {
+        let Self {
+            directory,
+            threshold_bytes,
+            max_file_bytes,
+            max_age_days,
+        } = self;
         let mut config = OutputStoreConfig::new(DEFAULT_TOOL_OUTPUT_DIRECTORY);
-        if let Some(path) = self.directory {
+        if let Some(path) = directory {
             // Checked here: joined to `parent`, an empty path would name `parent` itself.
             ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
             config.directory = parent.join(path);
         }
-        if let Some(bytes) = self.threshold_bytes {
+        if let Some(bytes) = threshold_bytes {
             config.threshold_bytes = (bytes > 0).then_some(bytes);
         }
-        if let Some(bytes) = self.max_file_bytes {
+        if let Some(bytes) = max_file_bytes {
             config.max_file_bytes = bytes;
         }
-        if let Some(days) = self.max_age_days {
+        if let Some(days) = max_age_days {
             config.max_age = (days > 0).then(|| Duration::from_secs(u64::from(days) * SECONDS_PER_DAY));
         }
         Ok(config)

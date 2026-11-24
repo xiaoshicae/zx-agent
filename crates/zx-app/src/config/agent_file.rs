@@ -126,22 +126,32 @@ impl AgentFile {
         if self.has_instructions() {
             agent.instructions = self.body;
         }
-        let front = self.front;
-        if let Some(tools) = front.tools {
+        let FrontMatter {
+            // Read before: it chose the agent this file is laid over.
+            extends: _,
+            tools,
+            continue_on_length,
+            permissions,
+            limits,
+            context: RawContext { discover, files },
+            skills,
+            compaction,
+        } = self.front;
+        if let Some(tools) = tools {
             agent.tools = tools;
         }
-        if let Some(count) = front.continue_on_length {
+        if let Some(count) = continue_on_length {
             agent.continue_on_length = count;
         }
-        front.permissions.apply(&mut agent.permissions)?;
-        front.limits.apply(&mut agent.limits)?;
-        if let Some(discover) = front.context.discover {
+        permissions.apply(&mut agent.permissions)?;
+        limits.apply(&mut agent.limits)?;
+        if let Some(discover) = discover {
             agent.context.discover = discover;
         }
-        if let Some(files) = front.context.files {
+        if let Some(files) = files {
             agent.context.files = files.into_iter().map(|path| parent.join(path)).collect();
         }
-        if let Some(skills) = front.skills {
+        if let Some(skills) = skills {
             agent.skills = skills
                 .into_iter()
                 .map(|mut skill| {
@@ -150,7 +160,7 @@ impl AgentFile {
                 })
                 .collect();
         }
-        front.compaction.apply(&mut agent.compaction);
+        compaction.apply(&mut agent.compaction);
         Ok(())
     }
 }
@@ -158,19 +168,25 @@ impl AgentFile {
 impl RawLimits {
     /// Lay these over `limits`. A cost budget that is negative or not finite is an error.
     pub(crate) fn apply(self, limits: &mut RunLimits) -> Result<()> {
-        if let Some(requests) = self.max_model_requests {
+        let Self {
+            max_model_requests,
+            timeout_secs,
+            token_budget,
+            cost_budget: cost,
+        } = self;
+        if let Some(requests) = max_model_requests {
             limits.max_model_requests = match requests {
                 ModelRequestLimit::Count(count) => Some(count),
                 ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
             };
         }
-        if let Some(secs) = self.timeout_secs {
+        if let Some(secs) = timeout_secs {
             limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
-        if let Some(tokens) = self.token_budget {
+        if let Some(tokens) = token_budget {
             limits.token_budget = (tokens > 0).then_some(tokens);
         }
-        if let Some(amount) = self.cost_budget {
+        if let Some(amount) = cost {
             limits.cost_budget = cost_budget(amount).context("limits.costBudget")?;
         }
         Ok(())
@@ -189,25 +205,33 @@ pub(crate) fn cost_budget(amount: f64) -> Result<Option<f64>> {
 
 impl RawCompaction {
     fn apply(self, config: &mut compaction::Config) {
-        if let Some(bytes) = self.trigger_bytes {
+        let Self {
+            trigger_bytes,
+            trigger_tokens,
+            reserve_tokens: reserve,
+            keep_recent_bytes,
+            max_summary_tokens,
+            timeout_secs,
+        } = self;
+        if let Some(bytes) = trigger_bytes {
             config.trigger_bytes = (bytes > 0).then_some(bytes);
         }
-        if let Some(tokens) = self.trigger_tokens {
+        if let Some(tokens) = trigger_tokens {
             config.trigger_tokens = (tokens > 0).then_some(TokenTrigger::Above(tokens));
         }
         // Only a token trigger that no file set follows the window, below its reserve.
-        if let Some(tokens) = self.reserve_tokens
+        if let Some(tokens) = reserve
             && let Some(TokenTrigger::BelowWindow { reserve_tokens }) = &mut config.trigger_tokens
         {
             *reserve_tokens = tokens;
         }
-        if let Some(bytes) = self.keep_recent_bytes {
+        if let Some(bytes) = keep_recent_bytes {
             config.keep_recent_bytes = bytes;
         }
-        if let Some(tokens) = self.max_summary_tokens {
+        if let Some(tokens) = max_summary_tokens {
             config.max_summary_tokens = tokens;
         }
-        if let Some(secs) = self.timeout_secs {
+        if let Some(secs) = timeout_secs {
             config.timeout = Duration::from_secs(secs);
         }
     }

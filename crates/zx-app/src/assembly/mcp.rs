@@ -88,12 +88,21 @@ fn sends_credentials(server: &McpServer, credentials: &Credentials) -> bool {
 /// The settings to connect `server` with: its token and headers, calls bounded by its
 /// `timeoutSecs` or else by `tool_timeout`, and requests sent through `proxy`.
 fn server_config(server: &McpServer, tool_timeout: Duration, proxy: &Proxy) -> ServerConfig {
+    let McpServer {
+        name,
+        url,
+        token,
+        headers,
+        tools,
+        trust_read_only,
+        timeout_secs,
+    } = server;
     ServerConfig {
-        token: server.token.clone(),
-        headers: server.headers.clone().into_iter().collect(),
-        trust_read_only: server.trust_read_only,
-        call_timeout: server.timeout_secs.map_or(tool_timeout, Duration::from_secs),
+        token: token.clone(),
+        headers: headers.clone().into_iter().collect(),
+        trust_read_only: *trust_read_only,
+        call_timeout: timeout_secs.map_or(tool_timeout, Duration::from_secs),
         proxy: proxy.clone(),
-        ..ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone())
+        ..ServerConfig::new(name.as_str(), url.as_str(), tools.clone())
     }
 }
