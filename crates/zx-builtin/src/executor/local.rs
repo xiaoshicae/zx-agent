@@ -1,6 +1,7 @@
 //! Commands and files on this machine.
 
-use std::io::Write;
+use std::fs::{File, Metadata};
+use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -125,11 +126,10 @@ impl Executor for LocalExecutor {
             Err(error) => return Err(format!("cannot write {display}: {error}")),
         }
         let (target, bytes) = (path.to_path_buf(), contents.to_vec());
-        // Opening, truncating and writing are one step on a blocking thread, which nothing
-        // interrupts: once it has begun it runs to its end, whether this future is dropped,
-        // as a cancelled run drops its calls, or the runtime shuts down. Done step by step
-        // from here, a drop between the steps would leave the file empty or cut short. It is
-        // still written in place, so the file keeps its inode, mode and links.
+        // The whole write is one step on a blocking thread, which nothing interrupts: once it
+        // has begun it runs to its end, whether this future is dropped, as a cancelled run
+        // drops its calls, or the runtime shuts down. Done step by step from here, a drop
+        // between the steps of a write in place would leave the file empty or cut short.
         let written = tokio::task::spawn_blocking(move || overwrite_regular_file(&target, &bytes)).await;
         match written {
             Ok(result) => result,
@@ -142,19 +142,166 @@ impl Executor for LocalExecutor {
 }
 
 /// Replace the contents of the file at `path` with `bytes`, creating it when missing and
-/// refusing what is not a regular file. Opened without blocking, like the reads of `files`:
-/// opening a FIFO for writing waits for a reader. Truncated only once known to be a regular
-/// file.
+/// refusing what is not a regular file.
+///
+/// The bytes go into a new file beside the old one, which is renamed into its place: no reader
+/// and no crash finds the file empty or cut short, and a write that fails, such as on a full
+/// disk, leaves it as it was ([`replace`]). Where the new file would not be the same file, the
+/// file is written in place, as it is through a symbolic link: truncated, once known to be a
+/// regular file, and written.
 fn overwrite_regular_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let unwritable = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+    let link = match std::fs::symlink_metadata(path) {
+        Ok(found) => Some(found.file_type().is_symlink()),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(unwritable(path, &error)),
+    };
+    let file = match link {
+        None => match replace(path, None, bytes)? {
+            Replacement::Done => return Ok(()),
+            Replacement::InPlace => open_regular_file(path)?.0,
+        },
+        Some(is_link) => {
+            // Opened as for a write in place, so that a file that may not be written is
+            // refused however it would be written.
+            let (file, metadata) = open_regular_file(path)?;
+            if !is_link && let Replacement::Done = replace(path, Some(&metadata), bytes)? {
+                return Ok(());
+            }
+            file
+        }
+    };
+    write_in_place(file, path, bytes)
+}
+
+/// The error of a write of `path` that failed with `error`.
+fn unwritable(path: &Path, error: &std::io::Error) -> String {
+    format!("cannot write {}: {error}", path.display())
+}
+
+/// The file at `path`, opened for writing without truncating it and created when missing,
+/// and its metadata. Opened without blocking, like the reads of `files`: opening a FIFO for
+/// writing waits for a reader. Fails for what is not a regular file.
+fn open_regular_file(path: &Path) -> Result<(File, Metadata), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
     #[cfg(unix)]
     options.custom_flags(libc::O_NONBLOCK);
-    let mut file = options.open(path).map_err(unwritable)?;
-    check_regular_file(path, &file.metadata().map_err(unwritable)?)?;
-    file.set_len(0).map_err(unwritable)?;
-    file.write_all(bytes).map_err(unwritable)
+    let file = options.open(path).map_err(|e| unwritable(path, &e))?;
+    let metadata = file.metadata().map_err(|e| unwritable(path, &e))?;
+    check_regular_file(path, &metadata)?;
+    Ok((file, metadata))
+}
+
+/// Replace the contents of the regular `file`, opened from `path`, with `bytes` where it is.
+fn write_in_place(mut file: File, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    file.set_len(0).map_err(|e| unwritable(path, &e))?;
+    file.write_all(bytes).map_err(|e| unwritable(path, &e))
+}
+
+/// How [`replace`] went, when it did not fail.
+enum Replacement {
+    /// The new file took the place of the old one, or of none.
+    Done,
+    /// Nothing changed: the new file would not be the same file, so the file is to be written
+    /// in place.
+    InPlace,
+}
+
+/// Write `bytes` into a new file in the directory of `path`, to disk, and rename it over
+/// `path`, where it takes the place of the `existing` file, with its permissions and group,
+/// or of none. Nothing changes, for a write in place, when the new file would not be the same
+/// file: `existing` has more than one name or another owner, the directory takes no new file,
+/// or the group or the rename is refused. Fails, with nothing changed, when the new file
+/// cannot be written whole.
+#[cfg(unix)]
+fn replace(path: &Path, existing: Option<&Metadata>, bytes: &[u8]) -> Result<Replacement, String> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid takes no arguments, always succeeds and touches no memory.
+    let user = unsafe { libc::geteuid() };
+    if existing.is_some_and(|existing| existing.nlink() != 1 || existing.uid() != user) {
+        return Ok(Replacement::InPlace);
+    }
+    let Some(directory) = path.parent() else {
+        return Ok(Replacement::InPlace);
+    };
+    // A short name of its own, so that it fits wherever the file's name does.
+    let temporary = directory.join(format!(".zx-agent-write-{}.tmp", uuid::Uuid::new_v4()));
+    let file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+    {
+        Ok(file) => file,
+        // The directory takes no new file, while the file itself may still be written.
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            return Ok(Replacement::InPlace);
+        }
+        Err(error) => return Err(nothing_changed(path, &error)),
+    };
+    let replaced = fill_and_rename(file, &temporary, path, existing, bytes);
+    if !matches!(replaced, Ok(Replacement::Done)) {
+        // Best effort: the new file did not take the old one's place, and nothing refers to it.
+        let _ = std::fs::remove_file(&temporary);
+    }
+    replaced
+}
+
+/// Where new files are not renamed into place: every file is written in place.
+#[cfg(not(unix))]
+fn replace(_path: &Path, _existing: Option<&Metadata>, _bytes: &[u8]) -> Result<Replacement, String> {
+    Ok(Replacement::InPlace)
+}
+
+/// Give the new `file` at `temporary` the permissions and group of the `existing` one, write
+/// `bytes` into it to disk, and rename it over `path`, as [`replace`] does.
+#[cfg(unix)]
+fn fill_and_rename(
+    mut file: File,
+    temporary: &Path,
+    path: &Path,
+    existing: Option<&Metadata>,
+    bytes: &[u8],
+) -> Result<Replacement, String> {
+    if let Some(existing) = existing
+        && !takes_permissions_and_group(&file, existing)
+    {
+        return Ok(Replacement::InPlace);
+    }
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| nothing_changed(path, &error))?;
+    Ok(match std::fs::rename(temporary, path) {
+        Ok(()) => Replacement::Done,
+        // Such as a file mounted on its own, which nothing can be renamed over.
+        Err(_) => Replacement::InPlace,
+    })
+}
+
+/// Whether the new `file` now has the permissions and group of the `existing` one. Its group
+/// is the directory's or this user's; another one is kept where this user may set it.
+#[cfg(unix)]
+fn takes_permissions_and_group(file: &File, existing: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // A refusal only means that the new file would differ: the file is written in place then.
+    if file.set_permissions(existing.permissions()).is_err() {
+        return false;
+    }
+    match file.metadata() {
+        Ok(created) if created.gid() == existing.gid() => true,
+        Ok(_) => std::os::unix::fs::fchown(file, None, Some(existing.gid())).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// The error of a replacement of `path` that failed with `error` before it changed anything.
+#[cfg(unix)]
+fn nothing_changed(path: &Path, error: &std::io::Error) -> String {
+    format!("cannot write {}: {error}; the file was not changed", path.display())
 }
 
 /// Refuse to write what is not a regular file, with a hint for directories.
@@ -203,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwriting_a_file_replaces_its_contents_in_place() {
+    async fn overwriting_a_file_replaces_its_contents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a longer original").unwrap();
@@ -211,5 +358,103 @@ mod tests {
         overwrite_regular_file(&path, b"short").unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
+    }
+
+    #[cfg(unix)]
+    mod replacement {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::path::Path;
+
+        use super::super::overwrite_regular_file;
+
+        fn read(path: &Path) -> String {
+            std::fs::read_to_string(path).unwrap()
+        }
+
+        fn inode(path: &Path) -> u64 {
+            std::fs::metadata(path).unwrap().ino()
+        }
+
+        fn set_mode(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        #[test]
+        fn a_file_is_replaced_whole_by_a_new_one_with_its_permissions_and_group() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f.txt");
+            std::fs::write(&path, "old").unwrap();
+            set_mode(&path, 0o640);
+            let before = std::fs::metadata(&path).unwrap();
+
+            overwrite_regular_file(&path, b"new").unwrap();
+
+            let after = std::fs::metadata(&path).unwrap();
+            assert_eq!(read(&path), "new");
+            assert_ne!(after.ino(), before.ino(), "a new file took its place");
+            assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+            assert_eq!(after.gid(), before.gid());
+            // Nothing is left beside it.
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+
+        #[test]
+        fn a_file_with_another_name_or_behind_a_link_is_written_in_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = dir.path().join("shared.txt");
+            std::fs::write(&shared, "old").unwrap();
+            let other_name = dir.path().join("other-name.txt");
+            std::fs::hard_link(&shared, &other_name).unwrap();
+            let target = dir.path().join("target.txt");
+            std::fs::write(&target, "old").unwrap();
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let (shared_inode, target_inode) = (inode(&shared), inode(&target));
+
+            overwrite_regular_file(&other_name, b"through another name").unwrap();
+            overwrite_regular_file(&link, b"through a link").unwrap();
+
+            assert_eq!(read(&shared), "through another name");
+            assert_eq!(inode(&shared), shared_inode);
+            assert_eq!(read(&target), "through a link");
+            assert_eq!(inode(&target), target_inode);
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        }
+
+        #[test]
+        fn a_new_file_is_created_whole_and_a_read_only_one_is_refused_unchanged() {
+            let dir = tempfile::tempdir().unwrap();
+            let new = dir.path().join("new.txt");
+            let read_only = dir.path().join("read-only.txt");
+            std::fs::write(&read_only, "kept").unwrap();
+            set_mode(&read_only, 0o444);
+
+            overwrite_regular_file(&new, b"fresh").unwrap();
+            let refused = overwrite_regular_file(&read_only, b"x").unwrap_err();
+
+            assert_eq!(read(&new), "fresh");
+            assert!(refused.contains("Permission denied"), "{refused}");
+            assert_eq!(read(&read_only), "kept");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+
+        #[test]
+        fn a_file_in_a_directory_that_takes_no_new_file_is_written_in_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            let path = locked.join("f.txt");
+            std::fs::write(&path, "old").unwrap();
+            let before = inode(&path);
+            set_mode(&locked, 0o555);
+
+            let written = overwrite_regular_file(&path, b"new");
+
+            // Writable again, for the temporary directory to be removed.
+            set_mode(&locked, 0o755);
+            written.unwrap();
+            assert_eq!(read(&path), "new");
+            assert_eq!(inode(&path), before);
+        }
     }
 }

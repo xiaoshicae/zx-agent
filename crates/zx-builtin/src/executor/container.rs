@@ -41,7 +41,7 @@ use zx_core::tools::ExecutionMode;
 pub use self::config::{Access, ContainerConfig, InvalidContainerConfig, Network, UnusableWorkspace};
 use self::config::{Platform, check_workspace, container_section, parse_platform};
 use self::scripts::{
-    EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
+    EXIT_DENIED, EXIT_DIRECTORY, EXIT_INCOMPLETE, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
     PROBE_NO_WORKSPACE, PROBE_READ_ONLY, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
 };
 use super::capture::{Capture, await_end, collect};
@@ -292,6 +292,10 @@ async fn write_script(command: Command, path: &Path, contents: &[u8]) -> Result<
             path.display(),
             text(&stderr)
         )),
+        Some(EXIT_INCOMPLETE) => Err(format!(
+            "cannot write {}: not all of its contents reached the container; the file was not changed",
+            path.display()
+        )),
         _ => Err(format!(
             "cannot write {} in the container: {}",
             path.display(),
@@ -406,16 +410,22 @@ impl Executor for ContainerExecutor {
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
-        let mut command = self
-            .target
-            .exec(None, Input::Piped, WRITE, "zx-agent-write", [path.as_os_str()]);
+        let length = contents.len().to_string();
+        let mut command = self.target.exec(
+            None,
+            Input::Piped,
+            WRITE,
+            "zx-agent-write",
+            [path.as_os_str(), OsStr::new(&length)],
+        );
         command.stdout(Stdio::null());
         let turn = Arc::clone(&self.turn);
         let (target, bytes) = (path.to_path_buf(), contents.to_vec());
         // Awaited here, but not aborted when this future is dropped, as a cancelled run
-        // drops its calls: the script truncates the file before it writes, and stopping it
-        // in between would leave the file empty or cut short. So the write runs to its end
-        // on its own, on the executor's turn like any call, within the time a write may take.
+        // drops its calls: where the script writes in place, it truncates the file before it
+        // writes, and stopping it in between would leave the file empty or cut short. So the
+        // write runs to its end on its own, on the executor's turn like any call, within the
+        // time a write may take.
         let writing = tokio::spawn(async move {
             let _turn = turn.lock_owned().await;
             write_script(command, &target, &bytes).await

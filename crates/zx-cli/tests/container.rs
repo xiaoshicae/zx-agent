@@ -584,7 +584,8 @@ async fn file_writes_pass_the_contents_on_standard_input_as_the_command_user() {
     );
     let call = &fake.execs("zx-agent-write")[0];
     assert_eq!(call[1..5], ["--interactive", "--user", user.as_str(), executor.name()]);
-    assert_eq!(after(call, "zx-agent-write"), ["/srv/new/app.conf".to_string()]);
+    // The path and how many bytes were sent, for the script to tell a transfer cut short.
+    assert_eq!(after(call, "zx-agent-write"), ["/srv/new/app.conf", "12"]);
 }
 
 #[tokio::test]
@@ -612,6 +613,11 @@ async fn file_writes_map_each_refusal_to_an_actionable_error() {
             "2",
             "sh: 1: cannot create /srv/app.conf: Read-only file system",
             "cannot write /srv/app.conf in the container: sh: 1: cannot create /srv/app.conf: Read-only file system",
+        ),
+        (
+            "92",
+            "",
+            "cannot write /srv/app.conf: not all of its contents reached the container; the file was not changed",
         ),
     ] {
         fake.answer("write.code", code);
@@ -935,6 +941,33 @@ async fn real_files_are_written_inside_the_container() {
     assert_eq!(std::fs::metadata(&file).unwrap().uid(), owner(&workspace));
     let error = executor.write_file(&workspace.join("deep"), b"x").await.unwrap_err();
     assert!(error.contains("is a directory"), "{error}");
+}
+
+#[tokio::test]
+async fn real_a_file_is_replaced_whole_with_its_permissions_unless_it_has_another_name() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = start_real(&image, &workspace).await;
+    let file = workspace.join("app.conf");
+    std::fs::write(&file, "old\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let shared = workspace.join("shared.conf");
+    std::fs::write(&shared, "old\n").unwrap();
+    std::fs::hard_link(&shared, workspace.join("other-name.conf")).unwrap();
+    let shared_inode = std::fs::metadata(&shared).unwrap().ino();
+
+    executor.write_file(&file, b"new\n").await.unwrap();
+    executor.write_file(&shared, b"new\n").await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777, 0o640);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("other-name.conf")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(std::fs::metadata(&shared).unwrap().ino(), shared_inode);
+    // Nothing is left beside them.
+    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 3);
 }
 
 #[tokio::test]
