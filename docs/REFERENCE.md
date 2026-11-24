@@ -241,10 +241,10 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；它的 `source.kind` 与 `request_start` 事件的 `kind` 一样是 `task`（任务请求）或 `summary`（摘要请求）。不记录 API key、URL 与 HTTP 头。
 - 有副作用的工具调用执行前记录 `tool_call_started`。被取消的运行为整批调用都写下结果：还没开始的记为未执行；执行中被打断的，有副作用的工具说明它可能已改变状态，只读工具说明它没有改变任何东西。运行没能写下结果时（进程崩溃或退出、宿主丢弃了 `Run`、会话写入失败），以及失败或被取消的回答里的调用，由下一次运行补写错误结果，不重放，并发出 `tool_call_recovered`：`started`（结果未知，先核对再重试）、`not_started`（未执行）、`read_only`（只读工具，可重新调用）、`start_unknown`（当前未配置该工具，按可能已改变状态处理）。回到会话树上较早的位置后，结果留在另一分支上的调用同样补写：在那个分支上已经开始的记为 `started`。复制分支得到的会话保留来源会话里这些调用的开始记录（包括记在另一分支上的），补写时同样记为 `started`。
-- 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。`firstKeptEntryId` 是保留部分的第一条记录；边界落在最近一轮之内时（一次提问里的工具调用就超过了阈值）`compaction_started` 另有 `keptInputEntryId`，即那一轮的提问：摘要读取它，它也原样留在上下文里，排在摘要之前。`compaction_started` 写明摘要由谁产出：内核自己请求模型时是 `request`（可据此还原请求），宿主的摘要器产出时是 `summarizer`（它的名字；它怎样得到摘要不在会话里，也没有对应的 `request_started`）。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。
+- 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。`firstKeptEntryId` 是保留部分的第一条记录；边界落在最近一轮之内时（一次提问里的工具调用就超过了阈值）`compaction_started` 另有 `keptInputEntryId`，即那一轮的提问：摘要读取它，它也原样留在上下文里，排在摘要之前。`compaction_started` 写明摘要由谁产出：内核自己请求模型时是 `request`（可据此还原请求），宿主的摘要器产出时是 `summarizer`（它的名字；它怎样得到摘要不在会话里，也没有对应的 `request_started`）。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。内核请求模型得到的摘要里，一条事实既引用了读过的条目、又带着没读过的编号时，去掉没读过的编号（模型抄错了编号），摘要照常采用；一条读过的条目都没引用的事实使摘要失败。宿主的摘要器给出的摘要不做这一步，引用错了就失败。
 - 扩展的记录：`custom`（状态，不进入模型上下文）与 `custom_message`（发给模型的消息，投影为一条用户消息）。
 - 会话名称：`session_info`（`name`），以文件中最后一条为准，与分支无关，不进入模型上下文；`name` 只有一行、没有首尾空白、不为空，否则文件打开时报错。复制分支时随分支原样复制；起名也会更新列表的“最近活动”。
 
 ---
 
-REFERENCE.md · v0.42 · 2026年11月
+REFERENCE.md · v0.43 · 2026年11月
