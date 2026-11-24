@@ -107,6 +107,14 @@ impl PlatformFactory for NotBuilt {
 const MAX_TEXT_CHARS: usize = 4000;
 /// How often a rate-limited call is retried after waiting as long as the platform asks.
 const RATE_LIMIT_RETRIES: u32 = 3;
+/// How long one call may wait out rate limits in all, its retries included: less than the
+/// server waits for a call to a channel (`ServerConfig::outbound_timeout`, 30 seconds by
+/// default), so that a call the platform keeps limiting fails as rate limited, saying how long
+/// it was asked to wait, rather than as one that took too long. Slack's limits are per minute
+/// (Rate limits, "Tiers"): a longer wait is for a later call, not this one.
+pub(crate) const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(20);
+/// The wait for a rate limit whose answer does not say how long to wait.
+const UNSAID_RATE_LIMIT_WAIT: Duration = Duration::from_secs(1);
 /// Limit for each call to a platform and for opening its connection, unless a channel's
 /// settings say otherwise: long enough for a slow answer, short enough that a platform that
 /// stopped answering is tried again soon.
@@ -245,23 +253,80 @@ fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, V
     }
 }
 
-/// Longest wait a rate limit is given: a longer one is more likely a bad header than a real
-/// wait (Slack's limits, for one, are per minute: Rate limits, "Tiers"), and a send that
-/// waits that long is dropped by the server's outbound timeout anyway, a connection attempt
-/// by the stop.
-const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
+/// How long a rate-limited call is asked to wait, by a header of the answer.
+#[derive(Debug, PartialEq, Eq)]
+enum AskedWait {
+    /// The header's whole number of seconds.
+    Secs(Duration),
+    /// No such header.
+    Unsaid,
+    /// A header that is no whole number of seconds, as it reads.
+    Unreadable(String),
+}
 
-/// How long a rate-limited call waits before it is tried again: the seconds in the header
-/// `name` of `headers`, the answer's, in which the platform says so, but at most
-/// [`MAX_RATE_LIMIT_WAIT`]; one second when that header is missing, not text, or not a
-/// number of seconds.
-fn rate_limit_wait(headers: &HeaderMap, name: impl AsHeaderName) -> Duration {
-    let secs = headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(1);
-    Duration::from_secs(secs).min(MAX_RATE_LIMIT_WAIT)
+/// How long the answer with `headers` asks a rate-limited call to wait, in its header `name`.
+fn asked_wait(headers: &HeaderMap, name: impl AsHeaderName) -> AskedWait {
+    let Some(value) = headers.get(name) else {
+        return AskedWait::Unsaid;
+    };
+    let text = String::from_utf8_lossy(value.as_bytes());
+    match text.trim().parse() {
+        Ok(secs) => AskedWait::Secs(Duration::from_secs(secs)),
+        Err(_) => AskedWait::Unreadable(text.into_owned()),
+    }
+}
+
+/// The rate-limit waits of one call to a platform: each as long as the platform asks, or a
+/// second when it does not say, at most `retries` of them and [`RATE_LIMIT_BUDGET`] in all.
+struct RateLimitWaits {
+    retries: u32,
+    taken: u32,
+    waited: Duration,
+}
+
+impl RateLimitWaits {
+    /// The waits of a call that may wait out a rate limit `retries` times.
+    fn new(retries: u32) -> Self {
+        Self {
+            retries,
+            taken: 0,
+            waited: Duration::ZERO,
+        }
+    }
+
+    /// The wait before the call `what`, just rate limited, is tried again, as the platform
+    /// `asked`; or, when the call may wait no more, why it fails. A wait that cannot be read
+    /// is reported through `on_error` and taken as a second.
+    fn next(&mut self, asked: AskedWait, what: &str, on_error: Option<&ErrorReport>) -> Result<Duration, String> {
+        let wait = match asked {
+            AskedWait::Secs(wait) => wait,
+            AskedWait::Unsaid => UNSAID_RATE_LIMIT_WAIT,
+            AskedWait::Unreadable(written) => {
+                let unreadable = format!(
+                    "{what}: rate limited, with a wait that is no whole number of seconds ({written:?}); taken as {}s",
+                    UNSAID_RATE_LIMIT_WAIT.as_secs()
+                );
+                report(on_error, &ImError::Transport(unreadable));
+                UNSAID_RATE_LIMIT_WAIT
+            }
+        };
+        if self.taken == self.retries {
+            return Err(match self.taken {
+                0 => "rate limited".to_string(),
+                taken => format!("rate limited again after waiting {taken} times"),
+            });
+        }
+        if self.waited + wait > RATE_LIMIT_BUDGET {
+            return Err(format!(
+                "rate limited, for {}s: longer than a call waits ({}s in all)",
+                wait.as_secs(),
+                RATE_LIMIT_BUDGET.as_secs()
+            ));
+        }
+        self.taken += 1;
+        self.waited += wait;
+        Ok(wait)
+    }
 }
 
 /// One delivery's events once its messages are kept in the backlog ([`keep`]).
@@ -586,46 +651,75 @@ mod tests {
         );
     }
 
-    /// The wait after an answer whose `Retry-After` is `value`, or that has none.
-    fn retry_after(value: Option<HeaderValue>) -> Duration {
+    /// The wait asked by an answer whose `Retry-After` is `value`, or that has none.
+    fn retry_after(value: Option<HeaderValue>) -> AskedWait {
         let mut headers = HeaderMap::new();
         if let Some(value) = value {
             headers.insert(RETRY_AFTER, value);
         }
-        rate_limit_wait(&headers, RETRY_AFTER)
+        asked_wait(&headers, RETRY_AFTER)
+    }
+
+    fn secs(secs: u64) -> AskedWait {
+        AskedWait::Secs(Duration::from_secs(secs))
     }
 
     #[test]
-    fn a_rate_limit_wait_is_the_seconds_the_platform_names() {
-        assert_eq!(retry_after(Some(HeaderValue::from_static("5"))), Duration::from_secs(5));
+    fn a_rate_limit_wait_is_the_whole_seconds_the_platform_names() {
+        assert_eq!(retry_after(Some(HeaderValue::from_static("5"))), secs(5));
+        assert_eq!(retry_after(Some(HeaderValue::from_static(" 5 "))), secs(5));
+        assert_eq!(retry_after(None), AskedWait::Unsaid);
         assert_eq!(
-            retry_after(Some(HeaderValue::from_static(" 5 "))),
-            Duration::from_secs(5)
+            retry_after(Some(HeaderValue::from_static("1.5"))),
+            AskedWait::Unreadable("1.5".into())
         );
-    }
-
-    #[test]
-    fn a_rate_limit_wait_is_capped() {
-        assert_eq!(
-            retry_after(Some(HeaderValue::from_static("100000"))),
-            MAX_RATE_LIMIT_WAIT
-        );
-    }
-
-    #[test]
-    fn a_rate_limit_wait_without_a_number_of_seconds_is_one_second() {
-        assert_eq!(retry_after(None), Duration::from_secs(1));
-        assert_eq!(
-            retry_after(Some(HeaderValue::from_static("soon"))),
-            Duration::from_secs(1)
-        );
-        // Not text: as good as missing.
-        let not_text = HeaderValue::from_bytes(&[0xff]).unwrap();
-        assert_eq!(retry_after(Some(not_text)), Duration::from_secs(1));
         // Only the named header counts.
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
-        assert_eq!(rate_limit_wait(&headers, "x-reset"), Duration::from_secs(1));
+        assert_eq!(asked_wait(&headers, "x-reset"), AskedWait::Unsaid);
+    }
+
+    #[test]
+    fn a_call_waits_as_asked_within_its_budget_and_its_retries() {
+        let mut waits = RateLimitWaits::new(3);
+        assert_eq!(waits.next(secs(5), "call", None), Ok(Duration::from_secs(5)));
+        assert_eq!(waits.next(AskedWait::Unsaid, "call", None), Ok(Duration::from_secs(1)));
+        // 5 + 1 + 15 would go over the budget of 20 seconds.
+        assert_eq!(
+            waits.next(secs(15), "call", None),
+            Err("rate limited, for 15s: longer than a call waits (20s in all)".into())
+        );
+        assert_eq!(waits.next(secs(14), "call", None), Ok(Duration::from_secs(14)));
+        assert_eq!(
+            waits.next(secs(0), "call", None),
+            Err("rate limited again after waiting 3 times".into())
+        );
+        assert_eq!(
+            RateLimitWaits::new(0).next(secs(0), "call", None),
+            Err("rate limited".into())
+        );
+    }
+
+    #[test]
+    fn a_wait_that_cannot_be_read_is_reported_and_taken_as_a_second() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&reports);
+        let on_error: ErrorReport = Arc::new(move |error: &ImError| lock(&seen).push(error.to_string()));
+        let mut waits = RateLimitWaits::new(3);
+
+        let wait = waits.next(
+            AskedWait::Unreadable("soon".into()),
+            "slack chat.update",
+            Some(&on_error),
+        );
+
+        assert_eq!(wait, Ok(Duration::from_secs(1)));
+        let reports = lock(&reports);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            reports[0].contains("slack chat.update") && reports[0].contains("\"soon\""),
+            "{reports:?}"
+        );
     }
 
     #[test]

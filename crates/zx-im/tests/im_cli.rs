@@ -617,10 +617,11 @@ async fn a_message_a_killed_server_had_not_handled_is_answered_when_it_starts_ag
     let model = MockServer::start(vec![Reply::text("late answer")]).await;
     let mut slack = FakeSlack::start().await;
     // The first server waits out a rate limit reading the thread, before it makes the
-    // conversation's session: the message is kept, and nothing has handled it yet.
+    // conversation's session: the message is kept, and nothing has handled it yet. The wait
+    // is within what a call waits, or the read would fail at once instead.
     slack.script(
         "conversations.replies",
-        vec![Answer::RateLimited { retry_after_secs: 60 }],
+        vec![Answer::RateLimited { retry_after_secs: 15 }],
     );
     let config = write_im_config(
         dir.path(),

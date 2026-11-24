@@ -510,6 +510,22 @@ async fn a_rate_limited_post_waits_and_is_retried() {
 }
 
 #[tokio::test]
+async fn a_post_rate_limited_for_longer_than_a_call_waits_fails_at_once_as_rate_limited() {
+    let slack = FakeSlack::start().await;
+    slack.script("chat.postMessage", vec![Answer::RateLimited { retry_after_secs: 45 }]);
+    let channel = channel(&slack);
+    let error = tokio::time::timeout(WAIT, channel.send(&at("C1", Some("10.1")), &Post::Text("hello".into())))
+        .await
+        .expect("the post waited out a rate limit longer than a call waits")
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "slack chat.postMessage: rate limited, for 45s: longer than a call waits (20s in all)"
+    );
+    assert_eq!(slack.calls("chat.postMessage").len(), 1);
+}
+
+#[tokio::test]
 async fn posts_to_one_chat_are_spaced_out() {
     let slack = FakeSlack::start().await;
     let interval = Duration::from_millis(300);

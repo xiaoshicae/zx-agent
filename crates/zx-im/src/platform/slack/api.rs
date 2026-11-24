@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{HISTORY_PAGE_MESSAGES, SETUP_ERRORS, SlackChannel};
-use crate::platform::{RATE_LIMIT_RETRIES, rate_limit_wait};
+use crate::platform::{RATE_LIMIT_RETRIES, RateLimitWaits, asked_wait};
 use crate::{Attachment, Destination, ImError, MessageId, MessageRef, ThreadId};
 
 impl SlackChannel {
@@ -24,8 +24,9 @@ impl SlackChannel {
         self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES).await
     }
 
-    /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times: after
-    /// those, or with none, the limit is the call's error.
+    /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times
+    /// (`RateLimitWaits`): after those, with none, or for a wait over the budget, the limit is
+    /// the call's error.
     async fn call_retrying(
         &self,
         method: &str,
@@ -43,7 +44,7 @@ impl SlackChannel {
         if !args.is_empty() {
             url.query_pairs_mut().extend_pairs(args);
         }
-        let mut retries = 0;
+        let mut waits = RateLimitWaits::new(rate_limit_retries);
         loop {
             let request = self.http.post(url.clone()).bearer_auth(token);
             let request = match body {
@@ -55,9 +56,12 @@ impl SlackChannel {
                 .await
                 .map_err(|error| CallError::Failed(ImError::Transport(format!("slack {method}: {error}"))))?;
             let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < rate_limit_retries {
-                retries += 1;
-                let wait = rate_limit_wait(response.headers(), RETRY_AFTER);
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let what = format!("slack {method}");
+                let asked = asked_wait(response.headers(), RETRY_AFTER);
+                let wait = waits
+                    .next(asked, &what, self.config.on_error.as_ref())
+                    .map_err(|why| CallError::Failed(ImError::Transport(format!("{what}: {why}"))))?;
                 tokio::time::sleep(wait).await;
                 continue;
             }

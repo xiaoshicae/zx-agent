@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use zx_util::random::random_u64;
 
 use super::FeishuChannel;
-use crate::platform::{RATE_LIMIT_RETRIES, body_within, content_type_is, rate_limit_wait};
+use crate::platform::{RATE_LIMIT_RETRIES, RateLimitWaits, asked_wait, body_within, content_type_is};
 use crate::{Attachment, ImError};
 
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
@@ -178,10 +178,10 @@ impl FeishuChannel {
     }
 
     /// The answer to the request that `request` makes with the tenant token to `path`. A
-    /// frequency limit is waited out and the request made again; a code other than 0 is a
-    /// refusal.
+    /// frequency limit is waited out and the request made again, within `RateLimitWaits`; a
+    /// code other than 0 is a refusal.
     async fn answer(&self, path: &str, request: impl Fn(&str) -> RequestBuilder) -> Result<Value, CallError> {
-        let mut retries = 0;
+        let mut waits = RateLimitWaits::new(RATE_LIMIT_RETRIES);
         loop {
             let token = self.token().await.map_err(CallError::Failed)?;
             let response = request(&token)
@@ -189,14 +189,17 @@ impl FeishuChannel {
                 .await
                 .map_err(|error| CallError::Failed(ImError::Transport(format!("feishu {path}: {error}"))))?;
             let status = response.status();
-            let wait = rate_limit_wait(response.headers(), RATE_LIMIT_RESET);
+            let asked = asked_wait(response.headers(), RATE_LIMIT_RESET);
             // A body that is not JSON leaves no code; the status then explains the failure.
             let answer: Option<Value> = response.json().await.ok();
             let code = answer.as_ref().and_then(|answer| answer["code"].as_i64());
             let limited =
                 status == StatusCode::TOO_MANY_REQUESTS || code.is_some_and(|code| RATE_LIMIT_CODES.contains(&code));
-            if limited && retries < RATE_LIMIT_RETRIES {
-                retries += 1;
+            if limited {
+                let what = format!("feishu {path}");
+                let wait = waits
+                    .next(asked, &what, self.config.on_error.as_ref())
+                    .map_err(|why| CallError::Failed(ImError::Transport(format!("{what}: {why}"))))?;
                 tokio::time::sleep(wait).await;
                 continue;
             }
