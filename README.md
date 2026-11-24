@@ -95,12 +95,12 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；自动放行之外的调用在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。别的平台可以在宿主自己的程序里经 `zx_im::Program` 加入（见[作为库使用](docs/LIBRARY.md#im-平台)）。
+`zx-im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；自动放行之外的调用在 IM 里审批。支持 Slack（Socket Mode）与 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。别的平台可以在宿主自己的程序里经 `zx_im::Program` 加入（见[作为库使用](docs/LIBRARY.md#im-平台)）。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
 export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
-# 使用 ⚑ D:5/CHINA FLAG: 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET（企业自建应用的凭据）
+# 使用 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET（企业自建应用的凭据）
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
@@ -116,7 +116,7 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 
 ```
 zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、sessions）
-zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分派的服务、Slack 与 ⚑ D:5/CHINA FLAG: 飞书平台（feature feishu）
+zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分派的服务、Slack 与 飞书平台（feature feishu）
   ├─ zx-app    crates/zx-app    应用层，两个程序共用：config.toml 与 agent、装配 agent、OpenTelemetry 导出与收尾（依赖 zx-agent）
   └─ zx-agent  crates/zx-agent  SDK：把下面五个 crate 再导出成一个库，没有自己的代码
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
@@ -145,7 +145,7 @@ zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 
 | 文档 | 内容 |
 |---|---|
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.toml`、agent 文件与 `im.toml` 的键，内置 agent |
-| [docs/IM_SETUP.md](docs/IM_SETUP.md) | IM 接入指南：Slack 与 ⚑ D:5/CHINA FLAG: 飞书的应用设置、权限、名单里的 ID 与常见问题 |
+| [docs/IM_SETUP.md](docs/IM_SETUP.md) | IM 接入指南：Slack 与 飞书的应用设置、权限、名单里的 ID 与常见问题 |
 | [docs/REFERENCE.md](docs/REFERENCE.md) | 命令行参数、退出码，chat、ACP 与 IM 的行为，循环语义与 pi 的差异，事件、追踪与会话文件的格式 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全模型与容器执行 |
 | [docs/LIBRARY.md](docs/LIBRARY.md) | 作为库使用 |
@@ -160,7 +160,7 @@ cargo test                                   # 不需要网络和 API key；付�
 cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
 cargo clippy -p zx-builtin --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-builtin
-cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings      # 不带 ⚑ D:5/CHINA FLAG: 飞书平台的 zx-im
+cargo clippy -p zx-im --no-default-features --all-targets -- -D warnings      # 不带 飞书平台的 zx-im
 cargo fmt --check -- --config group_imports=StdExternalCrate   # 导入按规则 01 分组
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```

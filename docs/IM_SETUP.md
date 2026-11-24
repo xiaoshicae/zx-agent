@@ -1,14 +1,14 @@
 # IM 接入指南
 
-`zx-im` 把 agent 接入 Slack 与 ⚑ D:5/CHINA FLAG: 飞书。本文按顺序列出接入一个平台要做的事：在平台上建应用，开权限与事件，把凭据交给 `zx-im`，写 `im.toml`，把群和人加进名单，以及实测中遇到过的问题。每个键的说明见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)，服务的行为见 [REFERENCE.md](REFERENCE.md#im-服务)，部署到 Kubernetes 见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
+`zx-im` 把 agent 接入 Slack 与 飞书。本文按顺序列出接入一个平台要做的事：在平台上建应用，开权限与事件，把凭据交给 `zx-im`，写 `im.toml`，把群和人加进名单，以及实测中遇到过的问题。每个键的说明见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)，服务的行为见 [REFERENCE.md](REFERENCE.md#im-服务)，部署到 Kubernetes 见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
 
-⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台；审批人可以放行在 `zx-im` 所在机器上执行的命令] Subject to Legal/Export Compliance approval.
+⚠ COMPLIANCE REVIEW: [飞书：对话内容、命令输出与用户 ID 发往该平台；审批人可以放行在 `zx-im` 所在机器上执行的命令] Subject to Legal/Export Compliance approval.
 
 ## 总览
 
 两个平台都只需出网，不需要公网地址。
 
-| 步骤 | Slack | ⚑ D:5/CHINA FLAG: 飞书 |
+| 步骤 | Slack | 飞书 |
 |---|---|---|
 | 建应用 | 新建 Slack 应用 | 新建企业自建应用，启用机器人能力 |
 | 连接方式 | Socket Mode | 长连接 |
@@ -40,7 +40,7 @@
 7. **安装。** 在 Install App 中安装到工作区，复制 Bot User OAuth Token（`xoxb-` 开头），即 `SLACK_BOT_TOKEN`。以后增减权限，要重新安装才生效；实测中重新安装后 bot token 没有变。
 8. **加进频道。** 在要用的频道里执行 `/invite @应用名`。据 Slack 文档，应用不在频道里时收不到 @ 它的事件，新应用也不能在没加入的公开频道发消息。
 
-## ⚑ D:5/CHINA FLAG: 飞书
+## 飞书
 
 1. **建应用。** 在开发者后台（<https://open.feishu.cn/app>）创建企业自建应用，启用机器人能力。
 2. **权限。** 在权限管理中开通：
@@ -54,9 +54,9 @@
    | `im:chat.members:read` | 否 | `zx-im` 不用；只为管理员列出群成员的 open_id（见下文“取得 ID”） |
    | `im:resource` 或 `im:resource:upload` | 否 | 发文件（单个至多 30 MB）：太长的回答作为文件发出，agent 用工具 `send_file` 发报告或图片；没有时长回答照旧分段发文字，工具报错 |
 
-   ⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：`im:message.group_msg` 读取群内全部消息与历史消息] Subject to Legal/Export Compliance approval.
+   ⚠ COMPLIANCE REVIEW: [飞书：`im:message.group_msg` 读取群内全部消息与历史消息] Subject to Legal/Export Compliance approval.
 
-   ⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：`im:resource` 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
+   ⚠ COMPLIANCE REVIEW: [飞书：`im:resource` 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 3. **凭据。** 在凭证与基础信息中取得 App ID 与 App Secret，即 `FEISHU_APP_ID` 与 `FEISHU_APP_SECRET`。
 4. **先启动 `zx-im`。** 按下文“im.toml 与启动”写好 `[feishu]` 段并启动。官方文档要求保存长连接设置时长连接在线，所以这一步要在下一步之前。
 5. **事件与回调。** 在事件与回调中：
@@ -83,10 +83,10 @@ dir = "/data/sessions"
 
 第一次接入还不知道 ID 时，可以先写 `conversations = []` 启动：此时每条要机器人回答的消息都被拒绝，日志里正好留下要填的 ID（见下一节），填好后让它重读名单（见本节末尾）。
 
-凭据只放在环境变量（Kubernetes 中为 Secret）里，不写进 `im.toml`；`zx-im` 执行的命令看不到存放密钥的变量（⚑ D:5/CHINA FLAG: 飞书的 App ID 不是密钥，不隐藏）。启动：
+凭据只放在环境变量（Kubernetes 中为 Secret）里，不写进 `im.toml`；`zx-im` 执行的命令看不到存放密钥的变量（飞书的 App ID 不是密钥，不隐藏）。启动：
 
 ```bash
-export SLACK_APP_TOKEN=xapp-...   # 使用 ⚑ D:5/CHINA FLAG: 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET
+export SLACK_APP_TOKEN=xapp-...   # 使用 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET
 export SLACK_BOT_TOKEN=xoxb-...
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
@@ -101,7 +101,7 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 - **加一个审批人：** 请这个人私聊机器人一句，取 `user`；要让这个人私聊使用机器人，同一行的 `conversation` 就是私聊的 ID，也加进 `conversations`。日志行没有姓名，一次只请一个人发，按时间对上人。
 - **审批人要在机器人发卡片的群里**，才能看到并点击卡片；私聊里的卡片只有提问的人看得到。
 
-⚑ D:5/CHINA FLAG: 飞书的 open_id（`ou_…`）按应用区分，同一个人在不同应用里的 open_id 不同，要用本应用的。日志之外还有三种取法：
+飞书的 open_id（`ou_…`）按应用区分，同一个人在不同应用里的 open_id 不同，要用本应用的。日志之外还有三种取法：
 
 - **API 调试台：** 在 <https://open.feishu.cn/api-explorer> 选本应用，打开“发送消息”接口，`user_id_type` 选 `open_id`，用“快速复制 open_id”复制成员的 ID。不需要额外权限，适合只加几个人。
 - **列群成员：** `GET /open-apis/im/v1/chats/:chat_id/members?member_id_type=open_id` 返回成员的姓名与 open_id；需要 `im:chat.members:read` 等读群成员的权限之一，机器人要在群里。适合一次加一批。
@@ -123,9 +123,9 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 | 频道里 @ 机器人没反应 | 机器人不在频道里：`/invite @应用名` |
 | 线程里不 @ 机器人的回复没有回应 | 缺事件 `message.channels`、`message.groups`，或缺权限 `channels:history`、`groups:history` |
 | 模型看不到图片，日志有下载失败 | 缺 `files:read`；添加后重新安装应用 |
-| 长回答分成多条文字发出，日志的 `failed` 行说发不出 `answer.md` | Slack 缺 `files:write`（错误为 `missing_scope`）、⚑ D:5/CHINA FLAG: 飞书缺 `im:resource`；添加后（Slack 要重新安装应用）就作为文件发出 |
+| 长回答分成多条文字发出，日志的 `failed` 行说发不出 `answer.md` | Slack 缺 `files:write`（错误为 `missing_scope`）、飞书缺 `im:resource`；添加后（Slack 要重新安装应用）就作为文件发出 |
 
-### ⚑ D:5/CHINA FLAG: 飞书
+### 飞书
 
 | 现象 | 原因与处理 |
 |---|---|

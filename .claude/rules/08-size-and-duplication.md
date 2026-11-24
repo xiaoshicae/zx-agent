@@ -17,6 +17,6 @@ paths:
 
 - **同样的 5 行以上出现第二次就提取**，第三次必须提取，前提是提取出来的比重复的更好懂：为此要引入回调、装箱的 future 或每处一层转调时，保留重复并在一处注明。提取出来的放在它所属那一层的入口文件：工具共用的在 `tools.rs`（`parse_args`、`resolve`、`unless_cancelled`），平台共用的在 zx-im 的 `platform.rs`（`Pacer`、`keep`、`rate_limit_wait`、`next_message`），两个 HTTP provider 共用的在 `zx-ai-http`（`settings`、`request`、`stream`、`failure`），没有业务含义、几个 crate 都用的在 `zx-util`（准入条件见 CLAUDE.md 的 crate 表），测试共用的见规则 06。
 - **一处定义，别处引用**：常量、错误前缀（`fault`）、超时加上报（`Shared::bounded`）、结束事件（`StreamEvent::ending`）都只写一份。
-- **不横向引用**：同一层的模块互不依赖，如 zx-cli 的各子命令、zx-im 的各平台（`platform::slack` 与 ⚑ D:5/CHINA FLAG: `platform::feishu`，内部的项只对本模块可见，共用的在 `platform.rs`）、两个 provider（`zx-ai-openai` 与 `zx-ai-anthropic`，共用的在 `zx-ai-http`）；要共用就下沉到共同的下层。需要引用上层时，说明分层或接口该改了。
+- **不横向引用**：同一层的模块互不依赖，如 zx-cli 的各子命令、zx-im 的各平台（`platform::slack` 与 `platform::feishu`，内部的项只对本模块可见，共用的在 `platform.rs`）、两个 provider（`zx-ai-openai` 与 `zx-ai-anthropic`，共用的在 `zx-ai-http`）；要共用就下沉到共同的下层。需要引用上层时，说明分层或接口该改了。
 
 提交前对照 diff 过一遍 `.github/pull_request_template.md` 的“自查”。

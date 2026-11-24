@@ -54,7 +54,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `provider.maxTokensField` | 仅 `openai`。输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
 | `provider.fillMissingReasoning` | 仅 `openai`。`true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
 | `provider.promptCacheKey` | 仅 `openai`。`true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
-| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 ⚑ D:5/CHINA FLAG: DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking` 与 `output_config.effort`） |
+| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking` 与 `output_config.effort`） |
 | `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`；`anthropic` 的由 `apiKeyHeader` 定，默认 `x-api-key`） |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
@@ -94,14 +94,14 @@ headers = { anthropic-beta = "thinking-binding-controls-2026-08-01" }
 requestFields = { thinking = { block_binding = { prefix_mismatch_behavior = "drop_block" } } }
 ```
 
-### provider 示例：⚑ D:5/CHINA FLAG: DeepSeek
+### provider 示例：DeepSeek
 
 ⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
 
-⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用默认的 `openai` provider 即可：
+DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用默认的 `openai` provider 即可：
 
 ```toml
-# ⚑ D:5/CHINA FLAG: DeepSeek
+# DeepSeek
 model = "deepseek-flash"
 
 [provider]
@@ -113,7 +113,7 @@ apiKey = "${DEEPSEEK_API_KEY}"
 
 思考模式默认开启（2026-11-21 实测：不带 `thinking` 字段时与显式开启一样返回推理内容；不设 `reasoning` 时 zx-agent 不发这个字段，由服务的默认决定），`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi #3668 记录过这种历史经 OpenRouter 调用时返回 400 “The `reasoning_content` in the thinking mode must be passed back to the API.”，本项目没有实测这种情况。
 
-⚑ D:5/CHINA FLAG: `deepseek-flash` 收图片（[Vision 指南](https://api-docs.deepseek.com/guides/vision)），要发图片时在 `[[models]]` 写 `input = ["text", "image"]`；⚑ D:5/CHINA FLAG: `deepseek-v4-pro` 不收（[价格页](https://api-docs.deepseek.com/quick_start/pricing)）。`deepseek-flash` 收发图片在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；`deepseek-v4-pro` 不收图片只依据文档。
+`deepseek-flash` 收图片（[Vision 指南](https://api-docs.deepseek.com/guides/vision)），要发图片时在 `[[models]]` 写 `input = ["text", "image"]`；`deepseek-v4-pro` 不收（[价格页](https://api-docs.deepseek.com/quick_start/pricing)）。`deepseek-flash` 收发图片在 2026-11-20 验证过，见 [ROADMAP.md](ROADMAP.md) 第 6 节；`deepseek-v4-pro` 不收图片只依据文档。
 
 ### provider 示例：OpenRouter
 
@@ -333,7 +333,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 
 ## im.toml
 
-`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]`、`[[schedules]]`、`[[chats]]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 ⚑ D:5/CHINA FLAG: `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。⚑ D:5/CHINA FLAG: 飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+`zx-im --config <im.toml>` 读取的 IM 服务配置，与 `config.toml` 一样是最多 64 KiB 的普通 UTF-8 文件，未知的键视为错误。`[access]`（含 `conversations`）、`[sessions]` 与至少一个平台的段必须写。`[access]`、`[limits]`、`[sessions]`、`[replies]`、`[cardLabels]`、`[[schedules]]`、`[[chats]]` 以外的每个段配置以段名注册的平台：内置的有 `slack` 与 `feishu`，宿主自己的程序经 `zx_im::Program::register_platform` 加别的（见 [LIBRARY.md](LIBRARY.md#im-平台)）；没有注册的段名以退出码 2 报错。飞书平台在 `zx-im` 默认开启的 cargo feature `feishu` 后；不带它构建的 `zx-im` 遇到 `[feishu]` 段时报错，说明这个构建没有该平台。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
 
 ```toml
 [slack]
@@ -341,7 +341,7 @@ agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写�
 # botToken = "${SLACK_BOT_TOKEN}"
 # apiBase = "https://slack.com/api"   # 经代理或测试服务器时改
 
-# ⚑ D:5/CHINA FLAG: 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
+# 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
 # [feishu]
 # appId = "${FEISHU_APP_ID}"          # App ID 不是机密，不算凭据
 # appSecret = "${FEISHU_APP_SECRET}"
@@ -388,7 +388,7 @@ working = "处理中…"
 allowed = "已批准"
 ```
 
-名单要写的 ID 可以从日志取：不在名单里的聊天发来要机器人回答的消息被拒绝（不调用模型），日志的 `unauthorized` 行写明平台、聊天与发送人（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“日志”）。要加一个群，请人在群里 @ 机器人一次；要加一个人（如审批人），请他从不在名单里的聊天（如私聊）给机器人发一句。⚑ D:5/CHINA FLAG: 飞书的 open_id（`ou_…`）按应用区分，要用本应用收到的。
+名单要写的 ID 可以从日志取：不在名单里的聊天发来要机器人回答的消息被拒绝（不调用模型），日志的 `unauthorized` 行写明平台、聊天与发送人（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“日志”）。要加一个群，请人在群里 @ 机器人一次；要加一个人（如审批人），请他从不在名单里的聊天（如私聊）给机器人发一句。飞书的 open_id（`ou_…`）按应用区分，要用本应用收到的。
 
 改了 `[access]` 不必重启：`zx-im` 收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `conversations` 与 `approvers` 立即生效，日志记一条 `reloaded`；读不了或检查不过时保留原名单，记一条 `failed`。其他段（含 `[[chats]]` 与 `[[schedules]]`）的改动重启后才生效，一起检查是为了重启时不失败。只在 Unix 上。
 
@@ -396,7 +396,7 @@ allowed = "已批准"
 
 `[sessions]` 写 `dir` 与 `postgresUrl` 之一。`dir` 是本机磁盘或持久卷上的目录，供一个进程使用。`postgresUrl` 是 Postgres 的连接串，如 `postgres://zx:<密码>@db.example.com:5432/zx?sslmode=require`，通常写成 `"${变量名}"`：会话、backlog、“处理中”的记录与每天的用量都存进这个库里 `zx_im_` 开头的表，启动时建好缺的表；连不上库，或表的版本不是这个程序的，以退出码 2 结束。连接串是凭据，与平台的凭据一样：引用的变量对命令隐藏，值在工具输出中脱敏，启动行只写 `sessions in Postgres`。`sslmode` 只有 `disable`、`prefer`（默认）与 `require`：用 TLS 时总按系统的根证书校验证书与主机名，`prefer` 只在服务端不支持 TLS 时改用明文，跨网络连接写 `require`；libpq 的 `verify-full` 等写法被拒。会话的工作目录仍在本机。存在 Postgres 时可以用同一个 `im.toml` 运行几个副本：一个当选为主并服务，其余待命，主停止或与库断开后接手（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“主备”）；账号要能在库的默认 schema 中建表与函数，如库的所有者。Postgres 在 `zx-im` 默认开启的 cargo feature `postgres` 后，不带它构建的 `zx-im` 遇到 `postgresUrl` 时以退出码 2 报错。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“存在 Postgres”。
 
-发文件要平台应用有相应权限（Slack 的 `files:write`，⚑ D:5/CHINA FLAG: 飞书的 `im:resource` 或 `im:resource:upload`，见 [IM_SETUP.md](IM_SETUP.md)）：比 `longAnswerChars` 更长的回答作为文件发出，状态换成 `replies.answerAttached`；发不出时照旧分段发文字。每个 IM 会话还有工具 `send_file`，不由 agent 的 `tools` 启用：agent 可以把自己写的内容，或工作目录里的一个文件（至多 20 MiB），作为附件发进对话。后者不经脱敏，见 [SECURITY.md](SECURITY.md#工具)；要审批或禁用它，在 agent 的 `permissions.ask` 或 `deny` 中写 `send_file`。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：zx-im 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
+发文件要平台应用有相应权限（Slack 的 `files:write`，飞书的 `im:resource` 或 `im:resource:upload`，见 [IM_SETUP.md](IM_SETUP.md)）：比 `longAnswerChars` 更长的回答作为文件发出，状态换成 `replies.answerAttached`；发不出时照旧分段发文字。每个 IM 会话还有工具 `send_file`，不由 agent 的 `tools` 启用：agent 可以把自己写的内容，或工作目录里的一个文件（至多 20 MiB），作为附件发进对话。后者不经脱敏，见 [SECURITY.md](SECURITY.md#工具)；要审批或禁用它，在 agent 的 `permissions.ask` 或 `deny` 中写 `send_file`。⚠ COMPLIANCE REVIEW: [飞书：zx-im 向该平台上传 agent 产出的文件（数据）] Subject to Legal/Export Compliance approval.
 
 `dailyTokens` 须为正整数，`dailyCost` 须为正数；写了 `dailyCost`（`[limits]` 或任一 `[[chats]]`）时，模型要在 `config.toml` 的 `[[models]]` 中有单价，否则启动时以退出码 2 报错。当天的用量用完后，提问与 `/compact` 只回复 `replies.dailyLimit`，触发不开线程；正在进行的运行照常结束，所以一天的用量可能超出上限，要硬上限时给 agent 设单次的 `limits.tokenBudget` 或 `limits.costBudget`。会话存在 `dir` 时用量只在内存中计数，重启后当天从零计；存在 Postgres 时记在库里，重启后接着计。行为见 [REFERENCE.md](REFERENCE.md#im-服务) 的“每天的用量”。
 
