@@ -5,6 +5,11 @@
 //! The agent file is loaded here, once for each agent a host builds, and everything that
 //! depends on it is decided here too, such as which of the host's tools it enables and which
 //! tools of extensions ask. What belongs to one session is in `setup`.
+//!
+//! - `approvals`: which calls ask before they run, for the policies and the prompt section
+//!   that tells the model
+
+mod approvals;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,6 +27,7 @@ use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 use zx_util::env::{Unexpandable, env_value, expand, variables};
 
+use self::approvals::{APPROVALS, Asked};
 use super::execution::ExecutorFactory;
 use super::provider::{BuiltProvider, ProviderInput};
 use super::setup::{self, PerSession, SPILL_OUTPUTS};
@@ -113,7 +119,10 @@ impl ConfiguredAgent {
         let executor_factory = executor_factory(app, &permissions)?;
         let (built, key) = provider(app)?;
         let credentials = credentials(app, key);
-        let (policies, approvals) = policies(app, &permissions, &host, approvals);
+        let auto_approve_commands = permissions.allowed_commands();
+        let asked = Asked::new(app, &permissions, &host);
+        let approvals_section = asked.section(approvals, &enabled, &auto_approve_commands);
+        let (policies, approvals) = policies(app, &permissions, &asked, approvals);
         let hooks = hooks(app, continue_on_length, &credentials);
         let skills = skills_tool(skills, &enabled);
         // The host's tools that the agent enables, as it enables the built-in ones.
@@ -124,7 +133,7 @@ impl ConfiguredAgent {
             .cloned()
             .collect();
         let role = AgentConfig {
-            system_prompt: SystemPrompt::new(&instructions),
+            system_prompt: SystemPrompt::new(&instructions).with_section(APPROVALS, &approvals_section),
             tools,
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
@@ -158,8 +167,8 @@ impl ConfiguredAgent {
             agent: Agent::new(role)?,
             provider: built.provider,
             name,
-            auto_approve_commands: permissions.allowed_commands(),
-            commands_ask: !approves_every_call(&permissions, app.overrides.asking),
+            auto_approve_commands,
+            commands_ask: !matches!(asked, Asked::Nothing),
             place: place.clone(),
             cwd: app.overrides.cwd.clone(),
         })
@@ -283,7 +292,7 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
             "the host's policy {name:?} has a name that a built-in policy, an extension or another of the host's policies goes by"
         );
     }
-    let mut sections: HashSet<&str> = setup::SECTION_NAMES.into_iter().chain([PREAMBLE]).collect();
+    let mut sections: HashSet<&str> = setup::SECTION_NAMES.into_iter().chain([PREAMBLE, APPROVALS]).collect();
     for (name, _) in &app.host_sections {
         anyhow::ensure!(
             sections.insert(name),
@@ -413,39 +422,23 @@ fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>,
 }
 
 /// The policies every session of the agent asks, in this order: the command policy, the
-/// policy of the agent's `permissions` with the tools of MCP servers and of the `host`'s
-/// extensions that they do not allow (but the MCP tools a trusted server says only read), the
-/// host's own, and, where a person answers, the one that asks before bash commands. Nothing
-/// asks when every call is approved ([`approves_every_call`]). With them, who answers.
+/// policy of the agent's `permissions` with the tools that are `asked` about, the host's own,
+/// and, where a person answers, the one that asks before bash commands. Nothing asks when
+/// every call is approved ([`Asked::Nothing`]). With them, who answers.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest decision of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
 fn policies(
     app: &Application,
     permissions: &Permissions,
-    host: &HostTools,
+    asked: &Asked<'_>,
     approvals: Approvals<'_>,
 ) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
     let commands = CommandPolicy::new().deny_also(permissions.denied_commands());
     policies.push(COMMAND_POLICY, Arc::new(commands));
     let auto_approve = permissions.auto_approval();
-    // A server trusted to say which of its tools only read lets those run like built-in tools.
-    let extension_tools: Vec<String> = app
-        .mcp
-        .names
-        .iter()
-        .filter(|name| !app.mcp.read_only.contains(name))
-        .chain(&host.extensions)
-        .cloned()
-        .collect();
-    let every_call = approves_every_call(permissions, app.overrides.asking);
-    let (asked, extension_ask): (&[String], Vec<String>) = if every_call {
-        (&[], Vec::new())
-    } else {
-        (&permissions.ask, unallowed(permissions, &extension_tools))
-    };
-    if let Some(rules) = rules_policy(permissions, asked, &extension_ask, auto_approve.clone()) {
+    if let Some(rules) = rules_policy(permissions, asked, auto_approve.clone()) {
         policies.push(AGENT_PERMISSIONS, Arc::new(rules));
     }
     for (name, policy) in &app.policies {
@@ -455,7 +448,7 @@ fn policies(
         Approvals::Nobody => return (policies, ApprovalMode::Deny),
         Approvals::Person(reason) => reason,
     };
-    if !every_call {
+    if let Asked::Tools { .. } = asked {
         let bash = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
@@ -513,33 +506,19 @@ fn credentials(app: &Application, key: Credentials) -> Credentials {
     credentials
 }
 
-/// The tools of `names`, those of MCP servers and of the host's extensions, that
-/// `permissions.allow` does not list, which ask a person.
-fn unallowed(permissions: &Permissions, names: &[String]) -> Vec<String> {
-    let allowed = permissions.allowed_tools();
-    names.iter().filter(|name| !allowed.contains(name)).cloned().collect()
-}
-
-/// Whether every call runs unasked: when the agent approves every call, since the container is
-/// the sandbox, and when the host skips approvals ([`Asking::Never`]).
-fn approves_every_call(permissions: &Permissions, asking: Asking) -> bool {
-    permissions.approve_all || asking == Asking::Never
-}
-
-/// The denied tools of the agent's `permissions`, the tools it `asked` about and the tools of
-/// extensions that ask, MCP servers among them, as one policy that allows the rest; none
+/// The denied tools of the agent's `permissions` and the tools that are `asked` about, its own
+/// and those of extensions, MCP servers among them, as one policy that allows the rest; none
 /// without any of them.
-fn rules_policy(
-    permissions: &Permissions,
-    asked: &[String],
-    extension_ask: &[String],
-    auto_approve: AutoApprove,
-) -> Option<RulePolicy> {
+fn rules_policy(permissions: &Permissions, asked: &Asked<'_>, auto_approve: AutoApprove) -> Option<RulePolicy> {
+    let (agent_ask, extension_ask): (&[String], &[String]) = match asked {
+        Asked::Nothing => (&[], &[]),
+        Asked::Tools { agent, extensions } => (agent, extensions),
+    };
     let denied = permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
         decision: PolicyDecision::Deny("tool denied by the agent".into()),
     });
-    let asked = asked.iter().map(|tool| Rule {
+    let asked = agent_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });

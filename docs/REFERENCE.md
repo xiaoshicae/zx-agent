@@ -190,6 +190,7 @@ HTTP 错误按状态归类，错误码表明上下文过长或凭据、配额问
 | 部分 | 内容 | 何时出现 |
 |---|---|---|
 | 说明 | agent 的说明 | 总是 |
+| `<approvals>` | 哪些工具调用要审批，由实际生效的权限生成，agent 的说明里不必写：有人回答时（chat、acp、zx-im）列出要人批准的工具（agent 有 bash 时含 bash）与可以免审批的命令前缀；没人回答时（run）列出会被拒绝的工具；跳过审批（`--dangerously-skip-approvals` 或 `permissions.approveAll`）时说明不询问 | 有工具要审批或跳过审批时 |
 | `<environment>` | 操作系统与版本、CPU 架构、会话打开的时间（UTC）与时区、工作目录；容器执行时描述容器 | 总是 |
 | `<project_context>` | 自动发现的 `AGENTS.md` 与 agent 列出的文件 | 有项目说明时 |
 | `<available_skills>` | skill 的名称、描述与正文文件路径 | 启用 `read_skill` 且登记了 skill 时 |
@@ -244,4 +245,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.39 · 2026年11月
+REFERENCE.md · v0.40 · 2026年11月

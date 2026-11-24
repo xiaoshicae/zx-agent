@@ -355,8 +355,10 @@ async fn the_system_prompt_states_the_environment() {
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");
-    // The permissions are enforced, not stated: the prompt has no command policy section.
+    // The permissions are enforced, not stated: the prompt has no command policy section, and
+    // no approvals section, since nothing the agent has asks.
     assert!(!system.contains("<command_policy>"), "{system}");
+    assert!(!system.contains("<approvals>"), "{system}");
 }
 
 #[tokio::test]
