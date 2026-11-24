@@ -1048,6 +1048,8 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
         "{prompt}"
     );
     assert!(tool_result(&server, 1).starts_with("from-container\n"));
+    // Commands run unasked, but in the container: nothing to warn of.
+    assert!(!stderr(&output).contains("[bash]"), "{}", stderr(&output));
     let exec = &fake.execs("zx-agent-run")[0];
     assert_eq!(exec[3..5], ["--workdir".to_string(), workspace.display().to_string()]);
     assert_eq!(after(exec, "zx-agent-run")[1], "echo hi");
@@ -1102,6 +1104,11 @@ async fn chat_in_a_container_that_approves_every_call_runs_bash_without_asking()
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!stderr(&output).contains("[approval"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("bash runs without asking · commands run isolated from this machine"),
+        "{}",
+        stderr(&output)
+    );
     assert_eq!(fake.execs("zx-agent-run").len(), 1);
     assert!(tool_result(&server, 1).starts_with("from-container\n"));
 }

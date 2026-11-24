@@ -26,6 +26,8 @@ pub(super) struct About {
     pub(super) agent: String,
     pub(super) tools: Vec<String>,
     pub(super) commands: CommandApproval,
+    /// Whether commands run apart from this machine, in a sandbox such as the container.
+    pub(super) isolated: bool,
     pub(super) cwd: PathBuf,
     pub(super) session: Option<PathBuf>,
     /// What a listing shows of the conversation the session file held already, when it held
@@ -45,6 +47,7 @@ impl About {
             } else {
                 CommandApproval::Skipped
             },
+            isolated: agent.isolates_commands(),
             cwd: session.cwd().to_path_buf(),
             session: file,
             resumed: session.with_transcript(|transcript| {
@@ -90,23 +93,33 @@ pub(super) fn banner(output: &Output, model: &str, about: &About) {
     if let Some(line) = resumed_line(about) {
         output.line(Tone::Dim, &line);
     }
-    let approvals = if about.tools.iter().any(|tool| tool == BASH) {
-        let asks = match &about.commands {
-            CommandApproval::AllBut(prefixes) if prefixes.is_empty() => "every bash command asks first".to_string(),
-            CommandApproval::AllBut(prefixes) => format!("bash asks first, except {}", visible(&prefixes.join(", "))),
-            CommandApproval::Skipped => "bash runs without asking".to_string(),
-        };
-        format!(" · {asks} · commands run with this process's permissions")
-    } else {
-        String::new()
-    };
     output.line(
         Tone::Dim,
         &format!(
-            "[chat] tools={}{approvals} · /help for commands",
-            visible(&about.tools.join(","))
+            "[chat] tools={}{} · /help for commands",
+            visible(&about.tools.join(",")),
+            commands_part(about)
         ),
     );
+}
+
+/// ` · <which bash commands ask> · <where commands run>` for the banner, when the conversation
+/// has bash; else nothing.
+fn commands_part(about: &About) -> String {
+    if !about.tools.iter().any(|tool| tool == BASH) {
+        return String::new();
+    }
+    let asks = match &about.commands {
+        CommandApproval::AllBut(prefixes) if prefixes.is_empty() => "every bash command asks first".to_string(),
+        CommandApproval::AllBut(prefixes) => format!("bash asks first, except {}", visible(&prefixes.join(", "))),
+        CommandApproval::Skipped => "bash runs without asking".to_string(),
+    };
+    let place = if about.isolated {
+        "commands run isolated from this machine"
+    } else {
+        "commands run with this process's permissions"
+    };
+    format!(" · {asks} · {place}")
 }
 
 pub(super) fn status(output: &Output, model: &str, about: &About) {
@@ -153,6 +166,41 @@ pub(super) fn help(output: &Output, commands: &[(String, String)]) {
         output.line(
             Tone::Plain,
             &format!("/{:<21} {} (extension command)", visible(name), visible(description)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn about(tools: &[&str], commands: CommandApproval, isolated: bool) -> About {
+        About {
+            agent: "assistant".into(),
+            tools: tools.iter().map(ToString::to_string).collect(),
+            commands,
+            isolated,
+            cwd: PathBuf::from("/work"),
+            session: None,
+            resumed: None,
+        }
+    }
+
+    #[test]
+    fn the_banner_says_which_commands_ask_and_where_they_run() {
+        let asking = CommandApproval::AllBut(vec!["grep".into(), "head".into()]);
+        assert_eq!(
+            commands_part(&about(&["bash"], asking, false)),
+            " · bash asks first, except grep, head · commands run with this process's permissions"
+        );
+        assert_eq!(
+            commands_part(&about(&["read_file", "bash"], CommandApproval::Skipped, true)),
+            " · bash runs without asking · commands run isolated from this machine"
+        );
+        // Without bash, no command runs.
+        assert_eq!(
+            commands_part(&about(&["read_file"], CommandApproval::AllBut(Vec::new()), false)),
+            ""
         );
     }
 }

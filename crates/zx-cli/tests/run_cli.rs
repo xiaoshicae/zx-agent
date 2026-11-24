@@ -343,6 +343,24 @@ async fn bash_commands_cannot_read_the_api_key() {
 }
 
 #[tokio::test]
+async fn bash_running_unasked_on_this_machine_is_said_before_the_run() {
+    let server = MockServer::start(vec![Reply::text("done"), Reply::text("done"), Reply::text("done")]).await;
+    let notice = "[bash] nobody answers approvals: bash commands run on this machine without asking";
+
+    let with_bash = run_once(&server, &["--tools", "bash", "go"]).await;
+    assert_eq!(with_bash.status.code(), Some(0), "{}", stderr(&with_bash));
+    assert!(stderr(&with_bash).contains(notice), "{}", stderr(&with_bash));
+
+    // Without bash nothing runs commands; with approvals skipped, `[danger]` says it all.
+    let without_bash = run_once(&server, &GO).await;
+    assert!(!stderr(&without_bash).contains("[bash]"), "{}", stderr(&without_bash));
+    let skipped = run_once(&server, &["--dangerously-skip-approvals", "--tools", "bash", "go"]).await;
+    assert_eq!(skipped.status.code(), Some(0), "{}", stderr(&skipped));
+    assert!(stderr(&skipped).contains("[danger]"), "{}", stderr(&skipped));
+    assert!(!stderr(&skipped).contains("[bash]"), "{}", stderr(&skipped));
+}
+
+#[tokio::test]
 async fn the_system_prompt_states_the_environment() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
