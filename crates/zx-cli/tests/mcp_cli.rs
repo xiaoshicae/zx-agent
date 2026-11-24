@@ -157,6 +157,26 @@ async fn run_refuses_an_mcp_tool_that_needs_approval() {
 }
 
 #[tokio::test]
+async fn run_calls_an_mcp_tool_that_needs_approval_when_approvals_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = prom().await;
+    let model = MockServer::start(vec![
+        Reply::tool_call("c1", "prom__range", &json!({"q": "up"})),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&model, dir.path(), &agent_home(dir.path(), &fake.url, "[]"))
+        .arg("--dangerously-skip-approvals")
+        .output()
+        .await
+        .unwrap();
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("[danger] approvals are skipped"), "{stderr}");
+    assert_eq!(tool_results(&model), [r#"range: {"q":"up"}"#]);
+}
+
+#[tokio::test]
 async fn run_calls_a_tool_a_trusted_server_says_only_reads_without_approval() {
     let dir = tempfile::tempdir().unwrap();
     let mut range = tool("range", "Range query.");

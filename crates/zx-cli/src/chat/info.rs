@@ -13,11 +13,19 @@ use super::term::Tone;
 use super::{APPROVAL_MENU, QUIT_INTERRUPT_WINDOW};
 use crate::render::{local_time, visible};
 
+/// Which bash commands ask before they run.
+pub(super) enum CommandApproval {
+    /// All but those of these auto-approved prefixes.
+    AllBut(Vec<String>),
+    /// None: every call is approved, by the agent or by `--dangerously-skip-approvals`.
+    Skipped,
+}
+
 /// What a conversation runs on, shown at startup and by `/status`.
 pub(super) struct About {
     pub(super) agent: String,
     pub(super) tools: Vec<String>,
-    pub(super) auto_approve: Vec<String>,
+    pub(super) commands: CommandApproval,
     pub(super) cwd: PathBuf,
     pub(super) session: Option<PathBuf>,
     /// What a listing shows of the conversation the session file held already, when it held
@@ -32,7 +40,11 @@ impl About {
         Ok(Self {
             agent: agent.name().to_string(),
             tools: session.tool_names().to_vec(),
-            auto_approve: agent.auto_approve_commands().to_vec(),
+            commands: if agent.asks_before_commands() {
+                CommandApproval::AllBut(agent.auto_approve_commands().to_vec())
+            } else {
+                CommandApproval::Skipped
+            },
             cwd: session.cwd().to_path_buf(),
             session: file,
             resumed: session.with_transcript(|transcript| {
@@ -79,10 +91,10 @@ pub(super) fn banner(output: &Output, model: &str, about: &About) {
         output.line(Tone::Dim, &line);
     }
     let approvals = if about.tools.iter().any(|tool| tool == BASH) {
-        let asks = if about.auto_approve.is_empty() {
-            "every bash command asks first".to_string()
-        } else {
-            format!("bash asks first, except {}", visible(&about.auto_approve.join(", ")))
+        let asks = match &about.commands {
+            CommandApproval::AllBut(prefixes) if prefixes.is_empty() => "every bash command asks first".to_string(),
+            CommandApproval::AllBut(prefixes) => format!("bash asks first, except {}", visible(&prefixes.join(", "))),
+            CommandApproval::Skipped => "bash runs without asking".to_string(),
         };
         format!(" · {asks} · commands run with this process's permissions")
     } else {

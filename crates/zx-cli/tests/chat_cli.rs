@@ -545,6 +545,20 @@ async fn an_auto_approved_command_is_shown_with_a_preview_of_its_result() {
 }
 
 #[tokio::test]
+async fn skipping_approvals_runs_a_shell_call_unasked_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "printf ran > marker"), Reply::text("done")]).await;
+    let args = ["--tools", "bash", "--dangerously-skip-approvals"];
+    let output = run(&server, dir.path(), &args, "go\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(log.contains("[danger] approvals are skipped"), "{log}");
+    assert!(log.contains("bash runs without asking"), "{log}");
+    assert!(!log.contains("[approval"), "{log}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "ran");
+}
+
+#[tokio::test]
 async fn y_and_n_answer_an_approval_like_1_and_3() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![

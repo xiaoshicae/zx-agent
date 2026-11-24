@@ -17,6 +17,7 @@
 | `--cost-budget` | agent | 花费上限，需要模型的单价，0 不限；`run` 用完时以 8 结束 |
 | `<提示词>` | 无 | 仅 `run`：任务描述，`-` 表示从 stdin 读取。以 `@` 开头的参数是附在提问上的图片文件（如 `@shot.png`，PNG、JPEG、GIF 或 WebP，相对路径按启动时所在的目录，至多 10 MiB），按模型 API 的上限适配；有图片时可以不给任务描述。读不了、不是图片或适配不了的文件、多于一个任务描述、既没有文本也没有图片，都以退出码 2 结束；`--continue` 不收 `@` 参数 |
 | `--fail-on-denied` | 关闭 | 仅 `run`：有工具调用被拒时以 9 代替 0 |
+| `--dangerously-skip-approvals` | 关闭 | 仅 `run`、`chat`、`acp`：这次运行不询问任何审批，同 agent 的 `permissions.approveAll`，`ask` 列出的工具也不问；拒绝规则与命令的拒绝列表照旧。与 `approveAll` 不同，不要求隔离命令的执行环境：命令在本机执行时以当前用户的权限执行，模型读到的内容可以借提示注入执行任何命令，只在沙箱中使用。以 root 运行且执行环境不隔离时以退出码 2 结束。启动时在 stderr 打印一行 `[danger]`。这是命令行设置权限的唯一例外（D47） |
 | `--session` | `run`：只在内存；`chat`：会话目录中的新文件 | 仅 `run` 与 `chat`：会话文件，不存在则创建，存在则继续 |
 | `--no-session` | 关闭 | 仅 `chat` 与 `acp`：不写会话文件 |
 | `--resume [ID 前缀]` | 关闭 | 仅 `chat`，不能与 `--session` 同用 |
@@ -243,4 +244,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.37 · 2026年11月
+REFERENCE.md · v0.38 · 2026年11月

@@ -21,6 +21,6 @@ pub mod otel;
 pub mod shutdown;
 
 pub use self::assembly::{
-    Application, Approvals, BuiltProvider, ConfiguredAgent, ExecutorFactory, ExecutorSession, NoModel, Overrides,
-    ProviderFactory, ProviderInput, SessionPlace, SessionTools, resolve_cwd,
+    Application, Approvals, Asking, BuiltProvider, ConfiguredAgent, ExecutorFactory, ExecutorSession, NoModel,
+    Overrides, ProviderFactory, ProviderInput, SessionPlace, SessionTools, resolve_cwd,
 };

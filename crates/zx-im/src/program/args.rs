@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use zx_app::Overrides;
+use zx_app::{Asking, Overrides};
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +72,8 @@ impl Args {
         } = self;
         let overrides = Overrides {
             model,
+            // The approvers in the chat answer what asks: zx-im never skips them.
+            asking: Asking::AsConfigured,
             cwd,
             tools,
             max_model_requests,

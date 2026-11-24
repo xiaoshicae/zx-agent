@@ -49,7 +49,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；`Overrides::asking` 跳过审批时，会询问的调用直接执行，拒绝规则照旧；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -59,13 +59,13 @@
 | 文件 | 内容 |
 |---|---|
 | `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、模型请求与追踪导出经 `[proxy]` 并带上代理的凭据、续接的会话在原目录工作、`@文件` 附图 |
-| `crates/zx-cli/tests/chat_cli.rs` | chat：审批、斜杠命令、摘要、输出行、信号、PTY |
+| `crates/zx-cli/tests/chat_cli.rs` | chat：审批与跳过审批、斜杠命令、摘要、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片、模型与推理强度的配置项、上下文用量 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏（`apiKey` 引用变量或直接写在 config.toml 里都一样）与钩子失败输出 |
-| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），配置的请求头随每个请求发送，请求经 `[proxy]`，`token` 与引用了变量的请求头的变量对命令隐藏、值被脱敏，引用的变量没有值、服务器用不了时启动失败 |
+| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），`--dangerously-skip-approvals` 时未放行的工具也执行，配置的请求头随每个请求发送，请求经 `[proxy]`，`token` 与引用了变量的请求头的变量对命令隐藏、值被脱敏，引用的变量没有值、服务器用不了时启动失败 |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
 | `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放；被取消的运行为整批调用写下结果 |
 
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.39 · 2026年11月
+TESTS.md · v0.40 · 2026年11月

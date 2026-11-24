@@ -34,12 +34,13 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         session,
         base,
         budget,
+        approvals,
         output,
         deltas,
     } = args;
     let task = Task::of(prompt, continue_session, session).await?;
     with_telemetry(async move |telemetry| {
-        let app = connect(cli::overrides(base, &budget), Builtin::Unattended)
+        let app = connect(cli::overrides(base, &budget, &approvals), Builtin::Unattended)
             .await?
             .set_traces(telemetry.map(run_traces));
         let file = task.file().map(Path::to_path_buf);

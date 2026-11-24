@@ -263,7 +263,7 @@ shortFlags = ["A"]
 | `allowExcept` | 命令中出现其中的字词（不分大小写，子串比较）时，`allow` 放行的命令仍要审批 |
 | `allowOptions.<程序>` | 该程序（一个小写的词）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名）、`shortWithValue`（带值的单字母选项，如 `-oyaml`）、`shortFlags`（不带值、须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。选项按命令的第一个词查找，所以程序须是 `allow` 中某条 `bash(...)` 的第一个词：只经 `sudo` 或带路径放行的程序得不到约束，这样的配置以退出码 2 报错 |
 | `deny` | 工具名：拒绝该工具，批准也不能覆盖。`bash(<文本>)`：拒绝任何位置含该文本的命令，不分大小写。内置的拒绝规则始终保留 |
-| `approveAll` | `true` 时不询问任何审批，拒绝规则仍然生效。只能与隔离命令的执行环境一起使用：内置的只有 `execution = "container"`，宿主注册的执行环境自己声明是否隔离；`ask` 须为空（扩展 `assistant` 时写 `ask = []`） |
+| `approveAll` | `true` 时不询问任何审批，拒绝规则仍然生效。只能与隔离命令的执行环境一起使用：内置的只有 `execution = "container"`，宿主注册的执行环境自己声明是否隔离；`ask` 须为空（扩展 `assistant` 时写 `ask = []`）。命令行的 `--dangerously-skip-approvals` 对一次运行起同样的作用，不要求隔离（见 [REFERENCE.md](REFERENCE.md)） |
 
 没有命令白名单：只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow`，其余命令要审批，在 run 中被拒绝。条目无效（工具名不认识、为空、`bash()` 中没有文本或缺右括号）时以退出码 2 报错。
 
@@ -404,4 +404,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.49 · 2026年11月
+CONFIGURATION.md · v0.50 · 2026年11月

@@ -20,8 +20,8 @@ use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{SessionHeader, SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
 use zx_app::{
-    Application, Approvals, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
-    SessionPlace, SessionTools,
+    Application, Approvals, Asking, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory,
+    ProviderInput, SessionPlace, SessionTools,
 };
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
@@ -58,6 +58,11 @@ fn role_in(home: &Path) {
 /// A host whose agent has `front` in its file, asking `server`, its sessions working in
 /// `dir`, which also holds the home and a secret file.
 async fn host(dir: &Path, front: &str, server: &MockServer) -> Application {
+    host_asking(dir, front, server, Asking::AsConfigured).await
+}
+
+/// [`host`], with `asking` over the agent's permissions.
+async fn host_asking(dir: &Path, front: &str, server: &MockServer, asking: Asking) -> Application {
     let home = dir.join("home");
     agent_in(&home, front);
     let secret = dir.join("secret.txt");
@@ -70,6 +75,7 @@ async fn host(dir: &Path, front: &str, server: &MockServer) -> Application {
     config.secret_files.push(secret);
     let overrides = Overrides {
         cwd: Some(dir.to_path_buf()),
+        asking,
         ..Overrides::default()
     };
     Application::from_config(config, Some(home), overrides, Builtin::Unattended)
@@ -395,6 +401,31 @@ async fn the_tools_of_an_extension_of_the_host_ask_as_those_of_mcp_servers_do() 
     // Asked about, with nobody to answer.
     let result = first_result(&requests[1]);
     assert!(result.starts_with("Not executed: approval denied"), "{result}");
+}
+
+#[tokio::test]
+async fn skipping_approvals_runs_the_calls_that_would_ask_but_not_those_the_agent_denies() {
+    let asked = "tools = []\n[permissions]\nask = [\"ext_probe\"]";
+    let denied = "tools = []\n[permissions]\ndeny = [\"ext_probe\"]";
+    // Without a rule, the tool of an extension asks as an MCP server's does.
+    for (front, runs) in [("tools = []", true), (asked, true), (denied, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = calling("ext_probe").await;
+        let app = host_asking(dir.path(), front, &server, Asking::Never)
+            .await
+            .add_extension(Arc::new(Probes("ext_probe")));
+        assert!(
+            app.notices()[0].starts_with("[danger] approvals are skipped"),
+            "{:?}",
+            app.notices()
+        );
+        ask(&app).await;
+        let result = first_result(&server.requests()[1]);
+        assert_eq!(!result.starts_with("Not executed"), runs, "{front}: {result}");
+        if !runs {
+            assert!(result.contains("tool denied by the agent"), "{result}");
+        }
+    }
 }
 
 /// `probe`, which answers whom its session is for.

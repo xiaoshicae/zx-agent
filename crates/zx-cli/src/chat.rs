@@ -112,6 +112,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     let ChatArgs {
         base,
         budget,
+        approvals,
         output: output_mode,
         deltas,
         color,
@@ -119,7 +120,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let app = connect(cli::overrides(base, &budget), Builtin::Assistant)
+    let app = connect(cli::overrides(base, &budget, &approvals), Builtin::Assistant)
         .await?
         .set_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
