@@ -2,6 +2,11 @@
 //! a change (pi: coding-agent/src/core/tools/edit-diff.ts).
 
 use serde::Deserialize;
+use serde_json::{Map, Value, json};
+use zx_core::tools::MAX_DETAILS_BYTES;
+
+use super::PATCH_DETAIL;
+use crate::text::prefix_noted;
 
 /// One replacement the model asked for.
 #[derive(Debug, Deserialize)]
@@ -21,6 +26,10 @@ const CONTEXT_LINES: usize = 3;
 /// region is shown as removed and added whole: the search costs time and memory that grow
 /// with the square of this number.
 const MAX_DIFF_EDITS: usize = 500;
+
+/// The most bytes of the patch in a result's details: details over the loop's limit are
+/// dropped whole, so a long patch is cut to leave room for the other fields.
+const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
 /// `text` without a leading byte order mark, and the mark if there was one.
 pub(crate) fn split_bom(text: &str) -> (&str, &str) {
@@ -382,6 +391,23 @@ fn backtrack<'a>(
     ops
 }
 
+/// Add the change from `old` to `new` of the file `path` to a result's `details`: the patch,
+/// with the lines as the model reads them (`\n` endings) and within [`MAX_PATCH_BYTES`], and
+/// the first changed line as `firstChangedLine`. Nothing when nothing changed.
+pub(crate) fn add_patch(details: &mut Map<String, Value>, path: &str, old: &str, new: &str) {
+    if let Some((patch, first_changed_line)) = unified_patch(path, &lf_endings(old), &lf_endings(new)) {
+        details.insert(PATCH_DETAIL.into(), json!(bounded_patch(&patch)));
+        details.insert("firstChangedLine".into(), json!(first_changed_line));
+    }
+}
+
+/// `patch` within [`MAX_PATCH_BYTES`], with a note when it was cut.
+fn bounded_patch(patch: &str) -> String {
+    prefix_noted(patch, MAX_PATCH_BYTES, |kept, total| {
+        format!("\n[patch truncated at {kept} of {total} bytes]\n")
+    })
+}
+
 /// A unified patch from `old` to `new` with [`CONTEXT_LINES`] lines of context, headed by
 /// `path`, and the first changed line of `new` (1-based). `None` when nothing changed.
 pub(crate) fn unified_patch(path: &str, old: &str, new: &str) -> Option<(String, usize)> {
@@ -635,5 +661,22 @@ mod tests {
             .map(|(_, l)| *l)
             .collect();
         assert_eq!(original, old);
+    }
+
+    #[test]
+    fn a_long_patch_is_cut_at_a_character_boundary_with_a_note() {
+        // The limit falls inside a character; what is kept is a String, so it ends before it.
+        let text = format!("x{}", "界".repeat(MAX_PATCH_BYTES / 3 + 10));
+        let cut = bounded_patch(&text);
+        let (kept, note) = cut
+            .split_once("\n[patch truncated at ")
+            .expect("the patch is truncated");
+        assert!(
+            text.starts_with(kept) && kept.len() <= MAX_PATCH_BYTES,
+            "{} bytes kept",
+            kept.len()
+        );
+        assert_eq!(note, format!("{} of {} bytes]\n", kept.len(), text.len()));
+        assert_eq!(bounded_patch("short"), "short");
     }
 }

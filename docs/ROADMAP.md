@@ -95,7 +95,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 每开一个会话，`Agent::assemble` 都重建所有会话共用的部分：复制钩子、策略、模型元数据与系统提示词，并在 `Toolbox::new` 里为全部工具重新编译参数的 JSON Schema。开销没有测过；IM 的会话多起来时，再把共用的部分只建一次，会话只加自己的工具（2026-11-19 的评审提出）。
 - 两个 HTTP provider 发请求与读事件流的流程仍大体相同，`SystemUpdates` 各定义一份；再下沉到 `zx-ai-http` 涉及 D24 的分层，单独设计（2026-11-19 定为不在 e10a914 评审的修复中做）。
 - ACP 在运行中不显示扩展要求显示的消息，回放时显示：zx-agent 里没有部件会在运行中发出这种消息，所以没有端到端测试可写；`acp/updates.rs` 的单元测试要能构造 ACP 连接。
-- ACP 不提供 chat 有的三样：扩展注册的斜杠命令（`Session::commands`、`run_command` 只有 chat 调用）、工具的进度更新（`tool_execution_update`），以及扩展记下的状态与恢复时补写的调用结果（`run` 与 chat 各打一行）。扩展点在唯一的界面协议上只通了一部分，做 P7、P8 的验收时一起决定。
+- ACP 不提供 chat 有的两样：扩展注册的斜杠命令（`Session::commands`、`run_command` 只有 chat 调用），以及扩展记下的状态与恢复时补写的调用结果（`run` 与 chat 各打一行）。扩展点在唯一的界面协议上只通了一部分，做 P7、P8 的验收时一起决定。
 - ACP 的通知队列无界：SDK（agent-client-protocol 5.0.0）的 `send_notification` 不等待，放进无界通道；客户端不读 stdout 时，流式更新积在内存里，而内核的事件通道是有界的。要有界得等 SDK 提供可以等待的发送。
 - ACP 已有模型与推理强度两个配置项和上下文用量，还没有：用量中的花费（协议要求币种，`[[models]]` 的单价不记币种，要加时先定配置键）；会话模式（`session/set_mode`，会改变权限，按 D17 不由客户端决定，要做先定设计）；计划（`plan`，要先有记录任务清单的工具）；`session/fork`（SDK 中仍是 unstable）；内嵌资源（`embeddedContext`，没有声明时客户端只能发 `resource_link`，由模型自己读文件；要做先定大小上限）。
 - 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）；多 Agent 协作（2026-11-22 由第 7 节的“不做”改为待评估：单次运行的上下文或时长成为排查的瓶颈时再评估，在此之前由一个 agent 依次调用工具）。
@@ -158,4 +158,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.80 · 2026年11月
+ROADMAP.md · v0.81 · 2026年11月

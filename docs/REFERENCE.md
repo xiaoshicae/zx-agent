@@ -47,7 +47,7 @@
 
 - 直接输入问题开始下一轮。在终端中，任务运行期间输入的文本作为插话，在下一次模型请求前进入上下文；任务结束时没被读到的插话作为下一轮提问发送，Ctrl+C 取消任务时丢弃。一次粘贴的多行合为一条消息（以 `/` 开头的命令只占一行；非 Unix 平台不合并）。管道输入逐轮、逐行消费。
 - 单行（以及合并后的一条消息）最多 1 MiB；超限或无效 UTF-8 的行整行丢弃并提示，对话继续。
-- stdout 只有模型的回答，其余在 stderr：启动信息、每个工具调用一行 `[tool] bash: <命令> -> ok 12ms` 及结果的前 3 行（`edit_file` 显示补丁的前 20 行），每轮一行 `[turn] 3 request(s) · 30 in · 15 out · 4.4s`。默认只在交互终端上着色，见 `--color`。`--output jsonl` 每轮输出事件与一个 `run_end`。
+- stdout 只有模型的回答，其余在 stderr：启动信息、每个工具调用一行 `[tool] bash: <命令> -> ok 12ms` 及结果的前 3 行（`edit_file` 与覆盖文本文件的 `write_file` 显示补丁的前 20 行），每轮一行 `[turn] 3 request(s) · 30 in · 15 out · 4.4s`。默认只在交互终端上着色，见 `--color`。`--output jsonl` 每轮输出事件与一个 `run_end`。
 - 这是逐行 REPL，没有行编辑：方向键等控制序列会原样作为输入发送。
 - 会话：不给 `--session` 时，每次对话存为主目录下的 `sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名为去掉开头 `/`、其余 `/` 换成 `-` 的工作目录），Unix 上新建的目录权限 0700、文件 0600；`--no-session` 只保存在内存。`--resume` 找不到会话时新建并提示，`--resume <ID 前缀>` 找不到或不唯一时以退出码 2 结束。`zx-agent sessions` 每行一个会话：ID 前 8 个字符、最近活动时间、消息数、会话名称（没有名称时为第一条提示词的首行；名称由 ACP 的 `/name` 或 SDK 的 `Session::set_name` 设置）。
 
@@ -85,7 +85,7 @@
 - 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name` 与 `/compact`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/compact` 请模型摘要较早的对话，自成一个回合，可以用 `session/cancel` 取消：进度以 `compaction_update` 通知，完成时以 `end_turn` 结束，没有可摘要的部分时不发请求、发一条 `notice` 后同样以 `end_turn` 结束，取消为 `cancelled`，失败以 JSON-RPC 错误应答；带了输入时以 `-32602` 应答。`/named` 等其他文本仍是普通提问。
 - 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。提问取其中的文本与图片：`resource_link` 以一行 `[resource <URI> (<名称>)]` 交给模型；图片按模型 API 的上限适配后随提问发给模型，适配不了时以 JSON-RPC 错误（`-32602`）应答并说明是第几张、为什么；音频与内嵌资源没有声明支持，收到时略去。既没有文本也没有图片的提问、带图片的命令（如 `/compact`）同样以 `-32602` 应答。以上被拒的提问不记入会话，也不发请求。工具结果中的图片在工具调用的内容中以图片块显示。
 - 配置项：建会话、载入与续接的应答带 `configOptions`，都是单选：`model`（类别 `model`），可选 `[[models]]` 列出的模型与会话正在用的模型；`reasoning`（类别 `thought_level`），可选 `default`（请求不带推理设置，由服务决定）与 `off` 到 `xhigh`。会话正在回合中时（如载入本进程正在运行的会话）应答不带配置项。`session/set_config_option` 在会话空闲时修改，对之后的提问生效，应答带全部配置项的当前值，与 chat 的 `/model`、`/reasoning` 相同：换模型不换 provider，也不清空对话。不在可选值中的值、未知的配置项、不是单选值的值与回合进行中的修改都以 `-32602` 应答，不做改动。
-- 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态（`read_file`、`edit_file`、`write_file` 带所操作文件的位置；其他工具的 `path` 可能是目录，客户端会把位置当文件打开，所以不带），`write_file` 附 diff、`edit_file` 附补丁。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），请求中的调用以要审批的原因为内容（调用结束后换成结果），等待时间同 chat。
+- 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态（`read_file`、`edit_file`、`write_file` 带所操作文件的位置；其他工具的 `path` 可能是目录，客户端会把位置当文件打开，所以不带），`edit_file` 与覆盖文本文件的 `write_file` 每处改动附一个 diff（补丁超出上限被截短时，改附 `diff` 代码块），新建文件或原文件无法比较（二进制、不是 UTF-8、超过 10 MB、读不了）的 `write_file` 附整个新文件的 diff。客户端把文本当 Markdown 渲染，所以内置工具（`bash`、`read_file`、`grep`、`find`、`ls`、`read_output`）的输出与所有工具的失败结果放进代码块，`read_file` 以文件扩展名标语言；其他工具的文本、图片旁的说明照原样发送。运行中的工具报告的进度（如 MCP 的 progress）显示在调用里，结果到达后由结果取代。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），请求中的调用以要审批的原因为内容（调用结束后换成结果），等待时间同 chat。
 - 用量：会话所用模型在 `[[models]]` 有 `contextWindow` 时，以 `usage_update` 报告上下文的 token 数与窗口大小：每个报告了用量的回答之后，取它的输入加输出 token；建会话、载入或续接之后（在命令之后）、每个回合结束时与换模型之后，取最近一次测得的用量加上之后消息的估算，与自动摘要判断阈值的估算相同。模型没有窗口时不发。不带花费：协议要求写明币种，而 `[[models]]` 的单价不记币种。
 - 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。等待期间再收到一次信号时，进程立即被该信号结束。
 
@@ -247,4 +247,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.43 · 2026年11月
+REFERENCE.md · v0.45 · 2026年11月

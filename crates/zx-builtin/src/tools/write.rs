@@ -1,18 +1,21 @@
 //! `write_file` tool: create or replace a whole file (pi: coding-agent/src/core/tools/write.ts).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
+use super::edit_text::{add_patch, split_bom};
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
-use super::{check_path, parse_args, path_text, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, path_text, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 
-/// Creates or overwrites files, creating missing parent directories.
+/// Creates or overwrites files, creating missing parent directories. Replacing a text file,
+/// its result details hold the patch of the change, as [`EDIT_FILE`](super::EDIT_FILE)'s do.
 pub struct WriteFileTool {
     /// Where files are written. Defaults to this machine.
     pub executor: Arc<dyn Executor>,
@@ -81,11 +84,21 @@ impl Tool for WriteFileTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args = Args::parse(&args)?;
+        let shown = path_text(&args.path)?;
         let path = resolve(&ctx.cwd, &args.path)?;
         let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
             .ok_or(CHANGE_CANCELLED)?;
+        let replaced = unless_cancelled(ctx, self.replaced_text(&path))
+            .await
+            .ok_or(CHANGE_CANCELLED)?;
         let bytes = args.content.len();
+        let mut details = Map::new();
+        details.insert("path".into(), json!(path.display().to_string()));
+        details.insert("bytes".into(), json!(bytes));
+        if let Some(old) = &replaced {
+            add_patch(&mut details, shown, split_bom(old).1, split_bom(&args.content).1);
+        }
         write_locked(
             ctx,
             self.executor.clone(),
@@ -94,9 +107,20 @@ impl Tool for WriteFileTool {
             turn,
         )
         .await?;
-        Ok(
-            ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", path_text(&args.path)?))
-                .with_details(json!({ "path": path.display().to_string(), "bytes": bytes })),
-        )
+        Ok(ToolOutput::ok(format!("Wrote {bytes} bytes to {shown}.")).with_details(Value::Object(details)))
+    }
+}
+
+impl WriteFileTool {
+    /// The text of the file at `path` that a write replaces, for the patch of the change, or
+    /// `None` when there is none to show: the file is new, or it is binary, not UTF-8 or past
+    /// [`DEFAULT_MAX_FILE_BYTES`], or it cannot be read. None of these stops the write.
+    async fn replaced_text(&self, path: &Path) -> Option<String> {
+        // A failure only means there is no patch to show; the write goes on either way.
+        let bytes = self.executor.read_file(path, DEFAULT_MAX_FILE_BYTES).await.ok()?;
+        if looks_binary(&bytes) {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
     }
 }
