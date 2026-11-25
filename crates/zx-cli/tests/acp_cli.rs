@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use zx_testing::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use zx_testing::mock_server::{MockServer, Reply, text_chunk};
 use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
 use zx_testing::{stderr, summary_json};
@@ -606,6 +607,103 @@ async fn a_call_on_a_directory_has_no_location_for_the_client_to_open() {
 }
 
 #[tokio::test]
+async fn an_edit_shows_as_the_diff_of_each_changed_region() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    std::fs::write(cwd.join("plan.md"), "# Plan\n- ship on monday\n").unwrap();
+    let edits = json!({"path": "plan.md", "edits": [{"oldText": "monday", "newText": "friday"}]});
+    let server = MockServer::start(vec![Reply::tool_call("e", "edit_file", &edits), Reply::text("moved")]).await;
+    let mut acp = Acp::start(&server, &cwd, &["--dangerously-skip-approvals"]).await;
+    let session = acp.session(&cwd).await;
+
+    let response = acp.prompt(&session, "move it").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates = acp.replayed();
+    let ended = updates
+        .iter()
+        .find(|update| update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed")
+        .unwrap_or_else(|| panic!("{updates:?}"));
+    let content = ended["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "diff", "{ended}");
+    assert_eq!(content[0]["path"], json!(cwd.join("plan.md")));
+    assert_eq!(content[0]["oldText"], "# Plan\n- ship on monday\n");
+    assert_eq!(content[0]["newText"], "# Plan\n- ship on friday\n");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("plan.md")).unwrap(),
+        "# Plan\n- ship on friday\n"
+    );
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn a_write_over_a_file_shows_as_the_diff_of_what_changed() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    std::fs::write(cwd.join("plan.md"), "# Plan\n- ship on monday\n").unwrap();
+    let write = json!({"path": "plan.md", "content": "# Plan\n- ship on friday\n"});
+    let server = MockServer::start(vec![Reply::tool_call("w", "write_file", &write), Reply::text("moved")]).await;
+    let mut acp = Acp::start(&server, &cwd, &["--dangerously-skip-approvals"]).await;
+    let session = acp.session(&cwd).await;
+
+    let response = acp.prompt(&session, "move it").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates = acp.replayed();
+    let ended = updates
+        .iter()
+        .find(|update| update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed")
+        .unwrap_or_else(|| panic!("{updates:?}"));
+    let content = ended["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "diff", "{ended}");
+    assert_eq!(content[0]["oldText"], "# Plan\n- ship on monday\n");
+    assert_eq!(content[0]["newText"], "# Plan\n- ship on friday\n");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn a_tool_shows_its_progress_in_its_call_until_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let mcp = FakeMcp::start(Era::Modern, vec![tool("query", "Instant query.")]).await;
+    mcp.reply(
+        "query",
+        vec![McpReply::Progress {
+            steps: vec![json!({"progress": 1, "total": 2, "message": "half the series read"})],
+            every: Duration::from_millis(10),
+            result: json!({"content": [{"type": "text", "text": "up"}]}),
+        }],
+    );
+    let server = MockServer::start(vec![
+        Reply::tool_call("q", "prom__query", &json!({})),
+        Reply::text("all up"),
+    ])
+    .await;
+    let config = format!(
+        "idleTimeoutSecs = 10\n[[mcp]]\nname = \"prom\"\nurl = \"{}\"\ntools = [\"query\"]",
+        mcp.url
+    );
+    let mut acp = Acp::start_configured(&server, dir.path(), &["--dangerously-skip-approvals"], None, &config).await;
+    let session = acp.session(dir.path()).await;
+
+    let response = acp.prompt(&session, "check").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates = acp.replayed();
+    let calls: Vec<&Value> = updates.iter().filter(|update| update["toolCallId"] == "q").collect();
+    let progress = calls
+        .iter()
+        .position(|update| update["content"][0]["content"]["text"] == "half the series read")
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    let ended = calls
+        .iter()
+        .position(|update| update["status"] == "completed")
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    assert!(progress < ended, "{calls:?}");
+    assert_eq!(calls[ended]["content"][0]["content"]["text"], "up", "{calls:?}");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
 async fn a_session_is_kept_in_the_directory_of_its_cwd_and_loaded_with_its_history() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -696,10 +794,12 @@ async fn loading_replays_a_tool_call_with_its_result() {
         call["locations"][0]["path"],
         cwd.join("notes.txt").display().to_string()
     );
+    // Output as a code block in the file's language, which a client renders as it is.
     let shown = call["content"][0]["content"]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("{call}"));
-    assert!(shown.contains("deploys on tuesdays"), "{shown}");
+    assert!(shown.starts_with("```txt\ndeploys on tuesdays\n"), "{shown}");
+    assert!(shown.ends_with("\n```"), "{shown}");
     assert_eq!(replay[2]["sessionUpdate"], "agent_message_chunk");
     assert_eq!(text_of(&replay[2]), "noted");
     second.finish().await;

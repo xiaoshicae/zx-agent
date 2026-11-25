@@ -5,20 +5,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
+use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
-use super::edit_text::{Edit, NO_EDITS, apply_edits, lf_endings, split_bom, unified_patch};
+use super::edit_text::{Edit, NO_EDITS, add_patch, apply_edits, split_bom};
 use super::mutation::{CHANGE_CANCELLED, FileMutationQueue, write_locked};
-use super::{
-    DEFAULT_MAX_FILE_BYTES, PATCH_DETAIL, check_path, looks_binary, parse_args, path_text, resolve, unless_cancelled,
-};
+use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, path_text, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
-use crate::text::prefix_noted;
-
-/// The most bytes of the patch in a result's details: details over the loop's limit are
-/// dropped whole, so a long patch is cut to leave room for the other fields.
-const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
 /// Replaces exact, unique, non-overlapping pieces of text in one file of at most
 /// [`DEFAULT_MAX_FILE_BYTES`](super::DEFAULT_MAX_FILE_BYTES) bytes.
@@ -175,11 +168,7 @@ impl Tool for EditFileTool {
 
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));
-        // The patch shows the lines as the model reads them, with `\n` endings.
-        if let Some((patch, first_changed_line)) = unified_patch(shown, &lf_endings(text), &lf_endings(&changed)) {
-            details.insert(PATCH_DETAIL.into(), json!(bounded_patch(&patch)));
-            details.insert("firstChangedLine".into(), json!(first_changed_line));
-        }
+        add_patch(&mut details, shown, text, &changed);
         let count = args.edits.len();
         let blocks = if count == 1 { "block" } else { "blocks" };
         Ok(ToolOutput::ok(format!("Replaced {count} {blocks} in {shown}.")).with_details(Value::Object(details)))
@@ -189,13 +178,6 @@ impl Tool for EditFileTool {
 /// Whether `value` is one edit object: `oldText` and `newText` strings.
 fn is_single_edit(value: &Value) -> bool {
     value.get("oldText").is_some_and(Value::is_string) && value.get("newText").is_some_and(Value::is_string)
-}
-
-/// `patch` within [`MAX_PATCH_BYTES`], with a note when it was cut.
-fn bounded_patch(patch: &str) -> String {
-    prefix_noted(patch, MAX_PATCH_BYTES, |kept, total| {
-        format!("\n[patch truncated at {kept} of {total} bytes]\n")
-    })
 }
 
 #[cfg(test)]
@@ -246,22 +228,5 @@ mod tests {
         assert_eq!(prepared(&json!({"path": "f", "edits": "not json"})), None);
         assert_eq!(prepared(&json!({"path": "f", "oldText": 1, "newText": "y"})), None);
         assert_eq!(prepared(&json!("text")), None);
-    }
-
-    #[test]
-    fn a_long_patch_is_cut_at_a_character_boundary_with_a_note() {
-        // The limit falls inside a character; what is kept is a String, so it ends before it.
-        let text = format!("x{}", "界".repeat(MAX_PATCH_BYTES / 3 + 10));
-        let cut = bounded_patch(&text);
-        let (kept, note) = cut
-            .split_once("\n[patch truncated at ")
-            .expect("the patch is truncated");
-        assert!(
-            text.starts_with(kept) && kept.len() <= MAX_PATCH_BYTES,
-            "{} bytes kept",
-            kept.len()
-        );
-        assert_eq!(note, format!("{} of {} bytes]\n", kept.len(), text.len()));
-        assert_eq!(bounded_patch("short"), "short");
     }
 }

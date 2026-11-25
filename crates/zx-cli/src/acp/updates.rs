@@ -1,5 +1,9 @@
 //! Run events as `session/update` notifications, and the replay of a loaded session's
 //! conversation.
+//!
+//! - `shown`: what a finished tool call shows, its output as code and its edits as diffs
+
+mod shown;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,7 +11,7 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk, Diff, ImageContent, Notice,
+    CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk, ImageContent, Notice,
     NoticeSeverity, SessionId, SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallId,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
@@ -22,8 +26,9 @@ use zx_agent::policy::PolicyDecision;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 use zx_util::stdio::eprint_line;
 
+use self::shown::{result_content, text_content};
 use super::tool_kind;
-use crate::render::{call_label, patch_of};
+use crate::render::call_label;
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.
 pub(super) struct Updates {
@@ -139,7 +144,7 @@ impl Updates {
         });
         match result {
             Some(result) => {
-                let (status, content, raw_output) = self.result_fields(name, Some(args), result);
+                let (status, content, raw_output) = self.result_fields(Some(args), result);
                 call.status(status).content(content).raw_output(raw_output)
             }
             None => call.status(ToolCallStatus::Pending),
@@ -158,7 +163,6 @@ impl Updates {
     /// output.
     fn result_fields(
         &self,
-        name: &str,
         args: Option<&Value>,
         result: &ToolResultMessage,
     ) -> (ToolCallStatus, Vec<ToolCallContent>, Value) {
@@ -167,7 +171,7 @@ impl Updates {
         } else {
             ToolCallStatus::Completed
         };
-        let mut content = self.result_content(name, args, &result.content, result.details.as_ref());
+        let mut content = result_content(result, args, &self.cwd);
         content.extend(
             result
                 .images
@@ -211,34 +215,6 @@ impl Updates {
         }
     }
 
-    /// What a result shows: a write as a diff of the new file, an edit as its patch, anything
-    /// else as the text the model received.
-    fn result_content(
-        &self,
-        name: &str,
-        args: Option<&Value>,
-        content: &str,
-        details: Option<&Value>,
-    ) -> Vec<ToolCallContent> {
-        let mut shown = Vec::new();
-        if name == WRITE_FILE
-            && let Some(args) = args
-            && let (Some(path), Some(text)) = (
-                args.get("path").and_then(Value::as_str),
-                args.get("content").and_then(Value::as_str),
-            )
-        {
-            shown.push(ToolCallContent::Diff(Diff::new(self.absolute(path), text)));
-        }
-        let text = patch_of(name, details).unwrap_or(content);
-        if !text.is_empty() {
-            shown.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
-                TextContent::new(text),
-            ))));
-        }
-        shown
-    }
-
     /// Streamed answer text, which the answer's end then need not repeat.
     fn text_streamed(&mut self, text: &str) {
         self.wrote_text = true;
@@ -262,10 +238,18 @@ impl Updates {
         ));
     }
 
+    /// A running call reported progress: the client shows it until the result takes its place.
+    fn tool_progress(&self, tool_call_id: &str, text: &str) {
+        self.tool_update(
+            tool_call_id,
+            ToolCallUpdateFields::new().content(vec![text_content(text)]),
+        );
+    }
+
     /// A call ended: its status, what it shows and the raw output.
     fn tool_ended(&mut self, result: &ToolResultMessage) {
         let args = self.calls.remove(&result.tool_call_id);
-        let (status, content, raw_output) = self.result_fields(&result.tool_name, args.as_ref(), result);
+        let (status, content, raw_output) = self.result_fields(args.as_ref(), result);
         self.tool_update(
             &result.tool_call_id,
             ToolCallUpdateFields::new()
@@ -317,6 +301,7 @@ pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: Se
 
 impl Updates {
     /// Send what `event` of a run means to the client.
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     pub(super) fn emit(&mut self, event: &Event) {
         match &event.event {
             EventKind::MessageStart { role: Role::Assistant } => self.wrote_text = false,
@@ -349,6 +334,9 @@ impl Updates {
                 tool_call_id,
                 ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
             ),
+            EventKind::ToolExecutionUpdate {
+                tool_call_id, content, ..
+            } => self.tool_progress(tool_call_id, content),
             EventKind::MessageEnd {
                 message: Message::ToolResult(result),
                 ..
@@ -388,7 +376,6 @@ impl Updates {
             | EventKind::MessageStart { .. }
             | EventKind::MessageUpdate { .. }
             | EventKind::MessageEnd { .. }
-            | EventKind::ToolExecutionUpdate { .. }
             | EventKind::ToolDecision { .. }
             | EventKind::ApprovalRequested { .. }
             | EventKind::ApprovalResolved { .. }

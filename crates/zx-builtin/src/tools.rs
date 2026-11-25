@@ -44,8 +44,9 @@ pub const BASH: &str = "bash";
 pub const READ_FILE: &str = "read_file";
 /// Name of the built-in tool that replaces text in a file.
 pub const EDIT_FILE: &str = "edit_file";
-/// The key of [`EDIT_FILE`]'s result details that holds the unified patch of its change,
-/// for a front end that shows what changed.
+/// The key of the result details of [`EDIT_FILE`], and of [`WRITE_FILE`] when it replaced a
+/// text file, that holds the unified patch of the change, for a front end that shows what
+/// changed.
 pub const PATCH_DETAIL: &str = "patch";
 /// Name of the built-in tool that creates or overwrites a file.
 pub const WRITE_FILE: &str = "write_file";

@@ -74,6 +74,50 @@ async fn write_file_creates_missing_directories_and_replaces_an_existing_file() 
 }
 
 #[tokio::test]
+async fn write_file_reports_the_patch_of_the_file_it_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plan.md"), "\u{feff}# Plan\r\n- ship on monday\r\n").unwrap();
+
+    let replaced = write(
+        dir.path(),
+        json!({"path": "plan.md", "content": "# Plan\n- ship on friday\n"}),
+    )
+    .await
+    .unwrap();
+    let created = write(dir.path(), json!({"path": "new.md", "content": "# New\n"}))
+        .await
+        .unwrap();
+
+    // The lines as the model reads them: no mark, `\n` endings.
+    let details = replaced.details.unwrap();
+    assert_eq!(
+        details["patch"],
+        "--- plan.md\n+++ plan.md\n@@ -1,2 +1,2 @@\n # Plan\n-- ship on monday\n+- ship on friday\n"
+    );
+    assert_eq!(details["firstChangedLine"], 2);
+    // A new file has no earlier text to compare with.
+    assert!(created.details.unwrap().get("patch").is_none());
+}
+
+#[tokio::test]
+async fn write_file_replaces_a_file_it_cannot_compare_without_a_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("blob"), [0u8, 159, 146, 150]).unwrap();
+    std::fs::write(dir.path().join("same.txt"), "same\n").unwrap();
+
+    let binary = write(dir.path(), json!({"path": "blob", "content": "text now\n"}))
+        .await
+        .unwrap();
+    let unchanged = write(dir.path(), json!({"path": "same.txt", "content": "same\n"}))
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(dir.path().join("blob")).unwrap(), "text now\n");
+    assert!(binary.details.unwrap().get("patch").is_none());
+    assert!(unchanged.details.unwrap().get("patch").is_none());
+}
+
+#[tokio::test]
 async fn write_file_refuses_a_directory() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("sub")).unwrap();

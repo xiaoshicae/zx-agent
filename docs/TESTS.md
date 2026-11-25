@@ -35,7 +35,7 @@
 | `crates/zx-agent/tests/executor.rs` | 工具只经执行器运行命令与读写文件；本机执行器用 bash 运行命令，命令看不到隐藏的变量；执行器为提示词描述自己 |
 | `crates/zx-agent/tests/search_tools.rs` | grep、find、ls |
 | `crates/zx-agent/tests/file_mutations.rs` | 共用队列的两组工具协调同一文件的修改；调用被丢弃后，文件锁到写完为止 |
-| `crates/zx-agent/tests/file_tools.rs` | edit_file 与 write_file；调用被丢弃时文件仍写完整 |
+| `crates/zx-agent/tests/file_tools.rs` | edit_file 与 write_file（覆盖文本文件时报告补丁）；调用被丢弃时文件仍写完整 |
 | `crates/zx-agent/tests/output_store.rs` | 长结果先脱敏再落盘（留下第一页）与分页；不经符号链接读写；过期的结果在会话第一次落盘前删除 |
 | `crates/zx-agent/tests/hooks.rs` | 钩子、审批、策略事件与脱敏；`Agent::new` 拒绝的工具 |
 | `crates/zx-agent/tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
@@ -61,7 +61,7 @@
 | `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、模型请求与追踪导出经 `[proxy]` 并带上代理的凭据、续接的会话在原目录工作、`@文件` 附图、bash 在本机不经询问执行时的 `[bash]` 提示 |
 | `crates/zx-cli/tests/chat_cli.rs` | chat：审批与跳过审批（及提示词中的审批段落）、斜杠命令、摘要、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
-| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求（附要审批的原因）、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片、模型与推理强度的配置项、上下文用量、对目录的调用不带位置 |
+| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求（附要审批的原因）、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片、模型与推理强度的配置项、上下文用量、对目录的调用不带位置、编辑与覆盖写入显示为每处改动的 diff、输出与失败放进代码块、工具的进度显示在调用里 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏（`apiKey` 引用变量或直接写在 config.toml 里都一样）与钩子失败输出 |
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.46 · 2026年11月
+TESTS.md · v0.48 · 2026年11月
