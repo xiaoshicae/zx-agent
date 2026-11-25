@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{ToolCall, ToolDef};
+use zx_agent::ai::{Provider, ToolCall, ToolDef};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
@@ -19,8 +19,8 @@ use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{SessionHeader, SessionName, SessionQuery};
 use zx_app::config::{Builtin, Config};
 use zx_app::{
-    Application, Approvals, Asking, BuiltProvider, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory,
-    ProviderInput, SessionPlace, SessionTools,
+    Application, Approvals, Asking, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
+    SessionPlace, SessionTools,
 };
 use zx_testing::EchoTool;
 use zx_testing::mock_server::{Captured, MockServer, Reply};
@@ -576,12 +576,9 @@ impl ProviderFactory for Scripted {
         "ZX_APPLICATION_TEST_SCRIPTED_KEY"
     }
 
-    fn build(&self, input: ProviderInput<'_>) -> anyhow::Result<BuiltProvider> {
+    fn build(&self, input: ProviderInput<'_>) -> anyhow::Result<Arc<dyn Provider>> {
         let answer = input.options["answer"].as_str().unwrap_or_default();
-        Ok(BuiltProvider {
-            provider: Arc::new(FauxProvider::new(vec![FauxStep::text(answer)])),
-            session_cache_key: false,
-        })
+        Ok(Arc::new(FauxProvider::new(vec![FauxStep::text(answer)])))
     }
 }
 

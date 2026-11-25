@@ -44,7 +44,7 @@ pub use self::agent::{Approvals, ConfiguredAgent};
 pub use self::execution::{ExecutorFactory, ExecutorSession};
 use self::mcp::McpTools;
 pub use self::place::SessionPlace;
-pub use self::provider::{BuiltProvider, ProviderFactory, ProviderInput};
+pub use self::provider::{ProviderFactory, ProviderInput};
 pub use self::settings::NoModel;
 use self::settings::{Settings, checked_secret_files, secret_files};
 use crate::config::{Builtin, Config, Credentials, cost_budget};

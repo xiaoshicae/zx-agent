@@ -66,6 +66,7 @@
 | D49 | 第二轮外部评审（zx-ai、zx-im，2026-11-24，用户同意按建议做）：① 服务端要求的重试等待超过 `max_delay`（60 秒）时不再重试，失败原因写明要求等多久（同 pi），原来截到 60 秒后照样重试；② IM 平台调用的限流等待合计至多 20 秒，短于出站时限 30 秒，要求更久时立即以“被限流”失败，原来等到出站超时、报成“超时”，回答可能送不到；读不出的等待按 1 秒并记日志；③ 传输错误只写服务地址的 origin，路径与查询可能带凭据（与 MCP 一致）；④ OpenAI 兼容服务的 usage 缺某个计数时保留原值，与 Anthropic 一致；⑤ 错误措辞判断用具体短语（如 `connection refused`），不用 `connection`、`temporarily` 这样的单词；⑥ IM 审批只给一次性授权是有意的，不加“本会话允许”：点按钮的审批人不一定是发起人。不做：两个 provider 共用读流程、拆分 `types.rs`、`worker.rs`、`outlet.rs`（纯结构调整，另行）；读个别服务商放在别处的 usage（用到时再加，按 D10 显式开启）；拆 crate、细分 `ImError` 与配置错误、IM 的指标导出（D42）、Responses API（见第 5 节） |
 | D50 | 第三轮外部评审（zx-app、zx-core，2026-11-24，用户同意按建议做）：① 配置文件的表在读取处写出全部字段（规则 05），漏读的键编译报错，不再被静默忽略；② zx-core 的单元测试按 `lib.rs` 的模块清单检查每个模块引用的模块；③ 事件流新增事件类型或字段时 `schemaVersion` 不变，读取方跳过不认识的，删除、改名或改变含义时才提高；④ `SessionStorage::headers` 不给出其他格式的会话，原来 Postgres 给出，格式升级后对话的每条消息都打不开会话，直到 `/new`；⑤ 文档写明只认 `AGENTS.md`（与 pi 的差异）、`context.files` 与自动发现的关系、`Approvals::Person` 的文字是审批请求的理由；D15 写明前提。不做：合并配置的三层表示、`Config` 字段私有化、notices 结构化、追踪导出放进 feature、给未结束的 span 设上限、一次报出全部校验错误、登记部件时就报名字冲突；会话格式迁移（D15）、合并运行层的文件、`Halt` 换写法、裁剪 `Session` 与公开 API、hold 换成具名 trait、为会话自行关闭另发事件 |
 | D51 | 内核不提供打包的接口与斜杠命令（2026-11-25，用户决定）：删除 `extensions::Extension`、`AgentConfig::extensions`、`SlashCommand`、`Session::commands` 与 `run_command`，以及 `Application::add_extension`、`SessionSetup::section_names`。部件只有两处给出：所有会话共用的进 `AgentConfig`（工具、钩子、策略、提示词），属于一个会话的由 `SessionSetup` 给出（工具、钩子、提示词段落），随会话释放，按会话保存的状态放在会话自己的钩子里。一组部件一起交付时由宿主的注册代码完成，不重新编译的扩展走 MCP（第 2 节）。理由：`Extension` 只是几张清单，建 agent 时取一次，运行中的能力（发消息、记状态、改工具集）都在 `HookContext` 上；它的生产实现只有 MCP 服务器，只给工具；它独有的规则（段名、钩子阶段）只约束这一个入口。斜杠命令是界面的输入约定：`run_command` 只按名字查找，再用会话已公开的值拼出上下文，只有 chat 调用，ACP 与 IM 各自解析自己的命令；chat 的 `/help` 与命令解析不再有扩展命令。MCP 服务器的工具改由 `mcp::Server::tools` 给出，进 `AgentConfig::tools`，在请求里排在会话自己的工具（内置工具）之前，原来排在最后。以后要由配置按名字选用包、或在运行时加载时再引入接口，形状是安装函数，放在应用层 |
+| D52 | 会话的缓存键只有 provider 一个开关（2026-11-25，用户同意按建议做）：删除 `AgentConfig::session_cache_key`。内核给每个任务请求带上会话 ID 作为 `Request::cache_key`，发不发由 provider 自己的设置决定（`openai` 的 `provider.promptCacheKey`）；原来内核与 provider 各有一个开关，两者不一致时不报错、只是不发。会话 ID 因此随每个任务请求的配置记入会话（`request_config` 的 `cacheKey`），provider 不发送它时也记；摘要请求不带。`zx_app::ProviderFactory::build` 直接返回 provider，`BuiltProvider` 删除。同时 `Agent::new` 拒绝空的模型名（原来到第一次运行才失败，没有发出请求）与负数或不是有限数的花费预算（不是数的预算永远到不了） |
 
 ## 4. 当前阶段
 
@@ -159,4 +160,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.83 · 2026年11月
+ROADMAP.md · v0.84 · 2026年11月

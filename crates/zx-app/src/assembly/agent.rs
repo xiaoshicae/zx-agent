@@ -29,7 +29,7 @@ use zx_util::env::{Unexpandable, env_value, expand, variables};
 
 use self::approvals::{APPROVALS, Asked};
 use super::execution::ExecutorFactory;
-use super::provider::{BuiltProvider, ProviderInput};
+use super::provider::ProviderInput;
 use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Asking, Overrides, SessionPlace, resolve_cwd};
@@ -124,7 +124,7 @@ impl ConfiguredAgent {
         );
         let models = config.models.clone();
         let executor_factory = executor_factory(app, &permissions)?;
-        let (built, key) = provider(app)?;
+        let (provider, key) = provider(app)?;
         let credentials = credentials(app, key);
         let auto_approve_commands = permissions.allowed_commands();
         let asked = Asked::new(app, &permissions);
@@ -152,7 +152,6 @@ impl ConfiguredAgent {
             policies,
             approvals,
             models,
-            session_cache_key: built.session_cache_key,
             limits,
             retry: config.provider.retry.clone(),
             compaction,
@@ -171,11 +170,11 @@ impl ConfiguredAgent {
                 host_sections: app.host_sections.clone(),
                 host_tools: app.session_tools.clone(),
             })),
-            ..AgentConfig::new(Arc::clone(&built.provider), model)
+            ..AgentConfig::new(Arc::clone(&provider), model)
         };
         Ok(Self {
             agent: Agent::new(role)?,
-            provider: built.provider,
+            provider,
             name,
             auto_approve_commands,
             commands_ask: !matches!(asked, Asked::Nothing),
@@ -358,7 +357,7 @@ fn unasked_as_root(asking: Asking, factory: &dyn ExecutorFactory, user: User) ->
 
 /// The provider of config.toml, built by the factory registered for its `provider.api`, and
 /// the credential of its API key: `provider.apiKey`, or else the provider's own variable.
-fn provider(app: &Application) -> Result<(BuiltProvider, Credentials)> {
+fn provider(app: &Application) -> Result<(Arc<dyn Provider>, Credentials)> {
     let config = &app.settings.config;
     let factory = app
         .providers

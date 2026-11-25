@@ -19,7 +19,7 @@ use crate::hooks::HookChain;
 use crate::policy::{ApprovalMode, PolicyChain};
 use crate::runner::LoopConfig;
 pub use crate::runner::RunLimits;
-use crate::session::{Session, SessionOptions};
+use crate::session::{Session, SessionError, SessionOptions};
 use crate::sync::lock;
 use crate::tools::{Tool, Toolbox};
 use crate::transcript::{MemoryStorage, SessionHeader, SessionList, SessionQuery, SessionStorage, Transcript};
@@ -53,10 +53,6 @@ pub struct AgentConfig {
     /// [`TokenTrigger::BelowWindow`](compaction::TokenTrigger::BelowWindow) trigger of
     /// automatic compaction lies below. Empty by default: costs and windows stay unknown.
     pub models: HashMap<String, ModelMeta>,
-    /// Whether every task request carries its session's ID as the cache key
-    /// ([`crate::ai::Request::cache_key`]), so that a provider keeps one cache for each
-    /// conversation. Off by default.
-    pub session_cache_key: bool,
     /// The bounds of each run; none by default.
     pub limits: RunLimits,
     /// How often and how patiently a failed response is tried again.
@@ -88,7 +84,6 @@ impl AgentConfig {
             policies: PolicyChain::new(),
             approvals: ApprovalMode::Deny,
             models: HashMap::new(),
-            session_cache_key: false,
             limits: RunLimits::default(),
             retry: RetryPolicy::default(),
             compaction: compaction::Config::default(),
@@ -205,9 +200,18 @@ impl Drop for ForgetUnopened<'_> {
 
 impl Agent {
     /// An agent that plays the role `config` describes. Fails for what no session could run
-    /// with: tools that share a name, declare another name or an invalid parameter schema,
-    /// compaction budgets that cannot work, and a summarizer without a name.
+    /// with: a blank model ID, tools that share a name, declare another name or an invalid
+    /// parameter schema, a cost budget that is negative or not finite, compaction budgets
+    /// that cannot work, and a summarizer without a name.
     pub fn new(config: AgentConfig) -> Result<Self> {
+        anyhow::ensure!(!config.model.trim().is_empty(), SessionError::InvalidModel);
+        if let Some(budget) = config.limits.cost_budget {
+            // A budget that is not finite would never be reached.
+            anyhow::ensure!(
+                budget.is_finite() && budget >= 0.0,
+                "the cost budget must be zero or a positive amount, not {budget}"
+            );
+        }
         config.compaction.validate()?;
         if let Some(summarizer) = &config.summarizer {
             anyhow::ensure!(!summarizer.name().trim().is_empty(), "the summarizer has no name");
@@ -277,9 +281,9 @@ impl Agent {
 
     /// Close the session `id`: cancel its run, if it has one, and let go of its place in the
     /// storage and of everything set up for it, at once when idle, else when the cancelled
-    /// run has ended. Handles of the session then return
-    /// [`SessionError::Closed`](crate::session::SessionError::Closed); the session stays in
-    /// the storage, to be opened again. Returns false when no such session is open.
+    /// run has ended. Handles of the session then return [`SessionError::Closed`]; the
+    /// session stays in the storage, to be opened again. Returns false when no such session
+    /// is open.
     pub fn close_session(&self, id: &str) -> bool {
         let closed = {
             let mut sessions = lock(&self.shared.sessions);
@@ -349,7 +353,6 @@ impl Agent {
             policies: config.policies.clone(),
             approvals: config.approvals,
             models: config.models.clone(),
-            cache_key: config.session_cache_key.then(|| header.id.clone()),
             summarizer: config.summarizer.clone(),
             ..LoopConfig::new(config.provider.clone(), config.model.clone())
         })

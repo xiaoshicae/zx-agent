@@ -43,9 +43,6 @@ pub(crate) struct LoopConfig {
     /// What is known about models, by ID: the prices give each response a cost, and the
     /// window of `model` is what a token trigger that follows the window lies below.
     pub(crate) models: HashMap<String, ModelMeta>,
-    /// Sent with every task request as its cache key ([`crate::ai::Request::cache_key`]);
-    /// `None` sends none.
-    pub(crate) cache_key: Option<String>,
     /// Makes the summaries of compactions; without one the kernel asks the model.
     pub(crate) summarizer: Option<Arc<dyn Summarizer>>,
 }
@@ -68,7 +65,6 @@ impl LoopConfig {
             queues: Arc::new(InputQueues::default()),
             active_tools: Arc::new(ActiveTools::default()),
             models: HashMap::new(),
-            cache_key: None,
             summarizer: None,
         }
     }
