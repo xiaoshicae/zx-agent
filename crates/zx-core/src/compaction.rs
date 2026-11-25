@@ -422,7 +422,7 @@ pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
 
 /// The tokens `bytes` of serialized context are estimated to hold when no answer measures
 /// them, such as right after a compaction ([`context_tokens`]).
-fn estimated_tokens(bytes: usize) -> u64 {
+pub(crate) fn estimated_tokens(bytes: usize) -> u64 {
     // A `usize` fits in a `u64` on every target Rust supports; otherwise the count saturates.
     u64::try_from(bytes.div_ceil(BYTES_PER_TOKEN)).unwrap_or(u64::MAX)
 }

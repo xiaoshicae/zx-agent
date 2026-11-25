@@ -39,24 +39,43 @@ enum LastMessage {
     Answered,
 }
 
+/// The sizes of the context above which automatic compaction runs: its bytes, and the tokens
+/// it is estimated to hold; `None` where that measure starts none.
+#[derive(Clone, Copy, Debug)]
+struct Triggers {
+    bytes: Option<usize>,
+    tokens: Option<u64>,
+}
+
 /// Why automatic compaction is paused: a paid summary request failed, and repeating it on
-/// every prompt would keep paying for the same failure. A compaction that succeeds, a manual
-/// one included, or a change of model resumes it. The Runner owns it, so the pause
-/// outlives one prompt and a run whose future is dropped.
+/// every prompt would keep paying for the same failure. It tries once more after the context
+/// has grown by what separates two compactions that succeed, so that a failure that repeats
+/// costs no more often than compacting does. A compaction that succeeds, a manual one
+/// included, or a change of model resumes it. The Runner owns it, so the pause outlives one
+/// prompt and a run whose future is dropped.
 #[derive(Default)]
-pub(super) struct CompactionPause(Option<String>);
+pub(super) struct CompactionPause(Option<Paused>);
+
+/// A pause of automatic compaction.
+struct Paused {
+    /// Why the summary failed.
+    reason: String,
+    /// The triggers automatic compaction waits for instead of its own while paused.
+    resume_above: Triggers,
+}
 
 impl CompactionPause {
-    /// Whether automatic compaction is paused.
-    pub(super) fn is_paused(&self) -> bool {
-        self.0.is_some()
+    /// The triggers automatic compaction waits for while it is paused.
+    fn resume_above(&self) -> Option<Triggers> {
+        self.0.as_ref().map(|paused| paused.resume_above)
     }
 
     /// Why automatic compaction does not run now, when it is paused.
     pub(super) fn refusal(&self) -> Option<String> {
-        let reason = self.0.as_ref()?;
+        let reason = &self.0.as_ref()?.reason;
         Some(format!(
-            "automatic compaction is paused because it failed earlier in this session ({reason})"
+            "automatic compaction is paused because it failed earlier in this session ({reason}); \
+             it is tried again once the context has grown"
         ))
     }
 
@@ -65,16 +84,39 @@ impl CompactionPause {
     }
 
     /// Pause after a failure the summary request was answered for, which asking again would
-    /// pay for again; resume after a success. Other ends change nothing: a request that got
-    /// no answer may succeed the next time.
-    fn note(&mut self, compacted: &Compacted) {
+    /// pay for again, until the context passes `resume_above()`; resume after a success.
+    /// Other ends change nothing: a request that got no answer may succeed the next time.
+    fn note(&mut self, compacted: &Compacted, resume_above: impl FnOnce() -> Triggers) {
         let answered = compacted.reply == SummaryReply::Answered;
-        match &compacted.end {
-            End::Completed { .. } => self.0 = None,
-            End::Failed(error) if answered => self.0 = Some(error.clone()),
-            End::Unrecorded(error) if answered => self.0 = Some(format!("{error:#}")),
-            End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Cancelled(_) => {}
-        }
+        let reason = match &compacted.end {
+            End::Completed { .. } => return self.clear(),
+            End::Failed(error) if answered => error.clone(),
+            End::Unrecorded(error) if answered => format!("{error:#}"),
+            End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Cancelled(_) => return,
+        };
+        self.0 = Some(Paused {
+            reason,
+            resume_above: resume_above(),
+        });
+    }
+}
+
+/// The triggers a paused automatic compaction waits for, from the context of `transcript` as
+/// it is now: each of `triggers`, raised to the context's size now plus the growth between two
+/// compactions that succeed, which keep about `keep_recent_bytes` of the context.
+fn resume_above(transcript: &Transcript, compaction: &compaction::Config, triggers: Triggers) -> Triggers {
+    let kept_bytes = compaction.keep_recent_bytes;
+    // A measure that fails starts no compaction: the context it cannot measure stops the next
+    // run that compacts automatically before its trigger is checked (`prepare_context`).
+    Triggers {
+        bytes: triggers.bytes.and_then(|trigger| {
+            let now = compaction::context_bytes(&transcript.messages()).ok()?;
+            Some(now.saturating_add(trigger.saturating_sub(kept_bytes)))
+        }),
+        tokens: triggers.tokens.and_then(|trigger| {
+            let now = compaction::context_tokens(transcript).ok()?;
+            Some(now.saturating_add(trigger.saturating_sub(compaction::estimated_tokens(kept_bytes))))
+        }),
     }
 }
 
@@ -220,7 +262,10 @@ impl<'a> RunScope<'a> {
             attempt,
         };
         let compacted = compactor.run().await;
-        self.pause.note(&compacted);
+        let triggers = self.triggers();
+        let (transcript, compaction) = (&*self.transcript, self.compaction);
+        self.pause
+            .note(&compacted, || resume_above(transcript, compaction, triggers));
         compacted
     }
 
@@ -288,19 +333,26 @@ impl<'a> RunScope<'a> {
         self.compaction.automatic(&self.config.models, &self.config.model)
     }
 
-    /// Whether the context passes a trigger of automatic compaction: its bytes, or the tokens
-    /// it is estimated to hold, against the token trigger of the model the run asks now. Each
-    /// is measured only when its trigger applies.
-    fn over_trigger(&self) -> anyhow::Result<bool> {
-        if let Some(limit) = self.compaction.trigger_bytes
+    /// The triggers of automatic compaction: the byte trigger, and the token trigger of the
+    /// model the run asks now.
+    fn triggers(&self) -> Triggers {
+        Triggers {
+            bytes: self.compaction.trigger_bytes,
+            tokens: self
+                .compaction
+                .trigger_tokens_for(&self.config.models, &self.config.model),
+        }
+    }
+
+    /// Whether the context passes one of `triggers`: its bytes, or the tokens it is estimated
+    /// to hold. Each is measured only when its trigger applies.
+    fn passes(&self, triggers: Triggers) -> anyhow::Result<bool> {
+        if let Some(limit) = triggers.bytes
             && compaction::context_bytes(&self.transcript.messages())? > limit
         {
             return Ok(true);
         }
-        match self
-            .compaction
-            .trigger_tokens_for(&self.config.models, &self.config.model)
-        {
+        match triggers.tokens {
             Some(limit) => Ok(compaction::context_tokens(self.transcript)? > limit),
             None => Ok(false),
         }
@@ -317,8 +369,8 @@ impl<'a> RunScope<'a> {
     /// context under it, because the summary failed or because there is nothing old enough to
     /// summarize, leaves the context as it was and the run goes on with it: only the model
     /// rejecting the context as too long makes a summary necessary, which recovering from
-    /// that overflow tries. The run does not try again before its later requests, nor, while
-    /// automatic compaction is paused, does any run of the session.
+    /// that overflow tries. The run does not try again before its later requests. While
+    /// automatic compaction is paused, runs wait for the higher triggers of the pause instead.
     ///
     /// An error stops the loop: the context cannot be measured or the compaction was
     /// cancelled ([`Halt::Failed`]), or the session could not record it
@@ -327,10 +379,11 @@ impl<'a> RunScope<'a> {
         if !self.compacts_automatically() {
             return Ok(0);
         }
+        let triggers = self.pause.resume_above().unwrap_or_else(|| self.triggers());
         let over_trigger = self
-            .over_trigger()
+            .passes(triggers)
             .map_err(|error| Halt::Failed(format!("cannot measure context: {error:#}")))?;
-        if !over_trigger || accounting.failed_compactions > 0 || self.pause.is_paused() {
+        if !over_trigger || accounting.failed_compactions > 0 {
             return Ok(0);
         }
         let compacted = self.compact_for_run(accounting).await;

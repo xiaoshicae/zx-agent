@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk, ImageContent, Notice,
-    NoticeSeverity, SessionId, SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallId,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ClientCapabilities, CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock, ContentChunk,
+    ImageContent, Notice, NoticeSeverity, SessionId, SessionNotification, SessionUpdate, TextContent, ToolCall,
+    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::Value;
 use zx_agent::ai::{
@@ -28,13 +28,36 @@ use zx_util::stdio::eprint_line;
 
 use self::shown::{result_content, text_content};
 use super::tool_kind;
-use crate::render::call_label;
+use crate::render::{call_label, visible};
+
+/// The session updates that an agent may send only to a client that advertised them, and
+/// whether this client did.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ClientSupport {
+    /// `session.notices`: notices. Without it, a notice goes to stderr, and one that answers
+    /// the person goes as an agent message.
+    notices: bool,
+    /// `session.compaction`: the state of each compaction. Without it, none is sent.
+    compaction: bool,
+}
+
+impl ClientSupport {
+    /// What the client of `capabilities`, from its `initialize`, advertised.
+    pub(super) fn of(capabilities: &ClientCapabilities) -> Self {
+        let session = capabilities.session.as_ref();
+        Self {
+            notices: session.is_some_and(|session| session.notices.is_some()),
+            compaction: session.is_some_and(|session| session.compaction.is_some()),
+        }
+    }
+}
 
 /// Run events as `session/update` notifications. A turn owns the updates of its run.
 pub(super) struct Updates {
     cx: ConnectionTo<Client>,
     session_id: SessionId,
     cwd: PathBuf,
+    client: ClientSupport,
     /// The answer in progress streamed text, so its end need not repeat it.
     wrote_text: bool,
     /// Arguments of the tool calls in progress, by call ID, for their results.
@@ -42,14 +65,27 @@ pub(super) struct Updates {
 }
 
 impl Updates {
-    pub(super) fn new(cx: ConnectionTo<Client>, session_id: SessionId, cwd: PathBuf) -> Self {
+    /// The updates of session `session_id`, which works in `cwd`, to the client `cx`, which
+    /// presents what `client` says.
+    pub(super) fn new(cx: ConnectionTo<Client>, session_id: SessionId, cwd: PathBuf, client: ClientSupport) -> Self {
         Self {
             cx,
             session_id,
             cwd,
+            client,
             wrote_text: false,
             calls: HashMap::new(),
         }
+    }
+
+    /// The client the updates go to.
+    pub(super) fn cx(&self) -> &ConnectionTo<Client> {
+        &self.cx
+    }
+
+    /// The session the updates are about.
+    pub(super) fn session_id(&self) -> &SessionId {
+        &self.session_id
     }
 
     fn send(&self, update: SessionUpdate) {
@@ -259,24 +295,38 @@ impl Updates {
         );
     }
 
-    /// A notice to the client, described by the error or reason behind it.
+    /// A notice to the client, described by the error or reason behind it; to stderr when the
+    /// client does not present notices.
     fn notice(&self, severity: NoticeSeverity, title: impl Into<String>, description: &str) {
-        self.send(SessionUpdate::Notice(
-            Notice::new(severity, title).description(description.to_string()),
-        ));
+        let title = title.into();
+        if self.client.notices {
+            self.send(SessionUpdate::Notice(
+                Notice::new(severity, title).description(description.to_string()),
+            ));
+        } else {
+            eprint_line(&format!("[acp] {}: {}", visible(&title), visible(description)));
+        }
     }
 
-    /// Tell the client that a compaction it asked for found nothing to summarize.
+    /// Tell the client that a compaction it asked for found nothing to summarize: a notice,
+    /// or an agent message for a client that presents no notices, since it answers the person.
     pub(super) fn nothing_to_compact(&self) {
-        self.notice(
-            NoticeSeverity::Info,
-            "Nothing to summarize",
-            "no part of the conversation is old enough yet",
-        );
+        const TITLE: &str = "Nothing to summarize";
+        const WHY: &str = "no part of the conversation is old enough yet";
+        if self.client.notices {
+            self.notice(NoticeSeverity::Info, TITLE, WHY);
+        } else {
+            self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(&format!(
+                "{TITLE}: {WHY}."
+            ))));
+        }
     }
 
-    /// The state of the compaction that runs as `run_id`.
+    /// The state of the compaction that runs as `run_id`, for a client that presents it.
     fn compaction_update(&self, run_id: &str, status: CompactionStatus, error: Option<&str>) {
+        if !self.client.compaction {
+            return;
+        }
         let update = CompactionUpdate::new(CompactionId::new(run_id), status);
         let update = match error {
             Some(error) => update.error(error.to_string()),

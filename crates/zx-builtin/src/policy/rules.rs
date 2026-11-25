@@ -1,6 +1,8 @@
 //! Rules by tool name, with the auto-approval list that lets a rule's Ask become Allow for the
 //! calls it covers.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
@@ -74,23 +76,25 @@ impl RulePolicy {
             )
     }
 
-    /// The decision on `call`: the strictest rule that matches its tool, with an ask on a bash
-    /// command that the auto-approval list covers turned into an allow.
-    pub fn decision(&self, call: &ToolCall) -> PolicyDecision {
+    /// The decision on `call` in the working directory `cwd`: the strictest rule that matches
+    /// its tool, with an ask on a bash command that the auto-approval list covers turned into
+    /// an allow.
+    pub fn decision(&self, call: &ToolCall, cwd: &Path) -> PolicyDecision {
         match self.rule_decision(&call.name) {
-            PolicyDecision::Ask(reason) => self.unless_auto_approved(call, reason),
+            PolicyDecision::Ask(reason) => self.unless_auto_approved(call, cwd, reason),
             decision @ (PolicyDecision::Allow | PolicyDecision::Deny(_)) => decision,
         }
     }
 
     /// An ask on `call` for `reason`, or an allow where `call` runs a bash command that the
-    /// auto-approval list covers. Where the list names commands but not this one, the reason
-    /// goes on to say what keeps the command asking, for the person who approves it.
-    fn unless_auto_approved(&self, call: &ToolCall, reason: String) -> PolicyDecision {
+    /// auto-approval list covers, a leading `cd` into `cwd` aside. Where the list names
+    /// commands but not this one, the reason goes on to say what keeps the command asking,
+    /// for the person who approves it.
+    fn unless_auto_approved(&self, call: &ToolCall, cwd: &Path, reason: String) -> PolicyDecision {
         let BashCall::Command(command) = bash_call(call) else {
             return PolicyDecision::Ask(reason);
         };
-        match self.auto_approve.uncovered(command) {
+        match self.auto_approve.uncovered(without_cd_into(command, cwd)) {
             None => PolicyDecision::Allow,
             // With no command listed, none was expected to run without asking.
             Some(_) if self.auto_approve.is_empty() => PolicyDecision::Ask(reason),
@@ -101,10 +105,38 @@ impl RulePolicy {
 
 #[async_trait]
 impl ToolPolicy for RulePolicy {
-    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
-        self.decision(call)
+    async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
+        self.decision(call, &ctx.cwd)
     }
 }
+
+/// `command` without a leading `cd` into `cwd` and the `&&` after it, as in
+/// `cd /repo && grep x` run in `/repo`: commands run in `cwd` already, so that `cd` changes
+/// nothing, and models often write it all the same. The directory must be `.` or spell `cwd`
+/// in characters the shell takes as they are; otherwise `command` is returned whole.
+fn without_cd_into<'a>(command: &'a str, cwd: &Path) -> &'a str {
+    let Some(rest) = command.trim_start().strip_prefix("cd ") else {
+        return command;
+    };
+    let Some((directory, rest)) = rest.trim_start().split_once(char::is_whitespace) else {
+        return command;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix("&&") else {
+        return command;
+    };
+    let literal = directory
+        .chars()
+        .all(|c| c.is_alphanumeric() || LITERAL_PATH_PUNCTUATION.contains(&c));
+    if literal && (directory == "." || Path::new(directory) == cwd) {
+        rest.trim_start()
+    } else {
+        command
+    }
+}
+
+/// Punctuation of a path that the shell leaves as it is in a word, besides letters and digits.
+/// `~`, `$`, `*`, quotes, `\` and the rest could make the word name another directory.
+const LITERAL_PATH_PUNCTUATION: &[char] = &['-', '_', '.', '/', ':', '@', '+', ',', '='];
 
 #[cfg(test)]
 mod tests {
@@ -112,6 +144,12 @@ mod tests {
 
     use super::*;
     use crate::policy::test_support::{call, denied};
+
+    const CWD: &str = "/work/repo";
+
+    fn decide(policy: &RulePolicy, call: &ToolCall) -> PolicyDecision {
+        policy.decision(call, Path::new(CWD))
+    }
 
     #[test]
     fn rule_priority_is_deny_then_ask_then_allow_regardless_of_registration() {
@@ -138,11 +176,11 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.decision(&call("bash", json!({"command": "rm x"}))),
+            decide(&policy, &call("bash", json!({"command": "rm x"}))),
             PolicyDecision::Deny("first deny".into())
         );
         assert_eq!(
-            policy.decision(&call("read_file", json!({}))),
+            decide(&policy, &call("read_file", json!({}))),
             PolicyDecision::Ask("second ask".into())
         );
         let policy = RulePolicy::new(vec![
@@ -160,7 +198,7 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.decision(&call("bash", json!({}))),
+            decide(&policy, &call("bash", json!({}))),
             PolicyDecision::Ask("first".into())
         );
     }
@@ -171,8 +209,8 @@ mod tests {
             matcher: RuleMatcher::Tool("read_file".into()),
             decision: PolicyDecision::Allow,
         }]);
-        assert!(denied(&policy.decision(&call("bash", json!({"command": "ls"})))));
-        assert_eq!(policy.decision(&call("read_file", json!({}))), PolicyDecision::Allow);
+        assert!(denied(&decide(&policy, &call("bash", json!({"command": "ls"})))));
+        assert_eq!(decide(&policy, &call("read_file", json!({}))), PolicyDecision::Allow);
     }
 
     #[test]
@@ -189,21 +227,21 @@ mod tests {
         ])
         .auto_approve(AutoApprove::new(["ls"]));
         assert_eq!(
-            policy.decision(&call("bash", json!({"command": "ls -a"}))),
+            decide(&policy, &call("bash", json!({"command": "ls -a"}))),
             PolicyDecision::Allow
         );
         assert_eq!(
-            policy.decision(&call("bash", json!({"command": "rm x"}))),
+            decide(&policy, &call("bash", json!({"command": "rm x"}))),
             PolicyDecision::Ask(
                 "approve bash; not auto-approved: \"rm x\" starts with none of the auto-approved commands".into()
             )
         );
         assert_eq!(
-            policy.decision(&call("bash", json!({}))),
+            decide(&policy, &call("bash", json!({}))),
             PolicyDecision::Ask("approve bash".into())
         );
         assert_eq!(
-            policy.decision(&call("read_file", json!({"command": "ls"}))),
+            decide(&policy, &call("read_file", json!({"command": "ls"}))),
             PolicyDecision::Ask("approve any".into())
         );
     }
@@ -219,13 +257,13 @@ mod tests {
         };
         let quoted = call("bash", json!({"command": "ls 'a b'"}));
         assert_eq!(
-            asking(AutoApprove::new(["ls"])).decision(&quoted),
+            asking(AutoApprove::new(["ls"])).decision(&quoted, Path::new(CWD)),
             PolicyDecision::Ask(
                 "approve bash; not auto-approved: it contains '\\'', which can change what the shell runs".into()
             )
         );
         assert_eq!(
-            asking(AutoApprove::default()).decision(&quoted),
+            asking(AutoApprove::default()).decision(&quoted, Path::new(CWD)),
             PolicyDecision::Ask("approve bash".into())
         );
     }
@@ -239,8 +277,43 @@ mod tests {
             decision: PolicyDecision::Deny("denied".into()),
         }])
         .auto_approve(list.clone());
-        assert_eq!(denied_by_rule.decision(&ls), PolicyDecision::Deny("denied".into()));
+        assert_eq!(
+            denied_by_rule.decision(&ls, Path::new(CWD)),
+            PolicyDecision::Deny("denied".into())
+        );
         let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
-        assert!(denied(&unmatched.decision(&ls)));
+        assert!(denied(&unmatched.decision(&ls, Path::new(CWD))));
+    }
+
+    #[test]
+    fn a_leading_cd_into_the_working_directory_does_not_keep_a_command_asking() {
+        let policy = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::Tool("bash".into()),
+            decision: PolicyDecision::Ask("approve bash".into()),
+        }])
+        .auto_approve(AutoApprove::new(["grep"]));
+        let bash = |command: &str| decide(&policy, &call("bash", json!({ "command": command })));
+        for command in [
+            "cd /work/repo && grep -n x src",
+            "cd /work/repo/ &&grep x",
+            " cd . &&  grep x",
+        ] {
+            assert_eq!(bash(command), PolicyDecision::Allow, "{command}");
+        }
+        // Another directory, one the shell could rewrite, a second command or nothing after
+        // the cd: the command asks as it would have.
+        for command in [
+            "cd /work && grep x",
+            "cd /work/repo/sub && grep x",
+            "cd ~/repo && grep x",
+            "cd $HOME && grep x",
+            "cd /work/repo; grep x",
+            "cd /work/repo && grep x && rm y",
+            "cd /work/repo && rm y",
+            "cd /work/repo &&",
+            "cd /work/repo",
+        ] {
+            assert!(matches!(bash(command), PolicyDecision::Ask(_)), "{command}");
+        }
     }
 }

@@ -4,9 +4,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use agent_client_protocol::Client;
-use agent_client_protocol::v1::ConnectionTo;
-use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, SessionId, StopReason};
+use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, StopReason};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::{Image, Message};
@@ -30,9 +28,8 @@ pub(super) enum Running {
 /// One turn of a session: the conversation, and the client it reports to and asks.
 pub(super) struct Turn {
     session: Session,
+    /// The client and the session it knows, with what the client presents.
     updates: Updates,
-    cx: ConnectionTo<Client>,
-    id: SessionId,
     /// Cancelled when the process is told to stop.
     stop: CancellationToken,
     /// The models config.toml lists, for the context window of each answer's model.
@@ -40,21 +37,12 @@ pub(super) struct Turn {
 }
 
 impl Turn {
-    /// The turn of `session`, reported to the client `cx`, which knows the session as `id`;
-    /// `stop` is cancelled when the process is told to stop, and `models` gives the context
-    /// windows.
-    pub(super) fn new(
-        session: Session,
-        cx: ConnectionTo<Client>,
-        id: SessionId,
-        stop: CancellationToken,
-        models: Arc<Models>,
-    ) -> Self {
+    /// The turn of `session`, reported to the client through `updates`; `stop` is cancelled
+    /// when the process is told to stop, and `models` gives the context windows.
+    pub(super) fn new(session: Session, updates: Updates, stop: CancellationToken, models: Arc<Models>) -> Self {
         Self {
-            updates: Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf()),
             session,
-            cx,
-            id,
+            updates,
             stop,
             models,
         }
@@ -79,7 +67,12 @@ impl Turn {
                 compaction_stop(&report)
             }
         };
-        usage::of_session(&self.cx, &self.id, &self.session, &self.models);
+        usage::of_session(
+            self.updates.cx(),
+            self.updates.session_id(),
+            &self.session,
+            &self.models,
+        );
         Ok(PromptResponse::new(reason?))
     }
 
@@ -94,7 +87,7 @@ impl Turn {
                 ..
             } = &event.event
             {
-                usage::after_answer(&self.cx, &self.id, answer, &self.models);
+                usage::after_answer(self.updates.cx(), self.updates.session_id(), answer, &self.models);
             }
             if let EventKind::ApprovalRequested {
                 approval_id,
@@ -111,7 +104,7 @@ impl Turn {
                     args,
                     reason,
                 };
-                permissions::ask(&self.cx, &self.id, &self.session, request)?;
+                permissions::ask(self.updates.cx(), self.updates.session_id(), &self.session, request)?;
             }
         }
         Ok(())

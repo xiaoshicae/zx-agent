@@ -28,7 +28,7 @@
 | `crates/zx-agent/tests/session_fork.rs` | 复制分支成新会话 |
 | `crates/zx-agent/tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：`Agent` 在其中创建会话、按标签列出、由另一个 `Agent` 续接，以及唯一键拦住第二个写入者 |
 | `crates/zx-agent/tests/session_compaction.rs` | 存储中的摘要记录：会话文件拒绝读不了的记录且不改动文件；从摘要留下的会话续跑，上下文计划结束了摘要仍修改它点名的消息。摘要记录本身与投影在 `zx-core` 的单元测试 |
-| `crates/zx-agent/tests/compaction.rs` | 宿主的手动与自动摘要：计费、抄错的引用（事实另有读过的引用时去掉它）、失败（自动摘要失败后运行照常继续，同一次运行不再尝试，答了却不可用的不再付费）、上限、超时与取消 |
+| `crates/zx-agent/tests/compaction.rs` | 宿主的手动与自动摘要：计费、抄错的引用（事实另有读过的引用时去掉它）、失败（自动摘要失败后运行照常继续，同一次运行不再尝试，答了却不可用的暂停到上下文再增长一段才再试）、上限、超时与取消 |
 | `crates/zx-agent/tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
 | `crates/zx-agent/tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
 | `crates/zx-agent/tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对；分支配置索引的校验在 `zx-core` 的单元测试 |
@@ -61,7 +61,7 @@
 | `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、模型请求与追踪导出经 `[proxy]` 并带上代理的凭据、续接的会话在原目录工作、`@文件` 附图、bash 在本机不经询问执行时的 `[bash]` 提示 |
 | `crates/zx-cli/tests/chat_cli.rs` | chat：审批与跳过审批（及提示词中的审批段落）、斜杠命令、摘要、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
-| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求（附要审批的原因）、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片、模型与推理强度的配置项、上下文用量、对目录的调用不带位置、编辑与覆盖写入显示为每处改动的 diff、输出与失败放进代码块、工具的进度显示在调用里 |
+| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求（附要审批的原因）、取消、会话加载（摘要之后仍回放整段对话）、续接、列出与关闭、`/name` 与 `/compact`、终止信号、提问与工具结果中的图片、模型与推理强度的配置项、上下文用量、对目录的调用不带位置、编辑与覆盖写入显示为每处改动的 diff、输出与失败放进代码块、工具的进度显示在调用里、不向没有声明的客户端发通知与压缩状态 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏（`apiKey` 引用变量或直接写在 config.toml 里都一样）与钩子失败输出 |
@@ -90,4 +90,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.48 · 2026年11月
+TESTS.md · v0.49 · 2026年11月

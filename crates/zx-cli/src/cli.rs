@@ -203,10 +203,11 @@ pub(crate) struct BudgetArgs {
 /// which says so on stderr; zx-im has no such option.
 #[derive(Args)]
 pub(crate) struct ApprovalArgs {
-    /// Run bash commands and the tools of MCP servers without asking, wherever commands run.
-    /// Only the tools in the agent's permissions.ask still ask, and its deny rules still
-    /// apply. Refused as root unless execution in config.toml isolates commands. Whatever the
-    /// model reads can then run commands as this user: use it in a sandbox.
+    /// Run every tool call without asking, wherever commands run: bash commands, the tools of
+    /// MCP servers and those the agent's permissions.ask lists. Its deny rules and the denied
+    /// commands still apply. Refused as root unless execution in config.toml isolates
+    /// commands. Whatever the model reads can then run commands as this user: use it in a
+    /// sandbox.
     #[arg(long)]
     pub(crate) dangerously_skip_approvals: bool,
 }

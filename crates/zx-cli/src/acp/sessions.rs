@@ -14,7 +14,7 @@ use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_app::{ConfiguredAgent, resolve_cwd};
 use zx_util::stdio::eprint_line;
 
-use super::updates::Updates;
+use super::updates::{ClientSupport, Updates};
 use crate::application::open_session;
 use crate::render::{preview_text, utc_time, visible};
 
@@ -74,11 +74,12 @@ async fn locate(configured: &ConfiguredAgent, id: &SessionId, cwd: &Path) -> Res
 pub(super) async fn load(
     configured: &ConfiguredAgent,
     cx: &ConnectionTo<Client>,
+    client: ClientSupport,
     request: &LoadSessionRequest,
 ) -> Result<Session> {
     let id = &request.session_id;
     let session = locate(configured, id, &request.cwd).await?;
-    let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
+    let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf(), client);
     session
         .with_transcript(|transcript| updates.replay(transcript))
         .with_context(|| format!("cannot replay session {}", id.0))?;
