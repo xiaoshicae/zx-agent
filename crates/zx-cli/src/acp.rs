@@ -33,7 +33,7 @@ mod turn;
 mod updates;
 mod usage;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
@@ -53,11 +53,13 @@ use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
 use zx_app::{Approvals, ConfiguredAgent, SessionPlace};
+use zx_util::stdio::eprint_line;
 
 use self::commands::Command;
 use self::models::Models;
 use self::options::Change;
 use self::turn::{Prompt, Running, Turn};
+use self::updates::{ClientSupport, Updates};
 use crate::application::connect;
 use crate::cli::{self, AcpArgs};
 use crate::process::{EXIT_COMPLETED, cancel_on_signals, with_telemetry};
@@ -75,9 +77,18 @@ struct Host {
     /// the stop drops the one sender that outlives the turns, and has waited for them once
     /// the channel is closed.
     turns: mpsc::WeakSender<()>,
+    /// What the client advertised in `initialize` that the agent may only send to a client
+    /// that did.
+    client: OnceLock<ClientSupport>,
 }
 
 impl Host {
+    /// What the client presents: what it advertised, or nothing before `initialize`.
+    fn client(&self) -> ClientSupport {
+        // Before `initialize` the client advertised nothing.
+        self.client.get().copied().unwrap_or_default()
+    }
+
     /// The session `id` when the client has it open.
     fn session(&self, id: &SessionId) -> Option<Session> {
         self.configured.agent().session(&id.0)
@@ -108,6 +119,13 @@ impl Host {
         request: &InitializeRequest,
         responder: Responder<InitializeResponse, V1>,
     ) -> Result<(), Error> {
+        if self
+            .client
+            .set(ClientSupport::of(&request.client_capabilities))
+            .is_err()
+        {
+            eprint_line("[acp] a second initialize: the client capabilities of the first stay");
+        }
         responder.respond(
             InitializeResponse::new(request.protocol_version)
                 .agent_capabilities(agent_capabilities(self.keeps_files()))
@@ -135,7 +153,7 @@ impl Host {
         responder: Responder<LoadSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let result = sessions::load(&self.configured, cx, request).await;
+        let result = sessions::load(&self.configured, cx, self.client(), request).await;
         opened(responder, cx, &self.models, result, |_, options| {
             LoadSessionResponse::new().config_options(options)
         })
@@ -217,13 +235,8 @@ impl Host {
             Ok(running) => running,
             Err(error) => return responder.respond_with_error(protocol_error(error.into())),
         };
-        let turn = Turn::new(
-            session,
-            cx.clone(),
-            session_id,
-            self.stop.clone(),
-            Arc::clone(&self.models),
-        );
+        let updates = Updates::new(cx.clone(), session_id, session.cwd().to_path_buf(), self.client());
+        let turn = Turn::new(session, updates, self.stop.clone(), Arc::clone(&self.models));
         // None once the stop has waited for the turns: this one then ends with the process.
         let in_progress = self.turns.upgrade();
         cx.spawn(async move {
@@ -314,6 +327,7 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
         models,
         stop: stop.clone(),
         turns: turns.downgrade(),
+        client: OnceLock::new(),
     }));
     tokio::pin!(connection);
     tokio::select! {

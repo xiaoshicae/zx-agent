@@ -580,6 +580,42 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
 }
 
 #[tokio::test]
+async fn a_paused_automatic_summary_is_tried_again_once_the_context_has_grown() {
+    let (seed, old) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        // The automatic attempt fails and pauses automatic summaries; the run goes on.
+        FauxStep::text("not JSON"),
+        FauxStep::text("first answer"),
+        // Less than what one compaction frees: still paused. A long answer then grows the
+        // context by more than that.
+        FauxStep::text("y".repeat(3000)),
+        // The next automatic attempt is made and succeeds.
+        FauxStep::text(summary_json(&old)),
+        FauxStep::text("last answer"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: seed.into(),
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build()
+    .await;
+    assert_eq!(runner.run("continue").await.final_text, "first answer");
+    let paused = runner.run("next").await;
+    assert_eq!(paused.outcome, RunOutcome::Completed, "{paused:?}");
+    assert_eq!(paused.model_requests, 1, "the failed summary is not paid for again yet");
+
+    let resumed = runner.run("again").await;
+
+    assert_eq!(resumed.final_text, "last answer", "{resumed:?}");
+    assert_eq!(resumed.model_requests, 2, "a summary, then the task");
+    assert!(runner.transcript().latest_compaction().is_some());
+}
+
+#[tokio::test]
 async fn an_input_over_the_trigger_with_nothing_to_summarize_goes_to_the_model_whole() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answered")]));
     let (runner, _) = RunnerSetup {

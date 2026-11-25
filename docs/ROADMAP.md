@@ -44,7 +44,7 @@
 | D27 | IM 的路由只分派消息；运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话留给下一次运行；第一次为对话建会话前先读它之前的消息：别人发起的线程读线程，在频道里直接 @ 读频道（D16）。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D28 | 宿主自己的会话索引从会话头部建立（`SessionStorage::headers`），JSONL 存储不缓存；IM 服务启动时这样建立对话到会话的索引，此后只由本进程维护。宿主的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
 | D29 | 内核只留机制：内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，会话文件（JSONL）的存储在 zx-builtin；只有一个程序或一种存储用的代码也不在内核（如按会话 ID 前缀找会话在 chat）；内核的文档与报错用 Rust 字段名，不提命令行参数与 agent 文件的键；只有内核写的审计记录（请求、摘要、工具调用的开始）没有公开的写入方法。应用层 `zx-app` 只放各程序都要的配置装配与收尾，不打印，要说的作为返回值交给宿主，措辞不提子命令与命令行参数；只有一个程序用的行为留在那个程序里。用法见 [LIBRARY.md](LIBRARY.md#与命令行共用配置) |
-| D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停；随上下文窗口的 token 阈值按会话当时的模型取窗口（同 pi 的 `shouldCompact`）。IM 的每个平台是 `zx-im` 的 `platform` 下的同层模块，互不引用，带着自己的 `im.toml` 段与由段建 channel 的 `PlatformFactory`（D34）；飞书在默认开启的 feature `feishu` 后（关掉时见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)） |
+| D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停；暂停到上下文再增长两次成功摘要之间的那段时再试一次（2026-11-25，原为暂停到会话结束），同一个失败付费的频率不超过正常摘要；随上下文窗口的 token 阈值按会话当时的模型取窗口（同 pi 的 `shouldCompact`）。IM 的每个平台是 `zx-im` 的 `platform` 下的同层模块，互不引用，带着自己的 `im.toml` 段与由段建 channel 的 `PlatformFactory`（D34）；飞书在默认开启的 feature `feishu` 后（关掉时见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)） |
 | D31 | 模型请求的失败由 provider 归类：模型层 `zx-ai` 只定义中立的种类（`ProviderErrorKind`），重试与上下文溢出恢复只看种类，没有种类的失败不重试；HTTP 状态、错误码、`finish_reason` 与措辞属于哪一类，是协议与厂商的知识，只写在 provider 的 crate 里。种类与处理见 [REFERENCE.md](REFERENCE.md#模型请求失败) |
 | D32 | `zx-builtin` 与内核同一规则（D29）：设置类型自己校验，文档与报错用自己的字段名与语义，`zx-app` 把错误换成 `config.toml` 的键，并给出程序的默认值（如落盘目录）；执行器自己决定 shell，并为提示词描述自己；命令策略的程序清单宿主可以追加，续写的提示语可以替换，都不新增配置键。用法见 [LIBRARY.md](LIBRARY.md) |
 | D33 | IM 服务收到的每条消息先写入 backlog（`zx-im` 的 trait `Backlog`；程序用会话目录下的文件实现，不新增依赖），再确认投递，写入会话、已回复或有意丢弃之后才删除；去重也只由它做，处理完的消息仍被认出一段时间（文件实现为 24 小时）。消息的凭证与配额一起作为输入的 hold 交给内核（D28）：`Session::send` 也接收带 hold 的输入，写入会话后才释放。停止时还没写入会话的消息留到下次启动，不再回复；启动时先按到达顺序处理它们。崩溃或停止恰好落在写入会话与删除记录之间时重复处理一次，先接受，不为此改会话格式。多副本时 backlog 与会话存储、对话归属、状态记录一起换成数据库实现。行为见 [REFERENCE.md](REFERENCE.md#im-服务) |
@@ -158,4 +158,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.81 · 2026年11月
+ROADMAP.md · v0.82 · 2026年11月

@@ -156,10 +156,20 @@ impl Acp {
         self.write(json!({"jsonrpc": "2.0", "id": id, "result": result})).await;
     }
 
-    /// Initialize; the response, with the agent's capabilities.
+    /// Initialize as a client that presents notices and compactions, as Zed does; the
+    /// response, with the agent's capabilities.
     async fn initialize(&mut self) -> Value {
+        self.initialize_as(json!({"session": {"notices": {}, "compaction": {}}}))
+            .await
+    }
+
+    /// Initialize as a client with `capabilities`; the response.
+    async fn initialize_as(&mut self, capabilities: Value) -> Value {
         let initialized = self
-            .request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}}))
+            .request(
+                "initialize",
+                json!({"protocolVersion": 1, "clientCapabilities": capabilities}),
+            )
             .await;
         assert_eq!(initialized["result"]["agentInfo"]["name"], "zx-agent", "{initialized}");
         initialized
@@ -1258,6 +1268,52 @@ async fn the_compact_command_says_when_nothing_is_old_enough_to_summarize() {
     assert!(acp.inbox.is_empty(), "{:?}", acp.inbox);
     assert!(server.requests().is_empty());
     acp.finish().await;
+}
+
+#[tokio::test]
+async fn a_client_that_presents_no_notices_or_compactions_is_sent_none() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    write_agent(
+        &home.path().join(".zx-agent"),
+        "assistant",
+        "[compaction]\nkeepRecentBytes = 1",
+    );
+    let server = MockServer::start(vec![Reply::text("first answer"), Reply::text("second answer")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &["--tools", ""], Some(home.path())).await;
+    first.initialize_as(json!({})).await;
+    let id = first.create(&cwd).await;
+
+    // Nothing is old enough yet: the answer to the command is an agent message.
+    let response = first.prompt(&id, "/compact").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates = first.replayed();
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk", "{updates:?}");
+    assert_eq!(
+        text_of(&updates[0]),
+        "Nothing to summarize: no part of the conversation is old enough yet."
+    );
+    for prompt in ["one", "two"] {
+        let response = first.prompt(&id, prompt).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    }
+    first.finish().await;
+
+    // A compaction that runs sends no compaction updates.
+    let cited = prompt_record(&session_dir(home.path(), &cwd), "one");
+    let server = MockServer::start(vec![Reply::text(&summary_json(&cited))]).await;
+    let mut second = Acp::start_in(&server, &cwd, &["--tools", ""], Some(home.path())).await;
+    second.initialize_as(json!({})).await;
+    let resumed = second.resume(&id, &cwd).await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    let response = second.prompt(&id, "/compact").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(server.requests().len(), 1, "the summary ran");
+    let updates = second.replayed();
+    assert!(updates.is_empty(), "{updates:?}");
+    second.finish().await;
 }
 
 #[tokio::test]
