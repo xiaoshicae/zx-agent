@@ -165,7 +165,8 @@ fn secret_files_at(path: &Path) -> Result<Vec<PathBuf>, String> {
 
 #[async_trait]
 impl Hook for RedactSecrets {
-    /// After every extension has changed the output, so none can bring a secret back.
+    /// After every hook of the default stage has changed the output, so none of them can
+    /// bring a secret back.
     fn stage(&self) -> HookStage {
         HookStage::Redaction
     }

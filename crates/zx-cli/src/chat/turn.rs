@@ -22,7 +22,7 @@ use super::info::help;
 use super::input::{self, Line};
 use super::output::Output;
 use super::term::Tone;
-use super::{APPROVAL_MENU, Flow, InputMode, rejected, run_extension_command};
+use super::{APPROVAL_MENU, Flow, InputMode, rejected};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
 use crate::render::{describe_arguments, describe_call, visible};
 
@@ -35,14 +35,10 @@ pub(super) struct TurnIo<'a> {
     pub(super) signals: &'a mut Signals,
     pub(super) mode: InputMode,
     pub(super) output: &'a Output,
-    /// The commands extensions registered, for lines typed during the task.
-    pub(super) commands: &'a [(String, String)],
 }
 
 pub(super) enum Operation {
     Prompt(String),
-    /// A message an extension's command sends, as a prompt.
-    Message(Input),
     Continue,
     Compact,
 }
@@ -58,7 +54,6 @@ impl Running {
     fn start(session: &Session, operation: Operation) -> Result<Self, SessionError> {
         Ok(match operation {
             Operation::Prompt(text) => Self::Task(session.send(text)?),
-            Operation::Message(message) => Self::Task(session.send(message)?),
             Operation::Continue => Self::Task(session.continue_run()?),
             Operation::Compact => Self::Compaction(session.compact()?),
         })
@@ -180,7 +175,7 @@ pub(super) async fn drive_turn(session: &Session, operation: Operation, io: &mut
         pending: Pending::None,
         typed: match &operation {
             Operation::Compact => Typed::AfterCompaction(None),
-            Operation::Prompt(_) | Operation::Message(_) | Operation::Continue => Typed::Steering,
+            Operation::Prompt(_) | Operation::Continue => Typed::Steering,
         },
     };
     let mut run = Running::start(session, operation)?;
@@ -327,7 +322,7 @@ async fn typed(
                     answer_approval(session, io.output, &mut state.pending, text);
                     return Ok(None);
                 }
-                commands::parse(text, io.commands)
+                commands::parse(text)
             }
             Line::Rejected(reason) => {
                 rejected(io.output, &reason);
@@ -388,15 +383,7 @@ async fn busy(session: &Session, io: &TurnIo<'_>, state: &mut TurnState, command
             Tone::Warn,
             "[chat] wait for the current task or cancel it before /status",
         ),
-        Command::Help => help(output, io.commands),
-        // Extension commands run at once, as in pi; a message they send waits for the next
-        // request as steering input.
-        Command::Extension { name, args } => {
-            if let Some(message) = run_extension_command(session, &name, &args, output).await {
-                session.queues().steer(message);
-                output.line(Tone::Dim, "[chat] the command's message is queued as steering input");
-            }
-        }
+        Command::Help => help(output),
         Command::Compact => output.line(
             Tone::Warn,
             "[chat] session is busy; wait for the current operation or cancel it before /compact",

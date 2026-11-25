@@ -139,7 +139,7 @@ pub(super) fn status(output: &Output, model: &str, about: &About) {
     );
 }
 
-pub(super) fn help(output: &Output, commands: &[(String, String)]) {
+pub(super) fn help(output: &Output) {
     let quit = format!(
         "                      twice within {} seconds while idle: exit",
         QUIT_INTERRUPT_WINDOW.as_secs()
@@ -161,12 +161,6 @@ pub(super) fn help(output: &Output, commands: &[(String, String)]) {
         &approvals,
     ] {
         output.line(Tone::Plain, line);
-    }
-    for (name, description) in commands {
-        output.line(
-            Tone::Plain,
-            &format!("/{:<21} {} (extension command)", visible(name), visible(description)),
-        );
     }
 }
 

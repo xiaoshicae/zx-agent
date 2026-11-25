@@ -6,8 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use zx_agent::ai::Proxy;
 use zx_agent::builtin::mcp::{Server, ServerConfig};
-use zx_agent::extensions::Extension;
-use zx_agent::tools::Effects;
+use zx_agent::tools::{Effects, Tool};
 
 use super::settings::Settings;
 use crate::config::{Credentials, McpServer};
@@ -16,9 +15,10 @@ use crate::config::{Credentials, McpServer};
 /// opens; none without `[[mcp]]`.
 #[derive(Default)]
 pub(super) struct McpTools {
-    pub(super) servers: Vec<Arc<dyn Extension>>,
-    /// The names the model calls the servers' tools by; which of them ask depends on the
-    /// agent, so each agent decides when it is built.
+    /// The servers' tools, offered to every agent, in the order of `[[mcp]]`.
+    pub(super) tools: Vec<Arc<dyn Tool>>,
+    /// The names the model calls them by; which of them ask depends on the agent, so each
+    /// agent decides when it is built.
     pub(super) names: Vec<String>,
     /// Those of `names` that a server trusted with `trustReadOnly` says only read: they ask
     /// only where the agent's `permissions.ask` lists them.
@@ -73,7 +73,7 @@ impl McpTools {
             ));
             tools.names.extend(server.tool_names().iter().cloned());
             tools.read_only.extend(read_only);
-            tools.servers.push(Arc::new(server));
+            tools.tools.extend(server.tools());
         }
         Ok((tools, notices))
     }

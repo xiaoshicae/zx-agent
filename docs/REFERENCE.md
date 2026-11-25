@@ -53,14 +53,13 @@
 
 | 输入 | 行为 |
 |---|---|
-| `/help` | 查看命令，含扩展注册的命令 |
+| `/help` | 查看命令 |
 | `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
 | `/reasoning`、`/reasoning <级别>` | 查看或空闲时修改推理强度（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`；`default` 交给服务端） |
 | `/new` | 开新会话，清空历史和授权，重新加载 agent 与项目说明；运行中先取消任务。旧会话文件保留 |
 | `/compact` | 请模型压缩旧上下文，原始记录保留；没有可压缩范围时不发请求 |
 | `/continue` | 不加新输入，让模型接着回答，规则同 `run --continue` |
 | `/status` | 模型、agent、会话文件、工作目录，以及本会话累计的轮数、请求数与 token 用量 |
-| `/<扩展命令> [参数]` | 扩展注册的命令，内置命令优先；运行中也立即执行 |
 | `/quit` | 取消当前任务并退出 |
 | Ctrl+C | 取消当前任务或审批，保留会话；空闲时 2 秒内连按两次退出 |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的任务先完成；SIGTERM 取消并退出 |
@@ -142,6 +141,7 @@ IM 服务是程序 `zx-im`，命令见 [README](../README.md#im-服务)，`im.to
 | 会话名称 | 不能清除；chat 没有起名命令；客户端改标题的 `session/set_title` 在协议中仍不稳定，未实现 |
 | 队列取法 | 两个队列共用一种取法（`QueueMode`），默认 `All`；pi 两个队列各设一种，默认 `one-at-a-time` |
 | 扩展的消息与状态 | 运行中排队，下一回合开始或运行结束时写入；消息只有文本；请求只声明当前活跃的工具 |
+| 扩展的打包与命令 | 没有打包的接口，也没有扩展注册的命令：工具、策略与钩子由宿主直接注册，不重新编译的扩展走 MCP（pi 的扩展是运行时加载的 TypeScript 模块，经 `registerTool`、`registerCommand` 等注册） |
 | 环境信息 | 会话打开时写入系统提示词 |
 | 项目上下文文件 | 每层目录只认 `AGENTS.md`；pi 每层取 `AGENTS.override.md`、`AGENTS.md`、`CLAUDE.md` 等候选名中找到的第一个。其他文件由 agent 的 `context.files` 列出 |
 | 续接会话的目录 | 记录的目录已不存在时报错（见 `--cwd`），不询问是否改在当前目录继续 |
@@ -247,4 +247,4 @@ run、chat、acp 与 zx-im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（�
 
 ---
 
-REFERENCE.md · v0.46 · 2026年11月
+REFERENCE.md · v0.47 · 2026年11月

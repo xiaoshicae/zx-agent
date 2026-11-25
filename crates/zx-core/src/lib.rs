@@ -1,7 +1,7 @@
 //! Kernel of zx-agent: the agent and its sessions, the runner and the step loop, and the
 //! interfaces the kernel defines for everything scenario-specific (tools, policies, hooks,
-//! extensions, summarizers, session storage, session setup). The `zx-agent` crate re-exports
-//! it whole, module by module.
+//! summarizers, session storage, session setup). The `zx-agent` crate re-exports it whole,
+//! module by module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
 //! it, named in brackets where it uses any; the crate's tests check the source against this
@@ -21,8 +21,6 @@
 //!   the conversation, which the kernel asks the model for or the host's summarizer makes
 //! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
 //!   loop, and the chain that runs them
-//! - [`extensions`] (tools, input, policy, hooks): tools, policies, hooks, prompt sections and
-//!   slash commands registered together
 //! - `runner` (all of the above): one run at a time: the step loop of each attempt, the
 //!   retries, limits, summaries and recovery around it, and the delivery of its events (pi:
 //!   packages/agent)
@@ -90,8 +88,8 @@
 //!
 //! A host makes an [`Agent`] from an [`AgentConfig`], asks it for a [`Session`], and reads
 //! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],
-//! [`policy::ToolPolicy`], [`hooks::Hook`], [`extensions::Extension`],
-//! [`compaction::Summarizer`], [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
+//! [`policy::ToolPolicy`], [`hooks::Hook`], [`compaction::Summarizer`],
+//! [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
 //! [`transcript::SessionLog`]; approvals are answered through the session. The storage in
 //! memory ships with the kernel; the storage of session files, the built-in tools,
 //! executors, policies and hooks live in the `zx-builtin` crate, providers in crates such as
@@ -104,7 +102,6 @@ use zx_util::{sync, text};
 pub mod agent;
 pub mod compaction;
 pub mod events;
-pub mod extensions;
 mod guard;
 pub mod hooks;
 pub mod input;

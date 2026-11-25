@@ -17,7 +17,7 @@
 | `zx-ai-openai` | OpenAI 兼容的 provider；模型层里依赖 reqwest 的只有两个 provider 与它们共用的 `zx-ai-http`，都不依赖内核 |
 | `zx-ai-anthropic` | Anthropic Messages API 的 provider；与 `zx-ai-openai` 互不引用 |
 | `zx-ai-http` | 两个 provider 共用的 HTTP 部分：设置检查、取 key 与发请求、按限额读事件流、请求失败（`Failure`、Retry-After）；程序的其他 HTTP 客户端（MCP、IM 平台、追踪导出）也用它的 `client` 经代理发送；不属于 API。协议的写法与失败的归类留在各 provider |
-| `zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
+| `zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子的接口 |
 | `zx-builtin` | 随 SDK 附带的实现（库中名为 `zx_agent::builtin`）：内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP、图片进入会话前的适配 |
 | `zx-agent` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-ai-anthropic`、`zx-builtin` 再导出成一个库，没有自己的代码 |
 | `zx-app` | 应用层，命令行、IM 服务与其他宿主（如 Web 服务）共用：`config.toml` 与 agent 文件（`config`）、由它们装配 agent 的 `Application`、追踪导出（`otel`）、进程收尾（`shutdown`）。不知道命令行、终端与协议（ACP、IM 平台），不打印，要说的返回给宿主 |
@@ -31,6 +31,7 @@
 - **环境、角色与项目分开**（D17）：主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）的 `config.toml` 决定环境，agent 文件决定角色，命令行只选模型、工作目录、工具集、预算、会话与输出，不设环境与权限，唯一的例外是让一次运行跳过审批的 `--dangerously-skip-approvals`（D47）。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
 - **`Agent` 是唯一入口**（D21）：`AgentConfig` 是所有会话共用的角色，属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 给出。`Session` 的 `send`、`continue_run`、`compact` 返回 `Run`，读它才推进；事件只从 `Run` 读出，观察所有运行用 `Hook::on_event`。
 - **审批由内核等待，不是接口**：策略询问时，默认（`ApprovalMode::Deny`）立即拒绝，`Wait` 时调用在内核里等宿主经 `Session::resolve_approval` 回答；审批不写入会话。
+- **没有打包的接口**（D51）：部件只有两处给出，所有会话共用的进 `AgentConfig`，属于一个会话的由 `SessionSetup` 给出、随会话释放；一组部件一起交付时由宿主的注册代码完成，不重新编译的扩展走 MCP。斜杠命令属于各入口，内核不保存。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore`、`Backlog` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
 - **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和命令行；同层模块互不引用（规则 08）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13）：`chat` 只作应急与脚本化入口，不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
@@ -92,10 +93,9 @@
 | provider | 实现 `ai::Provider`，遵守不变量 1；每个失败归入 `ProviderErrorKind`，服务的状态、错误码与措辞属于哪一种只写在 provider 的 crate 里；解析与归类写单元测试；走 HTTP 的用 `zx-ai-http` 的共用件。由 `config.toml` 的 `provider.api` 按名字选用的，再实现 `zx_app::ProviderFactory`，经 `Application::register_provider` 注册 | `crates/zx-agent/tests/openai_mock.rs`、`anthropic_mock.rs`；`crates/zx-app/src/assembly/provider.rs` |
 | 工具 | 实现 `tools::Tool`，遵守不变量 8：参数是带 `#[serde(deny_unknown_fields)]` 的结构体，不改状态的 `effects()` 返回 `Effects::ReadOnly`。共用的进 `AgentConfig::tools`，绑定会话目录或执行环境的由 `SessionSetup` 给出 | `crates/zx-builtin/src/tools/` |
 | 策略 | 实现 `policy::ToolPolicy`，经 `PolicyChain::push` 进 `AgentConfig::policies`；无法判断时返回 `Deny`，所有策略取最严的结论。钩子不做放行判断 | `crates/zx-builtin/src/policy/` |
-| 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。经 `HookChain::push(名字, Arc)` 注册；共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `crates/zx-agent/tests/hook_contract.rs` |
-| 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-builtin/src/mcp.rs` |
+| 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`。经 `HookChain::push(名字, Arc)` 注册；共用的进 `AgentConfig::hooks`，单个会话的（含按会话保存状态的）进 `SessionParts::hooks` | `crates/zx-agent/tests/hook_contract.rs` |
 | 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 排序与截断 | `crates/zx-core/src/transcript/memory.rs`；只换写入方式时 `crates/zx-agent/tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer` | `crates/zx-agent/tests/summarizer.rs` |
-| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
-| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，自己的工具、钩子、策略、扩展与摘要器经它的 `add_*`、`set_*` 加入，由配置按名字选用的 provider 与执行环境经 `register_provider`、`register_executor` 注册（D34），信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
+| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-app/src/assembly/setup.rs` |
+| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent，自己的工具、钩子、策略与摘要器经它的 `add_*`、`set_*` 加入，由配置按名字选用的 provider 与执行环境经 `register_provider`、`register_executor` 注册（D34），信号与追踪导出的收尾用 `zx_app::shutdown`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
 | IM 平台 | `zx-im` 的 `platform` 下的一个模块实现 `ImChannel`（职责见它的 rustdoc），收到的消息经 `Inlet` 先存入 backlog 再确认投递（去重也在这里），用 `platform.rs` 的共用件：一次投递的存入 `keep`，限频 `Pacer` 与 `rate_limit_wait`，拆分超长文本 `split_text`，读连接 `next_message`，开连接与连接结束的 `Connection`、`Ended`；文案用 `CardLabels`。它的 `im.toml` 段、默认的变量名、要对命令隐藏的密钥变量与由段建 channel 的 `PlatformFactory` 都在这个模块里，在 `platform::built_in` 登记；可选的平台放在 cargo feature 后。库外的平台由宿主自己的程序经 `zx_im::Program::register_platform` 登记，宿主的其他部件经 `Program::customize` | `crates/zx-im/src/platform/slack.rs`；`crates/zx-im/tests/im_server/main.rs` 的 `FakeChannel` |

@@ -13,7 +13,6 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ToolCall, ToolDef};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
 use zx_agent::compaction::{Summarized, Summarizer, SummarySource};
-use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
@@ -136,28 +135,6 @@ impl ToolPolicy for ProbeOff {
         } else {
             PolicyDecision::Allow
         }
-    }
-}
-
-/// An extension named `probes` with one tool, named `.0`.
-struct Probes(&'static str);
-
-impl Extension for Probes {
-    fn name(&self) -> &str {
-        "probes"
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(EchoTool::new(self.0))]
-    }
-}
-
-/// An extension named `.0`, with nothing else.
-struct Named(&'static str);
-
-impl Extension for Named {
-    fn name(&self) -> &str {
-        self.0
     }
 }
 
@@ -389,31 +366,15 @@ async fn a_policy_of_the_host_refuses_a_call_the_agent_allows() {
 }
 
 #[tokio::test]
-async fn the_tools_of_an_extension_of_the_host_ask_as_those_of_mcp_servers_do() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = calling("ext_probe").await;
-    let app = host(dir.path(), "tools = []", &server)
-        .await
-        .add_extension(Arc::new(Probes("ext_probe")));
-    ask(&app).await;
-    let requests = server.requests();
-    assert_eq!(offered(&requests[0]), ["ext_probe"]);
-    // Asked about, with nobody to answer.
-    let result = first_result(&requests[1]);
-    assert!(result.starts_with("Not executed: approval denied"), "{result}");
-}
-
-#[tokio::test]
 async fn skipping_approvals_runs_the_calls_that_would_ask_but_not_those_the_agent_denies() {
-    let asked = "tools = []\n[permissions]\nask = [\"ext_probe\"]";
-    let denied = "tools = []\n[permissions]\ndeny = [\"ext_probe\"]";
-    // Without a rule, the tool of an extension asks as an MCP server's does.
-    for (front, runs) in [("tools = []", true), (asked, true), (denied, false)] {
+    let asked = "tools = [\"probe\"]\n[permissions]\nask = [\"probe\"]";
+    let denied = "tools = [\"probe\"]\n[permissions]\ndeny = [\"probe\"]";
+    for (front, runs) in [(asked, true), (denied, false)] {
         let dir = tempfile::tempdir().unwrap();
-        let server = calling("ext_probe").await;
+        let server = calling("probe").await;
         let app = host_asking(dir.path(), front, &server, Asking::Never)
             .await
-            .add_extension(Arc::new(Probes("ext_probe")));
+            .add_tool(Arc::new(EchoTool::new("probe")));
         assert!(
             app.notices()[0].starts_with("[danger] approvals are skipped"),
             "{:?}",
@@ -526,25 +487,18 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     agent_in(&home, "tools = [\"probe\"]");
-    let cases: [(Adding, &str); 9] = [
+    let cases: [(Adding, &str); 7] = [
         (
             |app| app.add_tool(Arc::new(EchoTool::new("bash"))),
             "the host's tool \"bash\" has the name of a built-in tool",
-        ),
-        (
-            |app| app.add_extension(Arc::new(Probes("read_file"))),
-            "the host's tool \"read_file\" has the name of a built-in tool",
         ),
         (
             |app| app.add_hook("redact_secrets", Arc::new(Leaky)),
             "the host's hook \"redact_secrets\" has a name",
         ),
         (
-            |app| {
-                app.add_extension(Arc::new(Probes("ext_probe")))
-                    .add_policy("probes", Arc::new(ProbeOff))
-            },
-            "the host's policy \"probes\" has a name",
+            |app| app.add_policy("command_policy", Arc::new(ProbeOff)),
+            "the host's policy \"command_policy\" has a name",
         ),
         (
             |app| {
@@ -552,10 +506,6 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
                     .add_tool(Arc::new(EchoTool::new("probe")))
             },
             "more than one tool is named \"probe\"",
-        ),
-        (
-            |app| app.add_extension(Arc::new(Named("redact_secrets"))),
-            "the extension \"redact_secrets\" has the name of a built-in hook or policy",
         ),
         (
             |app| app.add_prompt_section("environment", "Elsewhere."),

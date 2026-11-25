@@ -1,4 +1,4 @@
-//! What a loop runs with: the model, the tools and the host's extensions.
+//! What a loop runs with: the model, the tools, and the host's hooks and policies.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::compaction::Summarizer;
-use crate::extensions::SlashCommand;
 use crate::guard::CancelSignal;
 use crate::hooks::{HookChain, HookContext};
 use crate::input::InputQueues;
@@ -17,10 +16,10 @@ use crate::runner::RunTrace;
 use crate::tools::{ActiveTools, Toolbox};
 use crate::transcript::Transcript;
 
-/// What the loops of one session run with: the model and tools, and the host's extensions
-/// around them, as the agent assembled them for the session. Queues and the active tool set
-/// have shared ownership because frontends and hooks change them while a run borrows this
-/// configuration.
+/// What the loops of one session run with: the model and tools, and the host's hooks and
+/// policies around them, as the agent assembled them for the session. Queues and the active
+/// tool set have shared ownership because frontends and hooks change them while a run borrows
+/// this configuration.
 pub(crate) struct LoopConfig {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) model: String,
@@ -41,8 +40,6 @@ pub(crate) struct LoopConfig {
     pub(crate) queues: Arc<InputQueues>,
     /// Which of `tools` the requests offer; every one by default.
     pub(crate) active_tools: Arc<ActiveTools>,
-    /// Slash commands extensions registered, for a frontend to run.
-    pub(crate) commands: Vec<Arc<dyn SlashCommand>>,
     /// What is known about models, by ID: the prices give each response a cost, and the
     /// window of `model` is what a token trigger that follows the window lies below.
     pub(crate) models: HashMap<String, ModelMeta>,
@@ -70,7 +67,6 @@ impl LoopConfig {
             approvals: ApprovalMode::Deny,
             queues: Arc::new(InputQueues::default()),
             active_tools: Arc::new(ActiveTools::default()),
-            commands: Vec::new(),
             models: HashMap::new(),
             cache_key: None,
             summarizer: None,

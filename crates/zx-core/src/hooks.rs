@@ -229,24 +229,13 @@ pub enum StepDecision {
 /// with [`Hook::stage`], so the guarantees below hold however a host registers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookStage {
-    /// Every hook that declares no other stage: the host's own and every extension's.
+    /// Every hook that declares no other stage.
     Default,
     /// Removes known secrets from tool output, after every hook of the default stage has
     /// changed it.
     Redaction,
     /// Saves long tool output, after redaction.
     Storage,
-}
-
-impl HookStage {
-    /// The stage as messages name it: `default`, `redaction` or `storage`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Redaction => "redaction",
-            Self::Storage => "storage",
-        }
-    }
 }
 
 /// The callbacks an extension runs at the loop's extension points. Every method has a no-op

@@ -10,7 +10,7 @@
 - 图片输入：提问与工具结果都可以带图片，进入会话前缩到模型 API 的上限之内；只发给声明能看图的模型。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
-- 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
+- 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；工具、策略与钩子的扩展接口。
 
 尚未完成的部分见[路线图](docs/ROADMAP.md)。
 
@@ -120,7 +120,7 @@ zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分
   ├─ zx-app    crates/zx-app    应用层，两个程序共用：config.toml 与 agent、装配 agent、OpenTelemetry 导出与收尾（依赖 zx-agent）
   └─ zx-agent  crates/zx-agent  SDK：把下面五个 crate 再导出成一个库，没有自己的代码
        ├─ zx-builtin  crates/zx-builtin  附带的实现（zx_agent::builtin）：内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
-       ├─ zx-core   crates/zx-core   内核：Agent、会话与运行，循环，会话记录，摘要，工具、策略、钩子与扩展的接口
+       ├─ zx-core   crates/zx-core   内核：Agent、会话与运行，循环，会话记录，摘要，工具、策略与钩子的接口
        │    └─ zx-ai  crates/zx-ai   消息类型、系统提示词、流式事件协议、provider 契约
        ├─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（不依赖内核：只依赖 zx-ai、zx-ai-http 与 zx-util）
        └─ zx-ai-anthropic  crates/zx-ai-anthropic  Anthropic Messages API provider（只依赖 zx-ai 与 zx-ai-http）

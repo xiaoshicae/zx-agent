@@ -11,7 +11,6 @@
 //!   - [`tools`]: the tool interface
 //!   - [`policy`]: the interface that decides whether a tool call may run, and approval
 //!   - [`hooks`]: the extension points around the loop
-//!   - [`extensions`]: bundles of tools, policies, hooks and prompt sections
 //!   - [`transcript`]: the append-only record tree of a session, its projection and where
 //!     sessions are kept (pi: SessionManager)
 //!   - [`compaction`]: the bounded summary of a conversation, and who makes it

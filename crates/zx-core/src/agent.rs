@@ -15,7 +15,6 @@ use tokio::sync::OnceCell;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::compaction::{self, Summarizer};
-use crate::extensions::{Expanded, Extension};
 use crate::hooks::HookChain;
 use crate::policy::{ApprovalMode, PolicyChain};
 use crate::runner::LoopConfig;
@@ -49,9 +48,6 @@ pub struct AgentConfig {
     pub policies: PolicyChain,
     /// Who answers when a policy asks about a call; nobody by default, which denies it.
     pub approvals: ApprovalMode,
-    /// What they add is taken from them once, when the agent is made; every session has
-    /// it, after the session's own parts.
-    pub extensions: Vec<Arc<dyn Extension>>,
     /// What is known about models, by ID: the prices give each response a cost, and the
     /// context window of the model a session asks is what a
     /// [`TokenTrigger::BelowWindow`](compaction::TokenTrigger::BelowWindow) trigger of
@@ -91,7 +87,6 @@ impl AgentConfig {
             hooks: HookChain::new(),
             policies: PolicyChain::new(),
             approvals: ApprovalMode::Deny,
-            extensions: Vec::new(),
             models: HashMap::new(),
             session_cache_key: false,
             limits: RunLimits::default(),
@@ -118,13 +113,6 @@ pub trait SessionSetup: Send + Sync {
     /// storage. The agent waits as long as this takes; dropping the call that creates or
     /// opens the session drops this one.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts>;
-
-    /// The names of the prompt sections that [`setup`](Self::setup) gives, which no extension
-    /// may take: a session leaves a blank section out, and an extension that took its name
-    /// there would clash with it where it is not blank. None by default.
-    fn section_names(&self) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// What belongs to one session, added to what the agent gives every session.
@@ -132,11 +120,11 @@ pub trait SessionSetup: Send + Sync {
 pub struct SessionParts {
     /// Offered after the agent's tools. Their names must differ from every other tool's.
     pub tools: Vec<Arc<dyn Tool>>,
-    /// Run after the agent's hooks of the same stage.
+    /// Run after the agent's hooks of the same stage, and dropped with the session: a hook
+    /// that keeps state for one session belongs here.
     pub hooks: HookChain,
-    /// `(name, content)` sections placed after the agent's and before the extensions'. One
-    /// named like a section the agent's prompt has replaces it in place; blank content is
-    /// left out.
+    /// `(name, content)` sections placed after the agent's. One named like a section the
+    /// agent's prompt has replaces it in place; blank content is left out.
     pub prompt_sections: Vec<(String, String)>,
 }
 
@@ -172,8 +160,6 @@ pub struct Agent {
 
 struct Shared {
     config: AgentConfig,
-    /// What the extensions add to every session.
-    extensions: Expanded,
     /// The sessions that are open, by ID. A cell is empty while its session is being opened,
     /// so that calls that open the same session at the same time get the same one.
     sessions: Mutex<HashMap<String, Opening>>,
@@ -220,23 +206,15 @@ impl Drop for ForgetUnopened<'_> {
 impl Agent {
     /// An agent that plays the role `config` describes. Fails for what no session could run
     /// with: tools that share a name, declare another name or an invalid parameter schema,
-    /// extensions that [`Extension`] refuses, compaction budgets that cannot work, and a
-    /// summarizer without a name.
+    /// compaction budgets that cannot work, and a summarizer without a name.
     pub fn new(config: AgentConfig) -> Result<Self> {
         config.compaction.validate()?;
         if let Some(summarizer) = &config.summarizer {
             anyhow::ensure!(!summarizer.name().trim().is_empty(), "the summarizer has no name");
         }
-        let reserved = config
-            .session_setup
-            .as_ref()
-            .map(|setup| setup.section_names())
-            .unwrap_or_default();
-        let extensions = Expanded::of(&config.extensions, &reserved).map_err(anyhow::Error::msg)?;
         let agent = Self {
             shared: Arc::new(Shared {
                 config,
-                extensions,
                 sessions: Mutex::default(),
             }),
         };
@@ -348,38 +326,28 @@ impl Agent {
     }
 
     /// What the loops of the session with `header` run with, in the directory the header
-    /// names: the agent's role, then the session's own `parts`, then the extensions.
+    /// names: the agent's role, then the session's own `parts`.
     fn assemble(&self, header: &SessionHeader, parts: SessionParts) -> Result<LoopConfig> {
-        let (config, extensions) = (&self.shared.config, &self.shared.extensions);
-        let tools: Vec<Arc<dyn Tool>> = config
-            .tools
-            .iter()
-            .cloned()
-            .chain(parts.tools)
-            .chain(extensions.tools.iter().cloned())
-            .collect();
+        let config = &self.shared.config;
+        let tools: Vec<Arc<dyn Tool>> = config.tools.iter().cloned().chain(parts.tools).collect();
         let mut hooks = config.hooks.clone();
         hooks.extend(parts.hooks);
-        hooks.extend(extensions.hooks.clone());
-        let mut policies = config.policies.clone();
-        policies.extend(extensions.policies.clone());
-        let own = parts
+        let system_prompt = parts
             .prompt_sections
             .iter()
             .fold(config.system_prompt.clone(), |prompt, (name, content)| {
                 prompt.with_section(name, content)
             });
         Ok(LoopConfig {
-            system_prompt: extensions.sections_after(own).map_err(anyhow::Error::msg)?,
+            system_prompt,
             // The tool set's own check covers names, declarations and panics.
             tools: Toolbox::new(tools).map_err(anyhow::Error::msg)?,
             cwd: PathBuf::from(&header.cwd),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             hooks,
-            policies,
+            policies: config.policies.clone(),
             approvals: config.approvals,
-            commands: extensions.commands.clone(),
             models: config.models.clone(),
             cache_key: config.session_cache_key.then(|| header.id.clone()),
             summarizer: config.summarizer.clone(),

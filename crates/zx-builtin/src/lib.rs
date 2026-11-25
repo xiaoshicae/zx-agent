@@ -16,8 +16,7 @@
 //!   hidden, not part of the API, though `tools::paging` re-exports its `Links`
 //! - `calendar`: dates of the Gregorian calendar, for the times that file names and prompts
 //!   show
-//! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by
-//!   default
+//! - [`mcp`]: the tools of external MCP servers; the feature `mcp`, on by default
 //! - `test_support`, compiled for tests on Unix only: the FIFOs that tests put where a file
 //!   is expected
 
