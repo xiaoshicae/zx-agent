@@ -12,19 +12,13 @@ pub(super) enum Command {
     /// Continue without new input.
     Continue,
     Status,
-    /// A command an extension registered, with the text after its name.
-    Extension {
-        name: String,
-        args: String,
-    },
     Quit,
     Help,
     Invalid(String),
 }
 
-/// Parse one line. `extensions` are the names of the commands extensions registered, tried
-/// after the built-in ones (pi: built-in commands are matched first).
-pub(super) fn parse(line: String, extensions: &[(String, String)]) -> Command {
+/// Parse one line.
+pub(super) fn parse(line: String) -> Command {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Command::Empty;
@@ -33,26 +27,11 @@ pub(super) fn parse(line: String, extensions: &[(String, String)]) -> Command {
         return Command::Prompt(line);
     }
     let (name, rest) = trimmed.split_once(char::is_whitespace).unwrap_or((trimmed, ""));
-    let rest = rest.trim();
-    if let Some(command) = builtin(name, rest) {
-        return command;
-    }
-    match extensions
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .find(|registered| name[1..] == **registered)
-    {
-        Some(extension) => Command::Extension {
-            name: extension.to_string(),
-            args: rest.to_string(),
-        },
-        None => unknown(name),
-    }
+    builtin(name, rest.trim()).unwrap_or_else(|| unknown(name))
 }
 
 /// The command chat handles itself that `name` names, with `rest`, the text after it: an
-/// invalid one for text a command does not take. `None` for a name that is no built-in
-/// command; an extension's command cannot shadow one that is.
+/// invalid one for text a command does not take. `None` for a name that is no command.
 fn builtin(name: &str, rest: &str) -> Option<Command> {
     let bare = |command| if rest.is_empty() { command } else { unknown(name) };
     let text = || (!rest.is_empty()).then(|| rest.to_string());
@@ -84,7 +63,7 @@ mod tests {
     use super::*;
 
     fn parse(line: &str) -> Command {
-        super::parse(line.into(), &[])
+        super::parse(line.into())
     }
 
     #[test]
@@ -92,20 +71,6 @@ mod tests {
         assert!(matches!(parse("  你好  "), Command::Prompt(text) if text == "  你好  "));
         assert!(matches!(parse("第一行\n/quit"), Command::Prompt(text) if text == "第一行\n/quit"));
         assert!(matches!(parse(" \t"), Command::Empty));
-    }
-
-    #[test]
-    fn extension_commands_come_after_the_built_in_ones_and_keep_their_arguments() {
-        let registered = [
-            ("jira".to_string(), "Fetch an issue".to_string()),
-            ("quit".to_string(), "Cannot shadow /quit".to_string()),
-        ];
-        let parse = |line: &str| super::parse(line.into(), &registered);
-        assert!(matches!(parse("/jira ABC-1  two words"),
-            Command::Extension { name, args } if name == "jira" && args == "ABC-1  two words"));
-        assert!(matches!(parse("/jira"), Command::Extension { name, args } if name == "jira" && args.is_empty()));
-        assert!(matches!(parse("/quit"), Command::Quit));
-        assert!(matches!(parse("/jiraa"), Command::Invalid(_)));
     }
 
     #[test]

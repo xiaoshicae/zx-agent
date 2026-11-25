@@ -63,11 +63,6 @@ pub(super) const SPILL_OUTPUTS: &str = "spill_outputs";
 
 #[async_trait]
 impl SessionSetup for PerSession {
-    fn section_names(&self) -> Vec<String> {
-        let host = self.host_sections.iter().map(|(name, _)| name.clone());
-        SECTION_NAMES.map(String::from).into_iter().chain(host).collect()
-    }
-
     /// Each time a session is made or opened: a look at its working directory and a read of
     /// the project's instructions, synchronous but small and bounded by the instructions' size
     /// limit; then the start of the session's executor, such as its container.

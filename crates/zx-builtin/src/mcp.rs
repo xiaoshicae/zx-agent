@@ -9,8 +9,8 @@
 //! (HTTP 404), rmcp opens a new one and sends the request again. The tools are listed once,
 //! when connecting.
 //!
-//! A [`Server`] is an [`Extension`]: an agent takes it in
-//! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
+//! A [`Server`] gives its tools ([`Server::tools`]) for an agent's
+//! [`AgentConfig::tools`](zx_core::AgentConfig::tools).
 //!
 //! - `http`: the HTTP client a server's transport sends with, through its proxy
 
@@ -34,7 +34,6 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lifecycle};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
-use zx_core::extensions::Extension;
 use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 use self::http::http_client;
@@ -231,7 +230,6 @@ type Client = RunningService<RoleClient, Handler>;
 
 /// A connected MCP server and the tools taken from it.
 pub struct Server {
-    name: String,
     origin: String,
     protocol_version: String,
     tools: Vec<Arc<dyn Tool>>,
@@ -257,13 +255,13 @@ impl Server {
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        Self::with_tools(config, checked, protocol_version, &listed, &Arc::new(client))
+        Self::with_tools(&config, checked, protocol_version, &listed, &Arc::new(client))
     }
 
     /// The server with the configured tools among those it `listed`, as tools for the model,
     /// which calls them by the `checked` names, one for each configured tool.
     fn with_tools(
-        config: ServerConfig,
+        config: &ServerConfig,
         checked: Checked,
         protocol_version: String,
         listed: &[rmcp::model::Tool],
@@ -302,7 +300,6 @@ impl Server {
             }));
         }
         Ok(Self {
-            name: config.name,
             origin: checked.address.origin,
             protocol_version,
             tools,
@@ -325,14 +322,10 @@ impl Server {
     pub fn tool_names(&self) -> &[String] {
         &self.names
     }
-}
 
-impl Extension for Server {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+    /// The configured tools, in configuration order, as an agent offers them. They share the
+    /// connection, which stays open while one of them is kept.
+    pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools.clone()
     }
 }

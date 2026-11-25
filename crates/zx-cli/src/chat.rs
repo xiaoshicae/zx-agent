@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
-use zx_agent::input::Input;
 use zx_agent::session::SessionError;
 use zx_app::config::Builtin;
 use zx_app::otel::{Telemetry, TraceHook};
@@ -69,8 +68,6 @@ struct Built {
     place: SessionPlace,
     provider: Arc<dyn Provider>,
     about: About,
-    /// The commands extensions registered: name and description, for parsing and /help.
-    commands: Vec<(String, String)>,
 }
 
 /// What every conversation of this chat is built with.
@@ -89,17 +86,11 @@ impl Chat {
         let agent = self.app.build(model, place, approvals)?;
         let session = open_or_create(&agent, resume).await?;
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
-        let commands = session
-            .commands()
-            .iter()
-            .map(|command| (command.name().to_string(), command.description().to_string()))
-            .collect();
         Ok(Built {
             session,
             place: place.clone(),
             provider: Arc::clone(agent.provider()),
             about,
-            commands,
         })
     }
 }
@@ -172,7 +163,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
                 continue;
             }
         };
-        let command = commands::parse(text, &repl.built.commands);
+        let command = commands::parse(text);
         let flow = match repl.command(command, &mut terminal).await {
             Ok(flow) => flow,
             Err(error) if closed(&error) => repl.reopen(&error).await,
@@ -248,15 +239,14 @@ impl TerminalInput {
         }
     }
 
-    /// The terminal as one operation uses it, with the commands extensions registered.
-    fn io<'a>(&'a mut self, output: &'a Output, commands: &'a [(String, String)]) -> TurnIo<'a> {
+    /// The terminal as one operation uses it.
+    fn io<'a>(&'a mut self, output: &'a Output) -> TurnIo<'a> {
         TurnIo {
             input: &mut self.input,
             next_approval: &mut self.next_approval,
             signals: &mut self.signals,
             mode: self.mode,
             output,
-            commands,
         }
     }
 }
@@ -275,13 +265,8 @@ impl Repl<'_> {
     /// Carry out `command` typed while no task runs.
     async fn command(&mut self, command: Command, terminal: &mut TerminalInput) -> Result<Flow> {
         let output = &self.chat.output;
-        let session = &self.built.session;
         Ok(match command {
             Command::Prompt(text) => self.operate(Operation::Prompt(text), terminal).await?,
-            Command::Extension { name, args } => match run_extension_command(session, &name, &args, output).await {
-                Some(message) => self.operate(Operation::Message(message), terminal).await?,
-                None => Flow::Continue,
-            },
             Command::Compact => self.operate(Operation::Compact, terminal).await?,
             Command::Continue => self.operate(Operation::Continue, terminal).await?,
             Command::New => Flow::New,
@@ -298,7 +283,7 @@ impl Repl<'_> {
             }
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
-                help(output, &self.built.commands);
+                help(output);
                 Flow::Continue
             }
             Command::Invalid(message) => self.say(Tone::Warn, &format!("[chat] {}", visible(&message))),
@@ -308,7 +293,7 @@ impl Repl<'_> {
 
     /// Run `operation` while the terminal takes steering, approvals and signals.
     async fn operate(&self, operation: Operation, terminal: &mut TerminalInput) -> Result<Flow> {
-        let mut io = terminal.io(&self.chat.output, &self.built.commands);
+        let mut io = terminal.io(&self.chat.output);
         drive_turn(&self.built.session, operation, &mut io).await
     }
 
@@ -435,25 +420,6 @@ impl Repl<'_> {
 /// Whether `error` says the conversation's session is closed.
 fn closed(error: &anyhow::Error) -> bool {
     error.downcast_ref::<SessionError>() == Some(&SessionError::Closed)
-}
-
-/// Run an extension's command and show what it says. Returns the message it sends, if any.
-async fn run_extension_command(session: &Session, name: &str, args: &str, output: &Output) -> Option<Input> {
-    match session.run_command(name, args).await {
-        Ok(outcome) => {
-            for line in outcome.lines {
-                output.line(Tone::Plain, &visible(&line));
-            }
-            outcome.prompt
-        }
-        Err(error) => {
-            output.line(
-                Tone::Warn,
-                &format!("[chat] /{}: {}", visible(name), visible(&error.to_string())),
-            );
-            None
-        }
-    }
 }
 
 /// A discarded input line ends neither the conversation nor the current task.

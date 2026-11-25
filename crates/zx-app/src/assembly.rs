@@ -34,7 +34,6 @@ use zx_agent::ai::{ModelMeta, Reasoning};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, short_secret_files};
 use zx_agent::builtin::tools::FileMutationQueue;
 use zx_agent::compaction::Summarizer;
-use zx_agent::extensions::Extension;
 use zx_agent::hooks::Hook;
 use zx_agent::policy::ToolPolicy;
 use zx_agent::tools::Tool;
@@ -58,11 +57,11 @@ use crate::otel::TraceHook;
 /// session is opened at startup.
 ///
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
-/// (tools, each session's own tools, hooks, policies, extensions, prompt sections, hidden
-/// variables), `set_*` replaces
-/// the one there is (the summarizer, the trace export), and `register_*` names one
-/// that config.toml chooses by its name (providers, executors). They are treated as the built-in ones
-/// are, and a name that another part goes by already fails [`build`](Self::build).
+/// (tools, each session's own tools, hooks, policies, prompt sections, hidden variables),
+/// `set_*` replaces the one there is (the summarizer, the trace export), and `register_*`
+/// names one that config.toml chooses by its name (providers, executors). They are treated as
+/// the built-in ones are, and a name that another part goes by already fails
+/// [`build`](Self::build).
 pub struct Application {
     settings: Settings,
     /// What the host says over the agent: the working directory, the tools, the budgets and
@@ -90,8 +89,6 @@ pub struct Application {
     /// The host's own hooks and policies, by name, after the assembly's.
     hooks: Vec<(String, Arc<dyn Hook>)>,
     policies: Vec<(String, Arc<dyn ToolPolicy>)>,
-    /// The host's own extensions, after the MCP servers and treated as they are.
-    extensions: Vec<Arc<dyn Extension>>,
     /// What makes the summaries in place of the agent's model, when the host gives it.
     summarizer: Option<Arc<dyn Summarizer>>,
     /// The providers config.toml can name in `provider.api`, and the executors it can name in
@@ -171,7 +168,6 @@ impl Application {
             session_tools: Vec::new(),
             hooks: Vec::new(),
             policies: Vec::new(),
-            extensions: Vec::new(),
             summarizer: None,
             providers: provider::built_in(),
             executors,
@@ -252,14 +248,6 @@ impl Application {
     /// tighten what the agent's permissions allow but never loosen it.
     pub fn add_policy(mut self, name: &str, policy: Arc<dyn ToolPolicy>) -> Self {
         self.policies.push((name.into(), policy));
-        self
-    }
-
-    /// Add `extension` after the MCP servers, which are extensions too, and treated as they
-    /// are: its tools are offered to every agent and ask unless `permissions.allow` names
-    /// them.
-    pub fn add_extension(mut self, extension: Arc<dyn Extension>) -> Self {
-        self.extensions.push(extension);
         self
     }
 
@@ -385,9 +373,8 @@ pub struct Overrides {
 /// Which tool calls ask for approval before they run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Asking {
-    /// Those the agent's permissions ask about, the tools of MCP servers and of extensions
-    /// that they do not allow, and, where a person answers, the bash commands but the
-    /// auto-approved ones.
+    /// Those the agent's permissions ask about, the tools of MCP servers that they do not
+    /// allow, and, where a person answers, the bash commands but the auto-approved ones.
     #[default]
     AsConfigured,
     /// None, as when the agent approves every call (`permissions.approveAll`), which its

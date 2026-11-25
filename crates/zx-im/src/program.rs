@@ -115,9 +115,9 @@ impl Program {
     }
 
     /// Let `customize` give the application that every conversation's agent is built with
-    /// the host's own parts, with the verbs of [`Application`]: tools, hooks, policies,
-    /// extensions and prompt sections, the variables to hide from commands, and the providers
-    /// and executors config.toml chooses by name. The program's own parts come after them: the
+    /// the host's own parts, with the verbs of [`Application`]: tools, hooks, policies and
+    /// prompt sections, the variables to hide from commands, and the providers and executors
+    /// config.toml chooses by name. The program's own parts come after them: the
     /// platforms' credentials, hidden beside the host's variables, the trace export, which is
     /// the program's, and the prompt section on how answers reach people. Each call adds one
     /// more, applied in order.

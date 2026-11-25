@@ -47,12 +47,6 @@ impl PolicyChain {
         });
     }
 
-    /// Add the policies of `other` after this chain's, each with the name and the timeout it
-    /// was registered with.
-    pub(crate) fn extend(&mut self, other: PolicyChain) {
-        self.policies.extend(other.policies);
-    }
-
     /// The decision on `call`: the first deny, else the first ask, else allow. A policy that
     /// panics, runs past its timeout or is cut short by cancellation denies the call, and the
     /// reason names it.

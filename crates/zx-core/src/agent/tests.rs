@@ -7,6 +7,7 @@ use super::*;
 use crate::ai::faux::{FauxProvider, FauxStep};
 use crate::ai::{Message, ToolDef};
 use crate::events::RunOutcome;
+use crate::hooks::{Hook, HookContext, HookResult};
 use crate::session::SessionError;
 use crate::tools::{ToolContext, ToolOutput};
 use crate::transcript::{LoadedSession, LogRecord, SessionList, SessionLog};
@@ -289,6 +290,35 @@ async fn a_session_runs_with_the_parts_its_setup_makes() {
         .collect();
     assert_eq!(sections, [("place", Some("/work"))]);
     assert_eq!(setup.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Remembers the sessions whose input it saw.
+struct Remember(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Hook for Remember {
+    async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
+        lock(&self.0).push(ctx.session_id.clone());
+        Ok(text)
+    }
+}
+
+#[tokio::test]
+async fn the_hooks_of_the_agent_serve_every_session() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut config = AgentConfig::new(provider, "m");
+    config.hooks.push("remember", Arc::new(Remember(seen.clone())));
+    let agent = Agent::new(config).unwrap();
+
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = agent.create_session(SessionOptions::new(cwd())).await.unwrap();
+        session.send("go").unwrap().wait().await;
+        sessions.push(session.id().to_string());
+    }
+
+    assert_eq!(*lock(&seen), sessions);
 }
 
 #[tokio::test]

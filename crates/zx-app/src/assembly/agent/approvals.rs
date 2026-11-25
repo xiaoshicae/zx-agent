@@ -6,7 +6,7 @@ use zx_agent::builtin::tools::BASH;
 use super::Approvals;
 use crate::assembly::execution::ExecutorFactory;
 use crate::assembly::{Application, Asking};
-use crate::config::{HostTools, Permissions};
+use crate::config::Permissions;
 
 /// The name of the prompt section that says which calls ask.
 pub(super) const APPROVALS: &str = "approvals";
@@ -25,38 +25,33 @@ pub(super) enum Asked<'a> {
     /// None: every call is approved, by the agent (`permissions.approveAll`), since its
     /// container is the sandbox, or by the host ([`Asking::Never`]).
     Nothing,
-    /// Calls of the tools in the agent's `permissions.ask`, and of the `extensions`' tools:
-    /// those of MCP servers and of the host's extensions that `permissions.allow` does not
-    /// list, but the MCP tools a trusted server says only read. Where a person answers, every
-    /// bash command asks too, but the auto-approved ones.
-    Tools {
-        agent: &'a [String],
-        extensions: Vec<String>,
-    },
+    /// Calls of the tools in the agent's `permissions.ask`, and of the `mcp` tools: those of
+    /// MCP servers that `permissions.allow` does not list, but the ones a trusted server says
+    /// only read. Where a person answers, every bash command asks too, but the auto-approved
+    /// ones.
+    Tools { agent: &'a [String], mcp: Vec<String> },
 }
 
 impl<'a> Asked<'a> {
     /// What asks among the calls of the agent with `permissions`, given the tools of `app`'s
-    /// MCP servers and the `host`'s extensions.
-    pub(super) fn new(app: &Application, permissions: &'a Permissions, host: &HostTools) -> Self {
+    /// MCP servers.
+    pub(super) fn new(app: &Application, permissions: &'a Permissions) -> Self {
         if permissions.approve_all || app.overrides.asking == Asking::Never {
             return Self::Nothing;
         }
         let allowed = permissions.allowed_tools();
         // A server trusted to say which of its tools only read lets those run like built-in
         // tools.
-        let extensions = app
+        let mcp = app
             .mcp
             .names
             .iter()
-            .filter(|name| !app.mcp.read_only.contains(name))
-            .chain(&host.extensions)
-            .filter(|name| !allowed.contains(name))
+            .filter(|name| !app.mcp.read_only.contains(name) && !allowed.contains(name))
             .cloned()
             .collect();
         Self::Tools {
             agent: &permissions.ask,
-            extensions,
+            mcp,
         }
     }
 
@@ -91,18 +86,18 @@ impl<'a> Asked<'a> {
 
     /// The prompt section that tells the model which calls ask and what becomes of them, when
     /// `approvals` says who answers: empty when no tool of the agent's `enabled` ones or of
-    /// its extensions asks. The auto-approved `commands` are named by their prefixes only, and
+    /// the MCP servers asks. The auto-approved `commands` are named by their prefixes only, and
     /// what still makes them ask is described broadly: the model needs to know what to avoid,
     /// not the exact checks.
     pub(super) fn section(&self, approvals: Approvals<'_>, enabled: &[String], commands: &[String]) -> String {
-        let Self::Tools { agent, extensions } = self else {
+        let Self::Tools { agent, mcp } = self else {
             return NOTHING_ASKS.to_string();
         };
         let bash = matches!(approvals, Approvals::Person(_)).then_some(BASH);
         let own = bash.into_iter().chain(agent.iter().map(String::as_str));
         let listed = own
             .filter(|name| enabled.iter().any(|tool| tool == name))
-            .chain(extensions.iter().map(String::as_str));
+            .chain(mcp.iter().map(String::as_str));
         let mut tools: Vec<&str> = Vec::new();
         for name in listed {
             if !tools.contains(&name) {
@@ -145,7 +140,7 @@ mod tests {
         let ask = names(&["bash", "edit_file", "write_file"]);
         let asked = Asked::Tools {
             agent: &ask,
-            extensions: names(&["prom__query"]),
+            mcp: names(&["prom__query"]),
         };
         let enabled = names(&["bash", "read_file", "edit_file"]);
 
@@ -163,7 +158,7 @@ mod tests {
     fn without_a_person_the_tools_that_ask_are_denied_and_bash_asks_only_when_listed() {
         let asked = Asked::Tools {
             agent: &[],
-            extensions: names(&["prom__query"]),
+            mcp: names(&["prom__query"]),
         };
 
         let section = asked.section(Approvals::Nobody, &names(&["bash"]), &names(&["grep"]));
@@ -178,7 +173,7 @@ mod tests {
     fn nothing_is_said_when_no_tool_asks() {
         let asked = Asked::Tools {
             agent: &[],
-            extensions: Vec::new(),
+            mcp: Vec::new(),
         };
 
         assert_eq!(
@@ -194,7 +189,7 @@ mod tests {
         let none: &[String] = &[];
         let unasked = Asked::Tools {
             agent: none,
-            extensions: Vec::new(),
+            mcp: Vec::new(),
         };
         let bash = names(&["bash"]);
         assert!(unasked.bash_runs_unasked(Approvals::Nobody, &bash, none));
@@ -204,7 +199,7 @@ mod tests {
         assert!(!unasked.bash_runs_unasked(Approvals::Nobody, &bash, &bash));
         let asking = Asked::Tools {
             agent: &bash,
-            extensions: Vec::new(),
+            mcp: Vec::new(),
         };
         assert!(!asking.bash_runs_unasked(Approvals::Nobody, &bash, none));
         // Skipped approvals have a notice of their own.
@@ -216,7 +211,7 @@ mod tests {
         let executors = built_in(&ContainerSettings::default());
         let unasked = Asked::Tools {
             agent: &[],
-            extensions: Vec::new(),
+            mcp: Vec::new(),
         };
         let bash = names(&["bash"]);
         let permissions = Permissions::default();

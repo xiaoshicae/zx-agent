@@ -58,14 +58,11 @@ impl Builtin {
 
 /// The tools a host registers besides the built-in ones, by name, which an agent may name:
 /// `own`, which the agent's `tools` enables and which run unless `permissions.ask` names them,
-/// as the built-in tools do; those of its `extensions`, offered to every agent, which ask
-/// unless `permissions.allow` names them, as the tools of MCP servers do; and the `session`
-/// tools it gives each session of its own, offered in every session, which run unless
-/// `permissions.ask` names them.
+/// as the built-in tools do; and the `session` tools it gives each session of its own,
+/// offered in every session, which run unless `permissions.ask` names them.
 #[derive(Default)]
 pub(crate) struct HostTools {
     pub(crate) own: Vec<String>,
-    pub(crate) extensions: Vec<String>,
     pub(crate) session: Vec<String>,
 }
 
@@ -197,9 +194,9 @@ impl AgentDefinition {
     }
 
     /// Check tool names, permissions and skill registrations without reading skill bodies;
-    /// the tools may be the `host`'s own, and permissions may name those and the tools of its
-    /// extensions and the MCP tools of `config`. Whether commands run where every call may be
-    /// approved is the executor's to say, which the assembly checks.
+    /// the tools may be the `host`'s own, and permissions may name those and the MCP tools of
+    /// `config`. Whether commands run where every call may be approved is the executor's to
+    /// say, which the assembly checks.
     pub(crate) fn validate(&self, config: &Config, host: &HostTools) -> Result<()> {
         let known = |name: &str| known_tool(name) || host.own.iter().any(|own| own == name);
         let session = |name: &str| host.session.iter().any(|session| session == name);
@@ -210,8 +207,7 @@ impl AgentDefinition {
             );
             ensure!(known(name), "tools: unknown tool {name:?}");
         }
-        let mut asking = config.mcp_tool_names()?;
-        asking.extend(host.extensions.iter().cloned());
+        let asking = config.mcp_tool_names()?;
         self.permissions
             .validate(|name| known(name) || session(name), &asking)?;
         self.compaction.validate().map_err(|error| compaction_error(&error))?;

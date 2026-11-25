@@ -1,5 +1,5 @@
-//! What extensions can do at run time: send the model messages, record state,
-//! change the tools the model is offered, register commands; and how queued input is taken.
+//! What hooks and a host can do at run time: send the model messages, record state and
+//! change the tools the model is offered; and how queued input is taken.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,16 +11,12 @@ use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
 use zx_agent::events::{Event, EventKind, RunOutcome};
-use zx_agent::extensions::{CommandContext, CommandOutcome, Extension, SlashCommand};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
-use zx_agent::session::{CommandError, SessionError};
+use zx_agent::session::SessionError;
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::Entry;
-use zx_testing::{
-    EchoTool, NotifyingProvider, RefusingLog, RunnerSetup, Start, config, header, note, refusal, replayed_requests,
-    summarize,
-};
+use zx_testing::{EchoTool, NotifyingProvider, RunnerSetup, config, header, note, replayed_requests, summarize};
 
 async fn session_in(file: &Path, config: AgentConfig) -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
     RunnerSetup {
@@ -244,138 +240,31 @@ async fn a_hook_changes_the_tools_of_the_next_request() {
     assert_eq!(tool_names(&provider, 1), ["echo"]);
 }
 
-/// `/jira <key>`: records the key, tells the person, and sends the model the issue.
-struct Jira;
-
-#[async_trait]
-impl SlashCommand for Jira {
-    fn name(&self) -> &str {
-        "jira"
-    }
-
-    fn description(&self) -> &str {
-        "Fetch an issue"
-    }
-
-    async fn run(&self, args: &str, ctx: &CommandContext) -> Result<CommandOutcome, String> {
-        if args.is_empty() {
-            return Err("give an issue key".to_string());
-        }
-        ctx.queues.append_custom_entry("jira", json!({"key": args})).unwrap();
-        Ok(CommandOutcome {
-            lines: vec![format!("fetched {args}")],
-            prompt: Some(Input::Custom(note(&format!("Issue {args}: broken")))),
-        })
-    }
-}
-
-struct Commands {
-    name: &'static str,
-    commands: Vec<Arc<dyn SlashCommand>>,
-}
-
-impl Extension for Commands {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn commands(&self) -> Vec<Arc<dyn SlashCommand>> {
-        self.commands.clone()
-    }
-}
-
 #[tokio::test]
-async fn an_extension_command_runs_through_the_session_and_its_message_starts_a_run() {
+async fn state_queued_while_idle_is_recorded_before_the_input_of_the_next_run() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("looking")]));
-    let mut config = config(provider.clone(), vec![]);
-    config.extensions = vec![Arc::new(Commands {
-        name: "tracker",
-        commands: vec![Arc::new(Jira)],
-    })];
-    let (session, _) = session_in(&file, config).await;
-    assert_eq!(session.commands().len(), 1);
-    assert_eq!(session.commands()[0].description(), "Fetch an issue");
+    let (session, _) = session_in(&file, config(provider.clone(), vec![])).await;
 
-    let outcome = session.run_command("jira", "ABC-1").await.unwrap();
-    assert_eq!(outcome.lines, ["fetched ABC-1"]);
-    let report = session.prompt(outcome.prompt.unwrap()).await.unwrap();
+    // What a host does for a command of its own: record what was asked for, then send the
+    // model a message, which starts the run.
+    session
+        .queues()
+        .append_custom_entry("jira", json!({"key": "ABC-1"}))
+        .unwrap();
+    let report = session
+        .prompt(Input::Custom(note("Issue ABC-1: broken")))
+        .await
+        .unwrap();
 
     assert_eq!(report.final_text, "looking");
     assert_eq!(
         summarize(&provider.requests()[0].messages),
         ["user:Issue ABC-1: broken"]
     );
-    // The state the command recorded is written at the run's first step, before its input.
+    // The queued state is written at the run's first step, before its input.
     assert_eq!(&kinds(&file)[..2], ["custom", "custom_message"]);
-    assert_eq!(session.run_command("nope", "").await, Err(CommandError::Unknown));
-    assert_eq!(
-        session.run_command("jira", "").await,
-        Err(CommandError::Failed("give an issue key".into()))
-    );
-}
-
-#[tokio::test]
-async fn a_session_that_closed_itself_runs_no_more_commands() {
-    let mut config = config(Arc::new(FauxProvider::new([])), vec![]);
-    config.extensions = vec![Arc::new(Commands {
-        name: "tracker",
-        commands: vec![Arc::new(Jira)],
-    })];
-    let (session, _) = RunnerSetup {
-        session: Start::with_log(RefusingLog),
-        ..RunnerSetup::new(config)
-    }
-    .build()
-    .await;
-    assert!(!session.is_closed());
-    // The prompt cannot be recorded, so the session closes once the run ends.
-    session.prompt("go").await.unwrap();
-
-    assert!(session.is_closed());
-    assert_eq!(session.run_command("jira", "ABC-1").await, Err(CommandError::Closed));
-}
-
-struct Named(&'static str);
-
-#[async_trait]
-impl SlashCommand for Named {
-    fn name(&self) -> &str {
-        self.0
-    }
-
-    fn description(&self) -> &str {
-        ""
-    }
-
-    async fn run(&self, _args: &str, _ctx: &CommandContext) -> Result<CommandOutcome, String> {
-        Ok(CommandOutcome::default())
-    }
-}
-
-#[test]
-fn command_names_must_be_well_formed_and_unique() {
-    let cases: Vec<(Vec<&'static str>, &str)> = vec![
-        (vec!["jira", "jira"], "already registered"),
-        (vec!["my notes"], "must be ASCII"),
-        (vec!["1st"], "must be ASCII"),
-    ];
-    for (names, expected) in cases {
-        let mut config = config(Arc::new(FauxProvider::new(Vec::new())), vec![]);
-        config.extensions = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                Arc::new(Commands {
-                    name: ["one", "two"][index],
-                    commands: vec![Arc::new(Named(name))],
-                }) as Arc<dyn Extension>
-            })
-            .collect();
-        let error = refusal(config);
-        assert!(error.contains(expected), "{error}");
-    }
 }
 
 #[tokio::test]

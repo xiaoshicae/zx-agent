@@ -220,8 +220,7 @@ impl<'a> StepLoop<'a> {
             }))
             .await?;
         }
-        // State an extension recorded before the run, such as from a command, precedes the
-        // input it may refer to.
+        // State an extension recorded before the run precedes the input it may refer to.
         self.scope.record_pending_entries().await.map_err(Halt::Unrecorded)?;
         if let Some(first) = first {
             let (message, _hold) = first.into_parts();

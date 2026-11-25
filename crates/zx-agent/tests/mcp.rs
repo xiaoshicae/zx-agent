@@ -12,7 +12,6 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
 use zx_agent::events::RunOutcome;
-use zx_agent::extensions::Extension;
 use zx_agent::tools::{Effects, Tool, ToolContext, ToolOutput};
 use zx_testing::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
 use zx_testing::{RunnerSetup, config, run_prompt, summarize, tool_context};
@@ -297,14 +296,13 @@ async fn cancelling_a_run_gives_up_the_call_it_was_waiting_for() {
     for era in [Era::Modern, Era::Legacy] {
         let fake = FakeMcp::start(era, three_tools()).await;
         fake.reply("query", vec![Reply::Hang]);
-        let server: Arc<dyn Extension> = Arc::new(connect(&fake, &["query"]).await);
+        let server = connect(&fake, &["query"]).await;
         let provider = Arc::new(FauxProvider::new([FauxStep::tool_call(
             "c1",
             "prom__query",
             json!({"q": "up"}),
         )]));
-        let mut config = config(provider, Vec::new());
-        config.extensions = vec![server];
+        let config = config(provider, server.tools());
         let (runner, _) = RunnerSetup::new(config).build().await;
 
         let report = {
@@ -432,13 +430,12 @@ async fn malformed_settings_are_refused_before_connecting() {
 #[tokio::test]
 async fn the_model_calls_a_server_tool_through_the_loop() {
     let fake = FakeMcp::start(Era::Modern, three_tools()).await;
-    let server: Arc<dyn Extension> = Arc::new(connect(&fake, &["query"]).await);
+    let server = connect(&fake, &["query"]).await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::tool_call("c1", "prom__query", json!({"q": "up"})),
         FauxStep::text("done"),
     ]));
-    let mut config = config(provider.clone(), Vec::new());
-    config.extensions = vec![server];
+    let config = config(provider.clone(), server.tools());
     let mut context = Vec::new();
     run_prompt(config, &mut context, "is it up?").await;
     let requests = provider.requests();

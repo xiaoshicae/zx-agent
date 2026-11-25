@@ -116,6 +116,23 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
 }
 
 #[tokio::test]
+async fn the_tools_of_a_server_are_offered_before_those_of_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = prom().await;
+    let model = MockServer::start(vec![Reply::text("done")]).await;
+    let home = agent_home(dir.path(), &fake.url, "[\"read_file\"]");
+    let output = run(&model, dir.path(), &home).output().await.unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let tools = &model.requests()[0].body["tools"];
+    // Every session shares the servers' tools; a session's own, which work in its
+    // directory, come after them.
+    assert_eq!(tools[0]["function"]["name"], "prom__query");
+    assert_eq!(tools[1]["function"]["name"], "prom__range");
+    assert_eq!(tools[2]["function"]["name"], "read_file");
+    assert_eq!(tools.as_array().map(Vec::len), Some(3));
+}
+
+#[tokio::test]
 async fn the_server_is_reached_through_the_proxy_of_config_toml() {
     let dir = tempfile::tempdir().unwrap();
     let fake = prom().await;

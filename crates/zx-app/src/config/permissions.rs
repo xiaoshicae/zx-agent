@@ -154,8 +154,8 @@ impl Permissions {
 
     /// Check that `ask` is empty where every call is approved; the tool names against what is
     /// registered: `known` for the tools that run unless asked about, the built-in ones and the
-    /// host's own, and `asking` for those that ask unless allowed, the MCP tools and the host's
-    /// extensions' tools; and the program options.
+    /// host's own, and `asking` for those that ask unless allowed, the MCP tools; and the
+    /// program options.
     pub(super) fn validate(&self, known: impl Fn(&str) -> bool, asking: &[String]) -> Result<()> {
         ensure!(
             !self.approve_all || self.ask.is_empty(),

@@ -4,7 +4,7 @@
 //!
 //! The agent file is loaded here, once for each agent a host builds, and everything that
 //! depends on it is decided here too, such as which of the host's tools it enables and which
-//! tools of extensions ask. What belongs to one session is in `setup`.
+//! tools of MCP servers ask. What belongs to one session is in `setup`.
 //!
 //! - `approvals`: which calls ask before they run, for the policies and the prompt section
 //!   that tells the model
@@ -127,18 +127,20 @@ impl ConfiguredAgent {
         let (built, key) = provider(app)?;
         let credentials = credentials(app, key);
         let auto_approve_commands = permissions.allowed_commands();
-        let asked = Asked::new(app, &permissions, &host);
+        let asked = Asked::new(app, &permissions);
         let approvals_section = asked.section(approvals, &enabled, &auto_approve_commands);
         let isolates_commands = executor_factory.isolates();
         let notices = asked.notices(approvals, &enabled, &permissions, executor_factory.as_ref());
         let (policies, approvals) = policies(app, &permissions, &asked, approvals);
         let hooks = hooks(app, continue_on_length, &credentials);
         let skills = skills_tool(skills, &enabled);
-        // The host's tools that the agent enables, as it enables the built-in ones.
+        // The host's tools that the agent enables, as it enables the built-in ones, then
+        // those of the MCP servers, which every agent offers.
         let tools = app
             .tools
             .iter()
             .filter(|tool| enabled.iter().any(|name| name == tool.name()))
+            .chain(&app.mcp.tools)
             .cloned()
             .collect();
         let role = AgentConfig {
@@ -149,7 +151,6 @@ impl ConfiguredAgent {
             hooks,
             policies,
             approvals,
-            extensions: app.mcp.servers.iter().chain(&app.extensions).cloned().collect(),
             models,
             session_cache_key: built.session_cache_key,
             limits,
@@ -258,35 +259,27 @@ impl ConfiguredAgent {
     }
 }
 
-/// The names of the host's own tools, of its extensions' tools and of the tools it gives each
-/// session, which the agent may name.
+/// The names of the host's own tools and of the tools it gives each session, which the agent
+/// may name.
 fn host_tools(app: &Application) -> HostTools {
     HostTools {
         own: app.tools.iter().map(|tool| tool.name().to_string()).collect(),
-        extensions: app
-            .extensions
-            .iter()
-            .flat_map(|extension| extension.tools())
-            .map(|tool| tool.name().to_string())
-            .collect(),
         session: app.session_tools.iter().flat_map(|tools| tools.names()).collect(),
     }
 }
 
 /// Refuse a part of the host's whose name another part goes by already. A provider or an
-/// executor may not be registered under a taken name. A tool of the host or of its
-/// extensions may not be named like a built-in tool, which a session gets only when it is
-/// made; tools that share a name otherwise, and extensions that do, the kernel refuses as the
-/// agent is made. Extensions name their own hooks and policies, so an extension may not be
-/// named like a built-in hook or policy; a host's hook may not be named like a built-in hook,
-/// an extension or another of its hooks, and a policy likewise among policies: the kernel's
-/// chains name hooks and policies apart. The host's prompt sections are added
-/// beside the assembly's, so none may be named like one of those, the agent's instructions
-/// or another of the host's.
+/// executor may not be registered under a taken name. A tool of the host may not be named
+/// like a built-in tool, which a session gets only when it is made; tools that share a name
+/// otherwise the kernel refuses as the agent is made. A host's hook may not be named like a
+/// built-in hook or another of its hooks, and a policy likewise among policies: the kernel's
+/// chains name hooks and policies apart. The host's prompt sections are added beside the
+/// assembly's, so none may be named like one of those, the agent's instructions or another
+/// of the host's.
 fn check_names(app: &Application, host: &HostTools) -> Result<()> {
     app.providers.check_names().map_err(anyhow::Error::msg)?;
     app.executors.check_names().map_err(anyhow::Error::msg)?;
-    for name in host.own.iter().chain(&host.extensions).chain(&host.session) {
+    for name in host.own.iter().chain(&host.session) {
         anyhow::ensure!(
             !known_tool(name),
             "the host's tool {name:?} has the name of a built-in tool"
@@ -294,26 +287,16 @@ fn check_names(app: &Application, host: &HostTools) -> Result<()> {
     }
     let mut hooks: HashSet<&str> = BUILT_IN_HOOKS.into();
     let mut policies: HashSet<&str> = BUILT_IN_POLICIES.into();
-    for extension in app.mcp.servers.iter().chain(&app.extensions) {
-        let name = extension.name();
-        anyhow::ensure!(
-            !BUILT_IN_HOOKS.contains(&name) && !BUILT_IN_POLICIES.contains(&name),
-            "the extension {name:?} has the name of a built-in hook or policy"
-        );
-        // An extension's hooks and policies go by its name.
-        hooks.insert(name);
-        policies.insert(name);
-    }
     for (name, _) in &app.hooks {
         anyhow::ensure!(
             hooks.insert(name),
-            "the host's hook {name:?} has a name that a built-in hook, an extension or another of the host's hooks goes by"
+            "the host's hook {name:?} has a name that a built-in hook or another of the host's hooks goes by"
         );
     }
     for (name, _) in &app.policies {
         anyhow::ensure!(
             policies.insert(name),
-            "the host's policy {name:?} has a name that a built-in policy, an extension or another of the host's policies goes by"
+            "the host's policy {name:?} has a name that a built-in policy or another of the host's policies goes by"
         );
     }
     let mut sections: HashSet<&str> = setup::SECTION_NAMES.into_iter().chain([PREAMBLE, APPROVALS]).collect();
@@ -495,7 +478,7 @@ fn policies(
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
 /// whatever is registered later. A built-in hook's name, which `hook_failed` events and
-/// `[hook]` lines show, is no extension's: [`check_names`] refuses one named so.
+/// `[hook]` lines show, is no other hook's: [`check_names`] refuses a host's hook named so.
 fn hooks(app: &Application, continue_on_length: u32, credentials: &Credentials) -> HookChain {
     let mut hooks = HookChain::new();
     hooks.push(CONTINUE_ON_LENGTH, Arc::new(ContinueOnLength::new(continue_on_length)));
@@ -531,12 +514,11 @@ fn credentials(app: &Application, key: Credentials) -> Credentials {
 }
 
 /// The denied tools of the agent's `permissions` and the tools that are `asked` about, its own
-/// and those of extensions, MCP servers among them, as one policy that allows the rest; none
-/// without any of them.
+/// and those of MCP servers, as one policy that allows the rest; none without any of them.
 fn rules_policy(permissions: &Permissions, asked: &Asked<'_>, auto_approve: AutoApprove) -> Option<RulePolicy> {
-    let (agent_ask, extension_ask): (&[String], &[String]) = match asked {
+    let (agent_ask, mcp_ask): (&[String], &[String]) = match asked {
         Asked::Nothing => (&[], &[]),
-        Asked::Tools { agent, extensions } => (agent, extensions),
+        Asked::Tools { agent, mcp } => (agent, mcp),
     };
     let denied = permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
@@ -548,12 +530,11 @@ fn rules_policy(permissions: &Permissions, asked: &Asked<'_>, auto_approve: Auto
     });
     // An MCP server's tools ask unless permissions.allow lists them: annotations are hints,
     // except the read-only ones of a server the configuration trusts.
-    // So do those of the host's extensions, which are treated as MCP servers are.
-    let extension = extension_ask.iter().map(|tool| Rule {
+    let mcp = mcp_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
         decision: PolicyDecision::Ask("this tool requires approval (not in permissions.allow)".into()),
     });
-    let mut rules: Vec<Rule> = denied.chain(asked).chain(extension).collect();
+    let mut rules: Vec<Rule> = denied.chain(asked).chain(mcp).collect();
     if rules.is_empty() {
         return None;
     }

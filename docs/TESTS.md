@@ -22,7 +22,7 @@
 | `crates/zx-agent/tests/continue_run.rs` | 不加新输入的续跑 |
 | `crates/zx-agent/tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
 | `crates/zx-agent/tests/model_meta.rs` | 模型单价、成本与 token 阈值（随窗口的阈值跟着切换后的模型）；缓存键；模型切换、请求钩子、摘要与溢出恢复的费用预算校验 |
-| `crates/zx-agent/tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令；排队输入一次取几条 |
+| `crates/zx-agent/tests/extension_capabilities.rs` | 钩子与宿主在运行中发消息、记状态、改工具集；空闲时排队的状态先于下一次运行的输入写入；排队输入一次取几条 |
 | `crates/zx-agent/tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
 | `crates/zx-agent/tests/session_branch.rs` | `Session::branch` 切换分支 |
 | `crates/zx-agent/tests/session_fork.rs` | 复制分支成新会话 |
@@ -39,7 +39,6 @@
 | `crates/zx-agent/tests/output_store.rs` | 长结果先脱敏再落盘（留下第一页）与分页；不经符号链接读写；过期的结果在会话第一次落盘前删除 |
 | `crates/zx-agent/tests/hooks.rs` | 钩子、审批、策略事件与脱敏；`Agent::new` 拒绝的工具 |
 | `crates/zx-agent/tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
-| `crates/zx-agent/tests/extensions.rs` | `AgentConfig::extensions`：扩展给会话加了什么，哪些扩展让 `Agent::new` 拒绝 |
 | `crates/zx-agent/tests/mcp.rs` | MCP 客户端对假服务器：两代协议、工具的选择与命名、调用结果、错误与超时；运行被取消时通知服务器放弃调用；服务器停机期间的调用失败（错误里的地址只写到端口）、恢复后照常，旧服务器重启丢了会话时重新握手并重发；每个请求带上配置的请求头；只有受信任的服务器标为只读的工具声明为只读 |
 | `crates/zx-agent/tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
@@ -49,7 +48,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略、扩展与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；`Overrides::asking` 跳过审批时，会询问的调用直接执行，拒绝规则照旧；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；`Overrides::asking` 跳过审批时，会询问的调用直接执行，拒绝规则照旧；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -65,7 +64,7 @@
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文、skill 与工具结果落盘；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏（`apiKey` 引用变量或直接写在 config.toml 里都一样）与钩子失败输出 |
-| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），`--dangerously-skip-approvals` 时未放行的工具也执行，配置的请求头随每个请求发送，请求经 `[proxy]`，`token` 与引用了变量的请求头的变量对命令隐藏、值被脱敏，引用的变量没有值、服务器用不了时启动失败 |
+| `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run 与 chat：`permissions.allow` 与 `trustReadOnly` 决定哪些工具不经审批（`permissions.ask` 仍可收紧），`--dangerously-skip-approvals` 时未放行的工具也执行，服务器的工具在请求里排在会话自己的工具之前，配置的请求头随每个请求发送，请求经 `[proxy]`，`token` 与引用了变量的请求头的变量对命令隐藏、值被脱敏，引用的变量没有值、服务器用不了时启动失败 |
 | `crates/zx-cli/tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
 | `crates/zx-cli/tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放；被取消的运行为整批调用写下结果 |
 
@@ -90,4 +89,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.49 · 2026年11月
+TESTS.md · v0.50 · 2026年11月

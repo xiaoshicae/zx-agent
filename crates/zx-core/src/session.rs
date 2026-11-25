@@ -23,7 +23,6 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::events::Event;
-use crate::extensions::{CommandContext, CommandOutcome, SlashCommand};
 use crate::input::{InputQueues, PendingInput};
 use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
@@ -81,20 +80,6 @@ pub enum SessionError {
     /// its record could no longer be written. Its record stays in the storage, where the
     /// agent opens it again ([`Agent::open_session`](crate::Agent::open_session)).
     #[error("session is closed; the agent opens it again from its storage")]
-    Closed,
-}
-
-/// Why [`Session::run_command`] returned no outcome.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CommandError {
-    /// No extension registered a command with that name.
-    #[error("unknown command")]
-    Unknown,
-    /// The command ran and failed with this message.
-    #[error("command failed: {0}")]
-    Failed(String),
-    /// The session is closed, as [`SessionError::Closed`] says.
-    #[error("{}", SessionError::Closed)]
     Closed,
 }
 
@@ -159,7 +144,6 @@ struct Shared {
     queues: Arc<InputQueues>,
     active_tools: Arc<ActiveTools>,
     approvals: Arc<ApprovalGate>,
-    commands: Vec<Arc<dyn SlashCommand>>,
     tool_names: Vec<String>,
     cwd: PathBuf,
     id: String,
@@ -182,7 +166,6 @@ impl Session {
                 queues: config.queues.clone(),
                 active_tools: config.active_tools.clone(),
                 approvals: runner.approvals().clone(),
-                commands: config.commands.clone(),
                 tool_names: config.tools.names().map(str::to_string).collect(),
                 cwd: config.cwd.clone(),
                 id: runner.transcript().header().id.clone(),
@@ -287,36 +270,9 @@ impl Session {
         &self.shared.active_tools
     }
 
-    /// The slash commands extensions registered, in registration order.
-    pub fn commands(&self) -> &[Arc<dyn SlashCommand>] {
-        &self.shared.commands
-    }
-
-    /// Run the registered command called `name` with `args`, also while a run is in
-    /// progress (pi: extension commands run at once). The caller shows the outcome's lines
-    /// and sends its `prompt`, if any, as it would the person's input.
-    pub async fn run_command(&self, name: &str, args: &str) -> Result<CommandOutcome, CommandError> {
-        if self.is_closed() {
-            return Err(CommandError::Closed);
-        }
-        let shared = &self.shared;
-        let command = shared
-            .commands
-            .iter()
-            .find(|command| command.name() == name)
-            .ok_or(CommandError::Unknown)?;
-        let ctx = CommandContext::new(
-            shared.id.clone(),
-            shared.cwd.clone(),
-            shared.queues.clone(),
-            shared.active_tools.clone(),
-        );
-        command.run(args, &ctx).await.map_err(CommandError::Failed)
-    }
-
     /// Record state of an extension in the session while idle (pi: `appendEntry`); during
-    /// a run, hooks and commands use `queues().append_custom_entry` instead. Returns the entry's
-    /// ID. A run returns Busy; a write failure returns WriteFailed.
+    /// a run, hooks use `queues().append_custom_entry` instead. Returns the entry's ID. A run
+    /// returns Busy; a write failure returns WriteFailed.
     pub async fn append_custom_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
         self.append_idle(async |runner| runner.transcript_mut().append_custom_entry(custom_type, data).await)
             .await
