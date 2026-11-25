@@ -19,9 +19,9 @@ pub trait ProviderFactory: Send + Sync {
     /// The variable that holds the API key when config.toml writes no `provider.apiKey`.
     fn api_key_env(&self) -> &str;
 
-    /// The provider `input` describes. Fails on settings it cannot use; the error names the
-    /// keys as config.toml writes them.
-    fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider>;
+    /// The provider `input` describes, which the agent's sessions ask. Fails on settings it
+    /// cannot use; the error names the keys as config.toml writes them.
+    fn build(&self, input: ProviderInput<'_>) -> Result<Arc<dyn Provider>>;
 }
 
 /// What a factory builds a provider from.
@@ -36,15 +36,6 @@ pub struct ProviderInput<'a> {
     /// How the provider's requests reach the network: through the proxies of config.toml's
     /// `[proxy]`, else as the environment says.
     pub proxy: &'a Proxy,
-}
-
-/// A provider a factory built.
-pub struct BuiltProvider {
-    /// The provider the agent's sessions ask.
-    pub provider: Arc<dyn Provider>,
-    /// Whether requests carry the session's ID as the server's cache key
-    /// ([`AgentConfig::session_cache_key`](zx_agent::AgentConfig::session_cache_key)).
-    pub session_cache_key: bool,
 }
 
 /// The variable that holds the API key of the OpenAI-compatible provider when config.toml
@@ -77,16 +68,12 @@ impl ProviderFactory for OpenAi {
         DEFAULT_OPENAI_API_KEY_ENV
     }
 
-    fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
+    fn build(&self, input: ProviderInput<'_>) -> Result<Arc<dyn Provider>> {
         let mut config = openai_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
         config.proxy = input.proxy.clone();
-        let session_cache_key = config.body.prompt_cache_key;
         let provider = OpenAiCompatible::new(config).with_context(invalid_settings)?;
-        Ok(BuiltProvider {
-            provider: Arc::new(provider),
-            session_cache_key,
-        })
+        Ok(Arc::new(provider))
     }
 }
 
@@ -98,16 +85,12 @@ impl ProviderFactory for Anthropic {
         DEFAULT_ANTHROPIC_API_KEY_ENV
     }
 
-    fn build(&self, input: ProviderInput<'_>) -> Result<BuiltProvider> {
+    fn build(&self, input: ProviderInput<'_>) -> Result<Arc<dyn Provider>> {
         let mut config = anthropic_config(input.options, input.reasoning)?;
         config.api_key = input.api_key.into();
         config.proxy = input.proxy.clone();
         let provider = AnthropicMessages::new(config).with_context(invalid_settings)?;
-        Ok(BuiltProvider {
-            provider: Arc::new(provider),
-            // Its cache is the prefix of a request, marked in the body.
-            session_cache_key: false,
-        })
+        Ok(Arc::new(provider))
     }
 }
 
@@ -121,7 +104,7 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    fn built(api: &str, text: &str, reasoning: Option<Reasoning>) -> Result<BuiltProvider> {
+    fn built(api: &str, text: &str, reasoning: Option<Reasoning>) -> Result<Arc<dyn Provider>> {
         let registered = built_in();
         registered.get(api).map_err(anyhow::Error::msg)?.build(ProviderInput {
             options: &options(text),
@@ -134,11 +117,9 @@ mod tests {
     #[test]
     fn the_built_in_providers_are_found_by_name() {
         let openai = built(OPENAI, "promptCacheKey = true", None).unwrap();
-        assert_eq!(openai.provider.name(), "openai-compatible");
-        assert!(openai.session_cache_key);
+        assert_eq!(openai.name(), "openai-compatible");
         let anthropic = built(ANTHROPIC, "", None).unwrap();
-        assert_eq!(anthropic.provider.name(), "anthropic");
-        assert!(!anthropic.session_cache_key);
+        assert_eq!(anthropic.name(), "anthropic");
     }
 
     #[test]

@@ -37,7 +37,8 @@ impl StepLoop<'_> {
             tools: config.tools.definitions(&config.active_tools),
             max_tokens: config.max_tokens,
             reasoning: settings.reasoning,
-            cache_key: config.cache_key.clone(),
+            // The conversation the request belongs to; whether it is sent is the provider's.
+            cache_key: Some(self.scope.transcript.header().id.clone()),
             takes_images,
         };
         let provider = config.provider.as_ref();

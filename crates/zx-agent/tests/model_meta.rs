@@ -459,8 +459,7 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let mut config = config(provider.clone(), vec![]);
-    config.session_cache_key = true;
+    let config = config(provider.clone(), vec![]);
     let header = SessionHeader {
         id: "session-7".into(),
         ..header()

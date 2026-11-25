@@ -669,7 +669,6 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
             ..OpenAiConfig::default()
         },
     );
-    setup.config.session_cache_key = true;
     setup.session = session_42().await;
     let (runner, _) = setup.build().await;
     runner.run("go").await;
@@ -681,7 +680,6 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     assert_eq!(replayed.1.cache_key.as_deref(), Some("session-42"));
 
     let mut plain = setup_with_provider(&server, OpenAiConfig::default());
-    plain.config.session_cache_key = true;
     plain.session = session_42().await;
     let (runner, _) = plain.build().await;
     runner.run("go").await;

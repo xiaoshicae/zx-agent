@@ -5,7 +5,7 @@
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
 config.policies.push("permissions", policy);
-let agent = Agent::new(config)?;              // 校验工具与摘要设置
+let agent = Agent::new(config)?;              // 校验模型名、工具、花费预算与摘要设置
 let session = agent.create_session(SessionOptions::new(cwd)).await?;
 let mut run = session.send("任务描述")?;      // 只取得会话；读它，运行才推进
 while let Some(event) = run.next().await {
@@ -36,6 +36,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 | 建自己的会话索引 | `Agent::session_headers` | 只读头部、不读记录，按开始时间从新到旧；打开会话时仍完整校验。读不出头部或版本不符的会话不在其中，`list_sessions` 把它们列为读不出。JSONL 存储不缓存，每次读取查询范围内每个会话文件的第一行 |
 | 按模型的上下文窗口自动摘要 | `AgentConfig::compaction` 的 `trigger_tokens` 设为 `Some(TokenTrigger::BelowWindow { reserve_tokens })`（`None` 关闭 token 阈值），窗口写进 `AgentConfig::models` | 每次请求前按会话当时的模型取窗口，`Session::set_model` 换了模型就随之改变；窗口未知的模型没有 token 阈值 |
 | 自己产出摘要 | 实现 `compaction::Summarizer`，放进 `AgentConfig::summarizer` | 何时摘要、读哪一段（至多 2 MiB）、记录与校验引用、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入预算 |
+| 让服务端按会话缓存提示词 | provider 自己的设置，如 `OpenAiConfig` 的 `body.prompt_cache_key` | 内核给每个任务请求带上会话 ID（`Request::cache_key`），发不发只由 provider 决定；摘要请求不带 |
 | 一起加一组工具、策略与钩子 | 没有打包的接口：宿主的一个函数把它们放进 `AgentConfig` 的 `tools`、`policies`、`hooks` 与 `system_prompt` | 属于一个会话的部分由 `SessionSetup` 给出。MCP 服务器的工具由 `builtin::mcp::Server::tools()` 给出 |
 | 让内置工具在别处运行 | 实现 `builtin::executor::Executor`；`builtin::tools::executor_tools` 按名字（`EXECUTOR_TOOL_NAMES`）建出跑在它上面的工具。要让 `config.toml` 的 `execution` 按名字选用它，实现 `zx_app::ExecutorFactory`，经 `register_executor` 注册（见下文） | 命令行交给执行器自己的 shell，两个内置执行器都用 bash。`environment_section` 写提示词里描述执行环境的段落，默认只有工作目录。`edit_file` 与 `write_file` 在宿主给的 `FileMutationQueue` 里按文件排队，几个会话要协调时共用一个 |
 | 启动前检查附带实现的设置 | `ContainerConfig`、`OutputStoreConfig`、`mcp::ServerConfig` 与 `policy::ProgramOptions` 的 `validate` | 错误按字段名说明。容器与落盘的错误是枚举（`InvalidContainerConfig`、`InvalidOutputStoreConfig`），容器启动时工作目录不可用的错误可向下转型为 `UnusableWorkspace`：从自己的配置文件读设置的宿主按变体换成自己的键。`ServerConfig::validate` 返回模型看到的工具名 |
@@ -63,4 +64,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.41 · 2026年11月
+LIBRARY.md · v0.42 · 2026年11月

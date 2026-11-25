@@ -385,10 +385,37 @@ fn an_agent_no_session_could_run_with_is_refused() {
             keep_recent_bytes: 0,
             ..compaction::Config::default()
         },
-        ..AgentConfig::new(provider, "m")
+        ..AgentConfig::new(provider.clone(), "m")
     };
 
     let error = Agent::new(twice).err().unwrap();
     assert_eq!(error.to_string(), "more than one tool is named \"echo\"");
     assert!(Agent::new(unworkable).is_err());
+    for blank in ["", " \t"] {
+        let error = Agent::new(AgentConfig::new(provider.clone(), blank)).err().unwrap();
+        assert_eq!(error.downcast_ref(), Some(&SessionError::InvalidModel), "{blank:?}");
+    }
+    for budget in [f64::NAN, f64::INFINITY, -1.0] {
+        let unusable = AgentConfig {
+            limits: RunLimits {
+                cost_budget: Some(budget),
+                ..RunLimits::default()
+            },
+            ..AgentConfig::new(provider.clone(), "m")
+        };
+        let error = Agent::new(unusable).err().unwrap();
+        assert!(
+            error.to_string().contains("the cost budget must be"),
+            "{budget}: {error}"
+        );
+    }
+    // Zero is a budget like any other.
+    let nothing = AgentConfig {
+        limits: RunLimits {
+            cost_budget: Some(0.0),
+            ..RunLimits::default()
+        },
+        ..AgentConfig::new(provider, "m")
+    };
+    assert!(Agent::new(nothing).is_ok());
 }
