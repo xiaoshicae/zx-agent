@@ -207,9 +207,9 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
     assert!(configured.agent().close_session(&id));
     assert!(session.is_closed());
     let reopened = configured.open(&id).await.unwrap();
+    assert_eq!(reopened.model().unwrap(), "host-model");
     reopened
         .with_transcript(|transcript| {
-            assert_eq!(transcript.header().model, "host-model");
             assert_eq!(
                 transcript.header().cwd,
                 work.canonicalize().unwrap().display().to_string()

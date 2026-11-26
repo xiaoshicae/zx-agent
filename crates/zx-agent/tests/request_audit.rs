@@ -34,10 +34,13 @@ fn replays(transcript: &Transcript) -> serde_json::Value {
 /// A recorded session must keep rebuilding to the requests it sent. The fixture holds a tool
 /// call, a retried failure hidden by a context edit, a full summary and a request after it.
 /// If a change to the projection, to summaries or to the OpenAI conversion alters this
-/// output, sessions written before it would no longer show what they sent. Only the current
-/// format is read, so raise `SESSION_VERSION`, or the request conversion version for a
-/// change to the OpenAI conversion, so that such sessions are refused instead; then update
-/// the fixture's header or options and regenerate the expected file.
+/// output, sessions written before it would no longer show what they sent. A change of the
+/// session format raises `SESSION_VERSION` and still reads the sessions of version 16 and
+/// later: this fixture stays as version 16 wrote it and keeps rebuilding to the same
+/// requests, and a session of the new version gets a fixture of its own. A change to the
+/// OpenAI conversion raises the request conversion version, so that the requests recorded
+/// before it are refused instead; then update the fixture's options and regenerate the
+/// expected file.
 #[test]
 fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
     assert_fixture_rebuilds("replay-full");
@@ -124,7 +127,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 }
 
 #[tokio::test]
-async fn summary_requests_are_rebuilt_from_their_compaction() {
+async fn a_summary_request_is_rebuilt_from_its_request_configuration_and_its_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
@@ -158,6 +161,21 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
     let (config, request) = reopened.replay_request(&ids[0]).unwrap();
     assert!(config.tools.is_empty());
     assert_eq!(vec![request], provider.requests());
+    // The provider, the model and the output limit are recorded once, in the request's
+    // configuration; the start of the compaction adds the instructions and no copy of them.
+    assert_eq!(
+        (config.provider.as_str(), config.model.as_str(), config.max_tokens),
+        ("faux", "test-model", Some(Config::default().max_summary_tokens))
+    );
+    let lines = read_lines(&path);
+    let start = lines.iter().find(|line| line["type"] == "compaction_started").unwrap();
+    let recorded: Vec<&str> = start["request"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(recorded, ["instructions"]);
 }
 
 #[tokio::test]

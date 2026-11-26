@@ -14,7 +14,7 @@ fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {
     SessionHeader {
         id: id.into(),
         timestamp,
-        ..SessionHeader::new(Path::new(cwd), "m")
+        ..SessionHeader::new(Path::new(cwd))
     }
 }
 
@@ -187,9 +187,8 @@ async fn a_session_is_opened_by_its_id_whatever_its_file_is_called() {
     let dir = tempfile::tempdir().unwrap();
     let directory = dir.path().join("--w--");
     std::fs::create_dir_all(&directory).unwrap();
-    let line = |id: &str| {
-        format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"{id}","timestamp":1,"cwd":"/w","model":"m"}}"#)
-    };
+    let line =
+        |id: &str| format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"{id}","timestamp":1,"cwd":"/w"}}"#);
     std::fs::write(directory.join("renamed.jsonl"), format!("{}\n", line("abc"))).unwrap();
     std::fs::write(directory.join("abd.jsonl"), format!("{}\n", line("abd"))).unwrap();
     std::fs::write(directory.join("broken.jsonl"), "not json\n").unwrap();
@@ -495,6 +494,7 @@ async fn files_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     for version in [1, SESSION_VERSION - 1, SESSION_VERSION + 1] {
         let path = dir.path().join(format!("v{version}.jsonl"));
+        // With a model, as the versions before 16 wrote a header.
         let header =
             serde_json::json!({"type":"session","version":version,"id":"h","timestamp":1,"cwd":"/","model":"m"});
         let message =

@@ -191,10 +191,7 @@ impl Transcript {
             return Self::raw_projection_from(&path);
         };
         // The boundary is in record order even when a later edit omits that message.
-        let Some(cut) = path
-            .iter()
-            .position(|entry| entry.id() == compaction.first_kept_entry_id)
-        else {
+        let Some(cut) = path.iter().position(|entry| entry.id() == started.first_kept_entry_id) else {
             return Self::raw_projection_from(&path);
         };
         let edits = edits_on(&path);
@@ -219,6 +216,12 @@ impl Transcript {
     /// The latest compaction on the current branch that succeeded and still holds.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
         Self::compaction_in_effect_on(&self.branch_path()).map(|(compaction, _)| compaction)
+    }
+
+    /// The boundary of [`Self::latest_compaction`]: the ID of the first entry it keeps, which
+    /// the record of its start holds. `None` without such a compaction.
+    pub(crate) fn latest_compaction_boundary(&self) -> Option<&str> {
+        Self::compaction_in_effect_on(&self.branch_path()).map(|(_, started)| started.first_kept_entry_id.as_str())
     }
 
     /// The latest compaction on `path` that succeeded and still holds, with the record of its

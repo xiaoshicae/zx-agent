@@ -37,7 +37,7 @@ use crate::ai::{Message, UserMessageKind};
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
 /// let storage = MemoryStorage::default();
-/// let header = SessionHeader::new(Path::new("."), "model");
+/// let header = SessionHeader::new(Path::new("."));
 /// let log = storage.create(&header).await?;
 /// let mut session = Transcript::with_log(header, log);
 /// session.append_message(Message::user("check the disk")).await?;
@@ -291,7 +291,7 @@ mod tests {
     fn a_query_matches_the_working_directory_and_every_label_it_names() {
         let header = SessionHeader {
             labels: labels(&[("tenant", "acme"), ("channel", "web")]),
-            ..SessionHeader::new(Path::new("/w"), "m")
+            ..SessionHeader::new(Path::new("/w"))
         };
         let matches = |query: SessionQuery| query.matches(&header);
 
@@ -321,7 +321,7 @@ mod tests {
         let started = |timestamp, version| SessionHeader {
             timestamp,
             version,
-            ..SessionHeader::new(Path::new("/w"), "m")
+            ..SessionHeader::new(Path::new("/w"))
         };
         let current = started(1, SESSION_VERSION);
         let headers = vec![

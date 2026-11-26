@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(held_session(&place).await.unwrap(), None);
         assert_eq!(open(&path, None).await.unwrap().1, None);
 
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         let log = place.storage().create(&header).await.unwrap();
         let mut transcript = Transcript::with_log(header.clone(), log);
         transcript.append_message(Message::user("q")).await.unwrap();

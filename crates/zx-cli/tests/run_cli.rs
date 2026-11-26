@@ -99,7 +99,7 @@ async fn streaming_resource_limits_reach_the_provider() {
 async fn repaired_session_tails_are_reported_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path(), MODEL))
+    let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path()))
         .await
         .unwrap();
     session.append_message(Message::user("earlier")).await.unwrap();

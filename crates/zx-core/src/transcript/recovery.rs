@@ -199,7 +199,7 @@ mod tests {
     use crate::transcript::{CustomMessage, CustomType, SessionHeader};
 
     fn transcript() -> Transcript {
-        Transcript::in_memory(SessionHeader::new(Path::new("."), "m"))
+        Transcript::in_memory(SessionHeader::new(Path::new(".")))
     }
 
     fn answer(stop_reason: StopReason, calls: &[(&str, &str)]) -> Message {

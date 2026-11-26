@@ -90,7 +90,7 @@ pub(super) fn result_with_details(details: Option<serde_json::Value>) -> Message
 }
 
 pub(super) fn header() -> SessionHeader {
-    SessionHeader::new(Path::new("/tmp"), "m")
+    SessionHeader::new(Path::new("/tmp"))
 }
 
 pub(super) fn assistant(text: &str) -> Message {
@@ -136,10 +136,7 @@ pub(super) fn plan(transcript: &Transcript, first_kept: &str) -> CompactionPlan 
         kept_input_entry_id: None,
         source_entry_ids,
         by: SummarizedBy::Request(SummaryRequest {
-            provider: "faux".into(),
-            model: "m".into(),
             instructions: "Summarize".into(),
-            max_tokens: 100,
         }),
         input_bytes: 1000,
     }

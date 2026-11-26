@@ -344,7 +344,7 @@ mod tests {
     fn each_session_of_a_conversation_gets_the_tool_and_no_other_session_does() {
         let channel: Arc<dyn ImChannel> = Arc::new(Files::default());
         let tools = SendFiles::new(&[channel]);
-        let mut header = SessionHeader::new(Path::new("/w"), "m");
+        let mut header = SessionHeader::new(Path::new("/w"));
         assert!(tools.tools(&header).is_empty());
         let key = SessionKey {
             platform: "slack".into(),

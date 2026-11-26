@@ -345,7 +345,7 @@ async fn opening_one_session_twice_at_once_gives_the_same_session() {
         ..Setup::default()
     });
     let (agent, storage, _) = agent_with(setup.clone(), [FauxStep::Hang]);
-    let header = SessionHeader::new(cwd(), "m");
+    let header = SessionHeader::new(cwd());
     drop(storage.create(&header).await.unwrap());
 
     let release = async {
@@ -365,7 +365,7 @@ async fn opening_one_session_twice_at_once_gives_the_same_session() {
 #[tokio::test]
 async fn an_opening_that_fails_leaves_the_session_to_be_opened_later() {
     let (agent, storage, _) = agent([]);
-    let header = SessionHeader::new(cwd(), "m");
+    let header = SessionHeader::new(cwd());
 
     let error = agent.open_session(&header.id).await.err().unwrap();
 

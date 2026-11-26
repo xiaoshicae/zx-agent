@@ -29,8 +29,7 @@ fn snapshot(path: &Path) -> Result<Transcript> {
 /// A session file with a header followed by `entries`, one per line, unterminated.
 fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
     let path = dir.join("s.jsonl");
-    let header =
-        format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"h","timestamp":1,"cwd":"/","model":"m"}}"#);
+    let header = format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"h","timestamp":1,"cwd":"/"}}"#);
     let lines: Vec<&str> = std::iter::once(header.as_str())
         .chain(entries.iter().copied())
         .collect();
@@ -123,7 +122,7 @@ fn a_newer_session_with_a_cut_short_tail_is_left_unchanged() {
     let path = dir.path().join("future.jsonl");
     std::fs::write(
         &path,
-        "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\",\"model\":\"m\"}\n{\"type\":\"mess",
+        "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\"}\n{\"type\":\"mess",
     )
     .unwrap();
     let original = std::fs::read(&path).unwrap();
@@ -299,12 +298,13 @@ async fn a_session_file_is_read_back_as_it_was_written() {
     let mut transcript = create(&path).unwrap();
     transcript.append_message(Message::user("q")).await.unwrap();
     transcript.append_message(assistant("a")).await.unwrap();
+    let written = transcript.header().clone();
     drop(transcript);
 
     let reopened = open(&path).unwrap();
 
     assert_eq!(texts(&reopened), ["q", "a"]);
-    assert_eq!(reopened.header().model, "m");
+    assert_eq!(reopened.header(), &written);
 }
 
 #[test]

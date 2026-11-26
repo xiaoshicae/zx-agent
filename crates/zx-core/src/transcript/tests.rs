@@ -187,10 +187,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         kept_input_entry_id: None,
         source_entry_ids: ids[..2].to_vec(),
         by: SummarizedBy::Request(SummaryRequest {
-            provider: "p".into(),
-            model: "m".into(),
             instructions: "summarize".into(),
-            max_tokens: 10,
         }),
         input_bytes: 1,
     };

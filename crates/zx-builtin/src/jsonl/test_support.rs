@@ -8,7 +8,7 @@ use zx_core::transcript::{SessionHeader, Transcript};
 use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
 pub(super) fn header() -> SessionHeader {
-    SessionHeader::new(Path::new("/tmp"), "m")
+    SessionHeader::new(Path::new("/tmp"))
 }
 
 pub(super) fn assistant(text: &str) -> Message {
