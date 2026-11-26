@@ -244,7 +244,7 @@ impl Agent {
         };
         // What every session shares is assembled once and dropped, so that it is refused
         // here rather than with the first session.
-        let probe = SessionHeader::new(Path::new("."), &agent.shared.config.model);
+        let probe = SessionHeader::new(Path::new("."));
         agent.assemble(&probe, SessionParts::default())?;
         Ok(agent)
     }
@@ -260,7 +260,7 @@ impl Agent {
             .with_context(|| format!("cannot make the working directory {} absolute", options.cwd.display()))?;
         let header = SessionHeader {
             labels: options.labels,
-            ..SessionHeader::new(&cwd, &config.model)
+            ..SessionHeader::new(&cwd)
         };
         let parts = self.set_up(&header).await?;
         let assembled = self.assemble(&header, parts)?;

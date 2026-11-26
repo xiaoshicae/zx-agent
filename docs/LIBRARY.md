@@ -33,7 +33,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 | 限制待处理的输入 | `PendingInput::held(输入, 凭证)`，交给 `queues().steer`、`follow_up` 或 `Session::send` | 内核的输入队列不限量，也不计配额：宿主自己计量，凭证在输入离开队列时丢弃（何时离开见 `PendingInput`），`send` 的提问写入会话后丢弃；`Session::take_queued` 连同凭证一起取出，`PendingInput::into_parts` 把凭证还给宿主。IM 服务就这样限制每个对话，并在消息写入会话后才把它从 backlog 删除（`crates/zx-im/src/server/admission.rs`） |
 | 给模型图片 | 提问：`Input::User` 的 `images`；工具：`ToolOutput::with_images`。图片先经 `builtin::images::fit`（文件的字节）或 `fit_base64` 适配 | 没适配的图片可能超出 API 的上限，此后每次请求都失败。模型能否看图写在 `AgentConfig::models` 的 `ModelMeta::takes_images`，不能时 provider 把图片换成一句说明。输入钩子（`Hook::on_input`）只看到文本，图片原样写入会话 |
 | 存会话 | `AgentConfig::storage`：`transcript::MemoryStorage`（默认）、`builtin::jsonl::JsonlStorage`，或实现 `transcript::SessionStorage` 与 `SessionLog` | `open` 让 `Agent` 成为会话的写入者，`read` 是只读快照（交给 `Transcript::snapshot`）。自己实现时，列出用 `SessionList::new` 排序与截断；读头部时把读得出的头部都交给 `SessionQuery::arrange_headers`，由它去掉其他格式的会话、排序与截断，存储自己不必按版本过滤 |
-| 建自己的会话索引 | `Agent::session_headers` | 只读头部、不读记录，按开始时间从新到旧；打开会话时仍完整校验。读不出头部或版本不符的会话不在其中，`list_sessions` 把它们列为读不出。JSONL 存储不缓存，每次读取查询范围内每个会话文件的第一行 |
+| 建自己的会话索引 | `Agent::session_headers` | 只读头部、不读记录，按开始时间从新到旧；打开会话时仍完整校验。头部（`transcript::SessionHeader`）有格式版本、会话 ID、开始时间、工作目录、标签与来源会话，不记模型：模型可以中途更换（`Session::set_model`），每次请求用的在会话的 `request_config` 记录里。读不出头部或版本不符的会话不在其中，`list_sessions` 把它们列为读不出。JSONL 存储不缓存，每次读取查询范围内每个会话文件的第一行 |
 | 按模型的上下文窗口自动摘要 | `AgentConfig::compaction` 的 `trigger_tokens` 设为 `Some(TokenTrigger::BelowWindow { reserve_tokens })`（`None` 关闭 token 阈值），窗口写进 `AgentConfig::models` | 每次请求前按会话当时的模型取窗口，`Session::set_model` 换了模型就随之改变；窗口未知的模型没有 token 阈值 |
 | 自己产出摘要 | 实现 `compaction::Summarizer`，放进 `AgentConfig::summarizer` | 何时摘要、读哪一段（至多 2 MiB）、记录与校验引用、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入预算 |
 | 让服务端按会话缓存提示词 | provider 自己的设置，如 `OpenAiConfig` 的 `body.prompt_cache_key` | 内核给每个任务请求带上会话 ID（`Request::cache_key`），发不发只由 provider 决定；摘要请求不带 |
@@ -64,4 +64,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.46 · 2026年11月
+LIBRARY.md · v0.47 · 2026年11月

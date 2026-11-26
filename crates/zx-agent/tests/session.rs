@@ -746,7 +746,8 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one")]));
-    let seed = zx_testing::create_session_file(&file, header()).await.unwrap();
+    let started = header();
+    let seed = zx_testing::create_session_file(&file, started.clone()).await.unwrap();
     let (session, _) = RunnerSetup {
         session: seed.into(),
         ..RunnerSetup::new(config(provider, vec![]))
@@ -765,7 +766,17 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     session.prompt("second").await.unwrap();
     assert!(std::fs::read(&file).unwrap().starts_with(&before));
     let reopened = zx_testing::read_session_file(&file).unwrap();
-    assert_eq!(reopened.header().model, "test-model");
+    assert_eq!(reopened.header(), &started);
+    // The header names no model: each request's is in the configuration recorded for it.
+    let models: Vec<&str> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::RequestConfig(entry) => Some(entry.config.model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models, ["test-model", "new-model"]);
     assert!(
         matches!(reopened.messages().last(), Some(zx_agent::ai::Message::Assistant(message)) if message.model == "new-model")
     );

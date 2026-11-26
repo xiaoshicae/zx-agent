@@ -42,7 +42,7 @@ use super::SessionHeader;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
-/// let header = SessionHeader::new(Path::new("."), "model");
+/// let header = SessionHeader::new(Path::new("."));
 /// let (rows, table) = mpsc::channel();
 /// let mut transcript = Transcript::with_log(header.clone(), Box::new(Table(rows)));
 /// transcript.append_message(Message::user("check the disk")).await?;

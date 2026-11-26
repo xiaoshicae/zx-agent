@@ -14,9 +14,13 @@ use super::{
 };
 use crate::ai::{Message, UserMessageKind, now_ms};
 
-/// What a session starts with, and never changes: where and with which model it started,
-/// and what its host says about it. A storage keeps it before the records, as the first line
-/// of a session file.
+/// What a session starts with, and never changes: when and where it started, and what its
+/// host says about it. A storage keeps it before the records, as the first line of a session
+/// file.
+///
+/// It names no model: a session's model can change between requests, and each request's is
+/// in the request configuration recorded for it
+/// ([`RequestConfig::model`](super::RequestConfig::model)).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
@@ -25,7 +29,6 @@ pub struct SessionHeader {
     pub id: String,
     pub timestamp: u64,
     pub cwd: String,
-    pub model: String,
     /// The ID of the session this one was forked from; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
@@ -37,14 +40,13 @@ pub struct SessionHeader {
 }
 
 impl SessionHeader {
-    /// A header for a new session with a fresh id and no labels.
-    pub fn new(cwd: &Path, model: &str) -> Self {
+    /// A header for a new session in `cwd`, with a fresh id and no labels.
+    pub fn new(cwd: &Path) -> Self {
         Self {
             version: SESSION_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: now_ms(),
             cwd: cwd.display().to_string(),
-            model: model.to_string(),
             parent_session: None,
             labels: BTreeMap::new(),
         }
@@ -288,6 +290,34 @@ mod tests {
     use super::*;
     use crate::transcript::Transcript;
     use crate::transcript::test_support::{header, loaded};
+
+    #[test]
+    fn a_header_records_its_format_its_start_and_its_directory_and_no_model() {
+        let header = SessionHeader {
+            id: "h".into(),
+            timestamp: 1,
+            ..SessionHeader::new(Path::new("/w"))
+        };
+
+        assert_eq!(
+            serde_json::to_string(&header).unwrap(),
+            r#"{"version":16,"id":"h","timestamp":1,"cwd":"/w"}"#
+        );
+    }
+
+    #[test]
+    fn a_header_of_version_15_is_refused_as_a_session_of_any_other_version_is() {
+        // As version 15 wrote it, with the model the session started with.
+        let stored = json!({"version": 15, "id": "h", "timestamp": 1, "cwd": "/w", "model": "m"});
+        let header: SessionHeader = serde_json::from_value(stored).unwrap();
+
+        let error = Transcript::snapshot(loaded(header, Vec::new())).err().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "session format version 15 is not supported; only version 16 can be read or written"
+        );
+    }
 
     #[test]
     fn a_custom_type_is_kept_as_written_and_is_never_blank() {

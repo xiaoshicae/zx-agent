@@ -129,15 +129,15 @@ impl CompactionSummary {
     }
 }
 
-/// What a summary request was sent with, besides the records it read: enough to rebuild the
-/// request from the session.
+/// What a summary request says that no other record holds: its instructions. The records it
+/// read are those before the compaction's boundary, and its provider, model and output limit
+/// are in the request configuration recorded for the request itself
+/// ([`RequestConfig`](crate::transcript::RequestConfig)); together they rebuild the request
+/// from the session ([`Transcript::replay_request`](crate::transcript::Transcript::replay_request)).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryRequest {
-    pub provider: String,
-    pub model: String,
     pub instructions: String,
-    pub max_tokens: u32,
 }
 
 /// Who makes the summary of a compaction, as its start records it: in JSON either a
@@ -145,8 +145,8 @@ pub struct SummaryRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SummarizedBy {
-    /// The kernel asks the model: what the request was sent with, enough to rebuild it from
-    /// the session.
+    /// The kernel asks the model: the instructions of its request, which the session
+    /// rebuilds with the request's own records.
     Request(SummaryRequest),
     /// The host's summarizer, by its name. How it made the summary is not in the session.
     Summarizer(String),
@@ -162,6 +162,7 @@ pub struct CompactionStartedEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
+    /// The boundary: the first record the compaction keeps. Its result does not repeat it.
     pub first_kept_entry_id: String,
     /// The latest input before the boundary, when the boundary falls among what followed
     /// that input. The summary reads it like every record before the boundary, and it is
@@ -177,16 +178,17 @@ pub struct CompactionStartedEntry {
     pub input_bytes: usize,
 }
 
-/// A successful summary and the boundary it keeps from; the records it replaces in the
-/// context stay in the session.
+/// A successful summary; the records it replaces in the context stay in the session. The
+/// boundary it keeps from is in the record of its start
+/// ([`CompactionStartedEntry::first_kept_entry_id`]), which `compaction_id` names.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
+    /// The ID of the [`CompactionStartedEntry`] this is the result of.
     pub compaction_id: String,
-    pub first_kept_entry_id: String,
     pub summary: CompactionSummary,
     pub usage: Usage,
 }

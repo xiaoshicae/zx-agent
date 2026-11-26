@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::{CompactionPlan, CompactionSummary, SummarizedBy};
+use super::{CompactionPlan, CompactionSummary, SummarizedBy, summary_input, summary_messages};
 use crate::ai::{
     AssistantMessage, ContentBlock, Message, Request, StopReason, SystemMessage, SystemPrompt, ToolCall,
     ToolResultMessage, Usage, now_ms,
@@ -289,9 +289,95 @@ async fn serialized_compaction_records_use_camel_case_fields_and_snake_case_tags
     let json = serde_json::to_value(transcript.entries().last().unwrap()).unwrap();
     assert_eq!(json["type"], "compaction");
     assert_eq!(json["compactionId"], started);
-    assert_eq!(json["firstKeptEntryId"], kept);
     assert_eq!(json["summary"]["facts"][0]["sourceEntryIds"][0], old);
     assert_eq!(entry.summary.facts[0].text, "The old observation");
+    // The boundary is recorded once, by the start.
+    let fields: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        fields,
+        [
+            "type",
+            "id",
+            "parentId",
+            "timestamp",
+            "compactionId",
+            "summary",
+            "usage"
+        ]
+    );
+    let start = serde_json::to_value(transcript.get(&started).unwrap()).unwrap();
+    assert_eq!(start["firstKeptEntryId"], kept);
+}
+
+#[tokio::test]
+async fn a_loaded_compaction_keeps_from_the_boundary_its_start_records() {
+    let mut transcript = Transcript::in_memory(header());
+    let old = transcript.append_message(Message::user("old evidence")).await.unwrap();
+    // Not the latest input: only the start says that the summary keeps from here.
+    let kept = transcript.append_message(Message::user("kept question")).await.unwrap();
+    transcript.append_message(Message::user("latest input")).await.unwrap();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
+    transcript
+        .append_compaction(&started, summary(&old), Usage::default())
+        .await
+        .unwrap();
+
+    let reopened = Transcript::snapshot(loaded(transcript.header().clone(), records_of(&transcript))).unwrap();
+
+    assert_eq!(reopened.latest_compaction_boundary(), Some(kept.as_str()));
+    let messages = summarize(&reopened.messages());
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].starts_with("user:<context_summary>"), "{messages:?}");
+    assert_eq!(messages[1..], ["user:kept question", "user:latest input"]);
+}
+
+#[tokio::test]
+async fn a_summary_request_is_rebuilt_from_its_request_configuration_and_the_instructions_of_its_start() {
+    let mut transcript = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut transcript).await;
+    // What the summary reads: the records before its boundary.
+    let read: Vec<_> = transcript
+        .raw_projection()
+        .into_iter()
+        .take_while(|item| item.entry_id != kept)
+        .collect();
+    let started = transcript
+        .append_compaction_started(plan(&transcript, &kept))
+        .await
+        .unwrap();
+    let sent = Request {
+        model: "summary-model".into(),
+        messages: summary_messages("Summarize", summary_input(&read).unwrap(), 5, 6),
+        tools: Vec::new(),
+        max_tokens: Some(77),
+        reasoning: None,
+        cache_key: None,
+        takes_images: false,
+    };
+    let checkpoint = RequestSource::Summary {
+        compaction_id: started.clone(),
+        system_timestamp: 5,
+        user_timestamp: 6,
+    };
+    let id = transcript
+        .record_request(&sent, "summary-provider", json!({"dialect": "x"}), checkpoint)
+        .await
+        .unwrap();
+
+    let reopened = Transcript::snapshot(loaded(transcript.header().clone(), records_of(&transcript))).unwrap();
+    let (config, rebuilt) = reopened.replay_request(&id).unwrap();
+
+    assert_eq!(rebuilt, sent);
+    assert_eq!(
+        (config.provider.as_str(), config.model.as_str(), config.max_tokens),
+        ("summary-provider", "summary-model", Some(77))
+    );
+    // The start holds the one thing of the request that no other record does.
+    let start = serde_json::to_value(reopened.get(&started).unwrap()).unwrap();
+    assert_eq!(start["request"], json!({"instructions": "Summarize"}));
 }
 
 #[tokio::test]
@@ -324,7 +410,7 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
         .iter()
         .filter(|line| line["type"] == "compaction_started")
         .collect();
-    assert_eq!(starts[0]["request"]["maxTokens"], 100);
+    assert_eq!(starts[0]["request"], json!({"instructions": "Summarize"}));
     assert!(starts[0].get("summarizer").is_none());
     assert_eq!(starts[1]["summarizer"], "notes");
     assert!(starts[1].get("request").is_none());
@@ -338,7 +424,7 @@ async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
             _ => None,
         })
         .collect();
-    assert!(matches!(recorded[0], SummarizedBy::Request(request) if request.max_tokens == 100));
+    assert!(matches!(recorded[0], SummarizedBy::Request(request) if request.instructions == "Summarize"));
     assert_eq!(recorded[1], &SummarizedBy::Summarizer("notes".into()));
     assert_eq!(reopened.messages().len(), 2, "the summary and the latest input");
 }

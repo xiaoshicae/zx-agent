@@ -96,7 +96,7 @@ async fn compaction_write_failures_fail_the_run_before_any_further_model_request
         "compaction",
         "compaction_failed",
     ] {
-        let header = SessionHeader::new(Path::new("."), "m");
+        let header = SessionHeader::new(Path::new("."));
         let mut transcript = Transcript::with_writer(header, RejectWrites::entry(rejected));
         let old = transcript
             .append_message(Message::user("x".repeat(4096)))
@@ -132,7 +132,7 @@ async fn compaction_write_failures_fail_the_run_before_any_further_model_request
 
 #[tokio::test]
 async fn a_cancelled_summary_whose_failure_cannot_be_recorded_ends_the_run_as_an_error() {
-    let header = SessionHeader::new(Path::new("."), "m");
+    let header = SessionHeader::new(Path::new("."));
     let mut transcript = Transcript::with_writer(header, RejectWrites::entry("compaction_failed"));
     transcript
         .append_message(Message::user("x".repeat(4096)))
@@ -162,7 +162,7 @@ async fn a_cancelled_summary_whose_failure_cannot_be_recorded_ends_the_run_as_an
 #[tokio::test]
 async fn a_session_write_failure_fails_the_run() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-    let transcript = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
+    let transcript = Transcript::with_writer(SessionHeader::new(Path::new(".")), Box::new(FailingWriter));
     let mut runner = runner(config(&provider, vec![]), transcript);
 
     let report = run(&mut runner, "go", &CancellationToken::new()).await;
@@ -180,8 +180,7 @@ async fn a_session_write_failure_fails_the_run() {
 async fn a_request_checkpoint_write_failure_prevents_the_request() {
     for rejected in ["request_config", "request_started"] {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let transcript =
-            Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry(rejected));
+        let transcript = Transcript::with_writer(SessionHeader::new(Path::new(".")), RejectWrites::entry(rejected));
         let mut runner = runner(config(&provider, vec![]), transcript);
 
         let report = run(&mut runner, "go", &CancellationToken::new()).await;
@@ -232,7 +231,7 @@ async fn a_start_record_write_failure_prevents_the_call() {
         FauxStep::text("never sent"),
     ]));
     let transcript = Transcript::with_writer(
-        SessionHeader::new(Path::new("."), "m"),
+        SessionHeader::new(Path::new(".")),
         RejectWrites::entry("tool_call_started"),
     );
     let mut runner = runner(config(&provider, vec![tool.clone()]), transcript);
@@ -250,7 +249,7 @@ async fn a_start_record_write_failure_prevents_the_call() {
 async fn a_recovery_write_failure_fails_the_run_before_any_request() {
     // Recovery writes tool results; reject them, and only them.
     let mut transcript = Transcript::with_writer(
-        SessionHeader::new(Path::new("."), "m"),
+        SessionHeader::new(Path::new(".")),
         RejectWrites::containing("\"role\":\"toolResult\"", "a tool result"),
     );
     transcript.append_message(Message::user("go")).await.unwrap();
@@ -293,7 +292,7 @@ async fn a_context_edit_write_failure_prevents_the_request() {
     let mut config = config(&provider, vec![]);
     config.hooks.push("rewrite", Arc::new(Rewrite));
     let transcript = Transcript::with_writer(
-        SessionHeader::new(Path::new("."), "m"),
+        SessionHeader::new(Path::new(".")),
         RejectWrites::containing("context_edit", "edit"),
     );
     let mut runner = runner(config, transcript);
@@ -327,7 +326,7 @@ async fn a_failed_run_whose_last_entry_cannot_be_recorded_reports_both_failures(
     )]));
     let mut config = config(&provider, vec![]);
     config.hooks.push("note", Arc::new(NoteAtTheEnd));
-    let transcript = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry("custom"));
+    let transcript = Transcript::with_writer(SessionHeader::new(Path::new(".")), RejectWrites::entry("custom"));
     let mut runner = runner(config, transcript);
 
     let report = run(&mut runner, "go", &CancellationToken::new()).await;

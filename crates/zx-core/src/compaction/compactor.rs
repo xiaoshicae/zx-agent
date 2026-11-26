@@ -255,10 +255,8 @@ impl<'a> Compactor<'a> {
         if !source.iter().enumerate().any(summarized) {
             return Ok(None);
         }
-        if let Some(previous) = transcript.latest_compaction()
-            && let Some(old) = raw
-                .iter()
-                .position(|item| item.entry_id == previous.first_kept_entry_id)
+        if let Some(previous) = transcript.latest_compaction_boundary()
+            && let Some(old) = raw.iter().position(|item| item.entry_id == previous)
             && cut <= old
         {
             return Ok(None);
@@ -310,15 +308,14 @@ impl<'a> Compactor<'a> {
         self.token_trigger().is_some_and(|limit| tokens > limit)
     }
 
-    /// Who makes the summary of `source`, as the start records it.
-    fn summarized_by(&self, source: &Source<'_>) -> SummarizedBy {
+    /// Who makes the summary of `source`, as the start records it. Of a request it records
+    /// the instructions: the request's own records hold the provider, the model and the
+    /// output limit ([`Self::record_request`]).
+    fn summarized_by(source: &Source<'_>) -> SummarizedBy {
         match source {
             Source::Records(summarizer, _) => SummarizedBy::Summarizer(summarizer.name().to_string()),
             Source::Text(_) => SummarizedBy::Request(SummaryRequest {
-                provider: self.provider.name().into(),
-                model: self.model.to_string(),
                 instructions: SUMMARY_INSTRUCTIONS.into(),
-                max_tokens: self.compaction.max_summary_tokens,
             }),
         }
     }
@@ -332,7 +329,7 @@ impl<'a> Compactor<'a> {
             kept_input_entry_id: candidate.kept_input,
             // A copy: the start records the sources, and the summary is checked against them.
             source_entry_ids: candidate.source_ids.clone(),
-            by: self.summarized_by(&candidate.source),
+            by: Self::summarized_by(&candidate.source),
             input_bytes,
         };
         let id = self

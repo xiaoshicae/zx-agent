@@ -27,7 +27,8 @@ impl Transcript {
         .await
     }
 
-    /// Commit the result of a summary, validated like loading. Persistence precedes
+    /// Commit the result of a summary, validated like loading: an error, and nothing
+    /// written, when the compaction is not open on this branch. Persistence precedes
     /// projection changes.
     pub(crate) async fn append_compaction(
         &mut self,
@@ -35,14 +36,11 @@ impl Transcript {
         summary: CompactionSummary,
         usage: Usage,
     ) -> Result<String> {
-        let (_, started) = Self::compaction_start_on(&self.branch_path(), compaction_id)?;
-        let first_kept_entry_id = started.first_kept_entry_id.clone();
         self.append(Entry::Compaction(CompactionEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             compaction_id: compaction_id.into(),
-            first_kept_entry_id,
             summary,
             usage,
         }))
@@ -107,22 +105,13 @@ impl Transcript {
         Ok(found)
     }
 
-    /// The rules the start of a compaction follows when it is recorded: it says who makes
-    /// the summary, and its plan matches the branch.
+    /// The rules the start of a compaction follows when it is recorded: a summarizer that
+    /// makes the summary has a name, and its plan matches the branch.
     pub(in crate::transcript) fn validate_compaction_start(&self, start: &CompactionStartedEntry) -> Result<()> {
         match &start.by {
-            SummarizedBy::Request(request) => {
-                ensure!(
-                    request.max_tokens > 0,
-                    "compaction {}: maxTokens must be greater than zero",
-                    start.id
-                );
-                ensure!(
-                    !request.model.trim().is_empty(),
-                    "compaction {}: the model is empty",
-                    start.id
-                );
-            }
+            // The model and the output limit of a request are in its request configuration,
+            // which has its own rules.
+            SummarizedBy::Request(_) => {}
             SummarizedBy::Summarizer(name) => ensure!(
                 !name.trim().is_empty(),
                 "compaction {}: the summarizer has no name",
@@ -167,13 +156,6 @@ impl Transcript {
                 done.compaction_id
             );
         }
-        ensure!(
-            done.first_kept_entry_id == started.first_kept_entry_id,
-            "compaction {}: the result keeps from entry {} but the start from {}",
-            done.compaction_id,
-            done.first_kept_entry_id,
-            started.first_kept_entry_id
-        );
         done.summary.validate(&started.source_entry_ids)
     }
 

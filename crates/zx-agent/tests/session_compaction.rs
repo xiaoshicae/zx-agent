@@ -107,10 +107,7 @@ async fn record_compaction(seed: &mut Seed, first_kept: &str, kept_input: &str, 
         kept_input_entry_id: Some(kept_input.into()),
         source_entry_ids,
         by: SummarizedBy::Request(SummaryRequest {
-            provider: "faux".into(),
-            model: "m".into(),
             instructions: "Summarize".into(),
-            max_tokens: 100,
         }),
         input_bytes: 1000,
     });
@@ -120,7 +117,6 @@ async fn record_compaction(seed: &mut Seed, first_kept: &str, kept_input: &str, 
         parent_id: Some("compaction-started".into()),
         timestamp: now_ms(),
         compaction_id: "compaction-started".into(),
-        first_kept_entry_id: first_kept.into(),
         summary: summary(cited),
         usage: Usage::default(),
     });

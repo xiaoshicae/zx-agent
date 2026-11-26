@@ -24,7 +24,7 @@ pub fn header() -> SessionHeader {
 
 /// The header of a new session that works in `cwd`.
 pub fn header_in(cwd: &Path) -> SessionHeader {
-    SessionHeader::new(cwd, "test-model")
+    SessionHeader::new(cwd)
 }
 
 /// Which session the runs of a [`RunnerSetup`](crate::RunnerSetup) go to. The agent makes it

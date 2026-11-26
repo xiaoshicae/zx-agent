@@ -204,7 +204,7 @@ mod tests {
 
     /// A header of a session in `cwd` with the label `who`.
     fn header(cwd: &str, who: &str) -> SessionHeader {
-        let mut header = SessionHeader::new(Path::new(cwd), "model");
+        let mut header = SessionHeader::new(Path::new(cwd));
         header.labels = BTreeMap::from([("who".to_string(), who.to_string())]);
         header
     }

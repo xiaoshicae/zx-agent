@@ -137,7 +137,7 @@ mod tests {
         let place = SessionPlace::file(&path);
         assert_eq!(place.location(Path::new("/w")), Some(path.clone()));
 
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         drop(create(&place, &header).await);
 
         assert_eq!(place.path_of(&header.id).await.unwrap(), Some(path));
@@ -148,7 +148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.jsonl");
         let place = SessionPlace::file(&path);
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         drop(create(&place, &header).await);
 
         let error = place
@@ -168,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn memory_has_no_location() {
         let place = SessionPlace::memory();
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         let _open = create(&place, &header).await;
 
         assert_eq!(place.location(Path::new("/w")), None);
@@ -180,7 +180,7 @@ mod tests {
     async fn the_hosts_own_storage_keeps_the_sessions_and_has_no_files() {
         let storage = Arc::new(MemoryStorage::default());
         let place = SessionPlace::from_storage(storage.clone());
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         drop(create(&place, &header).await);
 
         assert!(place.is_persistent());
@@ -195,7 +195,7 @@ mod tests {
     async fn memory_keeps_nothing_of_a_session_that_was_closed() {
         // What a host that runs for long relies on when its clients close their sessions.
         let place = SessionPlace::memory();
-        let header = SessionHeader::new(Path::new("/w"), "m");
+        let header = SessionHeader::new(Path::new("/w"));
         let mut open = create(&place, &header).await;
         open.append_message(Message::user("q")).await.unwrap();
 
@@ -209,8 +209,8 @@ mod tests {
     async fn the_sessions_started_in_a_directory_are_those_whose_header_names_it() {
         let dir = tempfile::tempdir().unwrap();
         let place = SessionPlace::directory(dir.path());
-        let here = SessionHeader::new(Path::new("/w"), "m");
-        let elsewhere = SessionHeader::new(Path::new("/w/nested"), "m");
+        let here = SessionHeader::new(Path::new("/w"));
+        let elsewhere = SessionHeader::new(Path::new("/w/nested"));
         drop(create(&place, &here).await);
         drop(create(&place, &elsewhere).await);
 

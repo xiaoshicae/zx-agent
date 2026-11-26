@@ -64,10 +64,17 @@ pub use self::storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, 
 pub(crate) use self::test_support::{FailingWriter, WriterLog};
 use crate::ai::{Message, UserMessageKind, now_ms};
 
-/// The session format: written to every new header, and the only version a session may have
-/// to be created, loaded or read. A change to the format raises it, and sessions of any
-/// other version are refused.
-pub const SESSION_VERSION: u32 = 15;
+/// The session format: written to every new header, and for now the only version a session
+/// may have to be created, loaded or read; sessions of any other version are refused
+/// ([`SessionHeader::check_version`]).
+///
+/// A change to the format raises this number, and from version 16 on it must handle
+/// compatibility with the older versions as well: at the least, the code that raises it
+/// still reads the sessions of version 16 and of every version after it. Such a change
+/// brings the reading of those versions with it, tests included, and widens `check_version`
+/// from this one version to the versions it reads. The versions before 16 stay refused:
+/// each of them was replaced without a way to read it.
+pub const SESSION_VERSION: u32 = 16;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -383,13 +390,13 @@ impl Transcript {
     }
 
     /// The header of a session that continues one of this session's branches, for
-    /// [`Transcript::copy_branch`]: a fresh ID and start time, the given working directory
-    /// and model, this session's labels, and this session as `parent_session`.
-    pub fn fork_header(&self, cwd: &Path, model: &str) -> SessionHeader {
+    /// [`Transcript::copy_branch`]: a fresh ID and start time, the given working directory,
+    /// this session's labels, and this session as `parent_session`.
+    pub fn fork_header(&self, cwd: &Path) -> SessionHeader {
         SessionHeader {
             parent_session: Some(self.header.id.clone()),
             labels: self.header.labels.clone(),
-            ..SessionHeader::new(cwd, model)
+            ..SessionHeader::new(cwd)
         }
     }
 
