@@ -20,7 +20,16 @@ use zx_util::sync::lock;
 use super::access::Access;
 use super::usage::{ChatUsage, DayUsage, UsageStore, today};
 use super::{ChatConfig, DailyLimit, Replies, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore};
+use crate::platform::RATE_LIMIT_BUDGET;
 use crate::{ConversationId, ImChannel, ImError, MessageRef, UserId};
+
+/// Limit for each call the server waits for ([`timed`]): long enough for a platform's
+/// rate-limit queue, short enough that a platform that stopped answering does not hold a
+/// conversation for minutes.
+const OUTBOUND_TIMEOUT: Duration = Duration::from_secs(30);
+
+// A call that a platform rate limits fails as such before the server stops waiting for it.
+const _: () = assert!(RATE_LIMIT_BUDGET.as_secs() < OUTBOUND_TIMEOUT.as_secs());
 
 /// Settings and resources every conversation reads.
 pub(super) struct Shared {
@@ -42,7 +51,6 @@ pub(super) struct Shared {
     pub(super) max_pending_bytes: NonZeroUsize,
     pub(super) idle: Duration,
     pub(super) long_answer_chars: NonZeroUsize,
-    pub(super) outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
     pub(super) permits: Arc<Semaphore>,
@@ -87,7 +95,6 @@ impl Shared {
             long_answer_chars,
             daily,
             usage,
-            outbound_timeout,
             replies,
             statuses,
             // The channels' and the receipts', through the router.
@@ -102,7 +109,6 @@ impl Shared {
             replies,
             idle,
             long_answer_chars,
-            outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
             daily,
             used: Mutex::default(),
@@ -229,7 +235,7 @@ impl Shared {
             return Ok(());
         };
         let day = today();
-        let kept = timed(self.outbound_timeout, "read the day's usage", store.day(day))
+        let kept = timed("read the day's usage", store.day(day))
             .await
             .map_err(ImError::Config)?;
         lock(&self.used).load(day, &kept);
@@ -251,7 +257,7 @@ impl Shared {
         act: &str,
         operation: impl Future<Output = Result<T, E>>,
     ) -> Option<T> {
-        match timed(self.outbound_timeout, act, operation).await {
+        match timed(act, operation).await {
             Ok(value) => Some(value),
             Err(error) => {
                 self.failed(key, error);
@@ -281,17 +287,18 @@ impl Shared {
     }
 }
 
-/// `operation` within `timeout`. The error says what could not be done: `cannot <act>:
-/// <error>`, or `cannot <act>: took longer than <timeout>`.
+/// `operation` within the outbound timeout, which every server has: each call to a channel
+/// but its `run`, to the status store, to the usage store, and to the backlog but its `keep`.
+/// The error says what could not be done: `cannot <act>: <error>`, or `cannot <act>: took
+/// longer than <timeout>`.
 pub(super) async fn timed<T, E: Display>(
-    timeout: Duration,
     act: &str,
     operation: impl Future<Output = Result<T, E>>,
 ) -> Result<T, String> {
-    match tokio::time::timeout(timeout, operation).await {
+    match tokio::time::timeout(OUTBOUND_TIMEOUT, operation).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(format!("cannot {act}: {error}")),
-        Err(_) => Err(format!("cannot {act}: took longer than {timeout:?}")),
+        Err(_) => Err(format!("cannot {act}: took longer than {OUTBOUND_TIMEOUT:?}")),
     }
 }
 

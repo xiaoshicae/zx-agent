@@ -29,7 +29,7 @@ mod statuses;
 mod triggers;
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -636,6 +636,12 @@ struct Harness {
 }
 
 fn start(setup: Setup) -> Harness {
+    start_after(setup, |_| {})
+}
+
+/// Start the server `setup` describes once `before_run` has had its lists: what a host does
+/// between making its server and running it, such as a reload while it waits for its turn.
+fn start_after(setup: Setup, before_run: impl FnOnce(&Access)) -> Harness {
     let sessions = Arc::new(Sessions {
         provider: Arc::new(FauxProvider::new(setup.steps)),
         echo: Arc::new(EchoTool::new("echo")),
@@ -692,9 +698,10 @@ fn start(setup: Setup) -> Harness {
         events: events_to,
         ran: ran_to,
     };
-    let server = Server::new(config, agent.clone(), Arc::new(sink));
+    let server = Server::new(config, agent.clone(), Arc::new(sink)).unwrap();
     let triggers = server.triggers();
     let access = server.access();
+    before_run(&access);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let server = tokio::spawn(async move { server.run(vec![channel], &stop).await });

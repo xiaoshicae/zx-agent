@@ -59,7 +59,7 @@ impl FeishuChannel {
         });
         let response = self
             .http
-            .post(&self.config.token_url)
+            .post(self.token_url.clone())
             .json(&body)
             .send()
             .await
@@ -93,11 +93,11 @@ impl FeishuChannel {
     /// The file a resource API answers `path` with, at most `max_bytes`. An answer in JSON,
     /// or one with a status other than success, is a refusal, its code included.
     pub(super) async fn resource(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, ImError> {
-        let url = format!("{}{path}", self.config.api_base.trim_end_matches('/'));
+        let url = self.api_base.at(path);
         let token = self.token().await?;
         let response = self
             .http
-            .get(&url)
+            .get(url)
             .bearer_auth(&token)
             .send()
             .await
@@ -129,7 +129,7 @@ impl FeishuChannel {
         args: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Result<Value, CallError> {
-        let url = self.url(path, args)?;
+        let url = self.url(path, args);
         self.answer(path, |token| {
             let request = self.http.request(method.clone(), url.clone()).bearer_auth(token);
             match body {
@@ -145,7 +145,7 @@ impl FeishuChannel {
     /// for any file.
     pub(super) async fn upload(&self, file: &Attachment) -> Result<String, ImError> {
         const PATH: &str = "/open-apis/im/v1/files";
-        let url = self.url(PATH, &[])?;
+        let url = self.url(PATH, &[]);
         let fields = [("file_type", "stream"), ("file_name", file.name.as_str())];
         let form = Multipart::new(&fields, &file.name, &file.bytes);
         let answer = self
@@ -164,17 +164,12 @@ impl FeishuChannel {
     }
 
     /// The address of the open API `path`, with `args` in its query.
-    fn url(&self, path: &str, args: &[(&str, &str)]) -> Result<Url, CallError> {
-        let base = self.config.api_base.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}{path}")).map_err(|error| {
-            CallError::Failed(ImError::Config(format!(
-                "feishu {path}: invalid API base {base}: {error}"
-            )))
-        })?;
+    fn url(&self, path: &str, args: &[(&str, &str)]) -> Url {
+        let mut url = self.api_base.at(path);
         if !args.is_empty() {
             url.query_pairs_mut().extend_pairs(args);
         }
-        Ok(url)
+        url
     }
 
     /// The answer to the request that `request` makes with the tenant token to `path`. A

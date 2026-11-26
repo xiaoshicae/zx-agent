@@ -15,9 +15,9 @@ struct Lists {
     approvers: HashMap<String, HashSet<UserId>>,
 }
 
-/// Where the host replaces who may use a server while it runs ([`Server::access`]): the chats
-/// it answers in, and the users whose clicks decide approvals in the chats without approvers
-/// of their own. Its clones share the lists.
+/// Where the host replaces who may use a server, before it runs and while it does
+/// ([`Server::access`]): the chats it answers in, and the users whose clicks decide approvals
+/// in the chats without approvers of their own. Its clones share the lists.
 ///
 /// [`Server::access`]: super::Server::access
 #[derive(Clone)]
@@ -35,8 +35,9 @@ impl Access {
     /// the lists so far, given as [`ServerConfig::conversations`] and
     /// [`ServerConfig::approvers`] are. Work that runs goes on. A message from a chat no longer
     /// served gets [`Replies::unauthorized`], and a click by a user no longer listed decides
-    /// nothing. What chats have of their own ([`ServerConfig::chats`]) stays as the server
-    /// started with it.
+    /// nothing. What chats have of their own ([`ServerConfig::chats`]) stays as the server was
+    /// made with it, and is not checked against the new lists: the settings of a chat no
+    /// longer served go unused until a later list serves it again.
     ///
     /// [`ServerConfig::conversations`]: super::ServerConfig::conversations
     /// [`ServerConfig::approvers`]: super::ServerConfig::approvers

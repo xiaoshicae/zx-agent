@@ -276,7 +276,7 @@ fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
 /// Refuse a daily cost, of all chats or of one, where the model has no prices: nothing could
 /// count against it. Every agent asks the model of `app`.
 fn priced_for_daily_cost(app: &Application, daily: DailyLimit, chats: &[OwnChat]) -> Result<()> {
-    let costs = daily.cost.is_some() || chats.iter().any(|chat| chat.daily.cost.is_some());
+    let costs = daily.cost().is_some() || chats.iter().any(|chat| chat.daily.cost().is_some());
     ensure!(
         !costs || app.has_prices(app.model()),
         "dailyCost needs the prices of the model {:?}: add them to [[models]] in config.toml",
@@ -375,7 +375,8 @@ struct Serving {
 /// `serving` gives, once this process's turn comes, until a signal, a platform's failure or
 /// the loss of the lead; the exit code says which. The signals are heard while it waits for
 /// its turn: SIGINT and SIGTERM end the wait, and SIGHUP reads the lists again. An `Err` when
-/// the turn cannot be waited for, such as when the database cannot be reached.
+/// the server refuses `config`, and when the turn cannot be waited for, such as when the
+/// database cannot be reached.
 async fn serve(config: ServerConfig, agent: &ConfiguredAgent, serving: Serving, files: Files<'_>) -> Result<u8> {
     let Serving {
         channels,
@@ -390,8 +391,9 @@ async fn serve(config: ServerConfig, agent: &ConfiguredAgent, serving: Serving, 
     }
     // The session file is the record of each conversation; the operator log holds approvals,
     // triggers and failures (Log), and traces, when exported, the timeline. Made before the
-    // turn comes, so that a SIGHUP reaches its lists meanwhile.
-    let server = Server::new(config, agent.agent().clone(), Arc::new(Log));
+    // turn comes, so that a SIGHUP reaches its lists meanwhile; what chats have of their own
+    // is checked here, against the lists of the start, not when the turn comes.
+    let server = Server::new(config, agent.agent().clone(), Arc::new(Log))?;
     #[cfg(unix)]
     let reloading = reload::on_hangup(
         files.im_toml.to_path_buf(),

@@ -389,9 +389,11 @@ working = "处理中…"
 allowed = "已批准"
 ```
 
+平台段里的地址（`apiBase`，`[feishu]` 还有 `tokenUrl`）须是 `http://` 或 `https://` 的 URL，`apiBase` 不带查询串与片段：每次调用的路径接在它后面。不是时启动以退出码 2 报错，写明是哪个段的哪个键，不写地址本身（它可能带凭据）。
+
 名单要写的 ID 可以从日志取：不在名单里的聊天发来要机器人回答的消息被拒绝（不调用模型），日志的 `unauthorized` 行写明平台、聊天与发送人（见 [REFERENCE.md](REFERENCE.md#im-服务) 的“日志”）。要加一个群，请人在群里 @ 机器人一次；要加一个人（如审批人），请他从不在名单里的聊天（如私聊）给机器人发一句。飞书的 open_id（`ou_…`）按应用区分，要用本应用收到的。
 
-改了 `[access]` 不必重启：`zx-im` 收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `conversations` 与 `approvers` 立即生效，日志记一条 `reloaded`；读不了或检查不过时保留原名单，记一条 `failed`。其他段（含 `[[chats]]` 与 `[[schedules]]`）的改动重启后才生效，一起检查是为了重启时不失败。只在 Unix 上。
+改了 `[access]` 不必重启：`zx-im` 收到 SIGHUP 时重读 `im.toml`，服务自己的段按启动时的规则检查（平台以正在运行的为准），通过后 `conversations` 与 `approvers` 立即生效，日志记一条 `reloaded`；读不了或检查不过时保留原名单，记一条 `failed`。其他段（含 `[[chats]]` 与 `[[schedules]]`）的改动重启后才生效，一起检查是为了重启时不失败。所以从名单里移出一个聊天时，要把指向它的 `[[chats]]` 与 `[[schedules]]` 项一起删掉，否则检查不过、名单不变。运行中的进程（主与待命的副本）仍留着启动时读入的这些项，照常服务：那个聊天自己的设置只是用不上，它的定时到点时因聊天已不在名单里而只记一条 `failed`，重启后消失。只在 Unix 上。
 
 `[limits]` 中的四个上限与 `longAnswerChars` 须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
 
@@ -405,4 +407,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.56 · 2026年11月
+CONFIGURATION.md · v0.57 · 2026年11月

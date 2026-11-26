@@ -126,7 +126,7 @@ impl FeishuChannel {
     /// Ask for the long connection's address and open it. An error is a failure that
     /// retrying cannot fix.
     pub(super) async fn connect(&self, config: &mut ClientConfig) -> Result<Connection<Link>, ImError> {
-        let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
+        let url = self.api_base.at(ENDPOINT_PATH);
         let body = json!({
             "AppID": self.config.app_id,
             "AppSecret": self.config.app_secret,
@@ -134,7 +134,7 @@ impl FeishuChannel {
         });
         // `locale` as the Go SDK's `fetchEndpoint` sends it (`ws/client_transport.go`); it
         // decides the language of `msg` in the answer, which ends up in the error.
-        let response = match self.http.post(&url).header("locale", "zh").json(&body).send().await {
+        let response = match self.http.post(url).header("locale", "zh").json(&body).send().await {
             Ok(response) if response.status() == StatusCode::OK => response,
             Ok(response) => return Ok(later(format!("HTTP {}", response.status()))),
             Err(error) => return Ok(later(error)),

@@ -39,9 +39,18 @@ use self::process::EXIT_USAGE;
 /// Run the command line the process was started with, and return its exit code. An error
 /// that ends a subcommand, such as a configuration problem found before it started or an
 /// ACP connection that failed, is written to stderr and exits with the code of a usage
-/// error.
+/// error; so do arguments that cannot go together.
 pub async fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = match Cli::parse().checked() {
+        Ok(cli) => cli,
+        Err(conflict) => {
+            // Shown as the parser shows the conflicts it finds itself, which end the process
+            // with this code. Without a stderr to write to, the code alone says it.
+            conflict.print().ok();
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let result = match cli.command {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
         Command::Sessions(args) => sessions::run(args).await,

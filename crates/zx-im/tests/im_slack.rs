@@ -360,6 +360,23 @@ async fn a_rejected_app_token_stops_the_channel_with_a_configuration_error() {
     }
 }
 
+#[test]
+fn a_channel_is_not_made_with_an_api_base_that_calls_cannot_go_to() {
+    for (address, expected) in [
+        ("example.com/api", "api_base is not a URL"),
+        ("localhost:8080/api", "api_base must be an http or https URL"),
+        ("https://example.com/api?team=1", "api_base must end with its path"),
+    ] {
+        let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
+        config.api_base = address.into();
+        match SlackChannel::new(config) {
+            Err(ImError::Config(error)) => assert!(error.starts_with(expected), "{address}: {error}"),
+            Err(other) => panic!("{address}: expected a configuration error, got {other:?}"),
+            Ok(_) => panic!("{address}: a channel was made"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn text_is_posted_in_the_thread_with_entities_escaped() {
     let slack = FakeSlack::start().await;

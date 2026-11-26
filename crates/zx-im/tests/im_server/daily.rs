@@ -7,12 +7,9 @@ use super::*;
 /// What one answer of the scripted model uses: 10 input and 5 output tokens.
 const ONE_ANSWER: u64 = 15;
 
-/// A day's limit of `tokens` tokens.
+/// A day's limit of `tokens` tokens, which is not zero.
 fn tokens(tokens: u64) -> DailyLimit {
-    DailyLimit {
-        tokens: Some(tokens),
-        cost: None,
-    }
+    DailyLimit::new(Some(NonZeroU64::new(tokens).unwrap()), None).unwrap()
 }
 
 /// What `tokens` of work in the group chat count.

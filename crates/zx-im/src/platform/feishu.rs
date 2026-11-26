@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Method;
+use reqwest::{Method, Url};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::Instant;
@@ -35,8 +35,8 @@ use self::api::CallError;
 use self::connection::{ClientConfig, PREFIX};
 use self::events::{button, card, card_request, markdown, resolution, text_content};
 use super::{
-    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, FEISHU, MAX_TEXT_CHARS, Pacer, PlatformFactory,
-    PlatformInput, expanded_section, http_client, pause, report, split_text,
+    ApiBase, Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, FEISHU, MAX_TEXT_CHARS, Pacer,
+    PlatformFactory, PlatformInput, address, expanded_section, http_client, pause, report, split_text,
 };
 use crate::{
     Attachment, CardLabels, Destination, ErrorReport, ImChannel, ImError, ImageRef, Inlet, MessageId, MessageRef, Post,
@@ -62,10 +62,12 @@ const DEFAULT_POST_INTERVAL: Duration = Duration::from_millis(200);
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
-    /// Open API base URL: `https://open.feishu.cn` unless a proxy or a test server is used.
+    /// Open API base URL: `https://open.feishu.cn` unless a proxy or a test server is used. An
+    /// `http://` or `https://` URL without a query or a fragment: the path of each call
+    /// follows it.
     pub api_base: String,
     /// Tenant token endpoint: `https://accounts.feishu.cn/oauth/v3/token` by default, the one
-    /// the documentation recommends.
+    /// the documentation recommends. An `http://` or `https://` URL.
     pub token_url: String,
     /// Limit for each API call and for opening the WebSocket.
     pub request_timeout: Duration,
@@ -123,15 +125,20 @@ pub(super) struct Feishu;
 
 impl PlatformFactory for Feishu {
     /// The App Secret is the credential: the App ID is not a secret. Fails when a variable of
-    /// the app has no value, and when the channel cannot be built.
+    /// the app has no value, when `apiBase` or `tokenUrl` is not an address calls can go to,
+    /// and when the channel cannot be built.
     fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         let (section, credentials) = expanded_section(input.section, &APP, &["appSecret"])?;
         let section: FeishuSection = toml::Value::Table(section).try_into()?;
         let mut config = FeishuConfig::new(section.app_id, section.app_secret);
+        // Each address is refused here under its key's name; the channel checks its settings
+        // under their own.
         if let Some(base) = section.api_base {
+            ApiBase::of("apiBase", &base)?;
             config.api_base = base;
         }
         if let Some(url) = section.token_url {
+            address("tokenUrl", &url)?;
             config.token_url = url;
         }
         config.labels.clone_from(input.labels);
@@ -156,6 +163,9 @@ impl PlatformFactory for Feishu {
 /// fail, which the server reports, and the bot answers without what came before.
 pub struct FeishuChannel {
     config: FeishuConfig,
+    /// `config.api_base` and `config.token_url`, checked as the channel was made.
+    api_base: ApiBase,
+    token_url: Url,
     http: reqwest::Client,
     /// The tenant token and when it expires. An async lock, held across the renewal, so that
     /// concurrent calls wait for one renewal instead of each starting their own.
@@ -168,10 +178,14 @@ pub struct FeishuChannel {
 }
 
 impl FeishuChannel {
-    /// A channel for `config`. Fails when the HTTP client cannot be built, as for a proxy
-    /// that is not the `http://` URL of one.
+    /// A channel for `config`. A configuration error when [`FeishuConfig::api_base`] or
+    /// [`FeishuConfig::token_url`] is not an address calls can go to, which names the
+    /// setting, and when the HTTP client cannot be built, as for a proxy that is not the
+    /// `http://` URL of one.
     pub fn new(config: FeishuConfig) -> Result<Self, ImError> {
         Ok(Self {
+            api_base: ApiBase::of("api_base", &config.api_base)?,
+            token_url: address("token_url", &config.token_url)?,
             http: http_client(config.request_timeout, &config.proxy)?,
             posts: Pacer::new(config.post_interval),
             config,

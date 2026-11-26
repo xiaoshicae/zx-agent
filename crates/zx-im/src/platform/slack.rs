@@ -24,7 +24,7 @@ use zx_agent::ai::Proxy;
 use self::api::CallError;
 use self::events::{Me, button, card_request, escape, history, resolution, section, split};
 use super::{
-    Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
+    ApiBase, Backoff, BuiltChannel, Connection, DEFAULT_REQUEST_TIMEOUT, Ended, MAX_TEXT_CHARS, Pacer, PlatformFactory,
     PlatformInput, RATE_LIMIT_RETRIES, SLACK, body_within, content_type_is, expanded_section, http_client, report,
 };
 use crate::{
@@ -79,7 +79,9 @@ pub struct SlackConfig {
     pub app_token: String,
     /// Bot token (`xoxb-`) for posting.
     pub bot_token: String,
-    /// Web API base URL: `https://slack.com/api` unless a proxy or a test server is used.
+    /// Web API base URL: `https://slack.com/api` unless a proxy or a test server is used. An
+    /// `http://` or `https://` URL without a query or a fragment: the name of each method
+    /// follows it.
     pub api_base: String,
     /// Limit for each Web API call and for opening the WebSocket.
     pub request_timeout: Duration,
@@ -137,13 +139,15 @@ const TOKENS: [(&str, &str); 2] = [("appToken", DEFAULT_APP_TOKEN_ENV), ("botTok
 pub(super) struct Slack;
 
 impl PlatformFactory for Slack {
-    /// The tokens are the credentials. Fails when a token's variable has no value, and when
-    /// the channel cannot be built.
+    /// The tokens are the credentials. Fails when a token's variable has no value, when
+    /// `apiBase` is not an address calls can go to, and when the channel cannot be built.
     fn build(&self, input: PlatformInput<'_>) -> anyhow::Result<BuiltChannel> {
         let (section, credentials) = expanded_section(input.section, &TOKENS, &TOKENS.map(|(key, _)| key))?;
         let section: SlackSection = toml::Value::Table(section).try_into()?;
         let mut config = SlackConfig::new(section.app_token, section.bot_token);
         if let Some(base) = section.api_base {
+            // Refused here under the key's name; the channel checks its setting under its own.
+            ApiBase::of("apiBase", &base)?;
             config.api_base = base;
         }
         config.labels.clone_from(input.labels);
@@ -171,6 +175,8 @@ impl PlatformFactory for Slack {
 /// asks about for one, and read with the thread; it is never answered, and starts nothing.
 pub struct SlackChannel {
     config: SlackConfig,
+    /// `config.api_base`, checked as the channel was made.
+    api_base: ApiBase,
     http: reqwest::Client,
     posts: Pacer,
     /// Who the bot is, once `run` has asked: a thread read before that leaves every bot out.
@@ -178,10 +184,12 @@ pub struct SlackChannel {
 }
 
 impl SlackChannel {
-    /// A channel for `config`. Fails when the HTTP client cannot be built, as for a proxy
-    /// that is not the `http://` URL of one.
+    /// A channel for `config`. A configuration error when [`SlackConfig::api_base`] is not an
+    /// address calls can go to, which names the setting, and when the HTTP client cannot be
+    /// built, as for a proxy that is not the `http://` URL of one.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
         Ok(Self {
+            api_base: ApiBase::of("api_base", &config.api_base)?,
             http: http_client(config.request_timeout, &config.proxy)?,
             posts: Pacer::new(config.post_interval),
             config,
@@ -453,8 +461,7 @@ impl SlackChannel {
     fn file_url(&self, key: &str) -> Result<Url, ImError> {
         let refused = || ImError::Transport(format!("slack: {key} is not a URL of a file Slack keeps"));
         let url = Url::parse(key).map_err(|_| refused())?;
-        let api = Url::parse(&self.config.api_base)
-            .map_err(|error| ImError::Config(format!("slack: invalid API base {}: {error}", self.config.api_base)))?;
+        let api = self.api_base.url();
         let on_api_host = url.scheme() == api.scheme()
             && url.host_str() == api.host_str()
             && url.port_or_known_default() == api.port_or_known_default();

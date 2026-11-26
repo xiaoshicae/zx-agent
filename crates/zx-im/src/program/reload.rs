@@ -1,6 +1,8 @@
 //! The lists of im.toml, read again while the program runs: on SIGHUP, its `[access]`
 //! replaces the server's lists, once its server's sections pass the checks of a start. A
-//! replica that waits for its turn to serve reloads too, and serves with what it read.
+//! replica that waits for its turn to serve reloads too, and serves with what it read. What
+//! chats have of their own stays as the start read it: a chat the new lists no longer hold
+//! only leaves its settings unused, in the replica that leads and in the one that takes over.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

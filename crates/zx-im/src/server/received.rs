@@ -3,7 +3,6 @@
 //! process left pending, read as the server starts.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -65,8 +64,8 @@ impl Receipts {
 
 /// Start the task that completes in `backlog` each message whose receipt is dropped, and
 /// return the receipts' maker with it. The task ends once the maker and every receipt are
-/// gone. Each call may take `timeout`; a failure is reported to `sink`, and that message is
-/// handled again at the next start.
+/// gone. Each call may take the outbound timeout; a failure is reported to `sink`, and that
+/// message is handled again at the next start.
 ///
 /// The receipts' queue is unbounded, as dropping a receipt cannot wait. It holds at most one
 /// key per message kept and not yet completed, and channels keep one message at a time, no
@@ -74,14 +73,13 @@ impl Receipts {
 pub(super) fn complete_handled(
     backlog: Arc<dyn Backlog>,
     sink: Arc<dyn ServerSink>,
-    timeout: Duration,
     stop: CancellationToken,
 ) -> (Receipts, JoinHandle<()>) {
     let (handled, mut keys) = mpsc::unbounded_channel::<MessageKey>();
     let task = tokio::spawn(async move {
         while let Some(key) = keys.recv().await {
             let act = format!("complete message {} in the backlog", key.message);
-            if let Err(error) = timed(timeout, &act, backlog.complete(&key)).await {
+            if let Err(error) = timed(&act, backlog.complete(&key)).await {
                 sink.emit(&ServerEvent::Failed { key: None, error });
             }
         }
