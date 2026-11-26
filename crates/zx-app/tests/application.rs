@@ -17,18 +17,23 @@ use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{SessionHeader, SessionName, SessionQuery};
-use zx_app::config::{Builtin, Config};
+use zx_app::config::{Config, ContainerSettings, Credentials, McpServer};
 use zx_app::{
     Application, Approvals, Asking, ExecutorFactory, ExecutorSession, Overrides, ProviderFactory, ProviderInput,
     SessionPlace, SessionTools,
 };
 use zx_testing::EchoTool;
+use zx_testing::fake_mcp::{self, Era, FakeMcp};
 use zx_testing::mock_server::{Captured, MockServer, Reply};
 use zx_testing::program::{agent_text, write_agent_file};
 use zx_util::sync::lock;
 
 /// The value of a secret file of the configuration, which tool results must not show.
 const SECRET: &str = "s3cret-value-of-the-host";
+
+/// The agent the hosts of these tests build: the built-in one for runs that nobody attends, or
+/// the user's file of its name.
+const AGENT: &str = "unattended";
 
 fn configured() -> Config {
     let mut config = Config {
@@ -62,8 +67,11 @@ async fn host(dir: &Path, front: &str, server: &MockServer) -> Application {
 
 /// [`host`], with `asking` over the agent's permissions.
 async fn host_asking(dir: &Path, front: &str, server: &MockServer, asking: Asking) -> Application {
-    let home = dir.join("home");
-    agent_in(&home, front);
+    host_configured(dir, front, asking_model(dir, server), asking).await
+}
+
+/// The configuration of a host that asks `server`, with a secret file in `dir`.
+fn asking_model(dir: &Path, server: &MockServer) -> Config {
     let secret = dir.join("secret.txt");
     std::fs::write(&secret, SECRET).unwrap();
     let mut config = configured();
@@ -72,14 +80,20 @@ async fn host_asking(dir: &Path, front: &str, server: &MockServer, asking: Askin
         .options
         .insert("baseUrl".into(), server.base_url.clone().into());
     config.secret_files.push(secret);
+    config
+}
+
+/// A host with `config`, whose agent has `front` in its file, in the home that `dir` holds,
+/// its sessions working in `dir`, with `asking` over the agent's permissions.
+async fn host_configured(dir: &Path, front: &str, config: Config, asking: Asking) -> Application {
+    let home = dir.join("home");
+    agent_in(&home, front);
     let overrides = Overrides {
         cwd: Some(dir.to_path_buf()),
         asking,
         ..Overrides::default()
     };
-    Application::from_config(config, Some(home), overrides, Builtin::Unattended)
-        .await
-        .unwrap()
+    Application::from_config(config, Some(home), overrides).await.unwrap()
 }
 
 /// A model that calls `tool` once with the text `found it`, then answers.
@@ -94,7 +108,7 @@ async fn calling(tool: &str) -> MockServer {
 /// Ask the agent of `app` once, in a session kept in memory, with nobody to approve.
 async fn ask(app: &Application) {
     let configured = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .unwrap();
     let session = configured.create(None).await.unwrap();
     session.send("go").unwrap().wait().await;
@@ -167,14 +181,13 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
             cwd: Some(work.clone()),
             ..Overrides::default()
         },
-        Builtin::Unattended,
     )
     .await
     .unwrap();
     assert_eq!(app.model(), "host-model");
     assert!(app.notices().is_empty());
     let place = SessionPlace::directory(&dir.path().join("sessions"));
-    let configured = app.build(app.model(), &place, Approvals::Nobody).unwrap();
+    let configured = app.build(AGENT, app.model(), &place, Approvals::Nobody).unwrap();
     assert_eq!(configured.name(), "unattended");
     let session = configured.create(None).await.unwrap();
     let id = session.id().to_string();
@@ -213,7 +226,7 @@ async fn a_notice_about_a_short_secret_names_its_file_but_not_its_value() {
     std::fs::write(&secret, "Q7z").unwrap();
     let mut config = configured();
     config.secret_files.push(secret.clone());
-    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(config, None, Overrides::default())
         .await
         .unwrap();
     assert_eq!(app.notices().len(), 1);
@@ -222,11 +235,49 @@ async fn a_notice_about_a_short_secret_names_its_file_but_not_its_value() {
 }
 
 #[tokio::test]
+async fn container_settings_that_the_execution_does_not_use_are_noticed() {
+    let image = || ContainerSettings {
+        image: Some("debian:bookworm-slim".into()),
+        ..ContainerSettings::default()
+    };
+    for (execution, notice) in [
+        (
+            "local",
+            Some(
+                "[container] the [container] settings of config.toml are not used: execution is \"local\", and commands run on this machine; execution = \"container\" runs them in a container",
+            ),
+        ),
+        (
+            "noting",
+            Some(
+                "[container] the [container] settings of config.toml are not used: execution is \"noting\"; execution = \"container\" runs commands in a container",
+            ),
+        ),
+        ("container", None),
+    ] {
+        let config = Config {
+            container: image(),
+            ..executing(execution)
+        };
+        let app = Application::from_config(config, None, Overrides::default())
+            .await
+            .unwrap();
+        let notices: Vec<&str> = app.notices().iter().map(String::as_str).collect();
+        assert_eq!(notices, notice.into_iter().collect::<Vec<_>>(), "{execution}");
+    }
+    // Without the table there is nothing to say.
+    let app = Application::from_config(executing("local"), None, Overrides::default())
+        .await
+        .unwrap();
+    assert!(app.notices().is_empty(), "{:?}", app.notices());
+}
+
+#[tokio::test]
 async fn a_secret_file_that_cannot_be_used_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = configured();
     config.secret_files.push(dir.path().join("secret.txt"));
-    let error = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+    let error = Application::from_config(config, None, Overrides::default())
         .await
         .err()
         .unwrap();
@@ -238,7 +289,7 @@ async fn invalid_model_and_budget_are_rejected_before_any_session_is_created() {
     let mut config = configured();
     config.model = None;
     assert!(
-        Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        Application::from_config(config, None, Overrides::default())
             .await
             .is_err()
     );
@@ -249,12 +300,11 @@ async fn invalid_model_and_budget_are_rejected_before_any_session_is_created() {
             cost_budget: Some(1.0),
             ..Overrides::default()
         },
-        Builtin::Unattended,
     )
     .await
     .unwrap();
     let error = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .err()
         .unwrap();
     assert!(format!("{error:#}").contains("a cost budget needs the prices"));
@@ -267,7 +317,7 @@ async fn a_host_that_gives_a_negative_or_unbounded_cost_budget_gets_an_error() {
             cost_budget: Some(amount),
             ..Overrides::default()
         };
-        let refused = Application::from_config(configured(), None, overrides, Builtin::Unattended).await;
+        let refused = Application::from_config(configured(), None, overrides).await;
         let error = match refused {
             Ok(_) => panic!("the cost budget {amount} was accepted"),
             Err(error) => format!("{error:#}"),
@@ -286,13 +336,7 @@ async fn an_explicit_configuration_is_checked_as_a_file_would_be() {
         approval_timeout_secs: Some(0),
         ..configured()
     };
-    let refused = Application::from_config(
-        config,
-        Some(dir.path().join("home")),
-        Overrides::default(),
-        Builtin::Unattended,
-    )
-    .await;
+    let refused = Application::from_config(config, Some(dir.path().join("home")), Overrides::default()).await;
     let error = match refused {
         Ok(_) => panic!("an approval that times out at once was accepted"),
         Err(error) => format!("{error:#}"),
@@ -348,6 +392,36 @@ async fn what_a_hook_of_the_host_adds_to_a_tool_result_is_still_redacted() {
         .add_hook("leaky", Arc::new(Leaky));
     ask(&app).await;
     assert_eq!(first_result(&server.requests()[1]), "found it and [REDACTED]");
+}
+
+#[tokio::test]
+async fn the_token_of_an_mcp_server_a_host_configures_is_redacted_from_tool_output() {
+    const TOKEN: &str = "t0ken-of-the-mcp-server";
+    let dir = tempfile::tempdir().unwrap();
+    let mcp = FakeMcp::start(Era::Modern, vec![fake_mcp::tool("query", "Query the metrics.")]).await;
+    // The server answers a call with its arguments, so the model reads the token back.
+    let server = MockServer::start(vec![
+        Reply::tool_call("c1", "prom__query", &json!({"q": TOKEN})),
+        Reply::text("done"),
+    ])
+    .await;
+    let mut config = asking_model(dir.path(), &server);
+    config.mcp.push(McpServer {
+        name: "prom".into(),
+        url: mcp.url.clone(),
+        token: Some(TOKEN.into()),
+        headers: BTreeMap::new(),
+        tools: vec!["query".into()],
+        trust_read_only: false,
+        timeout_secs: None,
+    });
+    let front = "tools = []\n[permissions]\nallow = [\"prom__query\"]";
+    let app = host_configured(dir.path(), front, config, Asking::AsConfigured).await;
+    ask(&app).await;
+    let sent = mcp.requests("tools/call")[0].authorization.clone();
+    assert_eq!(sent, Some(format!("Bearer {TOKEN}")));
+    let result = first_result(&server.requests()[1]);
+    assert!(result.contains("[REDACTED]") && !result.contains(TOKEN), "{result}");
 }
 
 #[tokio::test]
@@ -429,7 +503,7 @@ impl SessionTools for Whom {
 /// approve.
 async fn ask_for(app: &Application, who: &str, cwd: &Path) {
     let configured = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .unwrap();
     let options = SessionOptions {
         labels: BTreeMap::from([("who".to_string(), who.to_string())]),
@@ -470,12 +544,30 @@ async fn permissions_may_deny_a_tool_of_each_session_and_tools_may_not_enable_it
         .await
         .add_session_tools(Arc::new(Whom));
     let error = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .err()
         .unwrap();
     assert!(
         format!("{error:#}").contains("the host offers \"probe\" in every session"),
         "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_names_a_tool_of_each_session_that_the_permissions_ask_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = calling("probe").await;
+    let asked = "tools = []\n[permissions]\nask = [\"probe\"]";
+    let app = host(dir.path(), asked, &server).await.add_session_tools(Arc::new(Whom));
+    ask_for(&app, "ops", dir.path()).await;
+    let requests = server.requests();
+    // Asked about, with nobody to answer: the call is denied, as the prompt said it would be.
+    let result = first_result(&requests[1]);
+    assert!(result.starts_with("Not executed: approval denied"), "{result}");
+    let prompt = requests[0].system_text();
+    assert!(
+        prompt.contains("so calls of these tools are denied: probe."),
+        "{prompt}"
     );
 }
 
@@ -524,17 +616,12 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
         ),
     ];
     for (add, expected) in cases {
-        let app = Application::from_config(
-            configured(),
-            Some(home.clone()),
-            Overrides::default(),
-            Builtin::Unattended,
-        )
-        .await
-        .unwrap();
+        let app = Application::from_config(configured(), Some(home.clone()), Overrides::default())
+            .await
+            .unwrap();
         let app = add(app);
         let error = app
-            .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+            .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
@@ -543,25 +630,25 @@ async fn a_part_of_the_host_named_like_another_fails_the_build() {
 
 #[tokio::test]
 async fn a_hook_and_a_policy_of_the_host_may_share_a_name() {
-    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(configured(), None, Overrides::default())
         .await
         .unwrap()
         .add_hook("audit", Arc::new(Leaky))
         .add_policy("audit", Arc::new(ProbeOff));
 
-    let built = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+    let built = app.build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody);
 
     assert!(built.is_ok(), "{:#}", built.err().unwrap());
 }
 
 #[tokio::test]
 async fn the_summarizer_a_host_sets_is_the_agents() {
-    let app = Application::from_config(configured(), None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(configured(), None, Overrides::default())
         .await
         .unwrap()
         .set_summarizer(Arc::new(Nameless));
     let error = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .err()
         .unwrap();
     // The kernel refuses it as it makes the agent: it is the one the agent was given.
@@ -593,7 +680,7 @@ fn with_provider(api: &str, text: &str) -> Config {
 /// The answer of the agent of `app` to one prompt.
 async fn answer_of(app: Application) -> String {
     let agent = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .unwrap();
     let session = agent.create(None).await.unwrap();
     session.send("hi").unwrap().wait().await.final_text
@@ -602,7 +689,7 @@ async fn answer_of(app: Application) -> String {
 #[tokio::test]
 async fn config_toml_names_the_provider_a_host_registers_and_gives_it_its_keys() {
     let config = with_provider("scripted", "answer = 'scripted hello'");
-    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(config, None, Overrides::default())
         .await
         .unwrap()
         .register_provider("scripted", Arc::new(Scripted));
@@ -621,7 +708,7 @@ async fn the_anthropic_provider_is_built_in() {
     .await;
     let root = server.base_url.trim_end_matches("/v1");
     let config = with_provider("anthropic", &format!("baseUrl = '{root}'"));
-    let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(config, None, Overrides::default())
         .await
         .unwrap();
     assert_eq!(answer_of(app).await, "from claude");
@@ -664,12 +751,12 @@ fn executing(name: &str) -> Config {
 #[tokio::test]
 async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_session() {
     let noting = Arc::new(Noting::default());
-    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
+    let app = Application::from_config(executing("noting"), None, Overrides::default())
         .await
         .unwrap()
         .register_executor("noting", noting.clone());
     let agent = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .unwrap();
     let session = agent.create(None).await.unwrap();
     let started = lock(&noting.started).clone();
@@ -683,28 +770,63 @@ async fn config_toml_names_the_executor_a_host_registers_and_it_starts_each_sess
     );
 }
 
+/// Credentials taken from `variables`, whose values the test does not need.
+fn from_variables(variables: &[&str]) -> Credentials {
+    Credentials {
+        variables: variables.iter().map(ToString::to_string).collect(),
+        values: Vec::new(),
+    }
+}
+
 #[tokio::test]
-async fn the_variables_a_host_hides_are_hidden_beside_the_api_key() {
+async fn the_variables_of_the_credentials_a_host_names_are_hidden_beside_the_api_keys() {
     let noting = Arc::new(Noting::default());
-    let app = Application::from_config(executing("noting"), None, Overrides::default(), Builtin::Unattended)
+    // Named in the configuration the host builds, and added to the application.
+    let config = Config {
+        credentials: from_variables(&["ZX_APPLICATION_TEST_MCP_TOKEN"]),
+        ..executing("noting")
+    };
+    let app = Application::from_config(config, None, Overrides::default())
         .await
         .unwrap()
         .register_executor("noting", noting.clone())
-        .add_hidden_env("ZX_APPLICATION_TEST_TOKEN")
-        .add_hidden_env("ZX_APPLICATION_TEST_SECRET");
+        .add_credentials(from_variables(&["ZX_APPLICATION_TEST_TOKEN"]))
+        .add_credentials(from_variables(&["ZX_APPLICATION_TEST_SECRET"]));
     let agent = app
-        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
         .unwrap();
     agent.create(None).await.unwrap();
     let started = lock(&noting.started).clone();
     let hidden_env = &started[0].1;
     for name in [
         "ZX_APPLICATION_TEST_UNUSED_KEY",
+        "ZX_APPLICATION_TEST_MCP_TOKEN",
         "ZX_APPLICATION_TEST_TOKEN",
         "ZX_APPLICATION_TEST_SECRET",
     ] {
         assert!(hidden_env.contains(&name.to_string()), "{name}: {hidden_env:?}");
     }
+}
+
+#[tokio::test]
+async fn the_value_of_a_credential_a_host_adds_is_redacted_from_tool_output() {
+    const TOKEN: &str = "t0ken-of-the-hosts-platform";
+    let dir = tempfile::tempdir().unwrap();
+    // The tool answers with its argument, so the model reads the token back.
+    let server = MockServer::start(vec![
+        Reply::tool_call("c1", "probe", &json!({"text": TOKEN})),
+        Reply::text("done"),
+    ])
+    .await;
+    let app = host(dir.path(), "tools = [\"probe\"]", &server)
+        .await
+        .add_tool(Arc::new(EchoTool::new("probe")))
+        .add_credentials(Credentials {
+            variables: Vec::new(),
+            values: vec![TOKEN.into()],
+        });
+    ask(&app).await;
+    assert_eq!(first_result(&server.requests()[1]), "[REDACTED]");
 }
 
 #[tokio::test]
@@ -716,14 +838,9 @@ async fn approving_every_call_needs_an_executor_that_isolates_commands() {
         ("plain", false, false),
         ("sandbox", true, true),
     ] {
-        let mut app = Application::from_config(
-            executing(name),
-            Some(dir.path().to_path_buf()),
-            Overrides::default(),
-            Builtin::Unattended,
-        )
-        .await
-        .unwrap();
+        let mut app = Application::from_config(executing(name), Some(dir.path().to_path_buf()), Overrides::default())
+            .await
+            .unwrap();
         if name != "local" {
             app = app.register_executor(
                 name,
@@ -733,7 +850,7 @@ async fn approving_every_call_needs_an_executor_that_isolates_commands() {
                 }),
             );
         }
-        let result = app.build(app.model(), &SessionPlace::memory(), Approvals::Nobody);
+        let result = app.build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody);
         match result {
             Ok(_) => assert!(built, "{name}"),
             Err(error) => {
@@ -772,12 +889,12 @@ async fn a_name_no_factory_is_registered_under_or_two_are_fails_the_build() {
         ),
     ];
     for (config, register, expected) in cases {
-        let app = Application::from_config(config, None, Overrides::default(), Builtin::Unattended)
+        let app = Application::from_config(config, None, Overrides::default())
             .await
             .unwrap();
         let app = register(app);
         let error = app
-            .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+            .build(AGENT, app.model(), &SessionPlace::memory(), Approvals::Nobody)
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains(expected), "{error:#}");

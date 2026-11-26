@@ -146,7 +146,7 @@ apiKeyHeader = "authorization"
 
 ### 容器执行
 
-`execution = "container"` 时 bash、read_file、edit_file、write_file 与搜索工具（grep、find、ls）在 Docker 容器中执行；行为与安全边界见 [SECURITY.md](SECURITY.md#容器执行)。
+`execution = "container"` 时 bash、read_file、edit_file、write_file 与搜索工具（grep、find、ls）在 Docker 容器中执行；行为与安全边界见 [SECURITY.md](SECURITY.md#容器执行)。`execution` 是别的值时 `[container]` 的设置不起作用（写了 `image` 时仍会检查），表可以留着：启动时 stderr 一行 `[container]` 说明它没被用到，`execution = "local"` 时并写明命令在本机执行。
 
 | 键 | 语义 |
 |---|---|
@@ -195,7 +195,7 @@ noProxy = ["localhost", "127.0.0.1", ".svc.cluster.local", "10.0.0.0/8"]
 | 项目 `AGENTS.md`（`context.discover`） | 不加载 | 加载 |
 | 自动摘要（`compaction.triggerBytes`） | 关闭 | 上下文超过 256 KiB 时 |
 
-`read_skill` 只在登记了 skill 时提供；`read_output` 见下文“工具结果落盘”。
+`read_skill` 只在登记了 skill 时提供，登记了 skill 的 agent 文件须启用它；`read_output` 见下文“工具结果落盘”。
 
 ### 文件格式
 
@@ -232,7 +232,7 @@ You review code without changing files.
 | `limits.costBudget` | 每轮花费上限，按 `[[models]]` 的单价计算，单位与单价相同；摘要请求与失败的尝试计入，工具报告的花费不计入；`0` 关闭。模型没有单价时以退出码 2 拒绝启动；切换模型或请求钩子选择了未配置单价的模型时，该次运行在发送请求前失败 |
 | `context.discover` | 是否自动发现项目 `AGENTS.md`，见下文“项目上下文” |
 | `context.files` | 显式上下文文件 |
-| `[[skills]]` | 登记 `name`、`description`、`path`；正文由 `read_skill` 按需读取 |
+| `[[skills]]` | 登记 `name`、`description`、`path`；正文由 `read_skill` 按需读取，所以 `tools`（自己写的或继承的）里须有 `read_skill`，否则以退出码 2 报错 |
 | `compaction.*` | 见下文“上下文管理” |
 
 两种预算都在每次请求之前检查，最后一次请求可能超出。上限、预算或续写用完时 run 的退出码见 [REFERENCE.md](REFERENCE.md#run-退出码)。`context.files` 与 `skills.path` 相对 agent 文件所在目录解析。
@@ -302,7 +302,7 @@ trustReadOnly = true
 
 ## skills
 
-skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[use read_skill with name="<名称>", offset=<偏移> to continue]`。
+skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKILL.md 的 frontmatter，不执行其中的脚本。登记了 skill 的 agent 文件，`tools` 里须有 `read_skill`：没有这个工具时 skill 读不了，启动时报错；命令行的 `--tools` 为一次运行去掉 `read_skill` 时不报错，这次运行没有 skill 的目录与工具。每个 skill 的名称、简介与正文文件的路径进入系统提示词；正文只在模型调用 `read_skill` 时读取，与其他工具结果一样经过策略、脱敏与审计。最多登记 64 个；`name` 为 1–64 个小写字母、数字或连字符，不能重复；`description` 为 1–1024 字节；正文至多 64 KiB，像 `read_output` 的结果一样分页读取，一页连同脚注至多 50 KiB，脚注为 `[use read_skill with name="<名称>", offset=<偏移> to continue]`。
 
 ## 上下文管理
 
@@ -405,4 +405,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.55 · 2026年11月
+CONFIGURATION.md · v0.56 · 2026年11月

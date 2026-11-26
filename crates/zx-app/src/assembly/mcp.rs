@@ -1,11 +1,9 @@
 //! The MCP servers of config.toml, connected once for every session of a process.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use zx_agent::ai::Proxy;
-use zx_agent::builtin::mcp::{Server, ServerConfig};
+use zx_agent::builtin::mcp::Server;
 use zx_agent::tools::{Effects, Tool};
 
 use super::settings::Settings;
@@ -13,16 +11,12 @@ use crate::config::{Credentials, McpServer};
 
 /// The MCP servers of config.toml, connected once per process and shared by every session it
 /// opens; none without `[[mcp]]`.
-#[derive(Default)]
 pub(super) struct McpTools {
-    /// The servers' tools, offered to every agent, in the order of `[[mcp]]`.
+    /// The servers' tools, offered to every agent, in the order of `[[mcp]]`. Which of them
+    /// ask depends on the agent, so each agent decides when it is built: by their names, and
+    /// by which of them a server trusted with `trustReadOnly` says only read
+    /// ([`Effects::ReadOnly`]).
     pub(super) tools: Vec<Arc<dyn Tool>>,
-    /// The names the model calls them by; which of them ask depends on the agent, so each
-    /// agent decides when it is built.
-    pub(super) names: Vec<String>,
-    /// Those of `names` that a server trusted with `trustReadOnly` says only read: they ask
-    /// only where the agent's `permissions.ask` lists them.
-    pub(super) read_only: Vec<String>,
 }
 
 impl McpTools {
@@ -32,35 +26,23 @@ impl McpTools {
     ///
     /// Fails when a server cannot be reached in time or lacks a tool.
     pub(super) async fn connect(settings: &Settings) -> Result<(Self, Vec<String>)> {
-        let mcp = &settings.config.mcp;
-        let configs = mcp
-            .iter()
-            .map(|server| server_config(server, settings.tool_timeout, &settings.config.proxy));
+        let config = &settings.config;
         // Each connection has its own bound, so the slowest server sets the startup time.
-        let connected = futures::future::join_all(configs.map(Server::connect)).await;
-        let mut tools = Self::default();
+        let connected = futures::future::join_all(config.mcp_servers().map(Server::connect)).await;
+        let mut tools = Vec::new();
         let mut notices = Vec::new();
-        for (entry, server) in mcp.iter().zip(connected) {
+        for (entry, server) in config.mcp.iter().zip(connected) {
             let server = server.map_err(anyhow::Error::msg)?;
-            let read_only: Vec<String> = server
-                .tools()
+            let offered = server.tools();
+            let listed: Vec<String> = offered
                 .iter()
-                .filter(|tool| tool.effects() == Effects::ReadOnly)
-                .map(|tool| tool.name().to_string())
-                .collect();
-            let listed: Vec<String> = server
-                .tool_names()
-                .iter()
-                .map(|name| {
-                    if read_only.contains(name) {
-                        format!("{name} (read-only)")
-                    } else {
-                        name.clone()
-                    }
+                .map(|tool| match tool.effects() {
+                    Effects::ReadOnly => format!("{} (read-only)", tool.name()),
+                    Effects::SideEffects => tool.name().to_string(),
                 })
                 .collect();
             let origin = server.origin();
-            let plain = if sends_credentials(entry, &settings.config.credentials) && origin.starts_with("http://") {
+            let plain = if sends_credentials(entry, &config.credentials) && origin.starts_with("http://") {
                 "; credentials are sent unencrypted"
             } else {
                 ""
@@ -71,38 +53,14 @@ impl McpTools {
                 listed.join(", "),
                 server.protocol_version()
             ));
-            tools.names.extend(server.tool_names().iter().cloned());
-            tools.read_only.extend(read_only);
-            tools.tools.extend(server.tools());
+            tools.extend(offered);
         }
-        Ok((tools, notices))
+        Ok((Self { tools }, notices))
     }
 }
 
-/// Whether `server` sends a credential among `credentials`: its token, or a header that names
-/// a variable.
+/// Whether `server` sends a credential: its token, or a header whose value is among
+/// `credentials`, as that of a header that names a variable in config.toml is.
 fn sends_credentials(server: &McpServer, credentials: &Credentials) -> bool {
     server.token.is_some() || server.headers.values().any(|value| credentials.values.contains(value))
-}
-
-/// The settings to connect `server` with: its token and headers, calls bounded by its
-/// `timeoutSecs` or else by `tool_timeout`, and requests sent through `proxy`.
-fn server_config(server: &McpServer, tool_timeout: Duration, proxy: &Proxy) -> ServerConfig {
-    let McpServer {
-        name,
-        url,
-        token,
-        headers,
-        tools,
-        trust_read_only,
-        timeout_secs,
-    } = server;
-    ServerConfig {
-        token: token.clone(),
-        headers: headers.clone().into_iter().collect(),
-        trust_read_only: *trust_read_only,
-        call_timeout: timeout_secs.map_or(tool_timeout, Duration::from_secs),
-        proxy: proxy.clone(),
-        ..ServerConfig::new(name.as_str(), url.as_str(), tools.clone())
-    }
 }

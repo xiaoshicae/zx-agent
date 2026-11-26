@@ -14,8 +14,8 @@ use zx_agent::ai::Reasoning;
 use zx_agent::ai::anthropic::{AnthropicConfig, ApiKeyHeader};
 use zx_agent::ai::openai::OpenAiConfig;
 use zx_agent::ai::retry::RetryPolicy;
-use zx_util::env::variables;
 
+use super::env::variables;
 use super::parsed;
 
 /// The built-in provider of OpenAI-compatible servers, the one config.toml means unless

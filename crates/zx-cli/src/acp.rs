@@ -304,12 +304,9 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before what remains of the traces is exported.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let app = connect(
-        cli::overrides(args.base, &args.budget, &args.approvals),
-        Builtin::Assistant,
-    )
-    .await?
-    .set_traces(traces);
+    let app = connect(cli::overrides(args.base, &args.budget, &args.approvals))
+        .await?
+        .set_traces(traces);
     let place = if args.no_session {
         SessionPlace::memory()
     } else {
@@ -317,7 +314,7 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
-    let configured = app.build(app.model(), &place, approvals)?;
+    let configured = app.build(Builtin::Assistant.name(), app.model(), &place, approvals)?;
     let models = Arc::new(Models::new(app.models()));
     let stop = CancellationToken::new();
     cancel_on_signals(stop.clone());

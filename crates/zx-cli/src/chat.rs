@@ -83,7 +83,7 @@ impl Chat {
     async fn build(&self, model: &str, place: &SessionPlace, resume: Option<&str>) -> Result<Built> {
         // The person at the terminal answers; `drive_turn` passes the answer on.
         let approvals = Approvals::Person("shell commands require interactive approval");
-        let agent = self.app.build(model, place, approvals)?;
+        let agent = self.app.build(Builtin::Assistant.name(), model, place, approvals)?;
         let session = open_or_create(&agent, resume).await?;
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
         Ok(Built {
@@ -111,7 +111,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let app = connect(cli::overrides(base, &budget, &approvals), Builtin::Assistant)
+    let app = connect(cli::overrides(base, &budget, &approvals))
         .await?
         .set_traces(traces);
     let mode = if std::io::stdin().is_terminal() {

@@ -660,6 +660,33 @@ fn the_shipped_review_example_resolves_its_context_and_skill_files() {
 }
 
 #[test]
+fn skills_are_refused_where_the_files_tools_leave_read_skill_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = dir.path().join("SKILL.md");
+    std::fs::write(&body, "Review.").unwrap();
+    let skills = format!(
+        "[[skills]]\nname = 'review'\ndescription = 'Review a change'\npath = '{}'",
+        body.display()
+    );
+    // The unattended agent enables read_skill, and so does a file that keeps its tools.
+    assert_eq!(load_file(&skills).unwrap().skills.len(), 1);
+    let refused = [
+        load_file(&format!("tools = ['bash']\n{skills}")),
+        // A file that extends nothing has no tools but its own.
+        load_agent("bare.md", &skills, "Only this.\n", &Config::default()),
+    ];
+    for refused in refused {
+        let error = format!("{:#}", refused.unwrap_err());
+        assert!(
+            error.contains(
+                "skills: no skill can be read without \"read_skill\" among tools; add it to tools, or remove [[skills]]"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn permissions_may_name_the_configured_mcp_tools_only() {
     let prom = config("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = ['query', 'range']");
     let agent = load_with("[permissions]\ndeny = ['prom__range']", &prom).unwrap();

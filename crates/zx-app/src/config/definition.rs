@@ -75,7 +75,7 @@ pub(crate) struct AgentDefinition {
     /// Effective preamble, before generated machine and project sections.
     pub(crate) instructions: String,
     /// The tools the agent enables, by name: built-in ones and the host's own. read_skill is
-    /// offered only to an agent with skills.
+    /// offered only to an agent with skills, and an agent with skills enables it.
     pub(crate) tools: Vec<String>,
     /// What the agent may do, whatever its instructions say: which tools ask, which calls run
     /// without asking and which are denied.
@@ -150,10 +150,17 @@ impl AgentDefinition {
 
     /// The agent once every file of it is applied: its token trigger settled
     /// ([`settle_token_trigger`]) and its settings checked against `config` and the tools of
-    /// the `host`.
+    /// the `host`. Its skills need read_skill among its tools: without the tool they would
+    /// be checked and then left out of every session without a word. Checked here, for the
+    /// tools of the files alone: those a host gives in their place for one start may leave
+    /// the tool out on purpose.
     fn checked(mut self, config: &Config, host: &HostTools) -> Result<Self> {
         settle_token_trigger(&mut self.compaction);
         self.validate(config, host)?;
+        ensure!(
+            self.skills.is_empty() || self.tools.iter().any(|tool| tool == READ_SKILL),
+            "skills: no skill can be read without {READ_SKILL:?} among tools; add it to tools, or remove [[skills]]"
+        );
         Ok(self)
     }
 

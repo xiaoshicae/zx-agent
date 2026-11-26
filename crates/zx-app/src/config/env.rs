@@ -10,22 +10,22 @@ use std::fmt;
 /// The value of the environment variable `name`, when it is set and not empty.
 ///
 /// A value that is not UTF-8 holds no usable key, token, address or path: it counts as unset.
-pub fn env_value(name: &str) -> Option<String> {
+pub(crate) fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// A value with its placeholders replaced, and the variables it named.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Expanded {
-    pub value: String,
+pub(crate) struct Expanded {
+    pub(crate) value: String,
     /// The variables the placeholders named, in the order written, each once, whether their
     /// value or a default took their place.
-    pub variables: Vec<String>,
+    pub(crate) variables: Vec<String>,
 }
 
 /// Why a value's placeholders cannot be replaced.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unexpandable {
+pub(crate) enum Unexpandable {
     /// A `${` without its `}`, or with something else than a variable's name and a default
     /// before it, as written.
     Malformed(String),
@@ -58,7 +58,7 @@ impl fmt::Display for Unexpandable {
 /// takes `default` when NAME is unset or empty, `${NAME-default}` only when it is unset. A
 /// value that is not UTF-8 counts as unset. Fails for a malformed placeholder, for `$NAME`
 /// and for a variable that has neither a value nor a default.
-pub fn expand(text: &str) -> Result<Expanded, Unexpandable> {
+pub(crate) fn expand(text: &str) -> Result<Expanded, Unexpandable> {
     // Unlike for `env_value`, an empty value is one: `${NAME-default}` keeps it. A value that
     // is not UTF-8 is none, as there.
     expand_with(text, |name| std::env::var(name).ok())
@@ -66,7 +66,7 @@ pub fn expand(text: &str) -> Result<Expanded, Unexpandable> {
 
 /// [`expand`], with `lookup` giving the value of a variable: `None` when it is unset, and an
 /// empty string when it is set but empty.
-pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Expanded, Unexpandable> {
+fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Expanded, Unexpandable> {
     let mut expanded = Expanded {
         value: String::with_capacity(text.len()),
         variables: Vec::new(),
@@ -87,7 +87,7 @@ pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Resul
 
 /// The variables `text` names, in the order written, each once, whether or not they are set
 /// and whether or not they have a default. Fails for a malformed placeholder and for `$NAME`.
-pub fn variables(text: &str) -> Result<Vec<String>, Unexpandable> {
+pub(crate) fn variables(text: &str) -> Result<Vec<String>, Unexpandable> {
     let mut names: Vec<String> = Vec::new();
     for part in parts(text)? {
         if let Part::Variable(name, _) = part
@@ -249,8 +249,8 @@ mod tests {
         let expanded = expand_with("${MISSING:-x}${KEY-y}", lookup).unwrap();
         assert_eq!(expanded.variables, ["MISSING", "KEY"]);
         assert_eq!(variables("${MISSING:-x}${KEY-y}").unwrap(), ["MISSING", "KEY"]);
-        // The environment: PATH is set, ZX_UTIL_TEST_UNSET is not.
-        assert_eq!(expand("${ZX_UTIL_TEST_UNSET:-d}").unwrap().value, "d");
+        // The environment: PATH is set, ZX_APP_TEST_UNSET is not.
+        assert_eq!(expand("${ZX_APP_TEST_UNSET:-d}").unwrap().value, "d");
         assert_eq!(expand("${PATH-d}").unwrap().value, std::env::var("PATH").unwrap());
     }
 

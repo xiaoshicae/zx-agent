@@ -40,11 +40,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zx_agent::ai::Proxy;
 use zx_ai_http::client::routed;
-use zx_util::env::env_value;
 
 use self::signal::Signal;
 pub use self::signal::TraceHook;
 use self::spans::{Runs, export};
+use crate::config::env_value;
 
 /// Either variable turns the trace export on. As the OTLP specification has it, the first is
 /// used as it is, and the second gets `/v1/traces` appended.

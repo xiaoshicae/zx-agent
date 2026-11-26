@@ -12,9 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use zx_agent::builtin::redact::check_secret_files;
-use zx_util::env::env_value;
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Credentials, env_value};
 
 /// The variable that names the model under the host's and over config.toml's.
 const MODEL_ENV: &str = "ZX_MODEL";
@@ -23,8 +22,6 @@ pub(super) const BASE_URL_ENV: &str = "ZX_BASE_URL";
 /// Comma-separated secret files to redact, added to `secretFiles` of config.toml; deployments
 /// set it, for example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
-/// Seconds a bash command may run, and an MCP call wait, unless config.toml says otherwise.
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 /// How long a person has to answer an approval by default, in seconds: long enough to notice a
 /// card in an IM thread, short enough that a forgotten one does not hold a task.
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
@@ -42,12 +39,12 @@ pub struct NoModel {
 /// config.toml with the host's model and the variables over it, the defaults filled in.
 pub(super) struct Settings {
     pub(super) model: String,
-    pub(super) tool_timeout: Duration,
     /// How long a person has to answer an approval.
     pub(super) approval_timeout: Duration,
     /// The rest of config.toml: the provider, with `ZX_BASE_URL` over its address, the
-    /// reasoning level, where commands run, the MCP servers, the models, the secret files and
-    /// where long tool results go.
+    /// reasoning level, where commands run and how long, the MCP servers, the models, the
+    /// secret files and where long tool results go; with every credential it holds among its
+    /// [`credentials`](Config::credentials).
     pub(super) config: Config,
     /// The zx-agent home directory, whose `agents/` holds the user's agents.
     pub(super) home: Option<PathBuf>,
@@ -63,7 +60,9 @@ impl Settings {
     }
 
     /// `model` and `base_url` over `config`, read from `home`. Every host comes here, so a
-    /// configuration that was built rather than read is checked here as well.
+    /// configuration that was built rather than read is checked here as well, and the
+    /// credentials among its values join those the reading of a file found
+    /// ([`Config::credential_values`]): they are redacted wherever the configuration came from.
     pub(super) fn over(
         model: Option<String>,
         base_url: Option<String>,
@@ -71,6 +70,11 @@ impl Settings {
         home: Option<PathBuf>,
     ) -> Result<Self> {
         config.validate().context("invalid configuration")?;
+        let held = Credentials {
+            variables: Vec::new(),
+            values: config.credential_values(),
+        };
+        config.credentials.extend(held);
         let Some(model) = model.or_else(|| config.model.clone()) else {
             let config_file = config
                 .path
@@ -85,11 +89,10 @@ impl Settings {
                 .options
                 .insert("baseUrl".into(), toml::Value::String(url));
         }
-        let seconds = |value: Option<u64>, default| Duration::from_secs(value.unwrap_or(default));
+        let approval_timeout_secs = config.approval_timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS);
         Ok(Self {
             model,
-            tool_timeout: seconds(config.tool_timeout_secs, DEFAULT_TOOL_TIMEOUT_SECS),
-            approval_timeout: seconds(config.approval_timeout_secs, DEFAULT_APPROVAL_TIMEOUT_SECS),
+            approval_timeout: Duration::from_secs(approval_timeout_secs),
             config,
             home,
         })
@@ -135,10 +138,12 @@ pub(super) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<Pat
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use zx_agent::ai::Reasoning;
 
     use super::*;
-    use crate::config::OPENAI;
+    use crate::config::{McpServer, OPENAI};
 
     /// A config.toml that sets every key with a built-in default.
     fn file() -> Config {
@@ -176,7 +181,7 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("${FILE_KEY}"));
         assert_eq!(settings.config.reasoning, Some(Reasoning::Low));
         assert_eq!(settings.config.max_tokens, Some(512));
-        assert_eq!(settings.tool_timeout, Duration::from_secs(30));
+        assert_eq!(settings.config.tool_timeout(), Duration::from_secs(30));
         assert_eq!(provider.retry.max_retries, 0);
         assert_eq!(settings.approval_timeout, Duration::from_secs(60));
     }
@@ -189,9 +194,41 @@ mod tests {
         assert!(provider.options.is_empty() && provider.api_key.is_none());
         assert_eq!(settings.config.reasoning, None);
         assert_eq!(settings.config.max_tokens, None);
-        assert_eq!(settings.tool_timeout, Duration::from_secs(120));
+        assert_eq!(settings.config.tool_timeout(), Duration::from_secs(120));
         assert_eq!(provider.retry.max_retries, 3);
         assert_eq!(settings.approval_timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_credentials_among_the_values_join_those_the_configuration_names() {
+        let server = McpServer {
+            name: "prom".into(),
+            url: "https://prom.example/mcp".into(),
+            token: Some("prom-token".into()),
+            headers: BTreeMap::from([("X-Api-Key".to_string(), "Key prom-key".to_string())]),
+            tools: vec!["query".into()],
+            trust_read_only: false,
+            timeout_secs: None,
+        };
+        // What a host that builds the configuration names itself: the variable it took the
+        // token from, and the header that carries a credential.
+        let named = Credentials {
+            variables: vec!["PROM_TOKEN".into()],
+            values: vec!["Key prom-key".into()],
+        };
+        let config = Config {
+            mcp: vec![server],
+            credentials: named,
+            ..file()
+        };
+        let settings = Settings::over(None, None, config, None).unwrap();
+        assert_eq!(
+            settings.config.credentials,
+            Credentials {
+                variables: vec!["PROM_TOKEN".into()],
+                values: vec!["Key prom-key".into(), "prom-token".into()],
+            }
+        );
     }
 
     #[test]

@@ -470,6 +470,52 @@ fn proxy_gives_the_proxies_in_place_of_the_environments() {
     );
 }
 
+/// An MCP server a host configures itself, with `token`.
+fn built_server(name: &str, token: Option<&str>) -> McpServer {
+    McpServer {
+        name: name.into(),
+        url: "https://mcp.example/mcp".into(),
+        token: token.map(String::from),
+        headers: BTreeMap::from([("X-Scope-OrgID".to_string(), "tenant-a".to_string())]),
+        tools: vec!["query".into()],
+        trust_read_only: false,
+        timeout_secs: None,
+    }
+}
+
+#[test]
+fn the_tokens_and_the_proxies_with_a_user_of_a_built_configuration_are_credentials() {
+    let config = Config {
+        mcp: vec![
+            built_server("prom", Some("prom-token")),
+            built_server("open", None),
+            built_server("logs", Some("logs-token")),
+        ],
+        proxy: Proxy::Through(Proxies {
+            http: Some("http://proxy.internal:3128".into()),
+            https: Some("http://user:secret@proxy.internal:3128".into()),
+            no_proxy: vec!["localhost".into()],
+        }),
+        ..Config::default()
+    };
+    // Neither the proxy without a user nor a header, which is one only when the host says so.
+    assert_eq!(
+        config.credential_values(),
+        ["prom-token", "logs-token", "http://user:secret@proxy.internal:3128"]
+    );
+    assert!(Config::default().credential_values().is_empty());
+}
+
+#[test]
+fn the_values_tell_the_same_tokens_and_proxies_as_the_reading_of_the_file() {
+    let config = load_text(&format!(
+        "{PROM}[proxy]\nhttp = 'http://user:secret@proxy.internal:3128'\nhttps = 'http://proxy.internal:3128'\n"
+    ))
+    .unwrap();
+    // The file's keys are read in their order, `mcp` before `proxy`, as the values are.
+    assert_eq!(config.credential_values(), config.credentials.values);
+}
+
 #[test]
 fn a_proxy_that_is_not_the_http_url_of_one_is_refused_by_its_key() {
     let refused = error("[proxy]\nhttps = 'https://proxy.internal:3128'\n");

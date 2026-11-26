@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use zx_agent::builtin::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, UnusableWorkspace};
 use zx_util::registry::Registry;
 
-use crate::config::{CONTAINER, ContainerSettings, LOCAL};
+use crate::config::{CONTAINER, Config, ContainerSettings, LOCAL};
 
 /// Starts the executor each session runs its commands with, for the `execution` of
 /// config.toml that names it.
@@ -52,6 +52,26 @@ pub(super) fn built_in(container: &ContainerSettings) -> Registry<dyn ExecutorFa
         "executor",
         vec![(LOCAL.to_string(), local), (CONTAINER.to_string(), container)],
     )
+}
+
+/// What startup says when `config` has `[container]` settings that its `execution` does not
+/// use: the table may stay while `execution` names another executor, but then nothing of it
+/// is in force, and with `local` the commands run on this machine.
+pub(super) fn unused_container_notice(config: &Config) -> Option<String> {
+    let execution = config.execution.as_str();
+    if execution == CONTAINER || config.container == ContainerSettings::default() {
+        return None;
+    }
+    let instead = if execution == LOCAL {
+        format!(
+            "execution is {execution:?}, and commands run on this machine; execution = {CONTAINER:?} runs them in a container"
+        )
+    } else {
+        format!("execution is {execution:?}; execution = {CONTAINER:?} runs commands in a container")
+    };
+    Some(format!(
+        "[container] the [container] settings of config.toml are not used: {instead}"
+    ))
 }
 
 /// Commands on this machine, as the agent's user, without the hidden variables.
