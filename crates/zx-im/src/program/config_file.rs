@@ -217,8 +217,10 @@ pub(super) struct ChatSection {
     daily_cost: Option<f64>,
 }
 
-/// A chat of `[[chats]]`, checked: what it has of its own, its agent by name.
-#[derive(Debug, PartialEq)]
+/// A chat of `[[chats]]`, checked: what it has of its own, its agent by name. Two are equal
+/// when the file gives them alike, the approvers in the same order: a reload compares what a
+/// file gives a chat with what the start read.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct OwnChat {
     pub(super) platform: String,
     pub(super) chat: ConversationId,

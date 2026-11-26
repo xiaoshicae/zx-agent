@@ -8,7 +8,7 @@ use zx_agent::ai::now_ms;
 use zx_agent::events::RunOutcome;
 use zx_util::stdio::print_line;
 
-use crate::{ErrorReport, ImError, RunEnd, RunRecord, ServerEvent, ServerSink, SessionKey};
+use crate::{ConversationId, ErrorReport, ImError, RunEnd, RunRecord, ServerEvent, ServerSink, SessionKey};
 
 /// Reports what the channel of `platform` goes on after as `failed` lines, like the server's
 /// own.
@@ -24,6 +24,32 @@ pub(super) fn failure_log(platform: &str) -> ErrorReport {
 pub(super) fn reloaded(conversations: usize, approvers: usize) {
     let line = json!({"type": "reloaded", "conversations": conversations, "approvers": approvers, "timeMs": now_ms()});
     print_line(&line.to_string());
+}
+
+/// What a `deferred` line says of a chat that a reload left off the lists.
+const SERVICE_WAITS: &str =
+    "serving the chat waits for a restart: its settings in [[chats]] are not the ones in effect";
+/// What a `deferred` line says of a served chat whose own settings the file changes.
+const SETTINGS_WAIT: &str =
+    "its settings in [[chats]] change at a restart: the chat is served with the ones in effect until then";
+
+/// Log that a reload of im.toml left the chat `chat` on `platform` off the lists: the file
+/// newly serves it, with other settings of its own than those in effect, so it is served
+/// after a restart.
+pub(super) fn held_back(platform: &str, chat: &ConversationId) {
+    print_line(&deferred_line(platform, chat, SERVICE_WAITS).to_string());
+}
+
+/// Log that a reload of im.toml goes on serving the chat `chat` on `platform` with its own
+/// settings in effect: the file changes them, which takes effect at a restart.
+pub(super) fn settings_wait(platform: &str, chat: &ConversationId) {
+    print_line(&deferred_line(platform, chat, SETTINGS_WAIT).to_string());
+}
+
+/// The `deferred` line of the chat `chat` on `platform`: `change` is what a reload of im.toml
+/// left for a restart there.
+fn deferred_line(platform: &str, chat: &ConversationId, change: &str) -> Value {
+    json!({"type": "deferred", "platform": platform, "conversation": chat.0, "change": change, "timeMs": now_ms()})
 }
 
 /// Log a failure of the program's own, of no platform and no conversation.
@@ -139,7 +165,7 @@ mod tests {
     use zx_agent::events::Budget;
 
     use super::*;
-    use crate::{ConversationId, ThreadId};
+    use crate::ThreadId;
 
     /// A run in a thread of slack:C1 that ended as `end`.
     fn record(end: RunEnd) -> RunRecord {
@@ -184,6 +210,17 @@ mod tests {
         assert_eq!(
             (&summary["work"], &summary["outcome"], summary.get("budget")),
             (&json!("compaction"), &json!("noop"), None)
+        );
+    }
+
+    #[test]
+    fn a_deferred_line_names_the_chat_and_says_what_waits_for_a_restart() {
+        let mut line = deferred_line("slack", &ConversationId("C2".into()), SERVICE_WAITS);
+        let time = line.as_object_mut().unwrap().remove("timeMs").unwrap();
+        assert!(time.as_u64().unwrap() > 0);
+        assert_eq!(
+            line,
+            json!({"type": "deferred", "platform": "slack", "conversation": "C2", "change": SERVICE_WAITS})
         );
     }
 }

@@ -91,7 +91,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
 3. 取消 `kustomization.yaml` 中 `components:` 与 `- im` 的注释，再 `apply -k`。
 
-修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。只改了 `im.toml` 的 `[access]` 时可以不重启：等挂载的 ConfigMap 更新（约 1 分钟），再执行 `kubectl -n zx-agent exec deploy/zx-agent -c zx-agent -- sh -c 'kill -HUP "$(pidof zx-im)"'`，日志里出现 `reloaded` 行即已生效。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
+修改配置或凭据后执行 `kubectl -n zx-agent rollout restart deploy/zx-agent`。只改了 `im.toml` 的 `[access]` 时可以不重启：等挂载的 ConfigMap 更新（约 1 分钟），再执行 `kubectl -n zx-agent exec deploy/zx-agent -c zx-agent -- sh -c 'kill -HUP "$(pidof zx-im)"'`，日志里出现 `reloaded` 行即已生效；新加进名单的聊天在 `[[chats]]` 有自己的设置时不随重读生效，日志另有一行它的 `deferred`，要 `rollout restart`。日志格式见 [REFERENCE 的“IM 服务”](../../docs/REFERENCE.md#im-服务)，对话在 `/data/sessions`，收到而还没处理完的消息在 `/data/sessions/.backlog`，重启后接着处理。出网：Slack 需要 `slack.com` 及其 WebSocket 主机，飞书需要 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机；WebSocket 主机由平台运行时下发，没有实测。按域名限制出网要用出口代理。
 
 ### IM 服务的多副本
 
@@ -117,7 +117,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 - 主的进程结束时（滚动更新时收尾完毕退出，或崩溃），锁随即放出，备在 2 秒内接手。
 - 主所在的节点或网络出了问题时，库要等半分钟左右才放出锁。原来的主连不上库后约 10 秒内发现自己已不再是主，停止服务，以退出码 1 结束，由 Kubernetes 重启为备。
 
-只改了 `[access]` 时，向每个 Pod 发 SIGHUP，待命的那个也会重读，接手时用新的名单。也可以 `rollout restart`。列出这两个 Pod：`kubectl -n zx-agent get pods -l app.kubernetes.io/name=zx-agent -o name`。
+只改了 `[access]` 时，向每个 Pod 发 SIGHUP，待命的那个也会重读，接手时用新的名单。也可以 `rollout restart`；同时改了 `[[chats]]` 时只能这样（见上文）。列出这两个 Pod：`kubectl -n zx-agent get pods -l app.kubernetes.io/name=zx-agent -o name`。
 
 ## 权限
 
@@ -155,4 +155,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-deploy/kubernetes/README.md · v0.13 · 2026年11月
+deploy/kubernetes/README.md · v0.14 · 2026年11月

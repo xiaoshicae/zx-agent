@@ -469,6 +469,26 @@ async fn next_log_line(log: &mut tokio::io::Lines<BufReader<tokio::process::Chil
     }
 }
 
+/// `zx-im` started with `config`, in `dir`, against `model`, and its operator log.
+#[cfg(unix)]
+fn im_with_log(
+    dir: &Path,
+    config: &Path,
+    model: &str,
+) -> (
+    tokio::process::Child,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) {
+    let mut child = im(dir, config, model)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let log = BufReader::new(child.stdout.take().unwrap()).lines();
+    (child, log)
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_sighup_reads_the_lists_again_and_a_broken_file_keeps_them() {
@@ -477,13 +497,7 @@ async fn a_sighup_reads_the_lists_again_and_a_broken_file_keeps_them() {
     let mut slack = FakeSlack::start().await;
     let served = VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base));
     let config = write_im_config(dir.path(), &served);
-    let mut child = im(dir.path(), &config, &model.base_url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut log = BufReader::new(child.stdout.take().unwrap()).lines();
+    let (mut child, mut log) = im_with_log(dir.path(), &config, &model.base_url);
     // Connected once serving: the signal is listened for by then.
     let mut socket = slack.socket().await;
     let in_c2 = |envelope: &str, ts: &str| {
@@ -523,6 +537,47 @@ async fn a_sighup_reads_the_lists_again_and_a_broken_file_keeps_them() {
     );
     socket.send(in_c2("e2", "1700000002.000100")).await;
     model.wait_for_requests(1).await;
+    child.kill().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sighup_leaves_a_new_chat_with_an_agent_of_its_own_for_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(Vec::new()).await;
+    let mut slack = FakeSlack::start().await;
+    let served = VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base));
+    let config = write_im_config(dir.path(), &served);
+    let (mut child, mut log) = im_with_log(dir.path(), &config, &model.base_url);
+    // Connected once serving: the signal is listened for by then.
+    let mut socket = slack.socket().await;
+
+    // C2 joins the lists with the agent `prod`, which only a start builds.
+    std::fs::write(&config, with_prod_chat(&slack.api_base)).unwrap();
+    zx_testing::signal(&child, "-HUP").await;
+    let reloaded = next_log_line(&mut log, "reloaded").await;
+    assert_eq!(reloaded["conversations"], json!(1), "{reloaded}");
+    let deferred = next_log_line(&mut log, "deferred").await;
+    assert_eq!(
+        (&deferred["platform"], &deferred["conversation"]),
+        (&json!("slack"), &json!("C2"))
+    );
+    assert!(
+        deferred["change"].as_str().unwrap().contains("waits for a restart"),
+        "{deferred}"
+    );
+
+    // Until then the chat is off the lists, not answered by the server's agent.
+    let mut in_c2 = mention("e1", "1700000001.000100", "hello");
+    in_c2["payload"]["event"]["channel"] = json!("C2");
+    socket.send(in_c2).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let refused = slack.wait_for("chat.postMessage", 1).await;
+    assert_eq!(
+        refused[0].body["text"],
+        json!("Not authorized: this chat is not on the service's list.")
+    );
+    assert!(model.requests().is_empty());
     child.kill().await.unwrap();
 }
 
