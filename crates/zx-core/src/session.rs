@@ -28,7 +28,7 @@ use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
 use crate::sync::lock;
 use crate::tools::ActiveTools;
-use crate::transcript::{CustomMessage, SessionName, Transcript};
+use crate::transcript::{CustomMessage, CustomType, SessionName, Transcript};
 
 /// What a new session starts with.
 #[derive(Clone, Debug)]
@@ -62,13 +62,17 @@ pub enum SessionError {
     /// Model IDs must contain at least one non-whitespace character.
     #[error("model ID must not be empty")]
     InvalidModel,
+    /// A provider's name ([`Provider::name`]) must contain at least one non-whitespace
+    /// character: every request is recorded under it.
+    #[error("provider name must not be empty")]
+    InvalidProvider,
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
     /// The session could not record an entry. When its storage failed, the session closes
     /// itself once this operation ends, and the agent opens it again from its storage; an
-    /// entry it refuses before writing, such as a custom record without a custom type, leaves
-    /// it open.
+    /// entry it refuses before writing, such as a custom record whose data is nested too deep
+    /// to be read back, leaves it open.
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// No approval request with that ID waits for an answer: it was answered already, nobody
@@ -273,7 +277,7 @@ impl Session {
     /// Record state of an extension in the session while idle (pi: `appendEntry`); during
     /// a run, hooks use `queues().append_custom_entry` instead. Returns the entry's ID. A run
     /// returns Busy; a write failure returns WriteFailed.
-    pub async fn append_custom_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+    pub async fn append_custom_entry(&self, custom_type: CustomType, data: Value) -> Result<String, SessionError> {
         self.append_idle(async |runner| runner.transcript_mut().append_custom_entry(custom_type, data).await)
             .await
     }
@@ -384,13 +388,17 @@ impl Session {
 
     /// Switch provider and model together while idle, so that no request sees a mixed pair:
     /// `provider` as the host configured it, authentication and transport limits included,
-    /// and `model`, the ID later prompts pass to it. An empty ID returns InvalidModel; a run
-    /// returns Busy. History, tools, hooks, limits and exact-call approval grants are
-    /// kept. No request is made and the session header keeps its original starting model.
+    /// and `model`, the ID later prompts pass to it. An empty ID returns InvalidModel, a
+    /// provider without a name InvalidProvider, as when the agent is made; a run returns
+    /// Busy. History, tools, hooks, limits and exact-call approval grants are kept. No
+    /// request is made and the session header keeps its original starting model.
     pub fn set_model(&self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Result<(), SessionError> {
         let model = model.into();
         if model.trim().is_empty() {
             return Err(SessionError::InvalidModel);
+        }
+        if provider.name().trim().is_empty() {
+            return Err(SessionError::InvalidProvider);
         }
         let replaced = self.idle(|runner| runner.replace_model(provider, model))?;
         // A custom provider's destructor is host code too: the replaced provider is dropped

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, Usage};
-use zx_agent::transcript::{CustomMessage, Entry, Transcript};
+use zx_agent::transcript::{CustomMessage, CustomType, Entry, Transcript};
 
 /// The call `id` of `tool` with `arguments`, as an answer holds it.
 pub fn tool_call_block(id: &str, tool: &str, arguments: Value) -> ContentBlock {
@@ -29,11 +29,16 @@ pub fn tool_call(tool: &str) -> ToolCall {
     }
 }
 
+/// The custom type `name`, which is not blank, as an extension names its records.
+pub fn custom_type(name: &str) -> CustomType {
+    CustomType::new(name).unwrap()
+}
+
 /// A message of the custom type `note` with `text`, shown to the user and with the details
 /// `{"n": 1}`, as an extension sends one.
 pub fn note(text: &str) -> CustomMessage {
     CustomMessage {
-        custom_type: "note".into(),
+        custom_type: custom_type("note"),
         content: text.into(),
         display: true,
         details: Some(json!({"n": 1})),

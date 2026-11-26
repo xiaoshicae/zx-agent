@@ -116,6 +116,15 @@ pub struct ModelCost {
 }
 
 impl ModelCost {
+    /// Whether every price is an amount: a number, zero or more. Costs are computed only from
+    /// such prices: one that is negative or not finite gives totals that a cost budget
+    /// cannot be measured against, so an agent refuses it.
+    pub fn is_valid(&self) -> bool {
+        [self.input, self.output, self.cache_read, self.cache_write]
+            .iter()
+            .all(|price| price.is_finite() && *price >= 0.0)
+    }
+
     /// The cost of `usage` in the prices' unit: the prompt tokens outside the cache at the input price,
     /// the cached ones at theirs, the output at its price.
     pub fn of(&self, usage: &Usage) -> f64 {

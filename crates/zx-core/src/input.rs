@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::ai::Image;
 use crate::sync::lock;
-use crate::transcript::{BlankCustomType, CustomMessage, check_custom_type};
+use crate::transcript::{CustomMessage, CustomType};
 
 /// A message a frontend or an extension queues for a run (pi: `AgentMessage`).
 #[derive(Clone, Debug, PartialEq)]
@@ -122,7 +122,7 @@ pub enum QueueMode {
 /// A record an extension asked for during a run, kept until the loop can write it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PendingEntry {
-    pub(crate) custom_type: String,
+    pub(crate) custom_type: CustomType,
     pub(crate) data: Value,
 }
 
@@ -160,13 +160,9 @@ impl InputQueues {
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
     /// next step, or when the run ends. Without a run the entry waits for the next one; a
-    /// host that is idle records directly through its session instead. A blank
-    /// `custom_type` is refused here, and nothing is queued: recorded, it would fail the run.
-    pub fn append_custom_entry(&self, custom_type: impl Into<String>, data: Value) -> Result<(), BlankCustomType> {
-        let custom_type = custom_type.into();
-        check_custom_type(&custom_type)?;
+    /// host that is idle records directly through its session instead.
+    pub fn append_custom_entry(&self, custom_type: CustomType, data: Value) {
         lock(&self.entries).push(PendingEntry { custom_type, data });
-        Ok(())
     }
 
     /// How queued messages are taken.
@@ -326,7 +322,7 @@ mod tests {
 
         assert!(!queues.withdraw(&"b".into()));
         let custom = CustomMessage {
-            custom_type: "note".into(),
+            custom_type: CustomType::new("note").unwrap(),
             content: "a".into(),
             display: false,
             details: None,
@@ -352,26 +348,21 @@ mod tests {
     fn custom_messages_and_entries_queue_beside_user_text() {
         let queues = InputQueues::default();
         let custom = CustomMessage {
-            custom_type: "note".into(),
+            custom_type: CustomType::new("note").unwrap(),
             content: "remember".into(),
             display: false,
             details: None,
         };
+        let state = CustomType::new("state").unwrap();
         queues.steer("a");
         queues.steer(Input::Custom(custom.clone()));
-        queues
-            .append_custom_entry("state", serde_json::json!({"n": 1}))
-            .unwrap();
-        assert_eq!(
-            queues.append_custom_entry(" ", serde_json::json!(null)),
-            Err(BlankCustomType)
-        );
+        queues.append_custom_entry(state.clone(), serde_json::json!({"n": 1}));
 
         assert_eq!(inputs(queues.take_all()), [Input::from("a"), Input::Custom(custom)]);
         assert_eq!(
             queues.take_entries(),
             [PendingEntry {
-                custom_type: "state".into(),
+                custom_type: state,
                 data: serde_json::json!({"n": 1})
             }]
         );

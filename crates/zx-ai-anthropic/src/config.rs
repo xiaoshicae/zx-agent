@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zx_ai::{ApiKey, Proxy};
 use zx_ai_http::DEFAULT_MAX_EVENT_BYTES;
-use zx_ai_http::settings::{check_base_url, check_headers, check_limits};
+use zx_ai_http::settings::{check_base_url, check_headers, check_limits, check_provider_name};
 
 /// The API version a request names unless a header of the settings names another: the newest,
 /// whose changes from the one before touch nothing this provider sends.
@@ -32,9 +32,9 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// cannot replace them.
 pub(crate) const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "system", "tools", "max_tokens", "stream"];
 
-/// What a request's reasoning level sets in the body, as an object and a key in it. The other
-/// settings of `thinking` and `output_config` go with the level's, such as
-/// `thinking.block_binding`.
+/// What a request's reasoning level decides in the body, as an object and a key in it
+/// ([`BodyOptions::extra_fields`]). The other settings of `thinking` and `output_config` go
+/// with the level's, such as `thinking.block_binding`.
 pub(crate) const REASONING_FIELDS: [(&str, &str); 3] = [
     ("thinking", "type"),
     ("thinking", "display"),
@@ -59,7 +59,7 @@ pub struct AnthropicConfig {
     /// is refused, since the key goes through `api_key`. Neither the names nor the values
     /// are recorded in the session.
     pub headers: Vec<(String, String)>,
-    /// Name recorded on assistant messages.
+    /// Name recorded on assistant messages and with every request; not blank.
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
     pub idle_timeout: Duration,
@@ -92,10 +92,11 @@ impl Default for AnthropicConfig {
 }
 
 impl AnthropicConfig {
-    /// Check the settings. Errors: an address requests cannot go to, a byte budget or a
-    /// timeout of zero, an extra field the provider sets itself, and a header the client
-    /// cannot send.
+    /// Check the settings. Errors: a blank provider name, an address requests cannot go to,
+    /// a byte budget or a timeout of zero, an extra field the provider sets itself, and a
+    /// header the client cannot send.
     pub(crate) fn check(&self) -> anyhow::Result<()> {
+        check_provider_name(&self.provider_name)?;
         check_base_url(&self.base_url)?;
         check_limits(self.idle_timeout, self.max_response_bytes, self.max_sse_event_bytes)?;
         self.body.check()?;
@@ -139,9 +140,14 @@ impl fmt::Debug for AnthropicConfig {
 pub struct BodyOptions {
     /// How system prompt changes after the first one reach the model.
     pub system_updates: SystemUpdates,
-    /// Fields added as they are to every request body, such as `metadata` or an
-    /// `output_config` the request's reasoning level does not set. The fields the provider
-    /// sets itself are refused when the provider is built.
+    /// Fields added as they are to every request body, such as `metadata` or the settings of
+    /// an `output_config`. The fields the provider sets itself are refused when the provider
+    /// is built.
+    ///
+    /// A level chosen for a request decides `thinking.type`, `thinking.display` and
+    /// `output_config.effort` alone, at every level, `off` included: a value fixed here for
+    /// one of them is not sent with that request. A request without a level sends these
+    /// fields as they are.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub extra_fields: Map<String, Value>,
 }
@@ -159,10 +165,10 @@ impl BodyOptions {
         Ok(())
     }
 
-    /// The first extra field that a request's reasoning level sets too, as a dotted path such
-    /// as `thinking.type`: `thinking.type`, `thinking.display` or `output_config.effort`.
-    /// Which of the two reaches the server is not for the provider to choose, so a host that
-    /// sets a level refuses such a field.
+    /// The first extra field that a request's reasoning level decides, as a dotted path such
+    /// as `thinking.type`: one that only a request without a level sends
+    /// ([`extra_fields`](Self::extra_fields)). A host that sets a level refuses such a field,
+    /// so that one setting says how hard the model thinks.
     pub fn reasoning_overlap(&self) -> Option<String> {
         REASONING_FIELDS
             .iter()
@@ -309,6 +315,10 @@ mod tests {
             },
             AnthropicConfig {
                 headers: vec![("X-Api-Key".into(), "k".into())],
+                ..AnthropicConfig::default()
+            },
+            AnthropicConfig {
+                provider_name: String::new(),
                 ..AnthropicConfig::default()
             },
         ] {

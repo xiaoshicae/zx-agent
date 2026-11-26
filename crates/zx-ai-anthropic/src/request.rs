@@ -8,12 +8,12 @@ use zx_ai::{
     SystemPrompt, TOOL_IMAGES_OMITTED, ToolDef, ToolResultMessage, USER_IMAGES_OMITTED, api_identifier, with_note,
 };
 
-use crate::config::{BodyOptions, SystemUpdates};
+use crate::config::{BodyOptions, REASONING_FIELDS, SystemUpdates};
 
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "anthropic-messages";
 /// The version of this conversion in the recorded options, the only one replayed.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The output limit of a request that sets none, which the API requires: room for long
 /// answers on current models, whose responses stream.
@@ -101,7 +101,7 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
     for (field, value) in &options.extra_fields {
         body[field.as_str()] = value.clone();
     }
-    // After the extra fields: a level chosen for this request wins over a fixed one.
+    // After the extra fields, which a request without a level sends as they are.
     if let Some(reasoning) = request.reasoning {
         apply_reasoning(&mut body, reasoning);
     }
@@ -134,16 +134,24 @@ fn tools(tools: &[ToolDef]) -> Value {
 }
 
 /// Write `reasoning` into `body`: adaptive thinking at an effort, with the thinking shown as a
-/// summary, or thinking turned off. Minimal is the API's lowest effort, `low`. The level sets
-/// `thinking.type`, `thinking.display` and `output_config.effort`; the other settings of a
-/// `thinking` or an `output_config` among the extra fields stay, such as
-/// `thinking.block_binding`.
+/// summary, or thinking turned off, which says neither how it is shown nor an effort. Minimal
+/// is the API's lowest effort, `low`. The level alone decides [`REASONING_FIELDS`], so what
+/// the extra fields put there goes first ([`BodyOptions::extra_fields`]); the other settings
+/// of a `thinking` or an `output_config` among them stay, such as `thinking.block_binding`.
 fn apply_reasoning(body: &mut Value, reasoning: Reasoning) {
+    for (object, key) in REASONING_FIELDS {
+        let emptied = body
+            .get_mut(object)
+            .and_then(Value::as_object_mut)
+            .is_some_and(|settings| settings.remove(key).is_some() && settings.is_empty());
+        // An object that held nothing but the level's settings is not sent empty.
+        if emptied && let Some(sent) = body.as_object_mut() {
+            sent.remove(object);
+        }
+    }
     let effort = match reasoning {
         Reasoning::Off => {
-            let thinking = object(body, "thinking");
-            thinking.insert("type".into(), json!("disabled"));
-            thinking.remove("display");
+            object(body, "thinking").insert("type".into(), json!("disabled"));
             return;
         }
         Reasoning::Minimal | Reasoning::Low => "low",

@@ -369,6 +369,51 @@ fn a_reasoning_level_keeps_the_other_thinking_settings_of_the_extra_fields() {
     );
 }
 
+/// The body of a request at `reasoning` to a provider whose extra fields fix what a level
+/// sets, `thinking.type` and `output_config.effort`, beside a setting no level sets.
+fn with_fixed_reasoning(reasoning: Option<Reasoning>) -> Value {
+    let mut extra_fields = Map::new();
+    extra_fields.insert("thinking".into(), json!({"type": "enabled", "block_binding": {}}));
+    extra_fields.insert("output_config".into(), json!({"effort": "max"}));
+    let options = BodyOptions {
+        extra_fields,
+        ..BodyOptions::default()
+    };
+    build_body(
+        &Request {
+            reasoning,
+            ..request(vec![Message::user("hi")])
+        },
+        &options,
+        "p",
+    )
+}
+
+#[test]
+fn a_request_set_to_off_sends_no_fixed_effort() {
+    let off = with_fixed_reasoning(Some(Reasoning::Off));
+    assert_eq!(off["thinking"], json!({"block_binding": {}, "type": "disabled"}));
+    // Nothing else was in it, so the object goes with the effort.
+    assert!(off.get("output_config").is_none(), "{off}");
+}
+
+#[test]
+fn a_request_without_a_level_sends_the_fixed_reasoning_fields() {
+    let unset = with_fixed_reasoning(None);
+    assert_eq!(unset["thinking"], json!({"type": "enabled", "block_binding": {}}));
+    assert_eq!(unset["output_config"], json!({"effort": "max"}));
+}
+
+#[test]
+fn a_requests_reasoning_level_wins_over_the_fixed_fields() {
+    let high = with_fixed_reasoning(Some(Reasoning::High));
+    assert_eq!(
+        high["thinking"],
+        json!({"block_binding": {}, "type": "adaptive", "display": "summarized"})
+    );
+    assert_eq!(high["output_config"], json!({"effort": "high"}));
+}
+
 #[test]
 fn the_fields_a_reasoning_level_sets_are_those_extra_fields_must_not_set() {
     for reasoning in Reasoning::ALL {
@@ -413,11 +458,11 @@ fn replay_refuses_another_conversion_and_options_it_does_not_know() {
     for options in [
         Value::Null,
         json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
-        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "collapse"}),
-        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "sideways"}),
-        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extra": 1}),
-        json!({"format": "anthropic-messages", "version": 1}),
-        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "collapse", "extraFields": {"model": "x"}}),
+        json!({"format": "anthropic-messages", "version": 3, "systemUpdates": "collapse"}),
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "sideways"}),
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "collapse", "extra": 1}),
+        json!({"format": "anthropic-messages", "version": 2}),
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "collapse", "extraFields": {"model": "x"}}),
     ] {
         assert!(replay_body(&request, "p", &options).is_err(), "{options}");
     }
@@ -431,7 +476,7 @@ fn the_record_names_the_conversion_and_its_options() {
     };
     assert_eq!(
         request_options(&options),
-        json!({"format": "anthropic-messages", "version": 1, "systemUpdates": "inline"})
+        json!({"format": "anthropic-messages", "version": 2, "systemUpdates": "inline"})
     );
 }
 

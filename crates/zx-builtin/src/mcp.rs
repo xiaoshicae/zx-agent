@@ -93,11 +93,12 @@ pub struct ServerConfig {
     /// declares [`Effects::ReadOnly`], which a host may let run without asking. Untrusted, the
     /// annotations are hints, and every tool declares side effects.
     pub trust_read_only: bool,
-    /// Bound for connecting and listing the tools.
+    /// Bound for connecting and listing the tools. Not zero.
     pub connect_timeout: Duration,
     /// Longest a call may go without an answer or a progress notification: each
     /// notification starts it over (pi: the request timeout re-armed on progress). A call
-    /// that keeps reporting progress is bounded by the run's timeout and cancellation.
+    /// that keeps reporting progress is bounded by the run's timeout and cancellation. Not
+    /// zero.
     pub call_timeout: Duration,
     /// How requests reach the server: the environment's proxies by default.
     pub proxy: Proxy,
@@ -128,9 +129,9 @@ impl ServerConfig {
     /// Errors, each naming the server: a name that is not ASCII lowercase letters, digits and
     /// `-` (so that it ends at the first `__` of a tool's name); a URL that is not `http://` or
     /// `https://`; a header whose name or value is not valid, that is the transport's own,
-    /// that is given twice, or that is `Authorization` beside a token; no tools; a name longer
-    /// than model APIs accept ([`MAX_TOOL_NAME_CHARS`]); two tools that would get the same
-    /// name.
+    /// that is given twice, or that is `Authorization` beside a token; a timeout of zero; no
+    /// tools; a name longer than model APIs accept ([`MAX_TOOL_NAME_CHARS`]); two tools that
+    /// would get the same name.
     pub fn validate(&self) -> Result<Vec<String>, String> {
         self.check().map(|checked| checked.names)
     }
@@ -147,6 +148,15 @@ impl ServerConfig {
             return Err(fault(server, "the url must be http:// or https://"));
         }
         let headers = self.header_map()?;
+        // A timeout of zero would end every connection and every call before an answer.
+        for (field, timeout) in [
+            ("connect_timeout", self.connect_timeout),
+            ("call_timeout", self.call_timeout),
+        ] {
+            if timeout.is_zero() {
+                return Err(fault(server, format_args!("{field} must be greater than zero")));
+            }
+        }
         if self.tools.is_empty() {
             return Err(fault(server, "tools lists no tool"));
         }
@@ -779,6 +789,20 @@ mod tests {
             (
                 ServerConfig::new("prom", "https://x", tools(&[&"x".repeat(MAX_TOOL_NAME_CHARS)])),
                 "longer than 64",
+            ),
+            (
+                ServerConfig {
+                    connect_timeout: Duration::ZERO,
+                    ..ServerConfig::new("prom", "https://x", tools(&["q"]))
+                },
+                "connect_timeout must be greater than zero",
+            ),
+            (
+                ServerConfig {
+                    call_timeout: Duration::ZERO,
+                    ..ServerConfig::new("prom", "https://x", tools(&["q"]))
+                },
+                "call_timeout must be greater than zero",
             ),
         ] {
             let error = config.validate().unwrap_err();

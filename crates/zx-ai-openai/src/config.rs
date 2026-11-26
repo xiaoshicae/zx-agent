@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zx_ai::{ApiKey, Proxy};
 use zx_ai_http::DEFAULT_MAX_EVENT_BYTES;
-use zx_ai_http::settings::{check_base_url, check_headers, check_limits};
+use zx_ai_http::settings::{check_base_url, check_headers, check_limits, check_provider_name};
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -41,7 +41,7 @@ pub struct OpenAiConfig {
     /// is refused: the key goes through `api_key`. Neither the names nor the values are
     /// recorded in the session.
     pub headers: Vec<(String, String)>,
-    /// Name recorded on assistant messages.
+    /// Name recorded on assistant messages and with every request; not blank.
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
     pub idle_timeout: Duration,
@@ -73,10 +73,11 @@ impl Default for OpenAiConfig {
 }
 
 impl OpenAiConfig {
-    /// Check the settings. Errors: an address requests cannot go to, a byte budget or a
-    /// timeout of zero, an extra field the provider sets itself, and a header the client
-    /// cannot send.
+    /// Check the settings. Errors: a blank provider name, an address requests cannot go to,
+    /// a byte budget or a timeout of zero, an extra field the provider sets itself, and a
+    /// header the client cannot send.
     pub(crate) fn check(&self) -> anyhow::Result<()> {
+        check_provider_name(&self.provider_name)?;
         check_base_url(&self.base_url)?;
         check_limits(self.idle_timeout, self.max_response_bytes, self.max_sse_event_bytes)?;
         self.body.check()?;
@@ -117,7 +118,8 @@ pub struct BodyOptions {
     pub system_updates: SystemUpdates,
     /// Fields added as they are to every request body, for settings that some servers offer,
     /// such as `thinking` or `reasoning_effort`. The fields the provider sets itself are
-    /// refused when the provider is built.
+    /// refused when the provider is built; those a request's reasoning level decides are left
+    /// out of a request that carries a level ([`ReasoningFormat`]).
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub extra_fields: Map<String, Value>,
     /// Once one assistant message of a request carries `reasoning_content`, give the others
@@ -153,9 +155,10 @@ impl BodyOptions {
         Ok(())
     }
 
-    /// The first extra field that a request's reasoning level sets too, in the format these
-    /// options write it in, such as `reasoning_effort`. Which of the two reaches the server is
-    /// not for the provider to choose, so a host that sets a level refuses such a field.
+    /// The first extra field that a request's reasoning level decides, in the format these
+    /// options write it in, such as `reasoning_effort`: one that only a request without a
+    /// level sends ([`ReasoningFormat`]). A host that sets a level refuses such a field, so
+    /// that one setting says how hard the model thinks.
     pub fn reasoning_overlap(&self) -> Option<String> {
         self.reasoning_format
             .fields()
@@ -168,8 +171,12 @@ impl BodyOptions {
 /// How a request's reasoning level is written into the body.
 ///
 /// Servers differ, and the provider does not guess from a server's name: the formats are
-/// named after the field they write, not after a service. Nothing is sent for a request
-/// without a level.
+/// named after the field they write, not after a service.
+///
+/// A level chosen for a request decides the fields of the format alone, at every level, `off`
+/// included: a value that [`BodyOptions::extra_fields`] fixes for one of them is not sent
+/// with that request. A request without a level sends the extra fields as they are, and the
+/// format writes nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReasoningFormat {
@@ -186,7 +193,7 @@ pub enum ReasoningFormat {
 }
 
 impl ReasoningFormat {
-    /// The request body fields this format writes, which extra fields must not also set.
+    /// The request body fields this format writes: the ones a request's level decides.
     pub(crate) fn fields(self) -> &'static [&'static str] {
         match self {
             ReasoningFormat::Effort => &["reasoning_effort"],
@@ -303,6 +310,10 @@ mod tests {
             },
             OpenAiConfig {
                 headers: vec![("bad name".into(), "x".into())],
+                ..OpenAiConfig::default()
+            },
+            OpenAiConfig {
+                provider_name: " ".into(),
                 ..OpenAiConfig::default()
             },
         ] {

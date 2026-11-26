@@ -6,7 +6,7 @@
 //! The modules whose helpers are re-exported here, under the names the tests use. A module
 //! uses only modules listed before it, named in brackets where it uses any:
 //! - `records`: messages a test writes ([`tool_call_block`], [`tool_call`],
-//!   [`tool_call_answer`], [`answer_reporting`], [`note`], [`summary_json`],
+//!   [`tool_call_answer`], [`answer_reporting`], [`note`], [`custom_type`], [`summary_json`],
 //!   [`summary_of_the_source`]) and what it reads back: [`summarize`], [`request_ids`],
 //!   [`replayed_requests`], [`json_lines`], [`read_lines`]
 //! - `stand_ins`: in place of the real thing, [`EchoTool`], [`NotifyingProvider`], which says
@@ -70,8 +70,8 @@ pub const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 pub use self::program::signal;
 pub use self::program::{stderr, stdout};
 pub use self::records::{
-    answer_reporting, json_lines, note, read_lines, replayed_requests, request_ids, summarize, summary_json,
-    summary_of_the_source, tool_call, tool_call_answer, tool_call_block,
+    answer_reporting, custom_type, json_lines, note, read_lines, replayed_requests, request_ids, summarize,
+    summary_json, summary_of_the_source, tool_call, tool_call_answer, tool_call_block,
 };
 pub use self::runner::{
     Approver, Asked, Collect, Driven, RunnerSetup, config, fast_retry, refusal, run_approved, run_prompt,

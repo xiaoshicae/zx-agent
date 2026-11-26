@@ -151,15 +151,16 @@ impl<'a> RunScope<'a> {
     /// one.
     pub(super) async fn record_pending_entries(&mut self) -> anyhow::Result<()> {
         for entry in self.config.queues.take_entries() {
+            // The record keeps one copy of the type and the event that announces it another.
             let entry_id = self
                 .transcript
-                .append_custom_entry(&entry.custom_type, entry.data)
+                .append_custom_entry(entry.custom_type.clone(), entry.data)
                 .await
                 .context(PERSIST_FAILED)?;
             self.target
                 .emit(EventKind::CustomEntry {
                     entry_id,
-                    custom_type: entry.custom_type,
+                    custom_type: entry.custom_type.into(),
                 })
                 .await;
         }

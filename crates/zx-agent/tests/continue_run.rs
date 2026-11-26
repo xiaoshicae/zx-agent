@@ -14,8 +14,8 @@ use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{CustomMessage, Entry};
 use zx_testing::{
-    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, header, replayed_requests,
-    summarize, take_queued_inputs, tool_call_answer, tool_call_block,
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, Seed, Start, config, custom_type, header,
+    replayed_requests, summarize, take_queued_inputs, tool_call_answer, tool_call_block,
 };
 
 async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
@@ -85,7 +85,7 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (runner, _) = runner(&provider, seed.into()).await;
     let heard = CustomMessage {
-        custom_type: "heard".into(),
+        custom_type: custom_type("heard"),
         content: "someone spoke".into(),
         display: true,
         details: None,

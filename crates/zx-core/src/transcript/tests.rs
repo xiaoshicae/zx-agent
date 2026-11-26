@@ -244,12 +244,12 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         .await
         .unwrap();
     transcript
-        .append_custom_entry("state", serde_json::json!(1))
+        .append_custom_entry(CustomType::new("state").unwrap(), serde_json::json!(1))
         .await
         .unwrap();
     transcript
         .append_custom_message(CustomMessage {
-            custom_type: "note".into(),
+            custom_type: CustomType::new("note").unwrap(),
             content: "remember".into(),
             display: true,
             details: None,

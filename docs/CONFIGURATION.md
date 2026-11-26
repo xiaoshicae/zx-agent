@@ -40,7 +40,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | 键 | 语义 |
 |---|---|
 | `model` | 模型 ID |
-| `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 可以改 |
+| `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`。不设时请求不带推理设置；chat 的 `/reasoning` 与 ACP 的 `reasoning` 选项可以改。请求带强度时，请求体里的推理字段只由它决定，见 `provider.requestFields` |
 | `maxTokens` | 每次回复的输出 token 上限，大于零；不设时不限。推理计入输出的模型在上限太小时可能回答为空 |
 | `approvalTimeoutSecs` | chat、acp 与 zx-im 等待审批的秒数，至少 1，默认 600；超时视为拒绝。等待的时间也计入运行的时间上限（`--timeout-secs`）：那个上限先到时，运行以超时结束，审批算作取消 |
 | `toolTimeoutSecs` | bash 命令与 MCP 调用的默认超时，秒，至少 1，默认 120。模型可经 bash 的参数 `timeoutSecs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个 |
@@ -54,7 +54,7 @@ input = ["text", "image"]                                  # 这个模型能看�
 | `provider.maxTokensField` | 仅 `openai`。输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
 | `provider.fillMissingReasoning` | 仅 `openai`。`true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
 | `provider.promptCacheKey` | 仅 `openai`。`true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
-| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking` 与 `output_config.effort`） |
+| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 DeepSeek 示例中的 `thinking`。被拒绝的字段：zx-agent 自己设置的字段（`openai` 为 `model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`、`max_completion_tokens`，以及打开 `promptCacheKey` 时的 `prompt_cache_key`；`anthropic` 为 `model`、`messages`、`system`、`tools`、`max_tokens`、`stream`），以及设了 `reasoning` 时由它写入的字段（`openai` 按 `reasoningFormat`；`anthropic` 为 `thinking.type`、`thinking.display` 与 `output_config.effort`）。没设 `reasoning` 时可以写这些字段，发不发按请求定：请求带推理强度时（运行中经 `/reasoning` 或 ACP 的选项设的，`off` 也算），这些字段只由强度决定，这里给它们写的值不发送；请求不带强度时（没设过，或改回 `default`；摘要请求一律不带）原样发送 |
 | `provider.headers` | 每个请求都发送的请求头，如网关的路由头；携带 API key 的头被拒绝（`openai` 的 `Authorization`；`anthropic` 的由 `apiKeyHeader` 定，默认 `x-api-key`） |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
@@ -81,7 +81,7 @@ api = "anthropic"                  # API key 默认取 ANTHROPIC_API_KEY
 
 - 请求带 `anthropic-version: 2026-10-21`；`headers` 中的 `anthropic-version` 替换它，`anthropic-beta` 等其他请求头原样发送。
 - 不设 `maxTokens` 时每次请求的输出上限为 64000 token（这个 API 要求每次请求给出上限）；模型允许的输出上限更低时设 `maxTokens`。
-- `reasoning` 写成自适应思考（`thinking` 的 `type = "adaptive"`、`display = "summarized"`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking.type = "disabled"`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。`requestFields` 中 `thinking` 与 `output_config` 的其他键（如 `thinking.block_binding`）照常发送，`thinking.type`、`thinking.display` 与 `output_config.effort` 则与 `reasoning` 冲突。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
+- `reasoning` 写成自适应思考（`thinking` 的 `type = "adaptive"`、`display = "summarized"`）加 `output_config.effort`，`minimal` 与 `low` 都写成 `low`；`off` 写成 `thinking.type = "disabled"`，不接受它的模型（如 Claude Opus 5.5）返回 400，这时去掉 `reasoning`。`requestFields` 中 `thinking` 与 `output_config` 的其他键（如 `thinking.block_binding`）照常发送，`thinking.type`、`thinking.display` 与 `output_config.effort` 则与 `reasoning` 冲突；运行中设了强度的请求不发送 `requestFields` 给这三个键写的值（`off` 时不带 `output_config.effort`），见上表的 `provider.requestFields`。不设 `reasoning` 时请求不带思考设置，由模型的默认行为决定；只接受 `budget_tokens` 的旧模型把 `thinking` 写进 `requestFields`。
 - 思考块连同签名记入会话，只回传给产生它的 provider 名与模型；换了模型之后，较早回答中的思考不再发送。
 - 系统提示词、工具定义与对话末尾标为缓存断点（`cache_control`），以便下一次请求读取这一次写入的缓存；回答的输入 token 包括读写缓存的部分，与 `[[models]]` 的 `cacheRead`、`cacheWrite` 单价对应。`collapse` 下系统提示词有变化时，开头的缓存失效。
 - 思考块的签名绑定产生它时的对话：系统提示词、工具与此前的消息。之后的请求开头与那时不同时（如 `collapse` 下系统提示词变了，或摘要之后原样保留的近期消息中的思考），服务按 `thinking.block_binding.prefix_mismatch_behavior` 处理：`"error"` 以 400 拒绝请求，`"drop_block"` 丢掉这些思考块后照常回答；不设时是否拒绝由模型与账号决定（Claude Fable 5.2 一律拒绝）。带上请求头时，服务在回答中列出它对请求做的改动（`input_transformations`，如丢掉的思考块及原因 `prefix_binding_mismatch`），非空时原样记入这个回答的 `inputTransformations`。provider 不改写请求：被拒绝时这次请求失败，不重发。要让服务丢掉这些思考块，带上请求头并设这个字段（只设字段、不带请求头时服务以 400 拒绝；不设 `reasoning` 时 `thinking` 还要写 `type`，如 `"adaptive"`）；模型接受对话中间的 system 消息时，`systemUpdates = "inline"` 让系统提示词的变化不改动开头：
@@ -405,4 +405,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.54 · 2026年11月
+CONFIGURATION.md · v0.55 · 2026年11月

@@ -470,22 +470,19 @@ fn holds(keys: &[&str]) -> Holds {
     }
 }
 
-/// Check what is known about the model `id`: an ID, a positive context window, and prices
-/// that are numbers, zero or more.
+/// Check what is known about the model `id`: an ID, and what the agent refuses too
+/// (`Agent::new`), said here with the keys of config.toml: a context window of zero, and
+/// prices that are not amounts ([`ModelCost::is_valid`]).
 fn check_model(id: &str, meta: &ModelMeta) -> Result<()> {
     ensure!(!id.trim().is_empty(), "models: an entry has no id");
     ensure!(
-        meta.context_window.is_none_or(|window| window > 0),
+        meta.context_window != Some(0),
         "models.{id}: contextWindow must be greater than zero"
     );
-    if let Some(cost) = &meta.cost {
-        ensure!(
-            [cost.input, cost.output, cost.cache_read, cost.cache_write]
-                .iter()
-                .all(|price| price.is_finite() && *price >= 0.0),
-            "models.{id}: prices must be zero or more, per million tokens"
-        );
-    }
+    ensure!(
+        meta.cost.is_none_or(|cost| cost.is_valid()),
+        "models.{id}: prices must be zero or more, per million tokens"
+    );
     Ok(())
 }
 

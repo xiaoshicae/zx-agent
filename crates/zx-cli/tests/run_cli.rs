@@ -815,7 +815,7 @@ async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the
         let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(0), "{session}: {stderr}");
         let audit = std::fs::read_to_string(dir.path().join(session)).unwrap();
-        assert!(audit.contains(r#""version":2"#), "{audit}");
+        assert!(audit.contains(r#""version":3"#), "{audit}");
         assert_eq!(audit.contains(r#""fillMissingReasoning":true"#), filled, "{audit}");
     }
 }

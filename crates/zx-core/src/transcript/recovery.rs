@@ -196,7 +196,7 @@ mod tests {
 
     use super::*;
     use crate::ai::{AssistantMessage, ContentBlock, ToolCall, ToolResultMessage};
-    use crate::transcript::{CustomMessage, SessionHeader};
+    use crate::transcript::{CustomMessage, CustomType, SessionHeader};
 
     fn transcript() -> Transcript {
         Transcript::in_memory(SessionHeader::new(Path::new("."), "m"))
@@ -429,7 +429,7 @@ mod tests {
 
         transcript
             .append_custom_message(CustomMessage {
-                custom_type: "note".into(),
+                custom_type: CustomType::new("note").unwrap(),
                 content: "status".into(),
                 display: false,
                 details: None,

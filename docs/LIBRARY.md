@@ -5,7 +5,7 @@
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
 config.policies.push("permissions", policy);
-let agent = Agent::new(config)?;              // 校验模型名、工具、花费预算与摘要设置
+let agent = Agent::new(config)?;              // 校验角色，见导览的“建 agent”
 let session = agent.create_session(SessionOptions::new(cwd)).await?;
 let mut run = session.send("任务描述")?;      // 只取得会话；读它，运行才推进
 while let Some(event) = run.next().await {
@@ -22,24 +22,24 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 | 要做的事 | 用什么 | 要注意 |
 |---|---|---|
-| 建 agent | `Agent::new(AgentConfig)` | `AgentConfig` 是所有会话共用的角色：模型、工具、策略、钩子、上限、重试、摘要与存储 |
+| 建 agent | `Agent::new(AgentConfig)` | `AgentConfig` 是所有会话共用的角色：模型、工具、策略、钩子、上限、重试、摘要与存储。`Agent::new` 拒绝任何会话都跑不了的角色：空的模型名，名字为空的 provider（`Provider::name`），为零的 `max_tokens`，为零的审批等待（`ApprovalMode::Wait`），负数或不是有限数的花费预算，`models` 里为零的上下文窗口与负数或不是有限数的单价（`ModelCost::is_valid`），不能工作的摘要预算，没有名字的摘要器，重名、声明的名字与工具名不一致或参数 schema 无效的工具。`Session::set_model` 同样拒绝空的模型名与名字为空的 provider（`SessionError::InvalidModel`、`InvalidProvider`） |
 | 接入别的模型服务 | 实现 `ai::Provider`，参照 `ai::openai::OpenAiCompatible` 与 `ai::anthropic::AnthropicMessages`；API key 用 `ai::ApiKey`（固定的，或每次请求前经 `ApiKeySource` 取得）。要让 `config.toml` 按名字选用它，经 `zx_app::Application::register_provider` 注册（见下文）。走 HTTP 的可以用 `zx-ai-http` 的共用件：设置检查、取 key 与发送、按限额读事件流（`stream::Events`）、按请求的结果结束 provider 的流（`stream::end`）、请求失败（`Failure`）与 Retry-After | `stream` 立即返回、从不报错：失败编码为最后的 `StreamEvent::Error`，回答的 `provider_error` 给出失败的种类（`ProviderErrorKind`）。内核只按种类决定重试与上下文溢出恢复，没有种类的失败不重试；服务的状态、错误码与措辞属于哪一种由 provider 判断。测试里用 `FauxStep::fail(种类, 文本)` 脚本化失败 |
 | 开、续、关会话 | `Agent` 的 `create_session`、`open_session`、`session`、`close_session`、`list_sessions` | 会话在创建时给定的目录工作（`SessionOptions::cwd`），再次打开时不变。再打开同一个会话得到同一个 `Session`；`close_session` 取消进行中的运行，之后旧句柄返回 `SessionError::Closed`。记录写不进去的会话（写入失败、超时，或在写入途中丢弃了 `Run`）在那次操作结束时自行关闭，`open_session` 从存储重新打开它 |
 | 运行 | `Session` 的 `send`、`continue_run`、`compact`，各返回一个 `Run` | 读它才推进，事件经有界通道，读得慢运行就等；丢弃即取消并归还会话。取消发生在输入钩子（`Hook::on_input`）运行期间时，这次的输入不写入会话，以免没有钩子的改写就进入模型读的上下文；没有输入钩子时，输入先写入，运行随后停止。`Session` 可以克隆，克隆出来的是同一个会话；同一时间只有一次运行，重叠调用返回 Busy |
 | 给单个会话工具、钩子与提示词段落 | 实现 `agent::SessionSetup` | 创建或打开会话时调用，随会话释放；失败时新会话不会留在存储里。按会话保存状态的钩子在这里给出，会话关闭时一起释放。不需要按会话区分时，工具直接放进 `AgentConfig::tools` |
-| 让人审批 | `AgentConfig::approvals` 设为 `ApprovalMode::Wait(时长)`，回答用 `Session::resolve_approval(编号, 决定)` | 默认 `ApprovalMode::Deny`：策略询问的调用立即被拒绝。等待时运行发出带审批编号、工具名与参数的 `approval_requested`，超时或取消按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效 |
+| 让人审批 | `AgentConfig::approvals` 设为 `ApprovalMode::Wait(时长)`，回答用 `Session::resolve_approval(编号, 决定)` | 默认 `ApprovalMode::Deny`：策略询问的调用立即被拒绝。时长须大于零。等待时运行发出带审批编号、工具名与参数的 `approval_requested`，超时或取消按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效 |
 | 观察所有运行 | 实现 `hooks::Hook::on_event` | 事件只从 `Run` 读出；不等待的钩子按顺序看到它观察的每个事件（默认不含流式增量 `message_update`，见 `Hook::observes`），被取消的运行也一样。追踪导出（`zx_app::otel::Telemetry`）就这样注册为钩子 |
 | 标明调用者 | `SessionOptions::labels`（如租户或所属对话）、`Input::User { text, images, actor }` | 经 `PolicyContext` 与 `HookContext` 的 `labels`、`actor` 交给策略与钩子；`actor` 是最近一条提问的发送者，扩展发的消息不改变它；`finish_step` 钩子要来的追问没有发送者，此后为空。内核只记录与传递，不据此判断 |
 | 限制待处理的输入 | `PendingInput::held(输入, 凭证)`，交给 `queues().steer`、`follow_up` 或 `Session::send` | 内核的输入队列不限量，也不计配额：宿主自己计量，凭证在输入离开队列时丢弃（何时离开见 `PendingInput`），`send` 的提问写入会话后丢弃；`Session::take_queued` 连同凭证一起取出，`PendingInput::into_parts` 把凭证还给宿主。IM 服务就这样限制每个对话，并在消息写入会话后才把它从 backlog 删除（`crates/zx-im/src/server/admission.rs`） |
 | 给模型图片 | 提问：`Input::User` 的 `images`；工具：`ToolOutput::with_images`。图片先经 `builtin::images::fit`（文件的字节）或 `fit_base64` 适配 | 没适配的图片可能超出 API 的上限，此后每次请求都失败。模型能否看图写在 `AgentConfig::models` 的 `ModelMeta::takes_images`，不能时 provider 把图片换成一句说明。输入钩子（`Hook::on_input`）只看到文本，图片原样写入会话 |
-| 存会话 | `AgentConfig::storage`：`transcript::MemoryStorage`（默认）、`builtin::jsonl::JsonlStorage`，或实现 `transcript::SessionStorage` 与 `SessionLog` | `open` 让 `Agent` 成为会话的写入者，`read` 是只读快照（交给 `Transcript::snapshot`）。自己实现时，列出用 `SessionList::new`、读头部用 `SessionQuery::arrange_headers` 排序与截断 |
+| 存会话 | `AgentConfig::storage`：`transcript::MemoryStorage`（默认）、`builtin::jsonl::JsonlStorage`，或实现 `transcript::SessionStorage` 与 `SessionLog` | `open` 让 `Agent` 成为会话的写入者，`read` 是只读快照（交给 `Transcript::snapshot`）。自己实现时，列出用 `SessionList::new` 排序与截断；读头部时把读得出的头部都交给 `SessionQuery::arrange_headers`，由它去掉其他格式的会话、排序与截断，存储自己不必按版本过滤 |
 | 建自己的会话索引 | `Agent::session_headers` | 只读头部、不读记录，按开始时间从新到旧；打开会话时仍完整校验。读不出头部或版本不符的会话不在其中，`list_sessions` 把它们列为读不出。JSONL 存储不缓存，每次读取查询范围内每个会话文件的第一行 |
 | 按模型的上下文窗口自动摘要 | `AgentConfig::compaction` 的 `trigger_tokens` 设为 `Some(TokenTrigger::BelowWindow { reserve_tokens })`（`None` 关闭 token 阈值），窗口写进 `AgentConfig::models` | 每次请求前按会话当时的模型取窗口，`Session::set_model` 换了模型就随之改变；窗口未知的模型没有 token 阈值 |
 | 自己产出摘要 | 实现 `compaction::Summarizer`，放进 `AgentConfig::summarizer` | 何时摘要、读哪一段（至多 2 MiB）、记录与校验引用、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入预算 |
 | 让服务端按会话缓存提示词 | provider 自己的设置，如 `OpenAiConfig` 的 `body.prompt_cache_key` | 内核给每个任务请求带上会话 ID（`Request::cache_key`），发不发只由 provider 决定；摘要请求不带 |
 | 一起加一组工具、策略与钩子 | 没有打包的接口：宿主的一个函数把它们放进 `AgentConfig` 的 `tools`、`policies`、`hooks` 与 `system_prompt` | 属于一个会话的部分由 `SessionSetup` 给出。MCP 服务器的工具由 `builtin::mcp::Server::tools()` 给出 |
-| 让内置工具在别处运行 | 实现 `builtin::executor::Executor`；`builtin::tools::executor_tools` 按名字（`EXECUTOR_TOOL_NAMES`）建出跑在它上面的工具。要让 `config.toml` 的 `execution` 按名字选用它，实现 `zx_app::ExecutorFactory`，经 `register_executor` 注册（见下文） | 命令行交给执行器自己的 shell，两个内置执行器都用 bash。`environment_section` 写提示词里描述执行环境的段落，默认只有工作目录。`edit_file` 与 `write_file` 在宿主给的 `FileMutationQueue` 里按文件排队，几个会话要协调时共用一个 |
-| 启动前检查附带实现的设置 | `ContainerConfig`、`OutputStoreConfig`、`mcp::ServerConfig` 与 `policy::ProgramOptions` 的 `validate` | 错误按字段名说明。容器与落盘的错误是枚举（`InvalidContainerConfig`、`InvalidOutputStoreConfig`），容器启动时工作目录不可用的错误可向下转型为 `UnusableWorkspace`：从自己的配置文件读设置的宿主按变体换成自己的键。`ServerConfig::validate` 返回模型看到的工具名 |
+| 让内置工具在别处运行 | 实现 `builtin::executor::Executor`；`builtin::tools::executor_tools` 按名字（`EXECUTOR_TOOL_NAMES`）建出跑在它上面的工具。要让 `config.toml` 的 `execution` 按名字选用它，实现 `zx_app::ExecutorFactory`，经 `register_executor` 注册（见下文） | 命令行交给执行器自己的 shell，两个内置执行器都用 bash。`executor_tools` 拒绝为零的 bash 超时。`environment_section` 写提示词里描述执行环境的段落，默认只有工作目录。`edit_file` 与 `write_file` 在宿主给的 `FileMutationQueue` 里按文件排队，几个会话要协调时共用一个 |
+| 启动前检查附带实现的设置 | `ContainerConfig`、`OutputStoreConfig`、`mcp::ServerConfig` 与 `policy::ProgramOptions` 的 `validate` | 错误按字段名说明；`mcp::ServerConfig` 的 `connect_timeout` 与 `call_timeout` 为零时也报错。容器与落盘的错误是枚举（`InvalidContainerConfig`、`InvalidOutputStoreConfig`），容器启动时工作目录不可用的错误可向下转型为 `UnusableWorkspace`：从自己的配置文件读设置的宿主按变体换成自己的键。`ServerConfig::validate` 返回模型看到的工具名 |
 | 让连接经代理 | `ai::Proxy`：provider 设置的 `proxy`（`OpenAiConfig`、`AnthropicConfig`）、`mcp::ServerConfig::proxy`，zx-im 平台设置的 `proxy`（`SlackConfig`、`FeishuConfig`） | 默认 `FromEnvironment`：HTTP 请求读环境变量中的代理，IM 平台的长连接直连。`Direct` 一律直连；`Through(Proxies)` 只用给出的代理，`Proxies::route` 按目标的 scheme 与 `no_proxy` 决定每个连接，长连接经代理的 `CONNECT` 隧道。代理地址须是 `http://` URL，否则建 provider、MCP 连接或平台时报错 |
 | 长结果落盘 | `OutputStore::new(cwd, OutputStoreConfig::new(目录))`，交给 `SpillOutputs::with_reader` | 目录由宿主指定，相对路径相对会话的工作目录。宿主自己分页读文件的工具（如 `zx-app` 的 `read_skill`）用 `builtin::tools::paging` 的 `read_text` 与 `Pager`，脚注的写法与 `read_output` 相同 |
 | 调整内置的策略与钩子 | `CommandPolicy` 的 `deny_also`、`deny_programs_also`、`read_only_programs_also`；`ContinueOnLength::with_prompt` | 默认列表（`DEFAULT_DENIED_PATTERNS`、`DEFAULT_DENIED_PROGRAMS`、`DEFAULT_READ_ONLY_PROGRAMS`）只能追加。`AutoApprove` 不是策略：它交给 `RulePolicy::auto_approve`，只把 bash 命令的询问改为放行 |
@@ -64,4 +64,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.42 · 2026年11月
+LIBRARY.md · v0.43 · 2026年11月

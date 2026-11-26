@@ -16,7 +16,7 @@ use crate::config::{BodyOptions, ReasoningFormat, SystemUpdates};
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "openai-chat-completions";
 /// The version of this conversion in the recorded options, the only one replayed.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The result of a tool call that returned images and no text, whose images follow the
 /// results (pi: openai-completions).
@@ -119,15 +119,21 @@ pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &st
     for (field, value) in &options.extra_fields {
         body[field.as_str()] = value.clone();
     }
-    // After the extra fields: a level chosen for this request wins over a fixed one.
+    // After the extra fields, which a request without a level sends as they are.
     if let Some(reasoning) = request.reasoning {
         apply_reasoning(&mut body, reasoning, options.reasoning_format);
     }
     body
 }
 
-/// Write `reasoning` into `body` as `format` says.
+/// Write `reasoning` into `body` as `format` says. The level alone decides the fields of
+/// the format, so what the extra fields put there goes first ([`ReasoningFormat`]).
 fn apply_reasoning(body: &mut Value, reasoning: Reasoning, format: ReasoningFormat) {
+    if let Some(sent) = body.as_object_mut() {
+        for field in format.fields() {
+            sent.remove(*field);
+        }
+    }
     let level = reasoning.as_str();
     match (format, reasoning) {
         (ReasoningFormat::Effort, Reasoning::Off) => {}

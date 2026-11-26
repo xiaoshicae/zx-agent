@@ -183,15 +183,11 @@ impl Files {
     }
 
     /// The headers of the sessions `query` asks for, from the first line of each file. A file
-    /// whose header cannot be read, or that holds another format's session, is no session
-    /// this storage can open, so it is left out; a listing reports it.
+    /// whose header cannot be read is no session this storage can open, so it is left out; a
+    /// listing reports it.
     fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
         let (paths, _) = self.candidates(query)?;
-        let headers = paths
-            .iter()
-            .filter_map(|path| file::read_header(path).ok())
-            .filter(|header| header.check_version().is_ok())
-            .collect();
+        let headers = paths.iter().filter_map(|path| file::read_header(path).ok()).collect();
         Ok(query.arrange_headers(headers))
     }
 

@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{ProviderErrorKind, Reasoning, Request, ToolDef};
+use zx_agent::ai::{EventReceiver, Provider, ProviderErrorKind, Reasoning, Request, ToolDef};
 use zx_agent::events::{Event, EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, PendingInput};
@@ -427,8 +428,22 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
     assert!(next.requests().is_empty());
 }
 
+/// A provider without a name, whose streams end at once.
+struct Unnamed;
+
+impl Provider for Unnamed {
+    fn name(&self) -> &str {
+        " "
+    }
+
+    fn stream(&self, _request: Request, _cancel: CancellationToken) -> EventReceiver {
+        let (_sender, receiver) = zx_agent::ai::event_channel();
+        receiver
+    }
+}
+
 #[tokio::test]
-async fn an_invalid_model_does_not_replace_the_current_configuration() {
+async fn an_invalid_model_or_provider_does_not_replace_the_current_configuration() {
     let (session, provider, _) = setup([FauxStep::text("done")]).await;
     let next = Arc::new(FauxProvider::new([]));
     for invalid in ["", " \t　"] {
@@ -437,6 +452,10 @@ async fn an_invalid_model_does_not_replace_the_current_configuration() {
             Err(SessionError::InvalidModel)
         );
     }
+    assert_eq!(
+        session.set_model(Arc::new(Unnamed), "next"),
+        Err(SessionError::InvalidProvider)
+    );
     session.prompt("go").await.unwrap();
     assert_eq!(provider.requests()[0].model, "test-model");
     assert!(next.requests().is_empty());
@@ -659,7 +678,7 @@ async fn an_answer_that_comes_after_the_request_timed_out_reaches_no_call() {
         FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
         FauxStep::text("went on"),
     ]));
-    let (session, tool) = asking_session(provider, Duration::ZERO).await;
+    let (session, tool) = asking_session(provider, Duration::from_millis(1)).await;
 
     let mut run = session.send("go").unwrap();
     let mut requests = Vec::new();

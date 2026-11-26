@@ -64,7 +64,7 @@ impl StepLoop<'_> {
             message: projected,
             entry_id: id,
             custom: Some(CustomMessageInfo {
-                custom_type: message.custom_type,
+                custom_type: message.custom_type.into(),
                 display: message.display,
                 details: message.details,
             }),
