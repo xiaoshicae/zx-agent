@@ -200,16 +200,36 @@ impl Drop for ForgetUnopened<'_> {
 
 impl Agent {
     /// An agent that plays the role `config` describes. Fails for what no session could run
-    /// with: a blank model ID, tools that share a name, declare another name or an invalid
-    /// parameter schema, a cost budget that is negative or not finite, compaction budgets
-    /// that cannot work, and a summarizer without a name.
+    /// with: a blank model ID, a provider whose name is blank, an output limit of zero, a
+    /// wait for approvals of zero, a cost budget that is negative or not finite, a model
+    /// whose context window is zero or whose prices are not amounts
+    /// ([`ModelCost::is_valid`](crate::ai::ModelCost::is_valid)), compaction budgets that
+    /// cannot work, a summarizer without a name, and tools that share a name, declare another
+    /// name or an invalid parameter schema.
     pub fn new(config: AgentConfig) -> Result<Self> {
         anyhow::ensure!(!config.model.trim().is_empty(), SessionError::InvalidModel);
+        anyhow::ensure!(!config.provider.name().trim().is_empty(), SessionError::InvalidProvider);
+        anyhow::ensure!(config.max_tokens != Some(0), "max_tokens must be greater than zero");
+        if let ApprovalMode::Wait(wait) = config.approvals {
+            // Every request would time out before a host could answer it.
+            anyhow::ensure!(!wait.is_zero(), "the wait for an approval must be longer than zero");
+        }
         if let Some(budget) = config.limits.cost_budget {
             // A budget that is not finite would never be reached.
             anyhow::ensure!(
                 budget.is_finite() && budget >= 0.0,
                 "the cost budget must be zero or a positive amount, not {budget}"
+            );
+        }
+        for (id, meta) in &config.models {
+            anyhow::ensure!(
+                meta.context_window != Some(0),
+                "model {id:?}: the context window must be greater than zero"
+            );
+            // A total that is not a number is never above a cost budget.
+            anyhow::ensure!(
+                meta.cost.is_none_or(|cost| cost.is_valid()),
+                "model {id:?}: prices must be numbers, zero or more"
             );
         }
         config.compaction.validate()?;

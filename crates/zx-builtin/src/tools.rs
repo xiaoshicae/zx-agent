@@ -73,7 +73,9 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// duplicates, running commands and reading and writing files through `executor`, which also
 /// decides what commands must not see (see [`LocalExecutor::hidden_env`]). edit_file and
 /// write_file wait for their turn at each file in `queue`, which the tools of other sessions
-/// may share to coordinate with them. Errors: a name that is not in [`EXECUTOR_TOOL_NAMES`].
+/// may share to coordinate with them. bash stops a command after `bash_timeout` unless the
+/// call sets its own. Errors: a name that is not in [`EXECUTOR_TOOL_NAMES`], and a
+/// `bash_timeout` of zero, which would stop every command at once.
 ///
 /// [`LocalExecutor::hidden_env`]: crate::executor::LocalExecutor::hidden_env
 pub fn executor_tools(
@@ -82,6 +84,7 @@ pub fn executor_tools(
     executor: &Arc<dyn Executor>,
     queue: &Arc<FileMutationQueue>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
+    anyhow::ensure!(!bash_timeout.is_zero(), "the bash timeout must be greater than zero");
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for name in names {
         let name = name.trim();
@@ -217,6 +220,15 @@ mod tests {
                 .to_string();
             assert!(error.starts_with(&format!("unknown tool {name:?}")), "{error}");
         }
+    }
+
+    #[test]
+    fn a_bash_timeout_of_zero_is_refused() {
+        let error = executor_tools(&["bash".to_string()], Duration::ZERO, &local(), &Arc::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(error, "the bash timeout must be greater than zero");
     }
 
     #[test]

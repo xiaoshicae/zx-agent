@@ -10,7 +10,7 @@ use zx_agent::builtin::images::fit;
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::input::{Input, PendingInput};
 use zx_agent::session::SessionError;
-use zx_agent::transcript::{CustomMessage, SessionQuery};
+use zx_agent::transcript::{CustomMessage, CustomType, SessionQuery};
 use zx_agent::{Agent, Session, SessionOptions, compaction};
 use zx_app::shutdown::next_event;
 
@@ -604,7 +604,7 @@ pub(super) fn with_notes(text: &str, notes: &[String]) -> String {
 
 pub(super) fn said(content: String) -> CustomMessage {
     CustomMessage {
-        custom_type: SAID_TYPE.into(),
+        custom_type: CustomType::new(SAID_TYPE).expect("the constant is not blank"),
         content,
         display: true,
         details: None,

@@ -1,11 +1,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::ai::faux::{FauxProvider, FauxStep};
-use crate::ai::{Message, ToolDef};
+use crate::ai::{EventReceiver, Message, ModelCost, Request, ToolDef, event_channel};
 use crate::events::RunOutcome;
 use crate::hooks::{Hook, HookContext, HookResult};
 use crate::session::SessionError;
@@ -373,49 +375,142 @@ async fn an_opening_that_fails_leaves_the_session_to_be_opened_later() {
     agent.open_session(&header.id).await.unwrap();
 }
 
+/// A provider called `name`, whose streams end at once.
+struct Called(&'static str);
+
+impl Provider for Called {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn stream(&self, _request: Request, _cancel: CancellationToken) -> EventReceiver {
+        let (_sender, receiver) = event_channel();
+        receiver
+    }
+}
+
+/// An agent of the model `m` with a cost budget of `budget`.
+fn budgeted(budget: f64) -> AgentConfig {
+    AgentConfig {
+        limits: RunLimits {
+            cost_budget: Some(budget),
+            ..RunLimits::default()
+        },
+        ..AgentConfig::new(Arc::new(FauxProvider::new([])), "m")
+    }
+}
+
+/// An agent of the model `m`, about which `meta` is known.
+fn knowing(meta: ModelMeta) -> AgentConfig {
+    AgentConfig {
+        models: [("m".to_string(), meta)].into(),
+        ..AgentConfig::new(Arc::new(FauxProvider::new([])), "m")
+    }
+}
+
+/// An agent of the model `m` at the prices `cost`.
+fn priced(cost: ModelCost) -> AgentConfig {
+    knowing(ModelMeta {
+        cost: Some(cost),
+        ..ModelMeta::default()
+    })
+}
+
+/// Agents of the model `m` that no session could run with, one for each rule but those of the
+/// model's and the provider's names, each with words of its refusal.
+fn unusable() -> Vec<(AgentConfig, &'static str)> {
+    let config = || AgentConfig::new(Arc::new(FauxProvider::new([])), "m");
+    let free = ModelCost::default();
+    vec![
+        (
+            AgentConfig {
+                tools: vec![Arc::new(Named("echo")), Arc::new(Named("echo"))],
+                ..config()
+            },
+            "more than one tool is named \"echo\"",
+        ),
+        (
+            AgentConfig {
+                compaction: compaction::Config {
+                    keep_recent_bytes: 0,
+                    ..compaction::Config::default()
+                },
+                ..config()
+            },
+            "keep_recent_bytes must be greater than zero",
+        ),
+        (budgeted(f64::NAN), "the cost budget must be"),
+        (budgeted(f64::INFINITY), "the cost budget must be"),
+        (budgeted(-1.0), "the cost budget must be"),
+        (
+            priced(ModelCost {
+                input: f64::NAN,
+                ..free
+            }),
+            "model \"m\": prices",
+        ),
+        (priced(ModelCost { output: -1.0, ..free }), "model \"m\": prices"),
+        (
+            priced(ModelCost {
+                cache_read: f64::INFINITY,
+                ..free
+            }),
+            "model \"m\": prices",
+        ),
+        (
+            priced(ModelCost {
+                cache_write: -0.5,
+                ..free
+            }),
+            "model \"m\": prices",
+        ),
+        (
+            knowing(ModelMeta {
+                context_window: Some(0),
+                ..ModelMeta::default()
+            }),
+            "model \"m\": the context window must be greater than zero",
+        ),
+        (
+            AgentConfig {
+                approvals: ApprovalMode::Wait(Duration::ZERO),
+                ..config()
+            },
+            "the wait for an approval must be longer than zero",
+        ),
+        (
+            AgentConfig {
+                max_tokens: Some(0),
+                ..config()
+            },
+            "max_tokens must be greater than zero",
+        ),
+    ]
+}
+
 #[test]
 fn an_agent_no_session_could_run_with_is_refused() {
+    let mut wrong = Vec::new();
+    for (config, expected) in unusable() {
+        match Agent::new(config) {
+            Err(error) if error.to_string().contains(expected) => {}
+            Err(error) => wrong.push(format!("refused with {error:?} instead of {expected:?}")),
+            Ok(_) => wrong.push(format!("accepted what {expected:?} refuses")),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
     let provider = Arc::new(FauxProvider::new([]));
-    let twice = AgentConfig {
-        tools: vec![Arc::new(Named("echo")), Arc::new(Named("echo"))],
-        ..AgentConfig::new(provider.clone(), "m")
-    };
-    let unworkable = AgentConfig {
-        compaction: compaction::Config {
-            keep_recent_bytes: 0,
-            ..compaction::Config::default()
-        },
-        ..AgentConfig::new(provider.clone(), "m")
-    };
-
-    let error = Agent::new(twice).err().unwrap();
-    assert_eq!(error.to_string(), "more than one tool is named \"echo\"");
-    assert!(Agent::new(unworkable).is_err());
     for blank in ["", " \t"] {
         let error = Agent::new(AgentConfig::new(provider.clone(), blank)).err().unwrap();
         assert_eq!(error.downcast_ref(), Some(&SessionError::InvalidModel), "{blank:?}");
-    }
-    for budget in [f64::NAN, f64::INFINITY, -1.0] {
-        let unusable = AgentConfig {
-            limits: RunLimits {
-                cost_budget: Some(budget),
-                ..RunLimits::default()
-            },
-            ..AgentConfig::new(provider.clone(), "m")
-        };
-        let error = Agent::new(unusable).err().unwrap();
-        assert!(
-            error.to_string().contains("the cost budget must be"),
-            "{budget}: {error}"
+        let error = Agent::new(AgentConfig::new(Arc::new(Called(blank)), "m")).err();
+        assert_eq!(
+            error.as_ref().and_then(|error| error.downcast_ref()),
+            Some(&SessionError::InvalidProvider),
+            "{blank:?}"
         );
     }
-    // Zero is a budget like any other.
-    let nothing = AgentConfig {
-        limits: RunLimits {
-            cost_budget: Some(0.0),
-            ..RunLimits::default()
-        },
-        ..AgentConfig::new(provider, "m")
-    };
-    assert!(Agent::new(nothing).is_ok());
+    // Zero is a budget like any other, and a price too.
+    assert!(Agent::new(budgeted(0.0)).is_ok());
+    assert!(Agent::new(priced(ModelCost::default())).is_ok());
 }

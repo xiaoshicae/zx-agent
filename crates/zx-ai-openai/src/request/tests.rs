@@ -334,7 +334,7 @@ fn leaves_missing_reasoning_alone_unless_asked() {
 #[test]
 fn replay_leaves_missing_reasoning_alone_unless_the_options_ask() {
     let request = partly_reasoned();
-    let options = json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"});
+    let options = json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse"});
     let body = replay_body(&request, "p", &options).unwrap();
     assert!(second_answer(&body).get("reasoning_content").is_none(), "{body}");
 }
@@ -375,7 +375,7 @@ fn replayed_bodies_match_the_live_body_in_both_system_update_modes() {
 fn request_options_hold_only_the_conversion_policy() {
     assert_eq!(
         provider(options(SystemUpdates::Inline)).request_options(),
-        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "inline"})
+        json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "inline"})
     );
     let filling = BodyOptions {
         fill_missing_reasoning: true,
@@ -405,7 +405,7 @@ fn every_option_is_recorded_under_its_name_and_replays() {
         recorded,
         json!({
             "format": "openai-chat-completions",
-            "version": 2,
+            "version": 3,
             "systemUpdates": "inline",
             "extraFields": {"seed": 7},
             "fillMissingReasoning": true,
@@ -427,14 +427,14 @@ fn replay_rejects_unknown_conversion_options() {
     let request = replayable_request();
     for options in [
         Value::Null,
-        json!({"format": "other", "version": 2, "systemUpdates": "collapse"}),
-        json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse"}),
+        json!({"format": "other", "version": 3, "systemUpdates": "collapse"}),
+        json!({"format": "openai-chat-completions", "version": 4, "systemUpdates": "collapse"}),
         // An older version is not replayed either.
-        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
-        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "sideways"}),
-        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "extra": 1}),
-        json!({"format": "openai-chat-completions", "version": 2}),
-        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "maxTokensField": "max_output_tokens"}),
+        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"}),
+        json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "sideways"}),
+        json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse", "extra": 1}),
+        json!({"format": "openai-chat-completions", "version": 3}),
+        json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse", "maxTokensField": "max_output_tokens"}),
     ] {
         assert!(replay_body(&request, "p", &options).is_err(), "{options}");
     }
@@ -485,7 +485,7 @@ fn fields_the_provider_sets_cannot_be_added() {
         assert!(error.to_string().contains(field), "{error}");
         let options = json!({
             "format": "openai-chat-completions",
-            "version": 2,
+            "version": 3,
             "systemUpdates": "collapse",
             "extraFields": extra_fields,
         });
@@ -575,6 +575,61 @@ fn a_requests_reasoning_level_wins_over_a_fixed_extra_field() {
     };
     assert_eq!(body_of(&request, &fixed)["reasoning_effort"], "high");
     assert_eq!(body_of(&replayable_request(), &fixed)["reasoning_effort"], "low");
+}
+
+#[test]
+fn a_request_set_to_off_sends_no_fixed_value_of_the_fields_its_format_writes() {
+    let off = Request {
+        reasoning: Some(Reasoning::Off),
+        ..replayable_request()
+    };
+    let cases = [
+        (
+            ReasoningFormat::Effort,
+            fields(&[("reasoning_effort", json!("low"))]),
+            json!({}),
+        ),
+        (
+            ReasoningFormat::Thinking,
+            fields(&[
+                ("thinking", json!({"type": "enabled"})),
+                ("reasoning_effort", json!("low")),
+            ]),
+            json!({"thinking": {"type": "disabled"}}),
+        ),
+        (
+            ReasoningFormat::ReasoningObject,
+            fields(&[("reasoning", json!({"effort": "high"}))]),
+            json!({"reasoning": {"effort": "none"}}),
+        ),
+    ];
+    for (reasoning_format, extra_fields, expected) in cases {
+        let fixed = BodyOptions {
+            reasoning_format,
+            extra_fields,
+            ..BodyOptions::default()
+        };
+        assert_eq!(
+            reasoning_fields(&body_of(&off, &fixed)),
+            expected,
+            "{reasoning_format:?}"
+        );
+    }
+}
+
+#[test]
+fn a_reasoning_level_leaves_the_extra_fields_its_format_does_not_write() {
+    let fixed = BodyOptions {
+        extra_fields: fields(&[("thinking", json!({"type": "enabled"})), ("seed", json!(7))]),
+        ..BodyOptions::default()
+    };
+    let off = Request {
+        reasoning: Some(Reasoning::Off),
+        ..replayable_request()
+    };
+    let body = body_of(&off, &fixed);
+    assert_eq!(reasoning_fields(&body), json!({"thinking": {"type": "enabled"}}));
+    assert_eq!(body["seed"], json!(7));
 }
 
 #[test]

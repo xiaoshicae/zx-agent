@@ -16,7 +16,9 @@ use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::Entry;
-use zx_testing::{EchoTool, NotifyingProvider, RunnerSetup, config, header, note, replayed_requests, summarize};
+use zx_testing::{
+    EchoTool, NotifyingProvider, RunnerSetup, config, custom_type, header, note, replayed_requests, summarize,
+};
 
 async fn session_in(file: &Path, config: AgentConfig) -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
     RunnerSetup {
@@ -51,7 +53,8 @@ struct Reminder;
 impl Hook for Reminder {
     async fn after_tool(&self, call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         ctx.queues.steer(Input::Custom(note(&format!("{} ran", call.name))));
-        ctx.queues.append_custom_entry("calls", json!({"id": call.id})).unwrap();
+        ctx.queues
+            .append_custom_entry(custom_type("calls"), json!({"id": call.id}));
         Ok(output)
     }
 }
@@ -116,40 +119,10 @@ struct AtEnd;
 impl Hook for AtEnd {
     async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
         if matches!(event.event, EventKind::AttemptEnd { .. }) {
-            ctx.queues.append_custom_entry("final", json!(true)).unwrap();
+            ctx.queues.append_custom_entry(custom_type("final"), json!(true));
         }
         Ok(())
     }
-}
-
-/// When the run starts: queues an entry without a custom type, then one with a type.
-struct BlankThenNamed;
-
-#[async_trait]
-impl Hook for BlankThenNamed {
-    async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
-        if matches!(event.event, EventKind::RunStart { .. }) {
-            // Whatever the hook makes of the refusal, the run goes on.
-            let _ = ctx.queues.append_custom_entry(" ", json!(null));
-            let _ = ctx.queues.append_custom_entry("named", json!(true));
-        }
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn an_entry_without_a_custom_type_is_refused_as_it_is_queued_and_the_run_goes_on() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("session.jsonl");
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let mut config = config(provider, vec![]);
-    config.hooks.push("blank_then_named", Arc::new(BlankThenNamed));
-    let (session, _) = session_in(&file, config).await;
-
-    let report = session.prompt("go").await.unwrap();
-
-    assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
-    assert!(kinds(&file).contains(&"custom"), "{:?}", kinds(&file));
 }
 
 #[tokio::test]
@@ -251,8 +224,7 @@ async fn state_queued_while_idle_is_recorded_before_the_input_of_the_next_run() 
     // model a message, which starts the run.
     session
         .queues()
-        .append_custom_entry("jira", json!({"key": "ABC-1"}))
-        .unwrap();
+        .append_custom_entry(custom_type("jira"), json!({"key": "ABC-1"}));
     let report = session
         .prompt(Input::Custom(note("Issue ABC-1: broken")))
         .await
@@ -274,22 +246,26 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
     let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("ok")]));
     let (session, _) = session_in(&file, config(provider.clone(), vec![])).await;
 
-    session.append_custom_entry("state", json!({"n": 1})).await.unwrap();
+    let state = custom_type("state");
+    session
+        .append_custom_entry(state.clone(), json!({"n": 1}))
+        .await
+        .unwrap();
     let id = session.append_custom_message(note("remember")).await.unwrap();
     assert_eq!(kinds(&file), ["custom", "custom_message"]);
-    assert_eq!(
-        session
-            .append_custom_entry(" ", json!(null))
-            .await
-            .err()
-            .map(|error| error.to_string().contains("customType")),
-        Some(true)
+    // An entry refused before it is written leaves the session open: this one is nested
+    // deeper than a record is read back.
+    let deep = (0..200).fold(json!(null), |inner, _| json!([inner]));
+    let refused = session.append_custom_entry(state.clone(), deep).await;
+    assert!(
+        matches!(&refused, Err(SessionError::WriteFailed(reason)) if reason.contains("could not be read back")),
+        "{refused:?}"
     );
 
     let mut running = Box::pin(session.prompt("go"));
     provider.wait_for_start(&mut running).await;
     assert_eq!(
-        session.append_custom_entry("state", json!(2)).await,
+        session.append_custom_entry(state, json!(2)).await,
         Err(SessionError::Busy)
     );
     assert_eq!(

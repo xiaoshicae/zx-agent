@@ -462,7 +462,7 @@ fn unread_input(session: &Session, output: &Output) -> Vec<Input> {
 fn describe_queued(message: &Input) -> String {
     match message {
         Input::User { text, .. } => text.clone(),
-        Input::Custom(custom) => format!("[{}] {}", custom.custom_type, custom.content),
+        Input::Custom(custom) => format!("[{}] {}", custom.custom_type.as_str(), custom.content),
     }
 }
 

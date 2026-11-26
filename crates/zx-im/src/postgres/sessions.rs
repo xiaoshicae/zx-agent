@@ -116,12 +116,8 @@ impl SessionStorage for PostgresSessions {
 
     async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
         let rows = self.matching(query).await?;
-        // A header that cannot be read, or of another format, is left out; a listing reports it.
-        let headers = rows
-            .iter()
-            .filter_map(|row| header_of_column(row, 1).ok())
-            .filter(|header| header.check_version().is_ok())
-            .collect();
+        // A header that cannot be read is left out; a listing reports it.
+        let headers = rows.iter().filter_map(|row| header_of_column(row, 1).ok()).collect();
         Ok(query.arrange_headers(headers))
     }
 

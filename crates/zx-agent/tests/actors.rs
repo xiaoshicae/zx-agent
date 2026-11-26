@@ -14,7 +14,7 @@ use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, SessionHeader, Transcript};
-use zx_testing::{Driven, EchoTool, RunnerSetup, Seed, Start, config, header};
+use zx_testing::{Driven, EchoTool, RunnerSetup, Seed, Start, config, custom_type, header};
 
 /// What a policy or a hook was told about the run: the labels and the actor.
 type Told = (BTreeMap<String, String>, Option<String>);
@@ -121,7 +121,7 @@ async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sen
     // Taken before the first request: Bob's words, then a note from an extension.
     session.queues().steer(sent_by("bob", "and this"));
     session.queues().steer(Input::Custom(CustomMessage {
-        custom_type: "note".into(),
+        custom_type: custom_type("note"),
         content: "a reminder".into(),
         display: false,
         details: None,

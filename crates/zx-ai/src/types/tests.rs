@@ -514,3 +514,33 @@ fn prices_apply_per_million_tokens_with_the_cache_priced_separately() {
     };
     assert!((cost.of(&odd) - 20.0 * 0.1 / 1_000_000.0).abs() < 1e-12);
 }
+
+#[test]
+fn prices_are_valid_when_each_is_a_number_that_is_zero_or_more() {
+    let free = ModelCost::default();
+    assert!(free.is_valid());
+    assert!(
+        ModelCost {
+            input: 1.5,
+            output: 6.0,
+            ..free
+        }
+        .is_valid()
+    );
+    for price in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01] {
+        for cost in [
+            ModelCost { input: price, ..free },
+            ModelCost { output: price, ..free },
+            ModelCost {
+                cache_read: price,
+                ..free
+            },
+            ModelCost {
+                cache_write: price,
+                ..free
+            },
+        ] {
+            assert!(!cost.is_valid(), "{cost:?}");
+        }
+    }
+}

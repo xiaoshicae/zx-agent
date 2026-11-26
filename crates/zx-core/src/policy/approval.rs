@@ -24,7 +24,8 @@ pub enum ApprovalMode {
     Deny,
     /// The host: the run emits `approval_requested` with the request's ID and waits this
     /// long for [`Session::resolve_approval`](crate::Session::resolve_approval). A request
-    /// that nobody answers in time, or whose run is cancelled, is denied.
+    /// that nobody answers in time, or whose run is cancelled, is denied. The wait is longer
+    /// than zero: no agent is made with one that no host could answer within.
     Wait(Duration),
 }
 

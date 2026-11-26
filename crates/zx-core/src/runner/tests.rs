@@ -7,7 +7,7 @@ use crate::ai::faux::{FauxProvider, FauxStep};
 use crate::ai::{Message, ProviderErrorKind};
 use crate::hooks::{Hook, HookContext, HookResult};
 use crate::tools::{Tool, Toolbox};
-use crate::transcript::{FailingWriter, SessionHeader};
+use crate::transcript::{CustomType, FailingWriter, SessionHeader};
 
 #[test]
 fn default_request_limit_is_unbounded() {
@@ -312,7 +312,8 @@ struct NoteAtTheEnd;
 impl Hook for NoteAtTheEnd {
     async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
         if matches!(event.event, EventKind::AttemptEnd { .. }) {
-            ctx.queues.append_custom_entry("note", serde_json::json!({})).unwrap();
+            let note = CustomType::new("note").unwrap();
+            ctx.queues.append_custom_entry(note, serde_json::json!({}));
         }
         Ok(())
     }

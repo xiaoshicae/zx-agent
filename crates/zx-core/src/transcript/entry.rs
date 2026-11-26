@@ -88,14 +88,49 @@ pub struct ContextEditEntry {
     pub replacement: Option<String>,
 }
 
+/// What an extension calls the records it appends (pi: `customType`): the name of the
+/// extension or of the kind of record, such as `jira_issue`. Kept as written, and never blank:
+/// a blank one would name nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CustomType(String);
+
+impl CustomType {
+    /// `text` as a custom type. `None` when it is empty or only whitespace.
+    pub fn new(text: impl Into<String>) -> Option<Self> {
+        let text = text.into();
+        (!text.trim().is_empty()).then_some(Self(text))
+    }
+
+    /// The type as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CustomType {
+    type Error = &'static str;
+
+    // A stored type must be one that `new` could have made, so a loaded session holds no
+    // custom record that could not have been appended.
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(text).ok_or("a custom record needs a customType that is not blank")
+    }
+}
+
+impl From<CustomType> for String {
+    fn from(custom_type: CustomType) -> Self {
+        custom_type.0
+    }
+}
+
 /// A message an extension sends to the model (pi: `CustomMessage`). The model sees its
 /// `content` as a user message; `custom_type`, `display` and `details` are for frontends
 /// and for the extension itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomMessage {
-    /// Names the extension or the kind of message, such as `jira_issue`; not blank.
-    pub custom_type: String,
+    pub custom_type: CustomType,
     pub content: String,
     /// Whether a frontend shows the message to the person; it reaches the model either way.
     pub display: bool,
@@ -111,7 +146,7 @@ pub struct CustomEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
-    pub custom_type: String,
+    pub custom_type: CustomType,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
 }
@@ -242,6 +277,42 @@ impl Entry {
             Self::Custom(entry) => entry.timestamp,
             Self::CustomMessage(entry) => entry.timestamp,
             Self::SessionInfo(entry) => entry.timestamp,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::transcript::Transcript;
+    use crate::transcript::test_support::{header, loaded};
+
+    #[test]
+    fn a_custom_type_is_kept_as_written_and_is_never_blank() {
+        let padded = CustomType::new(" jira issue ").unwrap();
+        assert_eq!(padded.as_str(), " jira issue ");
+        assert_eq!(serde_json::to_value(&padded).unwrap(), json!(" jira issue "));
+        for blank in ["", " ", "\n\t", "\u{3000}"] {
+            assert_eq!(CustomType::new(blank), None, "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn opening_refuses_a_custom_record_whose_type_is_blank() {
+        for record in [
+            json!({"type": "custom", "id": "c1", "parentId": null, "timestamp": 2, "customType": " "}),
+            json!({"type": "custom_message", "id": "c1", "parentId": null, "timestamp": 2,
+                "customType": "", "content": "x", "display": true}),
+        ] {
+            let error = Transcript::snapshot(loaded(header(), vec![record.to_string()]))
+                .err()
+                .unwrap_or_else(|| panic!("{record} was accepted"));
+            assert!(
+                format!("{error:#}").contains("a custom record needs a customType"),
+                "{record}: {error:#}"
+            );
         }
     }
 }

@@ -40,7 +40,8 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
 /// - The stream ends with exactly one `Done` or `Error` event.
 /// - Cancelling `cancel` ends the stream with `Aborted`, keeping content generated so far.
 pub trait Provider: Send + Sync {
-    /// Name recorded on assistant messages.
+    /// Name recorded on assistant messages and with every request. Not blank: a session
+    /// records no request under a blank name, so the kernel refuses a provider without one.
     fn name(&self) -> &str;
     /// Non-secret options needed to replay wire payload conversion. Never include
     /// authentication, headers or credentials. Null leaves custom wire conversion opaque;

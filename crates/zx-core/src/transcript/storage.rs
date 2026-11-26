@@ -68,12 +68,12 @@ pub trait SessionStorage: Send + Sync {
     async fn read(&self, id: &str) -> Result<LoadedSession>;
 
     /// The headers of the sessions `query` asks for, the most recently started first and no
-    /// more than its limit, as [`SessionQuery::arrange_headers`] arranges them: what a host
-    /// that keeps an index of its sessions reads, without their records. A session whose
-    /// header cannot be read, or that is of another format
-    /// ([`SessionHeader::check_version`]), cannot be opened, so it is left out;
-    /// [`list`](Self::list) reports it. The default reads every session `list` names; a
-    /// storage that can read headers alone does so instead.
+    /// more than its limit: what a host that keeps an index of its sessions reads, without
+    /// their records. An implementation gives every header it can read to
+    /// [`SessionQuery::arrange_headers`] and returns the result: that leaves out the sessions
+    /// of another format, which cannot be opened, and a header that cannot be read is left
+    /// out by the storage; [`list`](Self::list) reports both. The default reads every session
+    /// `list` names; a storage that can read headers alone does so instead.
     async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
         let listed = self
             .list(&SessionQuery {
@@ -122,10 +122,12 @@ impl SessionQuery {
                 .all(|(name, value)| header.labels.get(name) == Some(value))
     }
 
-    /// The `headers` that match, the most recently started first, then by ID, and no more
-    /// than the limit: what [`SessionStorage::headers`] returns.
+    /// The `headers` that match and are of the current format, the most recently started
+    /// first, then by ID, and no more than the limit: what [`SessionStorage::headers`]
+    /// returns. A session of another format ([`SessionHeader::check_version`]) cannot be
+    /// opened, so it is left out here, whatever the storage read.
     pub fn arrange_headers(&self, mut headers: Vec<SessionHeader>) -> Vec<SessionHeader> {
-        headers.retain(|header| self.matches(header));
+        headers.retain(|header| header.check_version().is_ok() && self.matches(header));
         headers.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
         if let Some(limit) = self.limit {
             headers.truncate(limit);
@@ -253,6 +255,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::transcript::SESSION_VERSION;
 
     fn session(id: &str, last_activity_ms: u64) -> SessionInfo {
         SessionInfo {
@@ -311,6 +314,28 @@ mod tests {
                 ..SessionQuery::default()
             }));
         }
+    }
+
+    #[test]
+    fn arranged_headers_leave_out_the_sessions_of_another_format() {
+        let started = |timestamp, version| SessionHeader {
+            timestamp,
+            version,
+            ..SessionHeader::new(Path::new("/w"), "m")
+        };
+        let current = started(1, SESSION_VERSION);
+        let headers = vec![
+            started(3, SESSION_VERSION + 1),
+            current.clone(),
+            started(2, SESSION_VERSION - 1),
+        ];
+        let newest = SessionQuery {
+            limit: Some(1),
+            ..SessionQuery::default()
+        };
+
+        // The limit counts the sessions that can be opened.
+        assert_eq!(newest.arrange_headers(headers), [current]);
     }
 
     #[test]

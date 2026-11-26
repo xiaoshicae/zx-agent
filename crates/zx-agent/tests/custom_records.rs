@@ -3,14 +3,17 @@
 
 use serde_json::json;
 use zx_agent::ai::{Message, UserMessageKind};
-use zx_agent::transcript::{CustomMessage, Transcript};
-use zx_testing::{header, note, read_lines, summarize};
+use zx_agent::transcript::Transcript;
+use zx_testing::{custom_type, header, note, read_lines, summarize};
 
 #[tokio::test]
 async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries_stay_out() {
     let mut transcript = Transcript::in_memory(header());
     transcript.append_message(Message::user("first")).await.unwrap();
-    transcript.append_custom_entry("state", json!({"n": 1})).await.unwrap();
+    transcript
+        .append_custom_entry(custom_type("state"), json!({"n": 1}))
+        .await
+        .unwrap();
     let id = transcript.append_custom_message(note("remember")).await.unwrap();
 
     assert_eq!(summarize(&transcript.messages()), ["user:first", "user:remember"]);
@@ -35,7 +38,7 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     let path = dir.path().join("s.jsonl");
     let mut seed = zx_testing::create_session_file(&path, header()).await.unwrap();
     seed.append_message(Message::user("first")).await.unwrap();
-    seed.append_custom_entry("state", json!(1)).await.unwrap();
+    seed.append_custom_entry(custom_type("state"), json!(1)).await.unwrap();
     seed.append_custom_message(note("remember")).await.unwrap();
     drop(seed);
 
@@ -58,20 +61,4 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     assert_eq!(lines[3]["parentId"], lines[2]["id"]);
     let reopened = zx_testing::open_session_file(&path).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:first", "user:remember"]);
-}
-
-#[tokio::test]
-async fn a_custom_record_needs_a_type_and_writes_nothing_without_one() {
-    let mut transcript = Transcript::in_memory(header());
-    assert!(transcript.append_custom_entry(" ", json!(null)).await.is_err());
-    assert!(
-        transcript
-            .append_custom_message(CustomMessage {
-                custom_type: String::new(),
-                ..note("x")
-            })
-            .await
-            .is_err()
-    );
-    assert!(transcript.entries().is_empty());
 }

@@ -176,7 +176,7 @@ async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on
     config
         .policies
         .push("decision", Arc::new(Decides(PolicyDecision::Ask("review".into()))));
-    config.approvals = ApprovalMode::Wait(Duration::ZERO);
+    config.approvals = ApprovalMode::Wait(Duration::from_millis(1));
     let host = Arc::new(WaitingHost(Arc::default()));
     let (result, _) = run_approved(config, host, "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
@@ -1194,7 +1194,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
 async fn an_approval_ends_as_denied_without_anyone_to_ask_and_as_timed_out_without_an_answer() {
     for (approvals, ended) in [
         (ApprovalMode::Deny, ApprovalResult::Denied),
-        (ApprovalMode::Wait(Duration::ZERO), ApprovalResult::TimedOut),
+        (ApprovalMode::Wait(Duration::from_millis(1)), ApprovalResult::TimedOut),
     ] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c", "echo", json!({})),

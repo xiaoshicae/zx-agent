@@ -50,7 +50,7 @@ pub use self::compaction::{
 };
 pub(crate) use self::compaction::{CompactionPlan, summary_input, summary_messages};
 pub use self::entry::{
-    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader,
+    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, CustomType, Entry, MessageEntry, SessionHeader,
 };
 pub use self::log::{LoadedSession, LogRecord, SessionLog};
 pub use self::memory::MemoryStorage;
@@ -279,20 +279,19 @@ impl Transcript {
     }
 
     /// Record state of an extension, which never reaches the model (pi: `appendEntry`).
-    /// `custom_type` must not be blank.
-    pub async fn append_custom_entry(&mut self, custom_type: &str, data: serde_json::Value) -> Result<String> {
+    pub async fn append_custom_entry(&mut self, custom_type: CustomType, data: serde_json::Value) -> Result<String> {
         let entry = Entry::Custom(CustomEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
-            custom_type: custom_type.to_string(),
+            custom_type,
             data,
         });
         self.append(entry).await
     }
 
     /// Record a message from an extension, which the model sees as a user message from now
-    /// on (pi: `sendMessage`). The message's `custom_type` must not be blank.
+    /// on (pi: `sendMessage`).
     pub async fn append_custom_message(&mut self, message: CustomMessage) -> Result<String> {
         let entry = Entry::CustomMessage(CustomMessageEntry {
             id: self.new_id(),
@@ -320,10 +319,8 @@ impl Transcript {
                 "entry {}: only a person's input names an actor",
                 message.id
             ),
-            // A name is valid by its type, whether appended or loaded.
-            Entry::SessionInfo(_) => {}
-            Entry::Custom(custom) => check_custom_type(&custom.custom_type)?,
-            Entry::CustomMessage(custom) => check_custom_type(&custom.message.custom_type)?,
+            // A name and a custom type are valid by their types, whether appended or loaded.
+            Entry::SessionInfo(_) | Entry::Custom(_) | Entry::CustomMessage(_) => {}
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
             Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
             Entry::Compaction(done) => self.validate_compaction(done)?,
@@ -535,18 +532,4 @@ pub(crate) fn context_edit_refusal(message: &Message, replacement: Option<&str>)
         }
         Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => None,
     }
-}
-
-/// A custom record whose custom type is blank: the type names what an extension recorded, and
-/// a blank one would name nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a custom record needs a customType")]
-pub struct BlankCustomType;
-
-/// Refuse a blank `custom_type`.
-pub(crate) fn check_custom_type(custom_type: &str) -> Result<(), BlankCustomType> {
-    if custom_type.trim().is_empty() {
-        return Err(BlankCustomType);
-    }
-    Ok(())
 }

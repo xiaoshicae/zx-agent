@@ -1,8 +1,15 @@
-//! The checks of the settings every HTTP provider has: where requests go, the headers they
-//! carry, and the limits of their responses. Errors name the fields as the providers' settings
-//! do.
+//! The checks of the settings every HTTP provider has: what its answers are recorded under,
+//! where requests go, the headers they carry, and the limits of their responses. Errors name
+//! the fields as the providers' settings do.
 
 use std::time::Duration;
+
+/// Refuse a blank provider name: every request and answer is recorded under it
+/// ([`Provider::name`](zx_ai::Provider::name)).
+pub fn check_provider_name(provider_name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!provider_name.trim().is_empty(), "provider_name must not be empty");
+    Ok(())
+}
 
 /// Refuse an address requests cannot go to: one that is not an http or https URL, and one
 /// with a query or a fragment, which the path of a request could not follow. The address may
@@ -78,6 +85,15 @@ mod tests {
         ] {
             assert!(check_base_url(base_url).is_ok(), "{base_url}");
         }
+    }
+
+    #[test]
+    fn a_blank_provider_name_is_refused() {
+        for blank in ["", " \t"] {
+            let error = check_provider_name(blank).unwrap_err().to_string();
+            assert_eq!(error, "provider_name must not be empty", "{blank:?}");
+        }
+        assert!(check_provider_name("openai-compatible").is_ok());
     }
 
     #[test]
