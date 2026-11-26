@@ -91,7 +91,7 @@ export SLACK_BOT_TOKEN=xoxb-...
 zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
-改了 `[access]`（`conversations` 与 `approvers`）不必重启：向 `zx-im` 进程发 SIGHUP（如 `kill -HUP "$(pidof zx-im)"`），它重读 `im.toml`，日志记一条 `reloaded`；文件有错时保留原名单，日志记一条 `failed` 写明原因。其他段（含 `[[chats]]`）的改动要重启才生效。Kubernetes 中的做法见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
+改了 `[access]`（`conversations` 与 `approvers`）不必重启：向 `zx-im` 进程发 SIGHUP（如 `kill -HUP "$(pidof zx-im)"`），它重读 `im.toml`，日志记一条 `reloaded`；文件有错时保留原名单，日志记一条 `failed` 写明原因。其他段（含 `[[chats]]`）的改动要重启才生效；新加进名单的聊天在 `[[chats]]` 有自己的设置时，也要重启才服务，重读只记一条 `deferred`（见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)）。Kubernetes 中的做法见 [deploy/kubernetes/README.md](../deploy/kubernetes/README.md#im-服务)。
 
 ## 取得 ID
 
@@ -139,9 +139,10 @@ zx-im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3
 | 现象 | 原因与处理 |
 |---|---|
 | 机器人回复 “Not authorized…” | 聊天不在 `conversations` 中：从 `unauthorized` 日志行取 ID 加入，再发 SIGHUP 或重启 |
+| 聊天加进 `conversations` 并发了 SIGHUP，机器人仍回复 “Not authorized…” | 日志有一条这个聊天的 `deferred`：`[[chats]]` 给它的设置与生效中的不同（通常是文件给了它自己的设置），重读不让它按别的设置开始服务，重启后服务 |
 | 点审批按钮后提示只有名单里的人能批 | 点的人不在 `approvers` 中 |
 | 审批卡片一直没人能点 | `approvers` 为空时审批只能超时 |
 
 ---
 
-IM_SETUP.md · v0.3 · 2026年11月
+IM_SETUP.md · v0.4 · 2026年11月

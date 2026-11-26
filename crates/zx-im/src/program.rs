@@ -197,19 +197,22 @@ async fn run(args: Args, program: Program) -> Result<u8> {
                 &channels,
             );
             priced_for_daily_cost(&app, daily, &chats)?;
-            // A conversation's sessions are those in the place that carry its labels.
-            let (agent, chats) = conversations_agents(&app, &place, chats).await?;
+            // A conversation's sessions are those in the place that carry its labels. What
+            // chats have of their own is built into the server here, and kept as the file
+            // gave it besides, for the task that compares a file read again with it.
+            let (agent, built_chats) = conversations_agents(&app, &place, chats.clone()).await?;
             let config = ServerConfig {
                 cwd: agent.new_session_cwd(None)?,
                 statuses: Some(statuses),
                 backlog,
                 usage,
-                chats,
+                chats: built_chats,
                 daily,
                 ..server_config(&file.limits, file.replies, conversations, approvers)
             };
             let files = Files {
                 im_toml: &path,
+                own_chats: chats,
                 sessions: &shown,
             };
             let serving = Serving {
@@ -360,6 +363,9 @@ fn build_agent(app: &Application, name: &str, place: &SessionPlace) -> Result<Co
 /// the startup line says.
 struct Files<'a> {
     im_toml: &'a Path,
+    /// What the `[[chats]]` of im.toml gave chats of their own at the start, in effect until a
+    /// restart: what a SIGHUP compares the file it reads with.
+    own_chats: Vec<OwnChat>,
     sessions: &'a str,
 }
 
@@ -396,8 +402,11 @@ async fn serve(config: ServerConfig, agent: &ConfiguredAgent, serving: Serving, 
     let server = Server::new(config, agent.agent().clone(), Arc::new(Log))?;
     #[cfg(unix)]
     let reloading = reload::on_hangup(
-        files.im_toml.to_path_buf(),
-        names.clone(),
+        reload::Started {
+            path: files.im_toml.to_path_buf(),
+            platforms: names.clone(),
+            chats: files.own_chats,
+        },
         server.access(),
         cancel.clone(),
     );

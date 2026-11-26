@@ -37,7 +37,10 @@ impl Access {
     /// served gets [`Replies::unauthorized`], and a click by a user no longer listed decides
     /// nothing. What chats have of their own ([`ServerConfig::chats`]) stays as the server was
     /// made with it, and is not checked against the new lists: the settings of a chat no
-    /// longer served go unused until a later list serves it again.
+    /// longer served go unused until a later list serves it again. A chat that a new list
+    /// starts to serve is served with those settings, or as a chat without any: a host whose
+    /// configuration gives it others leaves it off the list until it makes the server again,
+    /// as the program `zx-im` does.
     ///
     /// [`ServerConfig::conversations`]: super::ServerConfig::conversations
     /// [`ServerConfig::approvers`]: super::ServerConfig::approvers
@@ -51,8 +54,9 @@ impl Access {
         *lock(&self.0) = lists;
     }
 
-    /// Whether the server answers in the chat `chat` on `platform`.
-    pub(super) fn serves(&self, platform: &str, chat: &ConversationId) -> bool {
+    /// Whether the server answers in the chat `chat` on `platform`. The program asks as well,
+    /// to tell the chats that a reload of im.toml newly serves.
+    pub(crate) fn serves(&self, platform: &str, chat: &ConversationId) -> bool {
         lock(&self.0)
             .conversations
             .get(platform)
