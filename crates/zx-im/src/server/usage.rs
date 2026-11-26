@@ -3,6 +3,7 @@
 //! the server has one, so that a restart, or another replica, counts the day on.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 
 use async_trait::async_trait;
 use zx_agent::ai::{Usage, now_ms};
@@ -13,26 +14,57 @@ use crate::ConversationId;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// What the work of a day may use, from 00:00 UTC: in all ([`ServerConfig::daily`]) or in one
-/// chat ([`ChatConfig::daily`]). `None` does not limit. New work starts only while neither is
-/// used up; work that has started finishes, so a day may go over by what the work in progress
-/// uses, within each run's own budgets.
+/// chat ([`ChatConfig::daily`]). [`Default`] does not limit. New work starts only while
+/// neither is used up; work that has started finishes, so a day may go over by what the work
+/// in progress uses, within each run's own budgets.
 ///
 /// [`ServerConfig::daily`]: super::ServerConfig::daily
 /// [`ChatConfig::daily`]: super::ChatConfig::daily
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DailyLimit {
-    /// Input plus output tokens, as the providers report them.
-    pub tokens: Option<u64>,
-    /// What the work may cost, in the unit of the configured prices. A response of a model
-    /// without prices costs nothing here.
-    pub cost: Option<f64>,
+    tokens: Option<NonZeroU64>,
+    /// A finite amount above zero, as [`DailyLimit::new`] takes it.
+    cost: Option<f64>,
 }
 
 impl DailyLimit {
+    /// A limit of `tokens`, input plus output as the providers report them, and of `cost`,
+    /// what the work may cost in the unit of the configured prices; `None` does not limit
+    /// that one. A response of a model without prices costs nothing here.
+    ///
+    /// An error for a cost that would not limit as a limit does: one that is not a number or
+    /// is infinite is never reached, and zero or less is reached before any work.
+    pub fn new(tokens: Option<NonZeroU64>, cost: Option<f64>) -> Result<Self, InvalidDailyLimit> {
+        match cost {
+            Some(cost) if !(cost.is_finite() && cost > 0.0) => Err(InvalidDailyLimit::Cost(cost)),
+            _ => Ok(Self { tokens, cost }),
+        }
+    }
+
+    /// The tokens a day may use, input plus output; `None` when it does not limit them.
+    pub fn tokens(self) -> Option<NonZeroU64> {
+        self.tokens
+    }
+
+    /// What a day may cost; `None` when it does not limit the cost.
+    pub fn cost(self) -> Option<f64> {
+        self.cost
+    }
+
     /// Whether `used` leaves nothing of this limit.
     pub(super) fn reached_by(self, used: Used) -> bool {
-        self.tokens.is_some_and(|tokens| used.tokens >= tokens) || self.cost.is_some_and(|cost| used.cost >= cost)
+        self.tokens.is_some_and(|tokens| used.tokens >= tokens.get()) || self.cost.is_some_and(|cost| used.cost >= cost)
     }
+}
+
+/// Why [`DailyLimit::new`] refuses a limit. The message names the parameter as the
+/// constructor does; a host that reads the limit from a file of its own matches the variant
+/// to name its own key.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+pub enum InvalidDailyLimit {
+    /// `cost`, given here, is zero or less, or not a finite number.
+    #[error("cost is {0}; it must be a finite amount above zero")]
+    Cost(f64),
 }
 
 /// What the work in one chat used, on one day or in one piece of work.
@@ -215,18 +247,24 @@ mod tests {
     #[test]
     fn a_limit_is_reached_once_used_up_and_none_never_is() {
         let used = Used { tokens: 100, cost: 0.5 };
-        let tokens = |limit| DailyLimit {
-            tokens: Some(limit),
-            cost: None,
-        };
+        let tokens = |limit| DailyLimit::new(NonZeroU64::new(limit), None).unwrap();
         assert!(tokens(100).reached_by(used));
         assert!(!tokens(101).reached_by(used));
-        let cost = |limit| DailyLimit {
-            tokens: None,
-            cost: Some(limit),
-        };
+        let cost = |limit| DailyLimit::new(None, Some(limit)).unwrap();
         assert!(cost(0.5).reached_by(used));
         assert!(!cost(0.51).reached_by(used));
         assert!(!DailyLimit::default().reached_by(used));
+    }
+
+    #[test]
+    fn a_cost_that_is_no_finite_amount_above_zero_is_not_a_limit() {
+        for cost in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let limit = DailyLimit::new(None, Some(cost));
+            assert!(matches!(limit, Err(InvalidDailyLimit::Cost(_))), "{cost}: {limit:?}");
+        }
+        assert_eq!(
+            DailyLimit::new(None, Some(-1.0)).unwrap_err().to_string(),
+            "cost is -1; it must be a finite amount above zero"
+        );
     }
 }

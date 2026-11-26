@@ -32,6 +32,22 @@ const FEISHU_SECRET_UNSET: &str = "[feishu]: appSecret: names ${FEISHU_APP_SECRE
 #[cfg(not(feature = "feishu"))]
 const FEISHU_SECRET_UNSET: &str = "this build of zx-im has no such platform";
 
+/// The address settings of `[feishu]` that are not URLs, each with the error that names its
+/// key; none for a build without that platform, which never reads them.
+#[cfg(feature = "feishu")]
+const FEISHU_ADDRESSES: &[(&str, &str)] = &[
+    (
+        "apiBase = \"example.com\"",
+        "[feishu]: configuration error: apiBase is not a URL",
+    ),
+    (
+        "tokenUrl = \"example.com/token\"",
+        "[feishu]: configuration error: tokenUrl is not a URL",
+    ),
+];
+#[cfg(not(feature = "feishu"))]
+const FEISHU_ADDRESSES: &[(&str, &str)] = &[];
+
 /// The default variables of the platforms' credentials, which `zx-im` reads besides the
 /// variables that [`program::command`] withholds.
 const PLATFORM_CREDENTIALS: [&str; 4] = [
@@ -186,6 +202,37 @@ async fn configuration_errors_are_reported_before_serving() {
             .collect();
         created.sort();
         assert_eq!(created, [".zx-agent-home", "im.toml"], "{config}");
+    }
+}
+
+#[tokio::test]
+async fn a_platform_address_that_is_not_a_url_is_reported_by_its_key_before_serving() {
+    let slack = [(
+        "slack",
+        "apiBase = \"example.com/api\"",
+        "[slack]: configuration error: apiBase is not a URL",
+    )];
+    let feishu = FEISHU_ADDRESSES
+        .iter()
+        .map(|(setting, expected)| ("feishu", *setting, *expected));
+    for (platform, setting, expected) in slack.into_iter().chain(feishu) {
+        let config = format!("[{platform}]\n{setting}\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_im_config(dir.path(), &config);
+        let mut command = im(dir.path(), &path, "http://127.0.0.1:9/v1");
+        command.kill_on_drop(true);
+        // The wait ends only for a program that serves, and tries the address again and again.
+        let output = tokio::time::timeout(START_WAIT, command.output())
+            .await
+            .unwrap_or_else(|_| panic!("{config}: zx-im went on to serve"))
+            .unwrap();
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{config}: {stderr}");
+        assert!(stderr.contains(expected), "{config}: expected {expected:?} in {stderr}");
+        assert!(
+            !dir.path().join("s").exists(),
+            "{config}: the session directory was created"
+        );
     }
 }
 

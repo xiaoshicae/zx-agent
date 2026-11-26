@@ -355,7 +355,7 @@ impl Outlet {
     /// Post the card of an approval request. An error says why nobody can decide.
     pub(super) async fn post_card(&self, card: &Post) -> Result<MessageRef, String> {
         let post = self.channel.send(&self.to, card);
-        timed(self.shared.outbound_timeout, "post the approval request", post).await
+        timed("post the approval request", post).await
     }
 
     /// Run `prompt` in `session` to its end, as the task of a run does. Its approvals, and the
@@ -494,7 +494,7 @@ impl Outlet {
                 continue;
             }
             let fetch = self.channel.image(message, image, MAX_IMAGE_BYTES);
-            let bytes = match timed(self.shared.outbound_timeout, "fetch it", fetch).await {
+            let bytes = match timed("fetch it", fetch).await {
                 Ok(bytes) => bytes,
                 Err(reason) => {
                     self.failed(format!("image {} of message {}: {reason}", image.name, message.id));

@@ -58,8 +58,7 @@ pub(crate) use self::status::StatusFiles;
 pub use self::status::StatusStore;
 use self::status::{left_behind, replace_left_behind};
 pub use self::trigger::{Trigger, Triggers};
-pub use self::usage::{ChatUsage, DailyLimit, UsageStore};
-use crate::platform::RATE_LIMIT_BUDGET;
+pub use self::usage::{ChatUsage, DailyLimit, InvalidDailyLimit, UsageStore};
 use crate::{ApprovalId, Backlog, ConversationId, Destination, ImChannel, ImError, MemoryBacklog, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
@@ -70,12 +69,6 @@ const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 /// Two messages of text (`platform::MAX_TEXT_CHARS` each): a longer answer is read better as
 /// a file than as a run of messages.
 const DEFAULT_LONG_ANSWER_CHARS: NonZeroUsize = NonZeroUsize::new(8000).expect("8000 is not zero");
-/// Long enough for a platform's rate-limit queue, short enough that a platform that stopped
-/// answering does not hold a conversation for minutes.
-const DEFAULT_OUTBOUND_TIMEOUT: Duration = Duration::from_secs(30);
-
-// A call that a platform rate limits fails as such before the server stops waiting for it.
-const _: () = assert!(RATE_LIMIT_BUDGET.as_secs() < DEFAULT_OUTBOUND_TIMEOUT.as_secs());
 
 /// One conversation, with a session of its own: a direct chat, or a thread in a group.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -206,8 +199,9 @@ pub struct ServerConfig {
     /// their own ([`chats`](Self::chats)). A click by anyone else gets
     /// [`Replies::not_approver`] and decides nothing.
     pub approvers: Vec<(String, UserId)>,
-    /// Chats among [`conversations`](Self::conversations) with an agent or approvers of their
-    /// own. One that is not served, or that is given twice, is a configuration error.
+    /// Chats among [`conversations`](Self::conversations) with an agent, approvers or a daily
+    /// limit of their own. [`Server::new`] refuses one that is not among them, and one given
+    /// twice. The settings of a chat that the lists later lose ([`Access::replace`]) go unused.
     pub chats: Vec<ChatConfig>,
     /// Conversations that may run at once; the others wait in arrival order.
     pub max_running: NonZeroUsize,
@@ -237,12 +231,6 @@ pub struct ServerConfig {
     /// the replica that takes over ([`UsageStore`]); read as the server starts. `None`, the
     /// default, counts in memory only: a restart starts the day over.
     pub usage: Option<Arc<dyn UsageStore>>,
-    /// Limit for each call to a channel but [`ImChannel::run`], and for each call to
-    /// [`statuses`](Self::statuses), to [`usage`](Self::usage) and to the
-    /// [`backlog`](Self::backlog) but [`Backlog::keep`]; a call that takes longer counts as
-    /// failed. Keep it over the 20 seconds that a built-in platform's call waits out rate
-    /// limits in all, so that a call it limits fails as rate limited rather than as slow.
-    pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
     /// threads saying that the work goes on.
@@ -272,7 +260,6 @@ impl Default for ServerConfig {
             long_answer_chars: DEFAULT_LONG_ANSWER_CHARS,
             daily: DailyLimit::default(),
             usage: None,
-            outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
             statuses: None,
             backlog: Arc::new(MemoryBacklog::default()),
@@ -331,6 +318,11 @@ pub struct ChatConfig {
 /// - Once the day's usage of all chats or of a chat is used up ([`ServerConfig::daily`],
 ///   [`ChatConfig::daily`]), no work starts there: a message or `/compact` gets
 ///   [`Replies::daily_limit`], and a trigger is reported. Work in progress finishes.
+/// - Each call to a channel but [`ImChannel::run`], and each call to
+///   [`ServerConfig::statuses`], to [`ServerConfig::usage`] and to the
+///   [`ServerConfig::backlog`] but [`Backlog::keep`], may take 30 seconds; one that takes
+///   longer counts as failed. A call of a built-in platform waits out rate limits for less,
+///   20 seconds in all, so that a call the platform limits fails as rate limited, not as slow.
 pub struct Server {
     config: ServerConfig,
     agent: Agent,
@@ -345,20 +337,27 @@ pub struct Server {
 impl Server {
     /// A server for `config` whose conversations are sessions of `agent`, but in the chats
     /// with an agent of their own, and which reports to `sink`.
-    pub fn new(mut config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+    ///
+    /// A configuration error when a chat with settings of its own ([`ServerConfig::chats`])
+    /// is not among [`ServerConfig::conversations`], or is given more than once. The lists
+    /// are checked here, as the server is made with them, and not again: a chat that
+    /// [`Access::replace`] takes off them afterwards, before or while the server runs, only
+    /// leaves its settings unused.
+    pub fn new(mut config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Result<Self, ImError> {
         let (triggers, triggered) = Triggers::channel();
         let access = Access::new(
             std::mem::take(&mut config.conversations),
             std::mem::take(&mut config.approvers),
         );
-        Self {
+        served_once(&config.chats, &access)?;
+        Ok(Self {
             config,
             agent,
             sink,
             triggers,
             triggered,
             access,
-        }
+        })
     }
 
     /// Where the host asks this server for conversations it starts without a message, such
@@ -368,9 +367,9 @@ impl Server {
         self.triggers.clone()
     }
 
-    /// Where the host replaces, while the server runs, the chats it answers in and the users
-    /// whose clicks decide approvals ([`Access::replace`]), such as when its configuration
-    /// changes.
+    /// Where the host replaces, before the server runs and while it does, the chats it
+    /// answers in and the users whose clicks decide approvals ([`Access::replace`]), such as
+    /// when its configuration changes.
     pub fn access(&self) -> Access {
         self.access.clone()
     }
@@ -381,8 +380,7 @@ impl Server {
     /// [`Replies::stopped`] for a cancelled run. A message not handled by then, waiting for a
     /// run slot, steered into a run that did not take it in, or received during the stop,
     /// stays pending in the [`backlog`](ServerConfig::backlog). A channel's error is then
-    /// returned. Two channels with the same platform name are a configuration error, and so
-    /// are settings of a chat's own that [`ServerConfig::chats`] refuses.
+    /// returned. Two channels with the same platform name are a configuration error.
     ///
     /// As the server starts, it handles what the backlog holds pending, in the order kept,
     /// before anything new. With [`ServerConfig::statuses`], the statuses an earlier process
@@ -400,9 +398,7 @@ impl Server {
             triggered,
             access,
         } = self;
-        served_once(&config.chats, &access)?;
         let backlog = Arc::clone(&config.backlog);
-        let timeout = config.outbound_timeout;
         let shared = Arc::new(Shared::new(config, agent, access, Arc::clone(&sink)));
         shared.index_sessions().await?;
         shared.load_usage().await?;
@@ -417,7 +413,7 @@ impl Server {
             Arc::clone(&shared),
             stop.clone(),
         ));
-        let (receipts, completing) = complete_handled(Arc::clone(&backlog), Arc::clone(&sink), timeout, stop.clone());
+        let (receipts, completing) = complete_handled(Arc::clone(&backlog), Arc::clone(&sink), stop.clone());
         let mut router = Router::new(RouterSetup {
             channels,
             shared,

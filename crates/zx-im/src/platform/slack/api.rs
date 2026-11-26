@@ -1,8 +1,8 @@
 //! The Web API: calls with a token, rate limits waited out, and Slack's refusals told apart
 //! from calls that got no answer.
 
+use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
-use reqwest::{StatusCode, Url};
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -35,12 +35,7 @@ impl SlackChannel {
         body: Option<&Value>,
         rate_limit_retries: u32,
     ) -> Result<Value, CallError> {
-        let base = self.config.api_base.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}/{method}")).map_err(|error| {
-            CallError::Failed(ImError::Config(format!(
-                "slack {method}: invalid API base {base}: {error}"
-            )))
-        })?;
+        let mut url = self.api_base.at(&format!("/{method}"));
         if !args.is_empty() {
             url.query_pairs_mut().extend_pairs(args);
         }

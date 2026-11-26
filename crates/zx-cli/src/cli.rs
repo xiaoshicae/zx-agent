@@ -4,7 +4,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use zx_app::{Asking, Overrides};
 
 #[derive(Parser)]
@@ -12,6 +13,39 @@ use zx_app::{Asking, Overrides};
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+impl Cli {
+    /// This command line, once checked for the one conflict the parser cannot state, which
+    /// depends on an option's value: `--deltas` adds to the events of `--output jsonl`, and
+    /// would do nothing in text mode. The error is the parser's usage error for a conflict.
+    pub(crate) fn checked(self) -> Result<Self, clap::Error> {
+        let (subcommand, output, deltas) = match &self.command {
+            Command::Run(args) => ("run", args.output, args.deltas),
+            Command::Chat(args) => ("chat", args.output, args.deltas),
+            Command::Sessions(_) | Command::Acp(_) => return Ok(self),
+        };
+        if deltas && output != OutputMode::Jsonl {
+            return Err(conflict(
+                subcommand,
+                "the argument '--deltas' can only be used with '--output jsonl'",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// The usage error for arguments of `subcommand` that cannot go together, which `message`
+/// names: shown as the parser shows its own, with the usage of the subcommand, or of the
+/// program should it have none of that name.
+fn conflict(subcommand: &str, message: &str) -> clap::Error {
+    let mut program = Cli::command();
+    // Built, each subcommand knows the name it is run under, which its usage line shows.
+    program.build();
+    match program.find_subcommand_mut(subcommand) {
+        Some(named) => named.error(ErrorKind::ArgumentConflict, message),
+        None => program.error(ErrorKind::ArgumentConflict, message),
+    }
 }
 
 #[derive(Subcommand)]
@@ -67,7 +101,7 @@ pub(crate) struct RunArgs {
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
 
-    /// In jsonl mode, also emit streaming message_update events.
+    /// With --output jsonl, also emit streaming message_update events. Refused without it.
     #[arg(long)]
     pub(crate) deltas: bool,
 }
@@ -93,7 +127,7 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
 
-    /// In jsonl mode, also emit streaming message_update events.
+    /// With --output jsonl, also emit streaming message_update events. Refused without it.
     #[arg(long)]
     pub(crate) deltas: bool,
 
@@ -293,6 +327,40 @@ mod tests {
                 assert_eq!(args.output, OutputMode::Text);
             }
             Command::Run(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+        }
+    }
+
+    #[test]
+    fn deltas_are_a_conflict_unless_the_output_is_jsonl() {
+        let checked = |args: &[&str]| {
+            let args = ["zx-agent"].iter().chain(args);
+            Cli::try_parse_from(args).unwrap().checked().map(drop)
+        };
+        for (args, usage) in [
+            (&["run", "--deltas", "go"][..], "Usage: zx-agent run"),
+            (&["run", "--output", "text", "--deltas", "go"], "Usage: zx-agent run"),
+            (&["chat", "--deltas"], "Usage: zx-agent chat"),
+        ] {
+            let error = checked(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
+            // The code of a usage error, as for the conflicts the parser finds.
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+            let shown = error.to_string();
+            assert!(
+                shown.starts_with("error: the argument '--deltas' can only be used with '--output jsonl'"),
+                "{args:?}: {shown}"
+            );
+            assert!(shown.contains(usage), "{args:?}: {shown}");
+        }
+        for args in [
+            &["run", "--output", "jsonl", "--deltas", "go"][..],
+            &["chat", "--deltas", "--output", "jsonl"],
+            &["run", "go"],
+            &["chat"],
+            &["acp"],
+            &["sessions"],
+        ] {
+            assert!(checked(args).is_ok(), "{args:?}");
         }
     }
 

@@ -327,6 +327,36 @@ async fn a_refused_endpoint_stops_the_channel_with_a_configuration_error() {
     }
 }
 
+/// The configuration error of a channel made with the settings that `set` changes.
+fn refused(set: impl FnOnce(&mut FeishuConfig)) -> String {
+    let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
+    set(&mut config);
+    match FeishuChannel::new(config) {
+        Err(ImError::Config(error)) => error,
+        Err(other) => panic!("expected a configuration error, got {other:?}"),
+        Ok(_) => panic!("a channel was made"),
+    }
+}
+
+#[test]
+fn a_channel_is_not_made_with_an_address_that_calls_cannot_go_to() {
+    for (address, expected) in [
+        ("example.com", "api_base is not a URL"),
+        ("localhost:8080", "api_base must be an http or https URL"),
+        ("https://example.com/open?tenant=1", "api_base must end with its path"),
+    ] {
+        let error = refused(|config| config.api_base = address.into());
+        assert!(error.starts_with(expected), "{address}: {error}");
+    }
+    for (address, expected) in [
+        ("example.com/token", "token_url is not a URL"),
+        ("ftp://example.com/token", "token_url must be an http or https URL"),
+    ] {
+        let error = refused(|config| config.token_url = address.into());
+        assert!(error.starts_with(expected), "{address}: {error}");
+    }
+}
+
 #[tokio::test]
 async fn a_dropped_connection_is_opened_again() {
     let mut fake = FakeFeishu::start(120).await;

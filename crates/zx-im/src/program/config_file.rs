@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use zx_app::config::{Credentials, Holds, expand_table, read_text};
 
-use crate::{CardLabels, ConversationId, DailyLimit, Replies, ServerConfig, Trigger, UserId};
+use crate::{CardLabels, ConversationId, DailyLimit, InvalidDailyLimit, Replies, ServerConfig, Trigger, UserId};
 
 /// The sections of im.toml that are the server's; each of the others configures the platform
 /// registered under its name.
@@ -265,17 +265,11 @@ fn chats(sections: &[ChatSection], conversations: &Conversations, platforms: &Ha
     Ok(chats)
 }
 
-/// What work may use in a day for `field`: `tokens`, and `cost`, a positive amount.
+/// What work may use in a day for `field`: `tokens` and `cost`, as the limit takes them. What
+/// it refuses is said of the key of `field` that gave it.
 fn daily_limit(tokens: Option<NonZeroU64>, cost: Option<f64>, field: &str) -> Result<DailyLimit> {
-    if let Some(cost) = cost {
-        ensure!(
-            cost.is_finite() && cost > 0.0,
-            "{field}.dailyCost: a positive amount, not {cost}"
-        );
-    }
-    Ok(DailyLimit {
-        tokens: tokens.map(NonZeroU64::get),
-        cost,
+    DailyLimit::new(tokens, cost).map_err(|error| match error {
+        InvalidDailyLimit::Cost(cost) => anyhow::anyhow!("{field}.dailyCost: a positive amount, not {cost}"),
     })
 }
 
@@ -583,21 +577,12 @@ mod tests {
         let file = ConfigFile::parse(&format!("{SERVER}[limits]\ndailyTokens = 1000\ndailyCost = 2.5\n")).unwrap();
         assert_eq!(
             file.limits.daily().unwrap(),
-            DailyLimit {
-                tokens: Some(1000),
-                cost: Some(2.5)
-            }
+            DailyLimit::new(NonZeroU64::new(1000), Some(2.5)).unwrap()
         );
         let one = checked_chats("[[chats]]\nchat = \"slack:C1\"\ndailyTokens = 10\n").unwrap();
         assert_eq!(
             (one[0].daily, one[0].agent.as_deref()),
-            (
-                DailyLimit {
-                    tokens: Some(10),
-                    cost: None
-                },
-                None
-            )
+            (DailyLimit::new(NonZeroU64::new(10), None).unwrap(), None)
         );
     }
 

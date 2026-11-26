@@ -103,10 +103,7 @@ async fn a_trigger_once_the_day_s_usage_is_used_up_opens_no_thread_and_is_report
         steps: vec![FauxStep::text("first")],
         ..Setup::default()
     };
-    setup.config.daily = DailyLimit {
-        tokens: Some(1),
-        cost: None,
-    };
+    setup.config.daily = DailyLimit::new(Some(NonZeroU64::MIN), None).unwrap();
     let mut h = start(setup);
     h.say("m1", None, "hello").await;
     let status = h.posted(&thread("m1"), text(&h.replies.working)).await;

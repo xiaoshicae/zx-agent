@@ -1,5 +1,6 @@
 //! What a chat has of its own: an agent that answers its conversations, also after a restart,
-//! approvers who alone decide there, and settings the server refuses.
+//! approvers who alone decide there, settings a server is not made with, and the server that
+//! runs on once its lists no longer hold such a chat.
 
 use super::*;
 
@@ -110,7 +111,28 @@ async fn in_a_chat_with_approvers_of_its_own_only_they_decide() {
 }
 
 #[tokio::test]
-async fn settings_of_a_chat_not_served_or_given_twice_stop_the_server() {
+async fn a_server_runs_after_a_chat_with_settings_of_its_own_left_its_lists() {
+    let mut setup = Setup {
+        steps: vec![FauxStep::text("still serving")],
+        ..Setup::default()
+    };
+    setup.config.chats = vec![own_settings(DIRECT, None, Some(OTHER))];
+    // Replaced before the server runs, as a reload does on a replica that waits for its turn
+    // to serve: the lists no longer hold the chat whose settings the server was made with.
+    let mut h = start_after(setup, |access| {
+        access.replace(
+            vec![(PLATFORM.into(), ConversationId(CHAT.into()))],
+            vec![(PLATFORM.into(), UserId(APPROVER.into()))],
+        );
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working)).await;
+    h.updated(&status, text("still serving")).await;
+    h.stop().await.unwrap();
+}
+
+#[test]
+fn a_server_is_not_made_with_settings_of_a_chat_not_served_or_given_twice() {
     let cases = [
         (
             vec![own_settings("C9", None, Some(OTHER))],
@@ -124,10 +146,15 @@ async fn settings_of_a_chat_not_served_or_given_twice_stop_the_server() {
             "the chat fake:C1 has settings of its own more than once",
         ),
     ];
+    let (agent, _) = own_agent(&Arc::default(), Vec::new());
     for (chats, expected) in cases {
-        let mut setup = Setup::default();
-        setup.config.chats = chats;
-        let error = start(setup).stop().await.unwrap_err();
+        let config = ServerConfig {
+            chats,
+            ..Setup::default().config
+        };
+        let Err(error) = Server::new(config, agent.clone(), Arc::new(NullServerSink)) else {
+            panic!("a server was made, expected: {expected}");
+        };
         assert!(matches!(&error, ImError::Config(text) if text == expected), "{error:?}");
     }
 }

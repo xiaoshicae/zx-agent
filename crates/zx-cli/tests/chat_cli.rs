@@ -1151,6 +1151,25 @@ async fn read_terminal_until(terminal: &mut tokio::fs::File, seen: &mut Vec<u8>,
     .unwrap_or_else(|_| panic!("{needle:?} not seen in {:?}", String::from_utf8_lossy(seen)));
 }
 
+#[tokio::test]
+async fn deltas_without_jsonl_output_are_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+    // At the end of its input, a chat that starts ends with code 0.
+    let output = chat(&server, dir.path(), &["--tools", "", "--no-session", "--deltas"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("error: the argument '--deltas' can only be used with '--output jsonl'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Usage: zx-agent chat"), "{stderr}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_continue() {

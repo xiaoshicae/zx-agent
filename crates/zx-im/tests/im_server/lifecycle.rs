@@ -295,7 +295,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
         })
     };
     let h = start(Setup::default());
-    let server = Server::new(ServerConfig::default(), h.agent.clone(), Arc::new(NullServerSink));
+    let server = Server::new(ServerConfig::default(), h.agent.clone(), Arc::new(NullServerSink)).unwrap();
     let result = server.run(vec![channel(), channel()], &CancellationToken::new()).await;
     assert!(matches!(result, Err(ImError::Config(error)) if error.contains("fake")));
     h.stop().await.unwrap();

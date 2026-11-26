@@ -800,6 +800,23 @@ async fn continue_needs_an_existing_session_and_no_prompt() {
 }
 
 #[tokio::test]
+async fn deltas_without_jsonl_output_are_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+    for extra in [&["--deltas"][..], &["--deltas", "--output", "text"]] {
+        let output = run(&server, dir.path(), &GO).args(extra).output().await.unwrap();
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {stderr}");
+        assert!(
+            stderr.contains("error: the argument '--deltas' can only be used with '--output jsonl'"),
+            "{extra:?}: {stderr}"
+        );
+        assert!(stderr.contains("Usage: zx-agent run"), "{extra:?}: {stderr}");
+    }
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
 async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the_choice() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;

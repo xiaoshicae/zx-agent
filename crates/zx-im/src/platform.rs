@@ -1,11 +1,11 @@
 //! The chat platforms, each an [`ImChannel`](crate::ImChannel), and what every platform
-//! shares: an HTTP client, its connection and the loop that reads it (pings, the silence
-//! that means it died, the stop), keeping a delivery's messages before it is acknowledged,
-//! reports to the operator, splitting long text, pacing posts to a chat, waiting out a rate
-//! limit, reading a fetched file within a size, and waiting between attempts to reach the
-//! platform. A platform uses these and
-//! nothing of another platform. Each builds its channel from its im.toml section through a
-//! [`PlatformFactory`], registered under the section's name.
+//! shares: an HTTP client, the addresses its settings give, checked as its channel is made,
+//! its connection and the loop that reads it (pings, the silence that means it died, the
+//! stop), keeping a delivery's messages before it is acknowledged, reports to the operator,
+//! splitting long text, pacing posts to a chat, waiting out a rate limit, reading a fetched
+//! file within a size, and waiting between attempts to reach the platform. A platform uses
+//! these and nothing of another platform. Each builds its channel from its im.toml section
+//! through a [`PlatformFactory`], registered under the section's name.
 //!
 //! - `slack`: Slack, over Socket Mode and the Web API
 //! - `feishu`: Feishu, over its long connection and the open API (the feature `feishu`)
@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use reqwest::Url;
 use reqwest::header::{AsHeaderName, HeaderMap};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
@@ -108,8 +109,8 @@ const MAX_TEXT_CHARS: usize = 4000;
 /// How often a rate-limited call is retried after waiting as long as the platform asks.
 const RATE_LIMIT_RETRIES: u32 = 3;
 /// How long one call may wait out rate limits in all, its retries included: less than the
-/// server waits for a call to a channel (`ServerConfig::outbound_timeout`, 30 seconds by
-/// default), so that a call the platform keeps limiting fails as rate limited, saying how long
+/// server waits for a call to a channel (30 seconds, which the server asserts as it is
+/// compiled), so that a call the platform keeps limiting fails as rate limited, saying how long
 /// it was asked to wait, rather than as one that took too long. Slack's limits are per minute
 /// (Rate limits, "Tiers"): a longer wait is for a later call, not this one.
 pub(crate) const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(20);
@@ -131,6 +132,54 @@ fn http_client(timeout: Duration, proxy: &Proxy) -> Result<reqwest::Client, ImEr
     with_proxy(builder, proxy)
         .and_then(|builder| builder.build().map_err(|error| error.to_string()))
         .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))
+}
+
+/// The address that the setting `name` gives as `value`: an `http://` or `https://` URL. A
+/// configuration error that names the setting for anything else; it leaves the address out,
+/// which may hold a credential. A channel reads its addresses with this as it is made, so
+/// that none of its calls finds one unusable.
+fn address(name: &str, value: &str) -> Result<Url, ImError> {
+    let url = Url::parse(value).map_err(|error| ImError::Config(format!("{name} is not a URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ImError::Config(format!("{name} must be an http or https URL")));
+    }
+    Ok(url)
+}
+
+/// Where the API of a platform is: the address that the path of each of its calls follows.
+struct ApiBase(Url);
+
+impl ApiBase {
+    /// The base that the setting `name` gives as `value`: an address ([`address`]) that ends
+    /// with its path. A configuration error that names the setting for one with a query or a
+    /// fragment, which the path of a call could not follow.
+    fn of(name: &str, value: &str) -> Result<Self, ImError> {
+        let url = address(name, value)?;
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(ImError::Config(format!(
+                "{name} must end with its path, without a query or a fragment: the path of a call follows it"
+            )));
+        }
+        Ok(Self(url))
+    }
+
+    /// The address of `path` under the base; `path` starts with a slash and may end with a
+    /// query.
+    fn at(&self, path: &str) -> Url {
+        let (path, query) = match path.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (path, None),
+        };
+        let mut url = self.0.clone();
+        url.set_path(&format!("{}{path}", self.0.path().trim_end_matches('/')));
+        url.set_query(query);
+        url
+    }
+
+    /// The base itself, for what is told by its scheme, host and port.
+    fn url(&self) -> &Url {
+        &self.0
+    }
 }
 
 /// Whether `response` says its body is of a type that starts with `prefix`, such as
@@ -640,6 +689,57 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "secret: names ${ZX_IM_TEST_UNSET_SECRET}, which is not set");
+    }
+
+    /// The configuration error of `result`, which is one.
+    fn config_error<T>(result: Result<T, ImError>) -> String {
+        match result {
+            Err(ImError::Config(error)) => error,
+            Err(other) => panic!("expected a configuration error, got {other:?}"),
+            Ok(_) => panic!("expected a configuration error"),
+        }
+    }
+
+    #[test]
+    fn an_address_is_an_http_url_and_its_error_names_the_setting_without_the_address() {
+        for (value, expected) in [
+            ("example.com/api", "apiBase is not a URL: relative URL without a base"),
+            ("user:secret@example.com", "apiBase must be an http or https URL"),
+            ("ftp://example.com/api", "apiBase must be an http or https URL"),
+        ] {
+            assert_eq!(config_error(address("apiBase", value)), expected, "{value}");
+        }
+        let token_url = address("tokenUrl", "https://example.com/token?version=3").unwrap();
+        assert_eq!(token_url.as_str(), "https://example.com/token?version=3");
+    }
+
+    #[test]
+    fn an_api_base_with_a_query_or_a_fragment_is_refused() {
+        for value in ["https://example.com/api?team=1", "https://example.com/api#part"] {
+            let error = config_error(ApiBase::of("api_base", value));
+            assert!(error.starts_with("api_base must end with its path"), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_path_of_a_call_follows_the_path_of_the_base() {
+        let at = |base: &str, path: &str| ApiBase::of("api_base", base).unwrap().at(path).to_string();
+        assert_eq!(
+            at("https://example.com/api", "/auth.test"),
+            "https://example.com/api/auth.test"
+        );
+        assert_eq!(
+            at("https://example.com/api/", "/auth.test"),
+            "https://example.com/api/auth.test"
+        );
+        assert_eq!(
+            at("http://127.0.0.1:8080", "/open/v1/files"),
+            "http://127.0.0.1:8080/open/v1/files"
+        );
+        assert_eq!(
+            at("http://127.0.0.1:8080/", "/open/v1/resources/img_1?type=image"),
+            "http://127.0.0.1:8080/open/v1/resources/img_1?type=image"
+        );
     }
 
     #[test]
