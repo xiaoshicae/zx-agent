@@ -18,10 +18,13 @@
 //! - `skills`: an agent's skills: their catalog, whose bodies a tool reads on demand
 //! - `placeholders`: the `${NAME}` placeholders of config.toml and of a host's own files, and
 //!   the credentials among the strings
+//! - `env`: an environment variable that counts only when it is set and not empty, and the
+//!   `${NAME}` syntax itself: one string with its placeholders replaced by variables
 
 mod agent_file;
 mod context;
 mod definition;
+mod env;
 mod environment;
 mod permissions;
 mod placeholders;
@@ -32,12 +35,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
 use zx_agent::builtin::files::read_text_blocking;
-use zx_util::env::env_value;
 
 pub(crate) use self::agent_file::{ModelRequestLimit, RawLimits, cost_budget};
 pub(crate) use self::context::ProjectContext;
 pub use self::definition::Builtin;
 pub(crate) use self::definition::{AgentDefinition, HostTools, known_tool};
+pub(crate) use self::env::{Unexpandable, env_value, expand, variables};
 pub use self::environment::{CONTAINER, Config, ContainerSettings, LOCAL, McpServer};
 pub(crate) use self::permissions::Permissions;
 pub use self::placeholders::{Credentials, Holds, expand_table};

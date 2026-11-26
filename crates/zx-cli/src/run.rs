@@ -40,7 +40,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     } = args;
     let task = Task::of(prompt, continue_session, session).await?;
     with_telemetry(async move |telemetry| {
-        let app = connect(cli::overrides(base, &budget, &approvals), Builtin::Unattended)
+        let app = connect(cli::overrides(base, &budget, &approvals))
             .await?
             .set_traces(telemetry.map(run_traces));
         let file = task.file().map(Path::to_path_buf);
@@ -204,7 +204,7 @@ async fn build_session(app: &Application, file: Option<&Path>) -> Result<Session
         Some(path) => session_file::open(path, app.cwd()).await?,
         None => (SessionPlace::memory(), None),
     };
-    let agent = app.build(app.model(), &place, Approvals::Nobody)?;
+    let agent = app.build(Builtin::Unattended.name(), app.model(), &place, Approvals::Nobody)?;
     // Before the run, as the application's notices are when it connects.
     for notice in agent.notices() {
         eprint_line(&visible(notice));

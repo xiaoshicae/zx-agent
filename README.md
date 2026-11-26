@@ -126,7 +126,7 @@ zx-im       crates/zx-im     IM 服务程序 zx-im：平台接口、按会话分
        └─ zx-ai-anthropic  crates/zx-ai-anthropic  Anthropic Messages API provider（只依赖 zx-ai 与 zx-ai-http）
 
 zx-ai-http  crates/zx-ai-http  两个 provider 共用的 HTTP 部分（设置检查、发请求、读事件流、请求失败），依赖 zx-ai 与 zx-util，不属于 API
-zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短与小额数字的显示、随机数、判断默认值、读环境变量、按名字登记、不会 panic 的输出行），在最底层，不属于 API
+zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截短与小额数字的显示、随机数、判断默认值、按名字登记、不会 panic 的输出行），在最底层，不属于 API
 zx-testing  crates/zx-testing  各包集成测试共用的测试设施（依赖 zx-agent），只作测试依赖
 ```
 

@@ -16,13 +16,17 @@ use zx_agent::builtin::output_store::{
 };
 use zx_ai_http::client::check_proxy;
 
-use super::placeholders::{Credentials, Holds, expand_table};
+use super::placeholders::{Credentials, Holds, carries_user, expand_table};
 use super::provider::ProviderSettings;
 use super::{parsed, read_text};
 
 /// Where long tool results are stored unless `toolOutput.directory` says otherwise: relative
 /// to the working directory of each session.
 const DEFAULT_TOOL_OUTPUT_DIRECTORY: &str = ".zx-agent/outputs";
+
+/// Seconds a bash command may run, and an MCP call wait, unless `toolTimeoutSecs` says
+/// otherwise.
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
 /// A day, the unit of `toolOutput.maxAgeDays`.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -66,12 +70,15 @@ pub struct McpServer {
     pub name: String,
     /// The server's MCP endpoint (Streamable HTTP).
     pub url: String,
-    /// The token sent as `Authorization: Bearer`; unset sends none. A credential: the
-    /// variables it names are hidden from commands, and its value is redacted from tool
-    /// output.
+    /// The token sent as `Authorization: Bearer`, as it is; unset sends none. A credential:
+    /// its value is redacted from tool output, whether config.toml gave it or a host did.
+    /// The variables it names in config.toml are hidden from commands; a host that takes
+    /// it from a variable itself hides that variable
+    /// ([`Application::add_credentials`](crate::Application::add_credentials)).
     pub token: Option<String>,
-    /// Headers sent with every request, by name. A value that names a variable is a
-    /// credential, as the token is; one written as it is, is not.
+    /// Headers sent with every request, by name, as they are. In config.toml, a value that
+    /// names a variable is a credential, as the token is, and one written as it is, is not.
+    /// A host that sets a credential here names it among [`Config::credentials`].
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// The server's tools to offer the model, by the names the server gives them.
@@ -87,7 +94,34 @@ pub struct McpServer {
     pub timeout_secs: Option<u64>,
 }
 
-/// `config.toml`, checked: the environment every agent of this user runs in.
+impl McpServer {
+    /// The settings the server is connected with: every key of its entry, its calls bounded
+    /// by `timeoutSecs` or else by `tool_timeout`, and its requests sent through `proxy`.
+    fn server_config(&self, tool_timeout: Duration, proxy: &Proxy) -> ServerConfig {
+        let Self {
+            name,
+            url,
+            token,
+            headers,
+            tools,
+            trust_read_only,
+            timeout_secs,
+        } = self;
+        ServerConfig {
+            token: token.clone(),
+            headers: headers.clone().into_iter().collect(),
+            trust_read_only: *trust_read_only,
+            call_timeout: timeout_secs.map_or(tool_timeout, Duration::from_secs),
+            proxy: proxy.clone(),
+            ..ServerConfig::new(name.as_str(), url.as_str(), tools.clone())
+        }
+    }
+}
+
+/// `config.toml`, checked: the environment every agent of this user runs in. One a host
+/// builds itself holds final values: only the reading of the file replaces `${NAME}`
+/// placeholders, but for [`ProviderSettings::api_key`], which is expanded wherever it comes
+/// from.
 #[derive(Debug)]
 pub struct Config {
     /// Where the file is, or would be; `None` without a home directory.
@@ -127,9 +161,13 @@ pub struct Config {
     /// which replace the environment's; without it, the environment's apply as the HTTP
     /// client reads them. The commands an agent runs see the environment as it is.
     pub proxy: Proxy,
-    /// The credentials the file holds, but for the API key, which the assembly expands: the
-    /// MCP servers' tokens, the headers that name variables and the proxies that carry a user
-    /// or password.
+    /// The credentials the configuration holds, but for the API key, which the assembly
+    /// expands: commands do not inherit their variables, and their values are redacted from
+    /// tool output. The reading of config.toml lists them: the MCP servers' tokens, the
+    /// headers that name variables and the proxies that carry a user or password, with the
+    /// variables they name. A host that builds the configuration lists what its values do
+    /// not tell: the variables it took a credential from, and a header that carries one. The
+    /// tokens and such proxies are redacted whether listed or not.
     pub credentials: Credentials,
 }
 
@@ -257,27 +295,59 @@ impl Config {
         Ok(config)
     }
 
+    /// How long a bash command may run, and a call of an MCP server without `timeoutSecs`
+    /// wait: `toolTimeoutSecs`, or its default.
+    pub(crate) fn tool_timeout(&self) -> Duration {
+        Duration::from_secs(self.tool_timeout_secs.unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS))
+    }
+
+    /// The settings each `[[mcp]]` server is connected with, in the order of the entries:
+    /// what its entry says, its calls bounded by [`tool_timeout`](Self::tool_timeout) where
+    /// it gives no `timeoutSecs`, and its requests sent through `[proxy]`.
+    pub(crate) fn mcp_servers(&self) -> impl Iterator<Item = ServerConfig> + '_ {
+        let tool_timeout = self.tool_timeout();
+        self.mcp
+            .iter()
+            .map(move |server| server.server_config(tool_timeout, &self.proxy))
+    }
+
     /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries:
-    /// their `name`, `url`, headers and `tools` as [`ServerConfig::validate`] does, whose
-    /// errors name the server and those fields, and the keys that only config.toml has.
+    /// the settings they are connected with as [`ServerConfig::validate`] does, whose errors
+    /// name the server and its fields, and what only config.toml can say: a `timeoutSecs` of
+    /// zero by its key, and two entries of one name.
     pub(crate) fn mcp_tool_names(&self) -> Result<Vec<String>> {
         let mut servers = HashSet::new();
         let mut names = Vec::new();
-        for server in &self.mcp {
+        for (server, config) in self.mcp.iter().zip(self.mcp_servers()) {
             let name = server.name.as_str();
-            let config = ServerConfig {
-                token: server.token.clone(),
-                headers: server.headers.clone().into_iter().collect(),
-                ..ServerConfig::new(name, server.url.as_str(), server.tools.clone())
-            };
-            names.extend(config.validate().map_err(anyhow::Error::msg)?);
-            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
+            // Before the settings are checked, which would name the field they have for it.
             ensure!(
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
             );
+            names.extend(config.validate().map_err(anyhow::Error::msg)?);
+            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
         }
         Ok(names)
+    }
+
+    /// The values that are credentials by what they are, whether a file gave them or a host:
+    /// the token of each MCP server, and each proxy that carries a user or password. The
+    /// reading of a file finds them too, with the variables they name and the headers that
+    /// name one, which only the file as written tells.
+    pub(crate) fn credential_values(&self) -> Vec<String> {
+        let tokens = self.mcp.iter().filter_map(|server| server.token.clone());
+        let proxies = match &self.proxy {
+            Proxy::Through(Proxies {
+                http,
+                https,
+                no_proxy: _,
+            }) => [http.clone(), https.clone()],
+            Proxy::FromEnvironment | Proxy::Direct => [None, None],
+        };
+        tokens
+            .chain(proxies.into_iter().flatten().filter(|url| carries_user(url)))
+            .collect()
     }
 
     /// Check every value: what [`load`](Self::load) checks once it has read the file, and what

@@ -3,8 +3,8 @@
 //! builds its agents here, through [`Application`], and none of this knows a command line, a
 //! terminal or a protocol.
 //!
-//! - `settings`: config.toml with the host's model and the variables over it, and the secret
-//!   files to redact
+//! - `settings`: config.toml with the host's model and the variables over it, the credentials
+//!   it holds, and the secret files to redact
 //! - `mcp`: the MCP servers of config.toml, connected once for every session of a process
 //! - `provider`: the provider of an agent, which the factory registered under the name
 //!   config.toml gives builds
@@ -47,7 +47,7 @@ pub use self::place::SessionPlace;
 pub use self::provider::{ProviderFactory, ProviderInput};
 pub use self::settings::NoModel;
 use self::settings::{Settings, checked_secret_files, secret_files};
-use crate::config::{Builtin, Config, Credentials, cost_budget};
+use crate::config::{Config, Credentials, cost_budget};
 use crate::otel::TraceHook;
 
 /// What the agents of a process share, read and connected once: the settings with what the
@@ -57,7 +57,7 @@ use crate::otel::TraceHook;
 /// session is opened at startup.
 ///
 /// A host gives its own parts with three verbs: `add_*` adds one beside the assembly's
-/// (tools, each session's own tools, hooks, policies, prompt sections, hidden variables),
+/// (tools, each session's own tools, hooks, policies, prompt sections, credentials),
 /// `set_*` replaces the one there is (the summarizer, the trace export), and `register_*`
 /// names one that config.toml chooses by its name (providers, executors). They are treated as
 /// the built-in ones are, and a name that another part goes by already fails
@@ -67,16 +67,14 @@ pub struct Application {
     /// What the host says over the agent: the working directory, the tools, the budgets and
     /// which calls ask.
     overrides: Overrides,
-    /// The agent [`build`](Self::build) assembles: a built-in one, or the user's file that
-    /// replaces it.
-    builtin: Builtin,
     mcp: McpTools,
     /// The files whose contents are redacted from tool output.
     secret_files: Vec<PathBuf>,
-    /// What startup has to say, for the host to show: the MCP servers and short secrets.
+    /// What startup has to say, for the host to show: [`notices`](Self::notices).
     notices: Vec<String>,
-    /// Credentials besides those of config.toml, such as an IM service's tokens: commands do
-    /// not inherit their variables, and their values are redacted like the key's.
+    /// The host's credentials, besides those of the configuration, such as an IM service's
+    /// tokens: commands do not inherit their variables, and their values are redacted like
+    /// the key's.
     credentials: Credentials,
     /// The hook that exports every session's runs as traces, when the host exports them.
     traces: Option<TraceHook>,
@@ -101,53 +99,54 @@ pub struct Application {
 }
 
 impl Application {
-    /// Connect with `config` as the host gives it, with `overrides` over it, for sessions of
-    /// `builtin`. `home` is only where the agent files are (`agents/`): no config.toml is read
-    /// from it, and neither `ZX_MODEL`, `ZX_BASE_URL` nor `ZX_SECRET_FILES` is read. The
-    /// credentials the configuration names still come from their variables.
+    /// Connect with `config` as the host gives it, with `overrides` over it. `home` is only
+    /// where the agent files are (`agents/`): no config.toml is read from it, and neither
+    /// `ZX_MODEL`, `ZX_BASE_URL` nor `ZX_SECRET_FILES` is read.
+    ///
+    /// The configuration holds final values: a `${NAME}` placeholder is replaced only where
+    /// config.toml is read, but for the API key (`provider.api_key`), which is expanded
+    /// wherever it comes from, and read from the provider's own variable when it is unset.
+    /// The credentials are protected as those of the file are: the API key, the token of
+    /// each MCP server and a proxy that carries a user or password are redacted from tool
+    /// output, and the variables the API key names are hidden from commands. What the values
+    /// do not tell, the host names, in [`Config::credentials`] or with
+    /// [`add_credentials`](Self::add_credentials): the variables it took a credential from,
+    /// and a header that carries one.
     ///
     /// Fails on a configuration that [`Config::validate`] refuses, without a model
     /// ([`NoModel`]), on invalid [`Overrides`], an MCP server that cannot be used, and a secret
     /// file that cannot.
-    pub async fn from_config(
-        config: Config,
-        home: Option<PathBuf>,
-        overrides: Overrides,
-        builtin: Builtin,
-    ) -> Result<Self> {
+    pub async fn from_config(config: Config, home: Option<PathBuf>, overrides: Overrides) -> Result<Self> {
         let settings = Settings::over(overrides.model.clone(), None, config, home)?;
         let secret_files = checked_secret_files(settings.config.secret_files.clone())?;
-        Self::connect(settings, secret_files, overrides, builtin).await
+        Self::connect(settings, secret_files, overrides).await
     }
 
     /// Connect with the environment's configuration: config.toml in the zx-agent home
     /// ([`config::home`](crate::config::home)), with [`Overrides::model`], else `ZX_MODEL`,
     /// over its model, `ZX_BASE_URL` over its provider's address, and the files of
-    /// `ZX_SECRET_FILES` redacted besides its own; with `overrides` over the agent, for
-    /// sessions of `builtin`.
+    /// `ZX_SECRET_FILES` redacted besides its own; with `overrides` over the agent. The
+    /// `${NAME}` placeholders of the file are replaced as it is read, and the credentials
+    /// among its strings found with the variables they name.
     ///
     /// Fails as [`from_config`](Self::from_config) does, and when the home directory or
     /// config.toml cannot be read.
-    pub async fn from_environment(overrides: Overrides, builtin: Builtin) -> Result<Self> {
+    pub async fn from_environment(overrides: Overrides) -> Result<Self> {
         let settings = Settings::from_environment(overrides.model.clone())?;
         let secret_files = secret_files(&settings.config.secret_files)?;
-        Self::connect(settings, secret_files, overrides, builtin).await
+        Self::connect(settings, secret_files, overrides).await
     }
 
     /// What both ways of starting share once `settings` and the `secret_files` are checked:
     /// check `overrides`, connect the MCP servers, and note what startup has to say.
-    async fn connect(
-        settings: Settings,
-        secret_files: Vec<PathBuf>,
-        overrides: Overrides,
-        builtin: Builtin,
-    ) -> Result<Self> {
+    async fn connect(settings: Settings, secret_files: Vec<PathBuf>, overrides: Overrides) -> Result<Self> {
         overrides.validate()?;
         let (mcp, mut notices) = McpTools::connect(&settings).await?;
         if overrides.asking == Asking::Never {
             notices.insert(0, SKIPPED_APPROVALS.to_string());
         }
         let executors = execution::built_in(&settings.config.container);
+        notices.extend(execution::unused_container_notice(&settings.config));
         for file in short_secret_files(&secret_files) {
             notices.push(format!(
                 "[secret] {}: the value is shorter than {MIN_SECRET_CHARS} characters; it is still redacted, and so is every other occurrence of the same text in tool output",
@@ -157,7 +156,6 @@ impl Application {
         Ok(Self {
             settings,
             overrides,
-            builtin,
             mcp,
             secret_files,
             notices,
@@ -190,23 +188,11 @@ impl Application {
         self
     }
 
-    /// Hide the variable `name` from commands and redact its value, beside the API key's: a
-    /// credential such as a token of an IM service's platform.
-    pub fn add_hidden_env(mut self, name: &str) -> Self {
-        self.credentials.extend(Credentials {
-            variables: vec![name.to_string()],
-            values: Vec::new(),
-        });
-        self
-    }
-
-    /// Redact `value` from tool output, beside the API key: a credential that a configuration
-    /// file of the host's writes as it is, rather than naming its variable.
-    pub fn add_secret(mut self, value: &str) -> Self {
-        self.credentials.extend(Credentials {
-            variables: Vec::new(),
-            values: vec![value.to_string()],
-        });
+    /// Add `credentials` beside the API key and those of the configuration, such as the
+    /// tokens of an IM service's platforms: their variables are hidden from commands, and
+    /// their values, with those the variables hold, are redacted from tool output.
+    pub fn add_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials.extend(credentials);
         self
     }
 
@@ -267,25 +253,20 @@ impl Application {
         self
     }
 
-    /// Assemble the agent for `model`, usually [`Self::model`], whose sessions are kept in
-    /// `place`, sharing what startup read and connected with the host's other agents. Startup
-    /// reads; each session gets its executor when it is created or opened.
+    /// Assemble the agent `name` for `model`, usually [`Self::model`], whose sessions are kept
+    /// in `place`, sharing what startup read and connected with the host's other agents. The
+    /// agent is the user's `agents/<name>.md` in the zx-agent home, or, without that file, the
+    /// built-in agent of that name ([`Builtin::name`](crate::config::Builtin::name)). The host
+    /// chooses the name, from its own configuration where it has several agents, as zx-im
+    /// does for a chat; no project content can. Startup reads; each session gets its
+    /// executor when it is created or opened.
     ///
-    /// Fails on an agent file or a tool setting that cannot be used, a cost budget without
-    /// prices, invalid provider settings, a provider or an executor that no factory is
-    /// registered for, and a part of the host's whose name another part goes by already.
-    pub fn build(&self, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
-        self.build_named(self.builtin.name(), model, place, approvals)
-    }
-
-    /// Assemble the agent `name` as [`build`](Self::build) assembles the built-in one: the
-    /// user's `agents/<name>.md` in the zx-agent home, or, without that file, the built-in
-    /// agent of that name. A host chooses it from its own configuration, as zx-im does for a
-    /// chat; no project content can.
-    ///
-    /// Fails as `build` does, on a name of other characters than letters, digits, `-` and
-    /// `_`, and on one that is no built-in agent's and has no file.
-    pub fn build_named(
+    /// Fails on a name of other characters than letters, digits, `-` and `_`, on one that is
+    /// no built-in agent's and has no file, on an agent file or a tool setting that cannot be
+    /// used, a cost budget without prices, invalid provider settings, a provider or an
+    /// executor that no factory is registered for, and a part of the host's whose name
+    /// another part goes by already.
+    pub fn build(
         &self,
         name: &str,
         model: &str,
@@ -327,8 +308,9 @@ impl Application {
         self.overrides.cwd.as_deref()
     }
 
-    /// What startup has to say, without secrets, for the host to show or log: the MCP servers
-    /// it connected and the secret files whose values are short.
+    /// What startup has to say, without secrets, for the host to show or log: that approvals
+    /// are skipped, the MCP servers it connected, `[container]` settings that the execution
+    /// does not use, and the secret files whose values are short.
     pub fn notices(&self) -> &[String] {
         &self.notices
     }

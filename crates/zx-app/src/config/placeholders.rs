@@ -1,10 +1,11 @@
 //! The placeholders of the configuration files: every string a file holds may name
-//! environment variables as `${NAME}`, replaced as the file is read ([`zx_util::env::expand`]).
+//! environment variables as `${NAME}`, replaced as the file is read (`env::expand`).
 //! The credentials among the strings are told apart by their keys, so that the variables they
 //! name are hidden from commands and their values redacted from tool output.
 
 use anyhow::{Result, anyhow};
-use zx_util::env::expand;
+
+use super::env::expand;
 
 /// What a string of a configuration file holds, by its key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +138,7 @@ fn expand_text(
 }
 
 /// Whether `url` carries a user or password: an `@` before the end of its host and port.
-fn carries_user(url: &str) -> bool {
+pub(super) fn carries_user(url: &str) -> bool {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     rest.split(['/', '?', '#'])
         .next()

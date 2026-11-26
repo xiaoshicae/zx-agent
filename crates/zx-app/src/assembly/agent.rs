@@ -6,8 +6,8 @@
 //! depends on it is decided here too, such as which of the host's tools it enables and which
 //! tools of MCP servers ask. What belongs to one session is in `setup`.
 //!
-//! - `approvals`: which calls ask before they run, for the policies and the prompt section
-//!   that tells the model
+//! - `approvals`: which calls ask before they run, decided once for the policies and the
+//!   prompt section that tells the model
 
 mod approvals;
 
@@ -25,16 +25,16 @@ use zx_agent::hooks::HookChain;
 use zx_agent::policy::{ApprovalMode, PolicyChain, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
-use zx_util::env::{Unexpandable, env_value, expand, variables};
 
-use self::approvals::{APPROVALS, Asked};
+use self::approvals::{APPROVALS, Asked, Offered};
 use super::execution::ExecutorFactory;
 use super::provider::ProviderInput;
 use super::setup::{self, PerSession, SPILL_OUTPUTS};
 use super::skills::ReadSkillTool;
 use super::{Application, Asking, Overrides, SessionPlace, resolve_cwd};
 use crate::config::{
-    AgentDefinition, Credentials, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill, known_tool,
+    AgentDefinition, Credentials, HostTools, ModelRequestLimit, Permissions, READ_SKILL, RawLimits, Skill,
+    Unexpandable, env_value, expand, known_tool, variables,
 };
 use crate::otel;
 
@@ -102,8 +102,7 @@ impl ConfiguredAgent {
         place: &SessionPlace,
         approvals: Approvals<'_>,
     ) -> Result<Self> {
-        let settings = &app.settings;
-        let config = &settings.config;
+        let config = &app.settings.config;
         let host = host_tools(app);
         check_names(app, &host)?;
         let AgentDefinition {
@@ -127,25 +126,21 @@ impl ConfiguredAgent {
         let (provider, key) = provider(app)?;
         let credentials = credentials(app, key);
         let auto_approve_commands = permissions.allowed_commands();
-        let asked = Asked::new(app, &permissions);
-        let approvals_section = asked.section(approvals, &enabled, &auto_approve_commands);
+        let offered = Offered {
+            enabled: &enabled,
+            session: &host.session,
+            mcp: &app.mcp.tools,
+        };
+        let asked = Asked::new(app.overrides.asking, &permissions, &offered);
+        let approvals_section = asked.section(approvals, &auto_approve_commands);
         let isolates_commands = executor_factory.isolates();
-        let notices = asked.notices(approvals, &enabled, &permissions, executor_factory.as_ref());
+        let notices = asked.notices(approvals, &permissions, executor_factory.as_ref());
         let (policies, approvals) = policies(app, &permissions, &asked, approvals);
         let hooks = hooks(app, continue_on_length, &credentials);
         let skills = skills_tool(skills, &enabled);
-        // The host's tools that the agent enables, as it enables the built-in ones, then
-        // those of the MCP servers, which every agent offers.
-        let tools = app
-            .tools
-            .iter()
-            .filter(|tool| enabled.iter().any(|name| name == tool.name()))
-            .chain(&app.mcp.tools)
-            .cloned()
-            .collect();
         let role = AgentConfig {
             system_prompt: SystemPrompt::new(&instructions).with_section(APPROVALS, &approvals_section),
-            tools,
+            tools: shared_tools(app, &enabled),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             hooks,
@@ -163,7 +158,7 @@ impl ConfiguredAgent {
                 skills,
                 executor_factory,
                 hidden_env: credentials.variables,
-                tool_timeout: settings.tool_timeout,
+                tool_timeout: config.tool_timeout(),
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
                 file_queue: Arc::clone(&app.file_queue),
@@ -265,6 +260,18 @@ fn host_tools(app: &Application) -> HostTools {
         own: app.tools.iter().map(|tool| tool.name().to_string()).collect(),
         session: app.session_tools.iter().flat_map(|tools| tools.names()).collect(),
     }
+}
+
+/// The tools every session of the agent shares: the host's own that the agent's `enabled`
+/// tools name, as they name the built-in ones, then those of the MCP servers, which every
+/// agent offers.
+fn shared_tools(app: &Application, enabled: &[String]) -> Vec<Arc<dyn Tool>> {
+    app.tools
+        .iter()
+        .filter(|tool| enabled.iter().any(|name| name == tool.name()))
+        .chain(&app.mcp.tools)
+        .cloned()
+        .collect()
 }
 
 /// Refuse a part of the host's whose name another part goes by already. A provider or an
@@ -417,7 +424,8 @@ fn budgets(overrides: &Overrides) -> RawLimits {
 }
 
 /// read_skill with the catalog of its `skills` for the prompt, when the agent has skills and
-/// its `enabled` tools include it.
+/// its `enabled` tools include it: an agent file with skills enables it, but the tools a host
+/// gives in its place ([`Overrides::tools`]) may leave it out.
 fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>, String)> {
     if skills.is_empty() || !enabled.iter().any(|name| name == READ_SKILL) {
         return None;
@@ -437,7 +445,7 @@ fn skills_tool(skills: Vec<Skill>, enabled: &[String]) -> Option<(Arc<dyn Tool>,
 fn policies(
     app: &Application,
     permissions: &Permissions,
-    asked: &Asked<'_>,
+    asked: &Asked,
     approvals: Approvals<'_>,
 ) -> (PolicyChain, ApprovalMode) {
     let mut policies = PolicyChain::new();
@@ -512,12 +520,14 @@ fn credentials(app: &Application, key: Credentials) -> Credentials {
     credentials
 }
 
-/// The denied tools of the agent's `permissions` and the tools that are `asked` about, its own
-/// and those of MCP servers, as one policy that allows the rest; none without any of them.
-fn rules_policy(permissions: &Permissions, asked: &Asked<'_>, auto_approve: AutoApprove) -> Option<RulePolicy> {
+/// The denied tools of the agent's `permissions` and the tools that are `asked` about, those
+/// of its list and those of MCP servers, as one policy that allows the rest; none without any
+/// of them. The tools that ask are read from `asked`, as the prompt section reads them.
+fn rules_policy(permissions: &Permissions, asked: &Asked, auto_approve: AutoApprove) -> Option<RulePolicy> {
     let (agent_ask, mcp_ask): (&[String], &[String]) = match asked {
         Asked::Nothing => (&[], &[]),
-        Asked::Tools { agent, mcp } => (agent, mcp),
+        // What bash commands do where a person answers is the policy `BASH_APPROVAL`.
+        Asked::Tools { agent, mcp, bash: _ } => (agent, mcp),
     };
     let denied = permissions.denied_tools().into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
@@ -546,9 +556,49 @@ fn rules_policy(permissions: &Permissions, asked: &Asked<'_>, auto_approve: Auto
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use zx_agent::ai::ToolCall;
+
     use super::super::execution::built_in;
     use super::*;
     use crate::config::{CONTAINER, ContainerSettings, LOCAL};
+
+    #[test]
+    fn the_policy_asks_about_the_tools_the_approvals_section_names_and_no_others() {
+        let mut permissions = Permissions::default();
+        permissions.ask = vec!["edit_file".into(), "send_file".into(), "write_file".into()];
+        // write_file is in no session: neither enabled nor given to each session by the host.
+        let enabled = ["edit_file".to_string(), "read_file".to_string()];
+        let session = ["send_file".to_string()];
+        let offered = Offered {
+            enabled: &enabled,
+            session: &session,
+            mcp: &[],
+        };
+        let asked = Asked::new(Asking::AsConfigured, &permissions, &offered);
+
+        let policy = rules_policy(&permissions, &asked, permissions.auto_approval()).unwrap();
+
+        assert_eq!(
+            asked.section(Approvals::Nobody, &[]),
+            "No one answers approvals in this run, so calls of these tools are denied: edit_file, send_file. Other tools run without asking."
+        );
+        for (tool, asks) in [
+            ("edit_file", true),
+            ("send_file", true),
+            ("write_file", false),
+            ("read_file", false),
+        ] {
+            let call = ToolCall {
+                id: "call".into(),
+                name: tool.into(),
+                arguments: json!({}),
+                arguments_error: None,
+            };
+            let decision = policy.decision(&call, Path::new("/"));
+            assert_eq!(matches!(decision, PolicyDecision::Ask(_)), asks, "{tool}: {decision:?}");
+        }
+    }
 
     #[test]
     fn approvals_are_skipped_as_root_only_where_the_executor_isolates_commands() {

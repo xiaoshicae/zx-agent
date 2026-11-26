@@ -48,7 +48,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示；宿主加的工具、钩子、策略与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；`Overrides::asking` 跳过审批时，会询问的调用直接执行，拒绝规则照旧；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它 |
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配（与配置文件同样检查）、会话创建与续接、模型/预算校验、密钥文件与启动提示（含 `[container]` 的设置没被 `execution` 用到时的一行）；显式配置里 MCP 服务器的 `token` 在工具输出中脱敏；宿主给的凭据（`add_credentials` 与 `Config::credentials`）的变量对命令隐藏，`add_credentials` 给的值被脱敏；宿主加的工具、钩子、策略与摘要器与自带的同等对待，名字重复时 `build` 报错；`provider.api` 与 `execution` 选用宿主注册的或内置的实现，名字未注册或重复时 `build` 报错，`approveAll` 要求隔离命令的执行环境；`Overrides::asking` 跳过审批时，会询问的调用直接执行，拒绝规则照旧；宿主给每个会话的工具（`add_session_tools`）在每个会话里提供、知道自己的会话，`permissions.deny` 能拒绝它，`tools` 不能列它，`permissions.ask` 列出它时调用要审批、提示词的审批段落也列出它 |
 | `crates/zx-app/tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -89,4 +89,4 @@ ZX_TEST_POSTGRES_URL=postgres://zx@127.0.0.1:5432/zx cargo test -p zx-im postgre
 
 ---
 
-TESTS.md · v0.50 · 2026年11月
+TESTS.md · v0.51 · 2026年11月

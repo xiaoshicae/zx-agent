@@ -116,11 +116,10 @@ impl Program {
 
     /// Let `customize` give the application that every conversation's agent is built with
     /// the host's own parts, with the verbs of [`Application`]: tools, hooks, policies and
-    /// prompt sections, the variables to hide from commands, and the providers and executors
-    /// config.toml chooses by name. The program's own parts come after them: the
-    /// platforms' credentials, hidden beside the host's variables, the trace export, which is
-    /// the program's, and the prompt section on how answers reach people. Each call adds one
-    /// more, applied in order.
+    /// prompt sections, credentials, and the providers and executors config.toml chooses by
+    /// name. The program's own parts come after them: the platforms' credentials, added
+    /// beside the host's, the trace export, which is the program's, and the prompt section
+    /// on how answers reach people. Each call adds one more, applied in order.
     pub fn customize(mut self, customize: impl FnOnce(Application) -> Application + Send + 'static) -> Self {
         self.customizations.push(Box::new(customize));
         self
@@ -193,7 +192,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
             let app = assemble(
                 connect(overrides).await?,
                 customizations,
-                &credentials,
+                credentials,
                 telemetry.map(Telemetry::hook),
                 &channels,
             );
@@ -233,7 +232,7 @@ async fn run(args: Args, program: Program) -> Result<u8> {
 /// subcommands connect the same way: zx-app neither prints nor names the programs' options,
 /// and the two programs share no code.
 async fn connect(overrides: Overrides) -> Result<Application> {
-    let app = Application::from_environment(overrides, SERVER_AGENT)
+    let app = Application::from_environment(overrides)
         .await
         .map_err(with_model_hint)?;
     for notice in app.notices() {
@@ -249,19 +248,14 @@ async fn connect(overrides: Overrides) -> Result<Application> {
 fn assemble(
     app: Application,
     customizations: Vec<Customization>,
-    credentials: &Credentials,
+    credentials: Credentials,
     traces: Option<TraceHook>,
     channels: &[Arc<dyn ImChannel>],
 ) -> Application {
-    let app = customizations.into_iter().fold(app, |app, customize| customize(app));
-    let app = credentials
-        .variables
-        .iter()
-        .fold(app, |app, name| app.add_hidden_env(name));
-    credentials
-        .values
-        .iter()
-        .fold(app, |app, value| app.add_secret(value))
+    customizations
+        .into_iter()
+        .fold(app, |app, customize| customize(app))
+        .add_credentials(credentials)
         .set_traces(traces)
         .add_prompt_section(CONVERSATION_SECTION, CONVERSATION)
         .add_session_tools(Arc::new(SendFiles::new(channels)))
@@ -359,7 +353,7 @@ async fn conversations_agent(app: &Application, place: &SessionPlace, name: &str
 /// on the card it posts.
 fn build_agent(app: &Application, name: &str, place: &SessionPlace) -> Result<ConfiguredAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
-    app.build_named(name, app.model(), place, approvals)
+    app.build(name, app.model(), place, approvals)
 }
 
 /// Where the program's files are: im.toml, which a SIGHUP reads again, and the sessions, as
